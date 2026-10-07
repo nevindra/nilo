@@ -18,6 +18,8 @@ compounds does not, and no total will say which you have.
     python3 bench/mem.py --port 8790 --path /stream --hold
     python3 bench/mem.py --port 8787 --path /health --tls
     python3 bench/mem.py --port 50051 --path /pkg.Service/Method --grpc
+    python3 bench/mem.py --port 8787 --h2                  # HTTP/2, nothing in flight
+    python3 bench/mem.py --port 8787 --h2 --get --path /health   # ... after one GET (ADR 259)
 
 The server is found by port rather than named, so this works against any of
 them — `nilo-hello`, `nilo-bench-sql-server`, `nilo-bench-fetch-server`, or
@@ -106,6 +108,66 @@ def open_grpc(host, port, path, timeout):
         elif kind == 0x7:
             raise SystemExit("the server sent GOAWAY")
         elif kind == 0x1 and flags & 0x1:
+            return s
+
+
+def open_h2(host, port, path, timeout, get):
+    """One HTTP/2 connection on a plain port (ADR 259): the preface and the
+    SETTINGS exchange both ways, so the connection is HTTP/2 and has said
+    everything a client says before its first request. With `get`, one GET at
+    `path` is answered and drained as well. What is left is a connection with
+    no request in flight, which is a browser's tab between clicks.
+
+    The first header block opens with the size update to 0 that the server's
+    SETTINGS oblige a client to send once it has acknowledged them (RFC 7541
+    §4.2)."""
+    s = socket.create_connection((host, port), timeout=timeout)
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(0x4, 0, 0))
+    buf = b""
+
+    def next_frame():
+        nonlocal buf
+        while len(buf) < 9:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise SystemExit("the server closed the connection")
+            buf += chunk
+        length = int.from_bytes(buf[0:3], "big")
+        while len(buf) < 9 + length:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise SystemExit("the server closed the connection")
+            buf += chunk
+        kind, flags = buf[3], buf[4]
+        buf = buf[9 + length :]
+        return kind, flags
+
+    settings, acked = False, False
+    while not (settings and acked):
+        kind, flags = next_frame()
+        if kind == 0x4 and flags & 0x1:
+            acked = True
+        elif kind == 0x4:
+            settings = True
+            s.sendall(frame(0x4, 0x1, 0))
+        elif kind == 0x7:
+            raise SystemExit("the server sent GOAWAY")
+    if not get:
+        return s
+
+    block = (
+        b"\x20"  # the size update to 0
+        + b"\x82\x86"  # :method GET, :scheme http
+        + literal(":path", path)
+        + literal(":authority", host)
+    )
+    s.sendall(frame(0x1, 0x5, 1, block))
+    while True:
+        kind, flags = next_frame()
+        if kind == 0x7:
+            raise SystemExit("the server sent GOAWAY")
+        if kind in (0x0, 0x1) and flags & 0x1:
             return s
 
 
@@ -202,6 +264,17 @@ def main():
         help="speak h2c with prior knowledge and make one unary call at --path (ADR 220)",
     )
     p.add_argument(
+        "--h2",
+        action="store_true",
+        help="speak HTTP/2 with prior knowledge on a plain port: the preface and SETTINGS only, "
+        "or with --get one GET at --path first (ADR 259)",
+    )
+    p.add_argument(
+        "--get",
+        action="store_true",
+        help="with --h2, make one GET at --path on each connection before it is left idle",
+    )
+    p.add_argument(
         "--tls",
         action="store_true",
         help="connect through TLS 1.3, against `zig build bench-tls-server -Dtls`",
@@ -230,6 +303,8 @@ def main():
                 held.append(
                     open_grpc(args.host, args.port, args.path, args.timeout)
                     if args.grpc
+                    else open_h2(args.host, args.port, args.path, args.timeout, args.get)
+                    if args.h2
                     else open_one(args.host, args.port, args.path, args.timeout, args.hold, tls_ctx)
                 )
             time.sleep(args.settle)

@@ -375,12 +375,6 @@ Nothing is open at this tier.
 
 **Needs:** two named signals rather than one flag — "the client half-closed and is waiting" and "the socket is gone". What is already real is a write that fails, and a handler sees that today.
 
-**`Ctx.connection()` returns `http1.Connection`, and ADR 259 removes it.** It is public ([reference](./reference/ctx.md)) and names an HTTP/1.1 header, which means nothing on HTTP/2; `keepAlive()` says the same thing in neutral words. Nothing in the tree calls it.
-
-**Needs:** stage 5.3 of [the framing page](./design/framing.md#how-the-direction-is-built), which removes it with a `CHANGELOG.md` entry.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **A rule a build step holds against the patterns the audit kept finding.** Three of the four kinds of defect are spellable: `catch {}` and `else => {}` that swallow `error.Canceled` or `EndOfStream` on a connection path (the stop that waits, the upload that looks complete, the middleware's empty 200); `unreachable`, `std.debug.assert` and `catch unreachable` on a path a request reaches (`Room.print`, `Ctx.send`, `sayerFor`, `idempotentBegin`), each a remote panic in ReleaseSafe and undefined behaviour in ReleaseFast; and a module header's code example that no longer compiles (`std.time.Timer` in `middleware.zig` and ADR 008). The fourth kind, a comment or ADR claiming what the code does not do, a dozen of them, has no mechanism but probes. A step that refuses the three in `http/` unless the line carries a marked reason makes the next one a build failure rather than an audit finding.
 
 **Needs:** the decision on how a justified case is marked (a comment tag, or a list in `build.zig` the way `layers` is), and whether the step starts as a report over today's tree or as a refusal with the existing cases listed.
@@ -731,9 +725,9 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**Every request on HTTP/2 spawns a fiber, where HTTP/1.1 runs it on the connection's.** A unary gRPC call is 767 to 773 ns in process against a routed HTTP/1.1 `GET`'s 410, and part of the gap is the spawn; once every request can arrive on HTTP/2 ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)), a browser's small `GET`s pay it too. A finished call's fiber taking the connection's next stream, rather than ending, would pay the spawn once per burst.
+**Every request on HTTP/2 spawns a fiber, where HTTP/1.1 runs it on the connection's.** A unary gRPC call is 767 to 773 ns in process against a routed HTTP/1.1 `GET`'s 410, and a routed `GET` over HTTP/2 is 963 to 971 ns ([`bench/result/http.md`](../bench/result/http.md#what-any-request-on-http2-costs)); the Engine's spawn is not in the profile, and a real server held 947k to 1,016k requests a second under `h2load` all the same. Now every request can arrive on HTTP/2 ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)), a browser's small `GET`s pay it too. A finished call's fiber taking the connection's next stream, rather than ending, would pay the spawn once per burst.
 
-**What would settle it:** stage 5.3's `GET` over HTTP/2 against HTTP/1.1 in `zig build profile`, with the spawn's share of it, and the same row with a fiber kept for the next stream.
+**What would settle it:** the spawn's share of a `GET` over HTTP/2 measured through the Engine (not inline, as `zig build profile` does), and the same row with a fiber kept for the next stream.
 
 **Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 

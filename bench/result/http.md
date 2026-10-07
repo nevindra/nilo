@@ -3761,3 +3761,36 @@ Inside the spread of either, so unchanged.
 **Outside the suite**, `example-hello -Dhttp2` on one port: `curl` gets the 200 and `wati`; `curl --http2` (an `Upgrade: h2c` offer) is answered as HTTP/1.1; `curl --http2-prior-knowledge` to a plain route is reset `PROTOCOL_ERROR`, which is what the HTTP/2 connection says of anything that is not a call until stage 5.3; a gRPC `POST` to the same port with prior knowledge is answered `grpc-status: 12`, no route; `printf 'GET /\r\n\r\n' | nc` is answered at once, a 400, never waited on.
 
 **The decision it moved:** the choice ships as an inlined chooser with a hand-on from the entry, where the ADR's first preference was a tail call, because that is the one the idle figure held for and measured; ADR 259's text says so. **Can it be pushed further:** the tail call is the open question, and is worth one more measurement with `waitForRequest` inlined as above; nothing in a figure here asks for it. A TLS listener still runs `handleConnection` unchanged and is measured by stage 7.
+
+## What any request on HTTP/2 costs
+
+**Question.** Stage 5.3 of [framing](../../docs/design/framing.md) makes HTTP/2 serve every method but `CONNECT` through the router, middleware and handler on a fiber of its own, held to RFC 9113 §8, with `Ctx.connection()` removed and what waits for stage 6 refused by name ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md)). The bar the ADR set: a build without the flag byte-identical, an HTTP/1.1 connection in a `-Dhttp2` build at the idle figure it held, a request on HTTP/2 allocating no more than the same one on HTTP/1.1 from the second on a connection, and its time and idle figure on record.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `1e7d905` from `git archive`, after is the working tree on it, built the same afternoon. Server on cores 0 to 3, the client on 4 and 5.
+
+**Size**, stripped:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 |
+| `example-hello` | `-Dhttp2` | 1,103,496 | 1,116,168 | +12,672 |
+| `example-rest` | `-Dhttp2` | 1,292,856 | 1,305,544 | +12,688 |
+
+The 12.7 KB is the §8 checks, the `HTTP` answer and its head, and the stage-6 refusals. It is paid only by a build that asked for HTTP/2.
+
+**Idle HTTP/1.1 connection**, `mem.py` at 1,000 and 10,000, two interleaved rounds: `-Dhttp2` before 5,317 to 5,321 and 5,197 to 5,198, after 5,317 to 5,321 and 5,197 to 5,198. A silent connection: 5,192 before and after at 10,000.
+
+**Idle HTTP/2 connection**, `mem.py --h2` (the preface, a `GET /users/42` with the stream left to finish, then idle), the same two rounds: 9,462 at 1,000, 9,365 at 5,000, 9,355 at 10,000, before and after to within 4 bytes. With `--get`, the stream left open after the request with its answer read: 11,186 at 1,000, 10,736 at 5,000, 10,686 at 10,000. A browser opens one such connection where it opened six HTTP/1.1 ones (6 x 5,197 is 31,182).
+
+**Routed `GET` over HTTP/1.1**, `-Dhttp2` build, wrk, 64 connections, five rounds each: before 967,168; 957,109; 959,555; 960,715; 961,044 (p99 67 to 68 µs), after 964,223; 964,639; 956,436; 958,093; 966,061 (p99 67 to 69 µs). Inside the spread of either, so unchanged.
+
+**In process**, `zig build profile -Dhttp2`, one core, three runs: a routed `GET` over HTTP/1.1 412 to 414 ns, a unary gRPC call 866 to 869 ns, and the same routed `GET` over HTTP/2 963 to 971 ns on one connection's fiber, answered inline: HPACK decode 34 ns (3.5%), the App 370 ns (38%), frames, head and answer 558 ns (58%). No Engine runs there, so the fiber spawn a request costs in a server is not in it.
+
+**Through a real server**, `h2load -n 1000000 -c 64 -m 10 -t 2` (nghttp2 1.12.0, Docker, host network) on `nilo-hello` with `-Dhttp2`, three runs: 1,015,573; 946,846; 1,013,072 requests a second, every one a 200. For the record: one fiber per stream, no reuse yet.
+
+**Allocations.** `test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 from the second on a connection"` in `http/behaviour.zig`, counting at the allocator under the arena: 0 on both framings from the second request, a 100 byte body included.
+
+**Outside the suite.** `curl --http2-prior-knowledge` against `example-hello` and `example-rest -Dhttp2`: a GET, a POST with a JSON body, a `HEAD` (no `DATA`), a 404 and a route's own headers all answer as on HTTP/1.1. h2spec 2.6.0 over the same port fails 67 of 146 as shipped. Nearly all of them are one thing: the suite sends the first header block without a dynamic table size update after our `SETTINGS_HEADER_TABLE_SIZE` of 0, which RFC 7541 §4.2 requires of the client, so the connection answers a compression error where the suite expected the stream to work. On a scratch copy with the table at 4096 the suite's own blocks decode, and what it then showed that was a real violation is fixed here: a stream depending on itself (§5.3.1), a `WINDOW_UPDATE` or `DATA` on a stream that is not open (§5.1), a window past 2^31-1 (`max_window` was one bit short), and a `GOAWAY` that dropped the frames already read. Run again on the tree as committed, with only the table widened to 4096 in a scratch copy (`example-hello`, `ReleaseSafe`): **142 of 146 pass**. The four left are choices, not defects: §3.5/2 sends a preface that differs from HTTP/2's, which one port serves as HTTP/1.1 by design (ADR 259) rather than answering `GOAWAY`; §5.1/8 and §5.1/11 send `DATA` on a stream the client reset or ended, which the connection counts against its window and ignores, because a reset for every such frame is a client making the server write uncounted (ADR 220); §5.4.1/1 sees the connection closed by a reset rather than a FIN after the `GOAWAY`, because the client's unread bytes are still in the socket when it closes. As shipped, with the table at 0, h2spec cannot test the rest: its encoder never sends the size update, which curl does (its requests above decode); a browser is put to it in stage 7.
+
+**The decision it moved:** none. `Ctx.connection()` goes (ADR 253's open question), a `Collected` answer carries its length and a pre-written field block so HTTP is framed without a second copy, and the frame fuzzer holds the answer's block against the same properties. Whether a request on HTTP/2 can be made cheaper than 963 ns is the optimisation session's: reusing a finished call's fiber for the next stream is the first thing it tries ([`todo.md`](../../docs/todo.md)).

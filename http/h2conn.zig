@@ -1,34 +1,40 @@
 //! The HTTP/2 connection: one listener's connections, spoken as HTTP/2 with
-//! prior knowledge, each unary call handed to the App as its fields and its
-//! one message ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md),
+//! prior knowledge, each request handed to the App as its fields and its body
+//! ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md),
 //! [ADR 253](../docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md),
 //! [ADR 259](../docs/adr/259-http2-is-a-framing-of-every-request.md)).
 //! What is gRPC's rather than HTTP/2's (the content type, `grpc-timeout`, the
 //! message prefix and compression, the status trailers) is `grpc.zig`, which
 //! this file calls and which never names it.
 //!
-//! **A gRPC method is an ordinary route.** `POST /package.Service/Method`,
-//! registered with `app.post`, reached through the same router, middleware,
-//! services and logger as every other route. What this file does is carry a
-//! call across: the HTTP/2 frames of one stream become a `framing.Call`, the
-//! call's metadata as the request's headers and its one message as the body,
-//! the length prefix and any gzip already taken off, which the App reads as
-//! it reads an HTTP/1.1 head and never as text it has to parse back; and
-//! what the route answers
-//! goes back as HEADERS, one DATA frame's worth of message per frame, and
-//! trailers carrying `grpc-status`. A route that fails with a status is a
-//! call that fails with the gRPC code that status means, and a path no route
-//! answers is `UNIMPLEMENTED`, which is what the gRPC spec asks of a method a
-//! server does not have.
+//! **Any request is an ordinary route, and gRPC is an envelope over it.** Any
+//! method but `CONNECT`, held to RFC 9113 §8 before it reaches the App
+//! (pseudo-headers, connection-specific fields, `te`, `content-length` against
+//! the `DATA`, `cookie` joined), reaches the same router, middleware, services
+//! and logger an HTTP/1.1 request does. What this file does is carry one
+//! across: the HTTP/2 frames of one stream become a `framing.Call`, the
+//! request's fields as its headers and its body whole, which the App reads as
+//! it reads an HTTP/1.1 head and never as text it has to parse back; and what
+//! the route answers goes back as HEADERS, DATA frames under both windows and
+//! trailers when the route set any. A request whose content type is
+//! `application/grpc` or `application/grpc+…` is a call: its message has the
+//! length prefix and any gzip taken off, its answer is framed and carries
+//! `grpc-status`, a route that fails with a status is a call that fails with
+//! the gRPC code that status means, and a path no route answers is
+//! `UNIMPLEMENTED`, which is what the gRPC spec asks of a method a server
+//! does not have. **Collected whole, still**: the body is read before the
+//! request runs and the answer is kept before it is written, so a streamed
+//! answer, a file, `bodyStream`, an event stream and a WebSocket are refused
+//! by name by `Ctx` (stage 6 makes them pipes, ADR 260).
 //!
-//! **Unary only.** A call carries one message each way. Streaming calls hold
-//! a stream open for their whole life, which is the one shape that costs a
-//! fiber for as long as it lasts, and they wait for a caller (ADR 220).
+//! **Unary only for gRPC.** A call carries one message each way. Streaming
+//! calls hold a stream open for their whole life, which is the one shape that
+//! costs a fiber for as long as it lasts, and they wait for a caller (ADR 220).
 //!
-//! **One fiber reads and writes the socket; each call runs on a fiber of its
-//! own.** The connection's fiber parses frames, collects a call's message,
-//! and hands the finished call to `bulkhead.spawnLocal`, which keeps it on
-//! the connection's thread. The call's fiber runs the route into memory and
+//! **One fiber reads and writes the socket; each request runs on a fiber of
+//! its own.** The connection's fiber parses frames, collects a request's body,
+//! and hands the finished request to `bulkhead.spawnLocal`, which keeps it on
+//! the connection's thread. The request's fiber runs the route into memory and
 //! hands the answer back through a queue and a
 //! `Waker.post`, and the connection's fiber writes it, as far as the flow-
 //! control windows allow. So no two fibers ever write the socket, and a
@@ -68,6 +74,7 @@ const encoded = @import("encoded.zig");
 const core = @import("nilo_core");
 const framing = @import("framing.zig");
 const grpc = @import("grpc.zig");
+const date = @import("date.zig");
 
 /// What a gRPC connection asks of the App, handed over by `app.zig` rather
 /// than named here. This file sits outside the App's core (`http_core` in
@@ -83,10 +90,10 @@ pub const Host = struct {
     /// does: what one connection's messages are bounded by together
     /// (`Conn.budget`, ADR 220).
     ceiling: usize,
-    /// What a call to this path is collected under: the route's `maxBody`
-    /// where it has one, `max_body` where it has not. Read once the headers
-    /// are in, before a byte of the message (ADR 156, ADR 220).
-    body_limit: *const fn (ptr: *anyopaque, path: []const u8) usize,
+    /// What a request to this method and path is collected under: the
+    /// route's `maxBody` where it has one, `max_body` where it has not. Read
+    /// once the headers are in, before a byte of the body (ADR 156, ADR 220).
+    body_limit: *const fn (ptr: *anyopaque, method: []const u8, path: []const u8) usize,
     /// Whether a `POST` to this path reaches a route.
     routes: *const fn (ptr: *anyopaque, path: []const u8) bool,
     /// One call through the App, handed over as what was read rather than
@@ -144,6 +151,10 @@ const idle_peek_ms = 200;
 /// A unary call with a small message stays inside it, so a busy connection's
 /// calls stop reaching the general-purpose allocator at all.
 const spare_arena_keep = 4096;
+
+/// `:status 100`, which is all an interim answer carries: the static table's
+/// `:status` name and the three digits. A test holds it to `encodeBlock`.
+const continue_block = "\x08\x03100";
 
 /// What one listener speaking gRPC runs for each connection, in place of
 /// `serve.handleConnection`. Returns when the client has gone, the
@@ -265,6 +276,13 @@ const Stream = struct {
     /// The message as it arrives, length prefix and all.
     body: std.ArrayList(u8) = .empty,
     body_over_limit: bool = false,
+    /// Whether the request is a gRPC call: its content type says so, and only
+    /// then is its body unframed and its answer framed and trailed as gRPC
+    /// (ADR 259). Every other request is HTTP.
+    grpc: bool = false,
+    /// Its HEADERS frame said it depends on itself, which is a stream error
+    /// (§5.3.1), said once the header block is decoded and the table is safe.
+    self_dependent: bool = false,
     /// What this call's message may be, from its route once the headers are
     /// in: `max_body`, or the route's own `maxBody` (ADR 156, ADR 220).
     limit: usize,
@@ -303,6 +321,9 @@ const Stream = struct {
     /// Everything is in `head_block`, END_STREAM included: a call that failed
     /// before it had anything to say (§ "Trailers-Only" of the gRPC spec).
     trailers_only: bool = false,
+    /// An HTTP answer with no trailers: the last DATA frame ends the stream,
+    /// where a call's answer always ends in a HEADERS frame.
+    no_trailers: bool = false,
     head_sent: bool = false,
     data_sent: usize = 0,
 
@@ -470,8 +491,11 @@ const Conn = struct {
             c.writeReady() catch break;
             _ = c.admitWaiting() catch break;
             c.grantWaiting() catch break;
+            // Nothing in flight and nothing more already read: what a client
+            // sent behind its GOAWAY is still answered, and closing on it
+            // unread would reset the connection under the client's last frames.
             if (c.goaway_sent or c.peer_goaway) {
-                if (c.streams.items.len == 0) break;
+                if (c.streams.items.len == 0 and c.in.bufferedLen() == 0) break;
             }
             if (!c.goaway_sent and c.app.stop.isRequested()) {
                 c.goaway(.no_error) catch break;
@@ -764,8 +788,14 @@ const Conn = struct {
             .priority => {
                 if (head.stream == 0) return error.Protocol;
                 if (head.len != 5) return error.FrameSize;
-                try c.discard(5);
+                const depends = dependsOn((try c.take(5))[0..5]);
                 try c.control();
+                // A stream that depends on itself is a stream error, whatever
+                // state it is in (§5.3.1); nothing else about priority is read.
+                if (depends == head.stream) {
+                    h2.writeRstStream(c.out, head.stream, .protocol_error) catch return error.Gone;
+                    if (c.find(head.stream)) |s| c.onReset(s);
+                }
             },
             .goaway => {
                 if (head.stream != 0) return error.Protocol;
@@ -810,9 +840,10 @@ const Conn = struct {
         if (head.stream == 0 or head.stream % 2 == 0) return error.Protocol;
         var len: usize = head.len;
         const pad = try c.padding(head, &len);
+        var self_dependent = false;
         if (head.has(h2.Flags.priority)) {
             if (len < 5) return error.Protocol;
-            try c.discard(5);
+            self_dependent = dependsOn((try c.take(5))[0..5]) == head.stream;
             len -= 5;
         }
 
@@ -832,6 +863,7 @@ const Conn = struct {
         c.last_stream = head.stream;
 
         const s = c.newStream(head.stream) catch return error.Internal;
+        s.self_dependent = self_dependent;
         s.headers_ns = bulkhead.monotonicNanos();
         s.collect_until_ns = c.collectUntil(s.headers_ns, c.app.max_body);
         c.streams.append(c.gpa, s) catch {
@@ -871,6 +903,9 @@ const Conn = struct {
             return c.dispatch(s);
         }
 
+        // A stream that depends on itself: decoded above, and reset now (§5.3.1).
+        if (s.self_dependent) return c.malformed(s);
+
         // After this side's GOAWAY: decoded above, because the table has to
         // stay in step, and refused, because the GOAWAY told the client this
         // stream was never processed and a client may send it again on a new
@@ -896,11 +931,31 @@ const Conn = struct {
         // send it is sized from it (ADR 156, ADR 220). Nothing is looked up
         // for a call with no path, which `dispatch` refuses.
         if (s.field(":path")) |path| {
-            s.limit = c.app.body_limit(c.app.ptr, path);
+            s.limit = c.app.body_limit(c.app.ptr, s.field(":method") orelse "", path);
             if (s.limit != c.app.max_body) s.collect_until_ns = c.collectUntil(s.headers_ns, s.limit);
         }
+        s.grpc = grpc.isGrpcContentType(s.field("content-type") orelse "");
         s.state = .body;
-        if (end_stream) try c.dispatch(s);
+        if (end_stream) return c.dispatch(s);
+        // A CONNECT never ends its own stream, since what follows is the
+        // tunnel, so it is answered now: refused, with the rest of what the
+        // client was going to send told to stop once the answer is out.
+        if (std.mem.eql(u8, s.field(":method") orelse "", "CONNECT")) {
+            for (s.fields.items) |f| if (!validField(f)) return c.malformed(s);
+            const id = s.id;
+            try c.dispatch(s);
+            if (c.find(id) == null) h2.writeRstStream(c.out, id, .no_error) catch return error.Gone;
+            return;
+        }
+        // A client that waits to be told before it sends its body is told at
+        // once: the body is collected whatever the route says, so there is no
+        // refusing it first for a `100` to hold back (ADR 259). Said for a
+        // stream that goes on, and never for one that is over.
+        if (s.field("expect")) |expect| {
+            if (std.ascii.eqlIgnoreCase(expect, "100-continue")) {
+                h2.writeHeaderBlock(c.out, s.id, continue_block, false, c.peer_max_frame) catch return error.Gone;
+            }
+        }
     }
 
     fn onData(c: *Conn, head: h2.Header) ReadError!void {
@@ -927,15 +982,19 @@ const Conn = struct {
         if (s.state != .body) {
             try c.discard(len + pad);
             if (s.state == .headers) return error.Protocol;
-            // Empty, to a call nothing is collecting: a frame read for
-            // nothing, as it is to one that is.
-            if (len == 0) try c.control();
+            // The client ended this request, which is half-closed (remote)
+            // while its answer is made and written: more DATA on it is a
+            // stream error STREAM_CLOSED (§5.1). Reset, and the stream is
+            // gone, so a frame after this one is a frame on a closed stream,
+            // ignored above and counted when it is empty.
+            h2.writeRstStream(c.out, s.id, .stream_closed) catch return error.Gone;
+            c.onReset(s);
             return;
         }
         if (len == 0 and !head.has(h2.Flags.end_stream)) try c.control();
         s.recv_window -= head.len;
         if (s.recv_window < 0) return error.FlowControl;
-        if (s.body_over_limit or s.body.items.len + len > s.limit + 5) {
+        if (s.body_over_limit or s.body.items.len + len > s.limit + @as(usize, if (s.grpc) grpc.prefix_len else 0)) {
             // Past the call's limit: read and dropped, so the connection stays in
             // step, and answered when the client says it is done.
             s.body_over_limit = true;
@@ -1153,6 +1212,9 @@ const Conn = struct {
             if (c.send_window > h2.max_window) return error.FlowControl;
             return;
         }
+        // A stream not opened yet is idle, and a frame other than HEADERS or
+        // PRIORITY on one is a connection error (§5.1).
+        if (head.stream > c.last_stream) return error.Protocol;
         const s = c.find(head.stream) orelse return;
         // Already reset and still running: its answer is going nowhere, and
         // an RST for every update would be the client making this side write.
@@ -1217,36 +1279,48 @@ const Conn = struct {
 
     // ---- starting a call ----
 
-    /// The client has sent everything. Check the call, take its message out
-    /// of its framing, and run it.
+    /// The client has sent everything. Check the request, and run it: as HTTP,
+    /// or, when its content type says it is a gRPC call, with its message
+    /// taken out of its framing (ADR 259).
     fn dispatch(c: *Conn, s: *Stream) ReadError!void {
         c.unstarve(s);
         const a = s.arena.allocator();
-        if (s.headers_over_limit) return c.answerNow(s, 8, "the call's metadata is larger than this server reads");
-        if (s.body_over_limit) return c.answerNow(s, 8, "the message is larger than its route's body limit");
+        if (s.headers_over_limit) {
+            if (!s.grpc) return c.answerStatus(s, 431, "the request's header fields are larger than this server reads");
+            return c.answerNow(s, 8, "the call's metadata is larger than this server reads");
+        }
+        if (s.body_over_limit) {
+            if (!s.grpc) return c.answerStatus(s, 413, "the request body is larger than its route's limit");
+            return c.answerNow(s, 8, "the message is larger than its route's body limit");
+        }
 
-        const method = s.field(":method") orelse return c.malformed(s);
-        const path = s.field(":path") orelse return c.malformed(s);
-        if (!std.mem.eql(u8, method, "POST")) return c.malformed(s);
-        if (path.len == 0 or path[0] != '/') return c.malformed(s);
+        // Held to RFC 9113 §8 before anything reads it: a request that is not
+        // well formed is a stream error and never reaches the App.
         for (s.fields.items) |f| if (!validField(f)) return c.malformed(s);
+        const method = s.field(":method") orelse return c.malformed(s);
+        if (std.mem.eql(u8, method, "CONNECT")) {
+            // A tunnel is not a thing this server is: no `:path`, no route,
+            // and extended CONNECT is not offered (RFC 9110 §9.3.6, §15.6.2).
+            c.control_run = 0;
+            return c.answerStatus(s, 501, "this server does not serve CONNECT");
+        }
+        const path = s.field(":path") orelse return c.malformed(s);
+        if (s.grpc and !std.mem.eql(u8, method, "POST")) return c.malformed(s);
+        // `OPTIONS *` is the one target that is not a path, and the empty
+        // `:path` is malformed (§8.3.1).
+        if (path.len == 0 or (path[0] != '/' and !(std.mem.eql(u8, method, "OPTIONS") and std.mem.eql(u8, path, "*"))))
+            return c.malformed(s);
         if (!validPseudo(s.fields.items)) return c.malformed(s);
+        if (!validConnectionFields(s.fields.items)) return c.malformed(s);
+        if (!lengthAgrees(s.fields.items, s.body.items.len)) return c.malformed(s);
 
-        // A well-formed call, answered or run: what ends a run of frames
-        // that moved nothing forward. Not before this point, where a call
+        // A well-formed request, answered or run: what ends a run of frames
+        // that moved nothing forward. Not before this point, where a request
         // refused as malformed would end it for the cost of one HEADERS
         // frame, and 999 PINGs between two of them would never be a flood.
         c.control_run = 0;
 
-        const content_type = s.field("content-type") orelse "";
-        if (!grpc.isGrpcContentType(content_type)) {
-            // Not a gRPC call at all: the spec says 415, and nothing else.
-            s.head_block = try c.headerBlock(a, &.{
-                .{ .name = ":status", .value = "415" },
-            });
-            s.trailers_only = true;
-            return c.ready(s);
-        }
+        if (!s.grpc) return c.start(s, null);
         if (!c.app.routes(c.app.ptr, path))
             return c.answerNow(s, 12, "no route answers this method");
         if (s.field("grpc-timeout")) |text| {
@@ -1293,7 +1367,7 @@ const Conn = struct {
     /// from here, `letGo` gives what the call was charged back with the rest.
     fn start(c: *Conn, s: *Stream, announced: ?usize) ReadError!void {
         const a = s.arena.allocator();
-        var message: []const u8 = s.body.items[grpc.prefix_len..];
+        var message: []const u8 = if (s.grpc) s.body.items[grpc.prefix_len..] else s.body.items;
         if (announced) |size| {
             c.hold(s, size);
             message = encoded.inflate(a, message, size) catch |err| switch (err) {
@@ -1322,8 +1396,8 @@ const Conn = struct {
         };
     }
 
-    /// A request that is not a gRPC call and not a well-formed HTTP/2 one
-    /// either: a stream error, and nothing else (§8.1.1).
+    /// A request that is not a well-formed HTTP/2 one: a stream error, and
+    /// nothing else (§8.1.1).
     fn malformed(c: *Conn, s: *Stream) ReadError!void {
         h2.writeRstStream(c.out, s.id, .protocol_error) catch return error.Gone;
         c.forget(s);
@@ -1338,6 +1412,19 @@ const Conn = struct {
     fn answerNow(c: *Conn, s: *Stream, code: u8, message: []const u8) ReadError!void {
         s.head_block = grpc.trailersOnly(s.arena.allocator(), code, .{ .ours = message }) catch return error.Internal;
         s.trailers_only = true;
+        return c.ready(s);
+    }
+
+    /// Answer as HTTP without running anything: a status and the failure
+    /// body every refusal of the App's own carries (ADR 024), for what is
+    /// refused before there is a route to ask.
+    fn answerStatus(c: *Conn, s: *Stream, comptime status: u16, comptime message: []const u8) ReadError!void {
+        const body = comptime std.fmt.comptimePrint("{{\"error\":\"{s}\",\"status\":{d}}}", .{ message, status });
+        var w: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(s.arena.allocator(), 96) catch return error.Internal;
+        writeHttpHead(&w.writer, status, "application/json", body.len, &.{}) catch return error.Internal;
+        s.head_block = w.written();
+        s.data = body;
+        s.no_trailers = true;
         return c.ready(s);
     }
 
@@ -1398,13 +1485,14 @@ const Conn = struct {
             const room = @min(c.send_window, s.send_window);
             if (room <= 0) return false;
             const n: usize = @intCast(@min(@as(i64, @intCast(s.data.len - s.data_sent)), room, c.peer_max_frame));
-            try h2.writeHeader(c.out, n, .data, 0, s.id);
+            const last = s.no_trailers and s.data_sent + n == s.data.len;
+            try h2.writeHeader(c.out, n, .data, if (last) h2.Flags.end_stream else 0, s.id);
             try c.out.writeAll(s.data[s.data_sent..][0..n]);
             s.data_sent += n;
             c.send_window -= @intCast(n);
             s.send_window -= @intCast(n);
         }
-        try h2.writeHeaderBlock(c.out, s.id, s.trailers, true, c.peer_max_frame);
+        if (!s.no_trailers) try h2.writeHeaderBlock(c.out, s.id, s.trailers, true, c.peer_max_frame);
         c.forget(s);
         return true;
     }
@@ -1431,7 +1519,12 @@ fn runCall(s: *Stream, on_engine: bool) void {
     };
 
     answer(s, &in_flight) catch {
-        s.head_block = grpc.trailersOnly(s.arena.allocator(), 13, .{ .ours = "the server could not build its answer" }) catch "";
+        if (s.grpc) {
+            s.head_block = grpc.trailersOnly(s.arena.allocator(), 13, .{ .ours = "the server could not build its answer" }) catch "";
+        } else {
+            // `:status 500` from the static table, and the stream ended.
+            s.head_block = "\x8e";
+        }
         s.trailers_only = true;
     };
 }
@@ -1439,7 +1532,7 @@ fn runCall(s: *Stream, on_engine: bool) void {
 fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
     const a = s.arena.allocator();
     const call: framing.Call = .{
-        .method = "POST",
+        .method = s.field(":method").?,
         .target = s.field(":path").?,
         .head = try fieldHead(a, s),
         .body = s.body.items,
@@ -1447,11 +1540,14 @@ fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
 
     var lifetime = core.Lifetime.init();
     defer lifetime.deinit();
-    // Five bytes in front of the body, so the message is framed where it
-    // lies and held once for as long as the client's window keeps it.
-    var collected: framing.Collected = .{ .arena = a, .front = grpc.prefix_len };
+    // A call has five bytes in front of its body, so the message is framed
+    // where it lies and held once for as long as the client's window keeps
+    // it. Any other request is answered as HTTP, and a route's headers kept
+    // as whole lines are read into fields for it.
+    var collected: framing.Collected = .{ .arena = a, .front = if (s.grpc) grpc.prefix_len else 0, .lines = !s.grpc };
     s.app.handle(s.app.ptr, a, &lifetime, in_flight, call, &collected, s.peer, s.until_ns);
     lifetime.end();
+    if (!s.grpc) return httpReply(s, &collected);
     const reply = try grpc.fromCollected(a, &collected, s.until_ns);
     s.head_block = reply.head_block;
     s.data = reply.data;
@@ -1459,6 +1555,64 @@ fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
     s.trailers_only = reply.trailers_only;
 }
 
+/// What a route answered, as an HTTP/2 answer: the head the route's status,
+/// type, length and headers make, the body, and the trailers the route set
+/// (ADR 254, ADR 259). A HEAD has the head a GET would, `content-length`
+/// included, and no body to send.
+fn httpReply(s: *Stream, collected: *const framing.Collected) !void {
+    const a = s.arena.allocator();
+    var extra: usize = 0;
+    for (collected.headers) |f| extra += f.name.len + f.value.len + 4;
+    var w: std.Io.Writer.Allocating = try .initCapacity(a, 96 + collected.content_type.len + extra);
+    try writeHttpHead(&w.writer, if (collected.status == 0) 500 else collected.status, collected.content_type, collected.length, collected.headers);
+    s.head_block = w.written();
+    s.data = collected.body;
+    if (collected.trailers.len > 0) {
+        var fields: std.ArrayList(hpack.Field) = .empty;
+        for (collected.trailers) |t| try fields.append(a, .{ .name = t.name, .value = t.value });
+        s.trailers = try hpack.encodeBlock(a, fields.items);
+    } else if (s.data.len == 0) {
+        // The head is the whole answer, and ends the stream.
+        s.trailers_only = true;
+    } else s.no_trailers = true;
+}
+
+/// The head of an HTTP answer: `:status`, the content type when there is
+/// one, `content-length` when the answer has a body to measure, the route's
+/// headers with the ones HTTP/2 forbids dropped (§8.2.2), and `date` unless
+/// the route said its own (ADR 197).
+fn writeHttpHead(w: *std.Io.Writer, status: u16, content_type: []const u8, length: ?u64, headers: []const framing.Header) !void {
+    // The seven statuses the static table has (RFC 7541 Appendix A), and a
+    // literal for the rest.
+    switch (status) {
+        200 => try hpack.writeIndexed(w, 8),
+        204 => try hpack.writeIndexed(w, 9),
+        206 => try hpack.writeIndexed(w, 10),
+        304 => try hpack.writeIndexed(w, 11),
+        400 => try hpack.writeIndexed(w, 12),
+        404 => try hpack.writeIndexed(w, 13),
+        500 => try hpack.writeIndexed(w, 14),
+        else => {
+            var text: [5]u8 = undefined;
+            try hpack.writeLiteral(w, ":status", std.fmt.bufPrint(&text, "{d}", .{status}) catch unreachable);
+        },
+    }
+    if (content_type.len > 0) try hpack.writeLiteral(w, "content-type", content_type);
+    if (length) |n| {
+        var text: [20]u8 = undefined;
+        try hpack.writeLiteral(w, "content-length", std.fmt.bufPrint(&text, "{d}", .{n}) catch unreachable);
+    }
+    var dated = false;
+    for (headers) |f| {
+        if (h2.hopByHop(f.name) or std.mem.eql(u8, f.name, "content-length")) continue;
+        if (std.mem.eql(u8, f.name, "date")) dated = true;
+        try hpack.writeLiteral(w, f.name, f.value);
+    }
+    if (!dated) {
+        const now = date.now();
+        try hpack.writeLiteral(w, "date", &now);
+    }
+}
 
 /// The call's fields as the head `framing.Call` asks for: an empty request
 /// line, `:authority` as `host`, the metadata, and the length of the one
@@ -1481,10 +1635,20 @@ fn fieldHead(a: std.mem.Allocator, s: *const Stream) ![]const u8 {
     } else if (s.field("host") == null) {
         try out.writeAll("host: localhost\r\n");
     }
+    // The cookies a client splits for compression are one again, `; ` between
+    // them (§8.2.3).
+    var cookies = false;
+    for (s.fields.items) |f| if (std.mem.eql(u8, f.name, "cookie")) {
+        try out.writeAll(if (cookies) "; " else "cookie: ");
+        try out.writeAll(f.value);
+        cookies = true;
+    };
+    if (cookies) try out.writeAll("\r\n");
     for (s.fields.items) |f| {
         if (f.name.len == 0 or f.name[0] == ':') continue;
         if (authority != null and std.mem.eql(u8, f.name, "host")) continue;
         if (h2.hopByHop(f.name)) continue;
+        if (std.mem.eql(u8, f.name, "cookie")) continue;
         if (std.mem.eql(u8, f.name, "content-length")) continue;
         // The whole message is already here, so there is nothing to wait
         // for leave to send.
@@ -1522,6 +1686,40 @@ fn validPseudo(fields: []const hpack.Field) bool {
     return seen[0] and seen[1] and seen[2];
 }
 
+
+/// The stream a PRIORITY frame's five bytes say the stream depends on,
+/// without the exclusive bit (§6.3).
+fn dependsOn(five: *const [5]u8) u32 {
+    return std.mem.readInt(u32, five[0..4], .big) & 0x7fff_ffff;
+}
+
+/// Whether no field is one HTTP/2 forbids for belonging to a connection:
+/// `connection`, `keep-alive`, `proxy-connection`, `transfer-encoding` and
+/// `upgrade`, and `te` with anything but `trailers` (§8.2.2). A request that
+/// has one is malformed.
+fn validConnectionFields(fields: []const hpack.Field) bool {
+    for (fields) |f| {
+        if (f.name.len == 0 or f.name[0] == ':') continue;
+        inline for (.{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" }) |forbidden| {
+            if (std.mem.eql(u8, f.name, forbidden)) return false;
+        }
+        if (std.mem.eql(u8, f.name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) return false;
+    }
+    return true;
+}
+
+/// Whether every `content-length` is a number and is the length of the DATA
+/// that arrived (§8.1.1): a request whose says otherwise is malformed.
+fn lengthAgrees(fields: []const hpack.Field, received: usize) bool {
+    for (fields) |f| {
+        if (!std.mem.eql(u8, f.name, "content-length")) continue;
+        if (f.value.len == 0) return false;
+        for (f.value) |ch| if (ch < '0' or ch > '9') return false;
+        const n = std.fmt.parseInt(u64, f.value, 10) catch return false;
+        if (n != received) return false;
+    }
+    return true;
+}
 
 /// A field that can be written into a head as it is: a lowercase token for a
 /// name, and a value with no line break and no NUL in it. What makes writing
@@ -1567,155 +1765,12 @@ test "pseudo-headers are the four, once each, ahead of the regular fields, the f
 const ctx_mod = @import("ctx.zig");
 const App = @import("app.zig").App;
 const Ctx = ctx_mod.Ctx;
-
-/// A client written the way the ones measured write: preface, SETTINGS, then
-/// frames, all into one buffer the connection reads as if from a socket.
-const TestClient = struct {
-    buf: std.Io.Writer.Allocating,
-
-    fn init() !TestClient {
-        var c: TestClient = .{ .buf = .init(testing.allocator) };
-        try c.buf.writer.writeAll(h2.preface);
-        try h2.writeSettings(&c.buf.writer, &.{});
-        return c;
-    }
-
-    fn deinit(c: *TestClient) void {
-        c.buf.deinit();
-    }
-
-    fn w(c: *TestClient) *std.Io.Writer {
-        return &c.buf.writer;
-    }
-
-    fn headersFor(c: *TestClient, stream: u31, path: []const u8, extra: []const hpack.Field, end_stream: bool) !void {
-        var block: std.Io.Writer.Allocating = .init(testing.allocator);
-        defer block.deinit();
-        try hpack.writeInt(&block.writer, 0x80, 7, 3); // :method POST
-        try hpack.writeInt(&block.writer, 0x80, 7, 6); // :scheme http
-        try hpack.writeLiteral(&block.writer, ":path", path);
-        try hpack.writeLiteral(&block.writer, ":authority", "localhost");
-        try hpack.writeLiteral(&block.writer, "content-type", "application/grpc");
-        try hpack.writeLiteral(&block.writer, "te", "trailers");
-        for (extra) |f| try hpack.writeLiteral(&block.writer, f.name, f.value);
-        try h2.writeHeaderBlock(c.w(), stream, block.written(), end_stream, h2.default_max_frame);
-    }
-
-    fn message(c: *TestClient, stream: u31, bytes: []const u8, compressed: bool) !void {
-        try h2.writeHeader(c.w(), 5 + bytes.len, .data, h2.Flags.end_stream, stream);
-        try c.w().writeByte(if (compressed) 1 else 0);
-        var len: [4]u8 = undefined;
-        std.mem.writeInt(u32, &len, @intCast(bytes.len), .big);
-        try c.w().writeAll(&len);
-        try c.w().writeAll(bytes);
-    }
-
-    /// `message`, over as many DATA frames as a message larger than one
-    /// frame takes.
-    fn messageInFrames(c: *TestClient, stream: u31, bytes: []const u8, compressed: bool) !void {
-        var framed_: std.Io.Writer.Allocating = .init(testing.allocator);
-        defer framed_.deinit();
-        try framed_.writer.writeByte(if (compressed) 1 else 0);
-        try framed_.writer.writeInt(u32, @intCast(bytes.len), .big);
-        try framed_.writer.writeAll(bytes);
-        var rest = framed_.written();
-        while (rest.len > 0) {
-            const n = @min(rest.len, 16_000);
-            try h2.writeHeader(c.w(), n, .data, if (n == rest.len) h2.Flags.end_stream else 0, stream);
-            try c.w().writeAll(rest[0..n]);
-            rest = rest[n..];
-        }
-    }
-
-    fn call(c: *TestClient, stream: u31, path: []const u8, bytes: []const u8) !void {
-        try c.headersFor(stream, path, &.{}, false);
-        try c.message(stream, bytes, false);
-    }
-};
-
-const Frame = struct { head: h2.Header, payload: []const u8 };
-
-/// What the server wrote, frame by frame, header blocks decoded.
-const Answer = struct {
-    arena: std.heap.ArenaAllocator,
-    frames: std.ArrayList(Frame) = .empty,
-    decoder: hpack.Decoder,
-
-    fn deinit(self: *Answer) void {
-        self.decoder.deinit();
-        self.arena.deinit();
-    }
-
-    fn of(t: h2.Type, self: *const Answer, stream: u31) []const Frame {
-        var out: std.ArrayList(Frame) = .empty;
-        for (self.frames.items) |f| if (f.head.type == t and f.head.stream == stream)
-            out.append(@constCast(&self.arena).allocator(), f) catch unreachable;
-        return out.items;
-    }
-
-    fn fields(self: *Answer, block: []const u8) ![]const hpack.Field {
-        var out: std.ArrayList(hpack.Field) = .empty;
-        _ = try self.decoder.decode(block, self.arena.allocator(), &out, 1 << 20);
-        return out.items;
-    }
-
-    fn value(fs: []const hpack.Field, name: []const u8) ?[]const u8 {
-        for (fs) |f| if (std.mem.eql(u8, f.name, name)) return f.value;
-        return null;
-    }
-
-    /// The trailers of a call: its last HEADERS frame's fields.
-    fn trailers(self: *Answer, stream: u31) ![]const hpack.Field {
-        const hs = of(.headers, self, stream);
-        if (hs.len == 0) return error.NoHeaders;
-        return self.fields(hs[hs.len - 1].payload);
-    }
-
-    fn message(self: *Answer, stream: u31) ![]const u8 {
-        var all: std.ArrayList(u8) = .empty;
-        for (of(.data, self, stream)) |f| try all.appendSlice(self.arena.allocator(), f.payload);
-        if (all.items.len < 5) return error.NoMessage;
-        return all.items[5..];
-    }
-
-    fn goaway(self: *const Answer) ?h2.ErrorCode {
-        for (self.frames.items) |f| if (f.head.type == .goaway)
-            return @enumFromInt(std.mem.readInt(u32, f.payload[4..8], .big));
-        return null;
-    }
-
-    fn rst(self: *const Answer, stream: u31) ?h2.ErrorCode {
-        for (self.frames.items) |f| if (f.head.type == .rst_stream and f.head.stream == stream)
-            return @enumFromInt(std.mem.readInt(u32, f.payload[0..4], .big));
-        return null;
-    }
-};
-
-fn converse(app: *App, client: *TestClient) !Answer {
-    var in: std.Io.Reader = .fixed(client.buf.written());
-    return converseFrom(app, &in);
-}
-
-fn converseFrom(app: *App, in: *std.Io.Reader) !Answer {
-    var out: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer out.deinit();
-    serveConnection(app.grpcHost(), in, &out.writer, .off, .off, .{});
-    return answerOf(out.written());
-}
-
-/// The frames in what a connection wrote.
-fn answerOf(written: []const u8) !Answer {
-    var answer_: Answer = .{ .arena = .init(testing.allocator), .decoder = .init(testing.allocator) };
-    const a = answer_.arena.allocator();
-    var rest = try a.dupe(u8, written);
-    while (rest.len >= h2.header_len) {
-        const head = h2.Header.parse(rest[0..h2.header_len]);
-        const end = h2.header_len + head.len;
-        try answer_.frames.append(a, .{ .head = head, .payload = rest[h2.header_len..end] });
-        rest = rest[end..];
-    }
-    return answer_;
-}
+const h2test = @import("h2test.zig");
+const TestClient = h2test.TestClient;
+const Answer = h2test.Answer;
+const converse = h2test.converse;
+const converseFrom = h2test.converseFrom;
+const answerOf = h2test.answerOf;
 
 fn echoRoute(c: *Ctx) anyerror!void {
     const body = try c.body();
@@ -2042,7 +2097,7 @@ test "a message marked compressed with no grpc-encoding is INTERNAL" {
     try testing.expectEqualStrings("13", Answer.value(try got.trailers(1), "grpc-status").?);
 }
 
-test "a call carrying expect: 100-continue is answered by its route, not by the 100" {
+test "a call carrying expect: 100-continue is told so at once, and answered by its route" {
     var app = try testApp();
     defer app.deinit();
     var client = try TestClient.init();
@@ -2052,6 +2107,9 @@ test "a call carrying expect: 100-continue is answered by its route, not by the 
 
     var got = try converse(&app, &client);
     defer got.deinit();
+    const heads = Answer.of(.headers, &got, 1);
+    try testing.expectEqualStrings("100", Answer.value(try got.fields(heads[0].payload), ":status").?);
+    try testing.expect(!heads[0].head.has(h2.Flags.end_stream));
     try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
     try testing.expectEqualStrings("still here", try got.message(1));
 }
@@ -2132,22 +2190,22 @@ test "a message larger than max_body is RESOURCE_EXHAUSTED, and the route never 
     try testing.expectEqualStrings("8", Answer.value(try got.trailers(1), "grpc-status").?);
 }
 
-test "a request that is not a gRPC call is a 415, and nothing else" {
+test "a request that is not a gRPC call is served as HTTP, with no grpc-status and the body in plain DATA" {
     var app = try testApp();
     defer app.deinit();
-    var client = try TestClient.init();
-    defer client.deinit();
-    var block: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer block.deinit();
-    try hpack.writeInt(&block.writer, 0x80, 7, 3);
-    try hpack.writeInt(&block.writer, 0x80, 7, 6);
-    try hpack.writeLiteral(&block.writer, ":path", "/test.Echo/Say");
-    try hpack.writeLiteral(&block.writer, "content-type", "application/json");
-    try h2.writeHeaderBlock(client.w(), 1, block.written(), true, h2.default_max_frame);
-
-    var got = try converse(&app, &client);
-    defer got.deinit();
-    try testing.expectEqualStrings("415", Answer.value(try got.trailers(1), ":status").?);
+    var ex = try h2test.roundTrip(&app, .{
+        .method = "POST",
+        .path = "/test.Echo/Say",
+        .fields = &.{.{ .name = "content-type", .value = "application/json" }},
+        .body = "{\"a\":1}",
+    });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqualStrings("{\"a\":1}", ex.body);
+    try testing.expectEqualStrings("7", ex.header("content-length").?);
+    try testing.expect(ex.header("date") != null);
+    try testing.expect(Answer.value(ex.trailers, "grpc-status") == null);
+    try testing.expectEqual(@as(usize, 0), ex.trailers.len);
 }
 
 test "a header value with a line break in it is refused before it can become a request" {
@@ -2459,12 +2517,20 @@ test "a header block that decodes to more than max_header_list is RESOURCE_EXHAU
     var client = try TestClient.init();
     defer client.deinit();
     const bomb = [_]u8{0x82} ** 8000;
-    try h2.writeHeaderBlock(client.w(), 1, &bomb, false, h2.default_max_frame);
+    // A call says what it is before the bomb, a request that is not one
+    // says nothing: the first is RESOURCE_EXHAUSTED, the second a 431.
+    var call_block: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer call_block.deinit();
+    try hpack.writeLiteral(&call_block.writer, "content-type", "application/grpc");
+    try call_block.writer.writeAll(&bomb);
+    try h2.writeHeaderBlock(client.w(), 1, call_block.written(), false, h2.default_max_frame);
     try client.message(1, "", false);
+    try h2.writeHeaderBlock(client.w(), 3, &bomb, true, h2.default_max_frame);
 
     var got = try converse(&app, &client);
     defer got.deinit();
     try testing.expectEqualStrings("8", Answer.value(try got.trailers(1), "grpc-status").?);
+    try testing.expectEqualStrings("431", Answer.value(try got.fields(Answer.of(.headers, &got, 3)[0].payload), ":status").?);
     try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
 }
 
@@ -2519,7 +2585,9 @@ fn hostRoute(c: *Ctx) anyerror!void {
     try c.send(200, "application/grpc", host);
 }
 
-fn expectContentType(value: []const u8, status: []const u8) !void {
+/// Whether a request with this content type is answered as a gRPC call
+/// (a `grpc-status` in its trailers) or as HTTP (none, and a `content-length`).
+fn expectContentType(value: []const u8, is_grpc: bool) !void {
     var app = try testApp();
     defer app.deinit();
     var client = try TestClient.init();
@@ -2531,21 +2599,23 @@ fn expectContentType(value: []const u8, status: []const u8) !void {
     var got = try converse(&app, &client);
     defer got.deinit();
     const head = try got.fields(Answer.of(.headers, &got, 1)[0].payload);
-    try testing.expectEqualStrings(status, Answer.value(head, ":status").?);
+    try testing.expectEqualStrings("200", Answer.value(head, ":status").?);
+    try testing.expectEqual(is_grpc, Answer.value(try got.trailers(1), "grpc-status") != null);
+    try testing.expectEqual(!is_grpc, Answer.value(head, "content-length") != null);
 }
 
 test "a content-type of application/grpc, or application/grpc+ and a subtype, is a gRPC call" {
-    try expectContentType("application/grpc", "200");
-    try expectContentType("application/grpc+proto", "200");
-    try expectContentType("application/grpc+json", "200");
+    try expectContentType("application/grpc", true);
+    try expectContentType("application/grpc+proto", true);
+    try expectContentType("application/grpc+json", true);
 }
 
-test "application/grpc-web and other near misses are not a native gRPC call: 415" {
-    try expectContentType("application/grpc-web", "415");
-    try expectContentType("application/grpc-web+proto", "415");
-    try expectContentType("application/grpcx", "415");
-    try expectContentType("application/grpc+", "415");
-    try expectContentType("application/grpc;x", "415");
+test "application/grpc-web and other near misses are not a native gRPC call: they are served as HTTP" {
+    try expectContentType("application/grpc-web", false);
+    try expectContentType("application/grpc-web+proto", false);
+    try expectContentType("application/grpcx", false);
+    try expectContentType("application/grpc+", false);
+    try expectContentType("application/grpc;x", false);
 }
 
 test "a request with a pseudo-header twice is a stream error PROTOCOL_ERROR" {
@@ -2609,17 +2679,24 @@ test "metadata an HTTP/1.1 head would be refused for is INVALID_ARGUMENT, by the
     try testing.expectEqualStrings("0", try statusFor(&(base_fields ++ [_]hpack.Field{.{ .name = "x-note", .value = "a\tb" }})));
 }
 
-test "a call's own content-length is not what its route reads: the message is" {
+test "a content-length that is the length of the DATA is not what the route reads: the message is" {
     var app = try testApp();
     defer app.deinit();
     var client = try TestClient.init();
     defer client.deinit();
-    try callWithFields(&client, 1, &(base_fields ++ [_]hpack.Field{.{ .name = "content-length", .value = "999" }}));
+    // The message is five bytes of prefix and "x".
+    try callWithFields(&client, 1, &(base_fields ++ [_]hpack.Field{.{ .name = "content-length", .value = "6" }}));
 
     var got = try converse(&app, &client);
     defer got.deinit();
     try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
     try testing.expectEqualStrings("x", try got.message(1));
+}
+
+test "a content-length that is not the length of the DATA is a stream error PROTOCOL_ERROR, over or under" {
+    try expectMalformed(&(base_fields ++ [_]hpack.Field{.{ .name = "content-length", .value = "999" }}));
+    try expectMalformed(&(base_fields ++ [_]hpack.Field{.{ .name = "content-length", .value = "5" }}));
+    try expectMalformed(&(base_fields ++ [_]hpack.Field{.{ .name = "content-length", .value = "six" }}));
 }
 
 test "a request with :authority and host is served, with :authority as its one host" {
@@ -3214,14 +3291,558 @@ test "one connection's budget grows to the largest limit a route raised to, and 
     try app.resolveChains();
     try testing.expectEqual(@as(usize, 1_000), app.grpcHost().ceiling);
 
-    // A lower limit moves nothing, and a raise on a route a call cannot
-    // reach is not a call's.
+    // A lower limit moves nothing, and a raise on a route of any method is
+    // a request's, since any method is served on HTTP/2 now (ADR 259).
     try app.with(maxbody.with(10)).post("/test.Echo/Low", echoRoute);
-    try app.with(maxbody.with(900_000)).put("/export", echoRoute);
     try app.resolveChains();
     try testing.expectEqual(@as(usize, 1_000), app.grpcHost().ceiling);
+    try app.with(maxbody.with(900_000)).put("/export", echoRoute);
+    try app.resolveChains();
+    try testing.expectEqual(@as(usize, 900_000), app.grpcHost().ceiling);
 
     try app.with(maxbody.with(3_000_000)).post("/test.Echo/High", echoRoute);
     try app.resolveChains();
     try testing.expectEqual(@as(usize, 3_000_000), app.grpcHost().ceiling);
+}
+
+// ---- any request, not only a call (ADR 259) ----
+
+fn pingRoute(c: *Ctx) anyerror!void {
+    try c.setHeader("X-Seen", "ping");
+    try c.sendText(200, "pong");
+}
+
+fn emptyRoute(c: *Ctx) anyerror!void {
+    try c.sendEmpty(204);
+}
+
+fn cookieRoute(c: *Ctx) anyerror!void {
+    try c.sendText(200, if (c.header("cookie")) |h| h.view() else "no cookie");
+}
+
+fn trailingRoute(c: *Ctx) anyerror!void {
+    try c.setTrailer("x-sum", "ok");
+    try c.sendText(200, "body");
+}
+
+fn bigRoute(c: *Ctx) anyerror!void {
+    try c.send(200, "application/octet-stream", "0123456789" ** 4_000);
+}
+
+fn pathRoute(c: *Ctx) anyerror!void {
+    const id = c.param("id").?.view();
+    try c.sendText(200, id);
+}
+
+fn sizeRoute(c: *Ctx) anyerror!void {
+    var buf: [20]u8 = undefined;
+    try c.sendText(200, std.fmt.bufPrint(&buf, "{d}", .{(try c.body()).view().len}) catch unreachable);
+}
+
+fn streamRoute(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    try out.finish();
+}
+
+fn eventsRoute(c: *Ctx) anyerror!void {
+    _ = try c.events();
+}
+
+fn bodyStreamRoute(c: *Ctx) anyerror!void {
+    _ = try c.bodyStream();
+}
+
+fn upgradeRoute(c: *Ctx) anyerror!void {
+    return c.upgrade(struct {
+        fn loop(_: *@import("websocket.zig").Socket) anyerror!void {}
+    }.loop, {});
+}
+
+fn eventsFromRoute(c: *Ctx) anyerror!void {
+    var room = try @import("room.zig").Room.init(testing.allocator);
+    defer room.deinit();
+    return c.eventsFrom(&room, .{});
+}
+
+var one_file: ?*OneFile = null;
+
+/// A directory with one file in it, for the route that sends it.
+const OneFile = struct {
+    tmp: nilo_testing.TmpDir,
+    dir: bulkhead.Dir,
+
+    fn init() !OneFile {
+        var tmp = nilo_testing.tmpDir();
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = "0123456789" });
+        var path_buf: [128]u8 = undefined;
+        const path = try tmp.path(&path_buf, "");
+        return .{ .tmp = tmp, .dir = try bulkhead.Dir.open(path) };
+    }
+
+    fn deinit(self: *OneFile) void {
+        self.dir.close();
+        self.tmp.cleanup();
+    }
+};
+
+fn fileRoute(c: *Ctx) anyerror!void {
+    const file = try one_file.?.dir.openFile("f.bin");
+    return c.sendFile(.{ .file = file, .content_type = "application/octet-stream" });
+}
+
+const nilo_testing = @import("testing.zig");
+
+fn httpApp() !App {
+    var app = App.init(testing.allocator);
+    errdefer app.deinit();
+    try app.get("/ping", pingRoute);
+    try app.get("/empty", emptyRoute);
+    try app.get("/cookie", cookieRoute);
+    try app.get("/trailing", trailingRoute);
+    try app.get("/big", bigRoute);
+    try app.get("/users/:id", pathRoute);
+    try app.post("/size", sizeRoute);
+    try app.get("/stream", streamRoute);
+    try app.get("/events", eventsRoute);
+    try app.get("/room", eventsFromRoute);
+    try app.get("/ws", upgradeRoute);
+    try app.get("/file", fileRoute);
+    try app.post("/body-stream", bodyStreamRoute);
+    try app.post("/test.Echo/Say", echoRoute);
+    try app.resolveChains();
+    return app;
+}
+
+fn quiet() std.log.Level {
+    const previous = testing.log_level;
+    testing.log_level = .err;
+    return previous;
+}
+
+test "a GET is answered as HTTP: its status, type, length and date in one HEADERS frame, and its body in DATA that ends the stream" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/ping" });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqualStrings("pong", ex.body);
+    try testing.expectEqualStrings("text/plain", ex.header("content-type").?);
+    try testing.expectEqualStrings("4", ex.header("content-length").?);
+    try testing.expectEqualStrings("ping", ex.header("x-seen").?);
+    try testing.expectEqual(@as(usize, 29), ex.header("date").?.len);
+    try testing.expectEqual(@as(usize, 0), ex.trailers.len);
+    // The stream ends on the last DATA frame, with no HEADERS after it.
+    const data = Answer.of(.data, &ex.answer, 1);
+    try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
+    try testing.expectEqual(@as(usize, 1), Answer.of(.headers, &ex.answer, 1).len);
+    try testing.expect(!Answer.of(.headers, &ex.answer, 1)[0].head.has(h2.Flags.end_stream));
+}
+
+test "a HEAD has the head a GET would, content-length included, and no DATA" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .method = "HEAD", .path = "/ping" });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqualStrings("4", ex.header("content-length").?);
+    try testing.expectEqual(@as(usize, 0), Answer.of(.data, &ex.answer, 1).len);
+    try testing.expect(Answer.of(.headers, &ex.answer, 1)[0].head.has(h2.Flags.end_stream));
+}
+
+test "a 204 has no content-length and no body, and its HEADERS end the stream" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/empty" });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 204), ex.status);
+    try testing.expect(ex.header("content-length") == null);
+    try testing.expectEqual(@as(usize, 0), ex.body.len);
+    try testing.expect(Answer.of(.headers, &ex.answer, 1)[0].head.has(h2.Flags.end_stream));
+}
+
+test "a route's trailers follow its body as one more HEADERS frame that ends the stream" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/trailing" });
+    defer ex.deinit();
+    try testing.expectEqualStrings("body", ex.body);
+    try testing.expectEqualStrings("ok", Answer.value(ex.trailers, "x-sum").?);
+    const heads = Answer.of(.headers, &ex.answer, 1);
+    try testing.expectEqual(@as(usize, 2), heads.len);
+    try testing.expect(heads[1].head.has(h2.Flags.end_stream));
+    const data = Answer.of(.data, &ex.answer, 1);
+    try testing.expect(!data[data.len - 1].head.has(h2.Flags.end_stream));
+}
+
+test "a failure is answered as the App answers it on HTTP/1.1: a 404 with the failure body, and a 405 with Allow" {
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try httpApp();
+    defer app.deinit();
+    var missing = try h2test.roundTrip(&app, .{ .path = "/nowhere" });
+    defer missing.deinit();
+    try testing.expectEqual(@as(u16, 404), missing.status);
+    try testing.expectEqualStrings("application/json", missing.header("content-type").?);
+    try testing.expect(std.mem.indexOf(u8, missing.body, "\"status\":404") != null);
+
+    var wrong = try h2test.roundTrip(&app, .{ .method = "DELETE", .path = "/ping" });
+    defer wrong.deinit();
+    try testing.expectEqual(@as(u16, 405), wrong.status);
+    try testing.expect(std.mem.indexOf(u8, wrong.header("allow").?, "GET") != null);
+}
+
+test "a path parameter and a body reach the route as they do on HTTP/1.1" {
+    var app = try httpApp();
+    defer app.deinit();
+    var got = try h2test.roundTrip(&app, .{ .path = "/users/42" });
+    defer got.deinit();
+    try testing.expectEqualStrings("42", got.body);
+
+    var sized = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/size", .body = "x" ** 40_000, .frame = 9_000 });
+    defer sized.deinit();
+    try testing.expectEqualStrings("40000", sized.body);
+}
+
+test "cookies a client split across fields are one field when the route reads them, joined with a semicolon" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/cookie", .fields = &.{
+        .{ .name = "cookie", .value = "a=1" },
+        .{ .name = "cookie", .value = "b=2" },
+        .{ .name = "cookie", .value = "c=3" },
+    } });
+    defer ex.deinit();
+    try testing.expectEqualStrings("a=1; b=2; c=3", ex.body);
+}
+
+test "OPTIONS * is a request, and answered with what the server supports" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .method = "OPTIONS", .path = "*" });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 204), ex.status);
+    try testing.expect(std.mem.indexOf(u8, ex.header("allow").?, "GET") != null);
+}
+
+test "an answer past the client's window waits for it, and the body still arrives whole" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    // A window of 1,000 bytes, then the updates a client reading would send.
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 1_000 }});
+    try h2test.requestOn(&client, 1, .{ .path = "/big" });
+    try h2.writeWindowUpdate(client.w(), 0, 100_000);
+    try h2.writeWindowUpdate(client.w(), 1, 100_000);
+
+    var ex = try h2test.exchangeOf(try converse(&app, &client), 1);
+    defer ex.deinit();
+    try testing.expectEqual(@as(usize, 40_000), ex.body.len);
+    try testing.expectEqualStrings("40000", ex.header("content-length").?);
+    try testing.expect(Answer.of(.data, &ex.answer, 1).len > 2);
+}
+
+test "a request with expect: 100-continue whose body has not arrived is told to send it, at once" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{
+        .method = "POST",
+        .path = "/size",
+        .fields = &.{.{ .name = "expect", .value = "100-continue" }},
+        .body = "hello",
+    });
+    defer ex.deinit();
+    try testing.expectEqualSlices(u16, &.{100}, ex.interim);
+    try testing.expectEqualStrings("5", ex.body);
+    // The 100 is a HEADERS frame that does not end the stream, ahead of the answer.
+    const heads = Answer.of(.headers, &ex.answer, 1);
+    try testing.expect(!heads[0].head.has(h2.Flags.end_stream));
+    // And is the constant block, which `encodeBlock` would have written.
+    try testing.expectEqualStrings(try hpack.encodeBlock(ex.answer.arena.allocator(), &.{.{ .name = ":status", .value = "100" }}), continue_block);
+}
+
+test "a request that is over, and expects 100-continue, is not sent one" {
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/ping", .fields = &.{.{ .name = "expect", .value = "100-continue" }} });
+    defer ex.deinit();
+    try testing.expectEqual(@as(usize, 0), ex.interim.len);
+}
+
+/// A request with exactly `fields`, no body and END_STREAM on its HEADERS.
+fn expectHttpMalformed(fields: []const hpack.Field) !void {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    var block: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer block.deinit();
+    for (fields) |f| try hpack.writeLiteral(&block.writer, f.name, f.value);
+    try h2.writeHeaderBlock(client.w(), 1, block.written(), true, h2.default_max_frame);
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.rst(1).?);
+    try testing.expectEqual(@as(usize, 0), Answer.of(.headers, &got, 1).len);
+    try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
+}
+
+const get_fields = [_]hpack.Field{
+    .{ .name = ":method", .value = "GET" },
+    .{ .name = ":scheme", .value = "http" },
+    .{ .name = ":path", .value = "/ping" },
+    .{ .name = ":authority", .value = "localhost" },
+};
+
+test "a request without :method, :scheme or :path is a stream error PROTOCOL_ERROR" {
+    try expectHttpMalformed(get_fields[1..]);
+    try expectHttpMalformed(&[_]hpack.Field{ get_fields[0], get_fields[2], get_fields[3] });
+    try expectHttpMalformed(&[_]hpack.Field{ get_fields[0], get_fields[1], get_fields[3] });
+}
+
+test "an empty :path is a stream error PROTOCOL_ERROR, and a :path that is not a path is too" {
+    try expectHttpMalformed(&[_]hpack.Field{ get_fields[0], get_fields[1], .{ .name = ":path", .value = "" } });
+    try expectHttpMalformed(&[_]hpack.Field{ get_fields[0], get_fields[1], .{ .name = ":path", .value = "ping" } });
+    try expectHttpMalformed(&[_]hpack.Field{ get_fields[0], get_fields[1], .{ .name = ":path", .value = "*" } });
+}
+
+test "a field that belongs to an HTTP/1.1 connection is a stream error PROTOCOL_ERROR" {
+    for ([_][]const u8{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" }) |name| {
+        try expectHttpMalformed(&(get_fields ++ [_]hpack.Field{.{ .name = name, .value = "x" }}));
+    }
+}
+
+test "te is malformed unless it is trailers (§8.2.2)" {
+    try expectHttpMalformed(&(get_fields ++ [_]hpack.Field{.{ .name = "te", .value = "gzip" }}));
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/ping", .fields = &.{.{ .name = "te", .value = "trailers" }} });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+}
+
+test "a field name in capitals is a stream error PROTOCOL_ERROR" {
+    try expectHttpMalformed(&(get_fields ++ [_]hpack.Field{.{ .name = "X-Trace", .value = "1" }}));
+}
+
+test "a pseudo-header after a regular field is a stream error PROTOCOL_ERROR, and so is one that is a response's" {
+    try expectHttpMalformed(&[_]hpack.Field{ get_fields[0], get_fields[1], .{ .name = "x-a", .value = "1" }, get_fields[2] });
+    try expectHttpMalformed(&(get_fields ++ [_]hpack.Field{.{ .name = ":status", .value = "200" }}));
+    try expectHttpMalformed(&[_]hpack.Field{ .{ .name = ":status", .value = "200" }, get_fields[0], get_fields[1], get_fields[2] });
+}
+
+fn expectLengthMalformed(declared: []const u8, body: []const u8) !void {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .method = "POST", .path = "/size", .fields = &.{.{ .name = "content-length", .value = declared }}, .body = body });
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.rst(1).?);
+    try testing.expectEqual(@as(usize, 0), Answer.of(.headers, &got, 1).len);
+}
+
+test "a content-length the DATA does not add up to is a stream error PROTOCOL_ERROR, over and under (§8.1.1)" {
+    try expectLengthMalformed("10", "hello");
+    try expectLengthMalformed("3", "hello");
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/size", .fields = &.{.{ .name = "content-length", .value = "5" }}, .body = "hello" });
+    defer ex.deinit();
+    try testing.expectEqualStrings("5", ex.body);
+}
+
+test "a malformed request resets its own stream and leaves the ones beside it alone" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/ping", .fields = &.{.{ .name = "connection", .value = "close" }} });
+    try h2test.requestOn(&client, 3, .{ .path = "/ping" });
+    const got = try converse(&app, &client);
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.rst(1).?);
+    var ex = try h2test.exchangeOf(got, 3);
+    defer ex.deinit();
+    try testing.expectEqualStrings("pong", ex.body);
+}
+
+test "CONNECT is answered 501, and no tunnel is made" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    var block: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer block.deinit();
+    try hpack.writeLiteral(&block.writer, ":method", "CONNECT");
+    try hpack.writeLiteral(&block.writer, ":authority", "example.test:443");
+    try h2.writeHeaderBlock(client.w(), 1, block.written(), false, h2.default_max_frame);
+    var ex = try h2test.exchangeOf(try converse(&app, &client), 1);
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 501), ex.status);
+    try testing.expect(std.mem.indexOf(u8, ex.body, "CONNECT") != null);
+    // The tunnel's bytes are not wanted: the client is told to stop sending them.
+    try testing.expectEqual(h2.ErrorCode.no_error, ex.answer.rst(1).?);
+}
+
+/// A route that asks for what HTTP/2 cannot give until stage 6, and the call
+/// it names in its sentence.
+fn expectRefusedByName(method: []const u8, path: []const u8, call: []const u8) !void {
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .method = method, .path = path, .body = if (std.mem.eql(u8, method, "POST")) "x" else "" });
+    defer ex.deinit();
+    // A 500 that says what was asked for, and never a 501 that would read as
+    // the route's own answer.
+    try testing.expectEqual(@as(u16, 500), ex.status);
+    try testing.expect(std.mem.indexOf(u8, ex.body, call) != null);
+    try testing.expect(std.mem.indexOf(u8, ex.body, "not available on HTTP/2 yet") != null);
+}
+
+test "a streamed answer, an event stream and a body stream are refused by name on HTTP/2" {
+    try expectRefusedByName("GET", "/stream", "c.stream()");
+    try expectRefusedByName("GET", "/events", "c.events()");
+    try expectRefusedByName("POST", "/body-stream", "c.bodyStream()");
+    try expectRefusedByName("GET", "/room", "c.eventsFrom()");
+}
+
+test "a WebSocket is refused by name on HTTP/2, and the sentence says it is HTTP/1.1" {
+    try expectRefusedByName("GET", "/ws", "c.upgrade()");
+    try expectRefusedByName("GET", "/ws", "a WebSocket is HTTP/1.1");
+}
+
+test "a file is refused by name on HTTP/2, and a HEAD of it, which sends none of it, is not" {
+    var files = try OneFile.init();
+    defer files.deinit();
+    one_file = &files;
+    defer one_file = null;
+    try expectRefusedByName("GET", "/file", "c.sendFile()");
+
+    var app = try httpApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .method = "HEAD", .path = "/file" });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqualStrings("10", ex.header("content-length").?);
+    try testing.expectEqual(@as(usize, 0), Answer.of(.data, &ex.answer, 1).len);
+}
+
+test "a request on HTTP/2 stays inside the heap allocations of one on HTTP/1.1, from its second on a connection" {
+    var app = try httpApp();
+    defer app.deinit();
+    var counting = @import("budget.zig").Counting{ .child = testing.allocator };
+
+    var results: [2]usize = undefined;
+    for (&results, [_]usize{ 2, 12 }) |*r, requests| {
+        var client = try TestClient.init();
+        defer client.deinit();
+        var id: u31 = 1;
+        for (0..requests) |_| {
+            try h2test.requestOn(&client, id, .{ .path = "/ping", .fields = &.{
+                .{ .name = "user-agent", .value = "wrk" },
+                .{ .name = "accept", .value = "*/*" },
+                .{ .name = "accept-encoding", .value = "gzip" },
+            } });
+            id += 2;
+        }
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        var host = app.grpcHost();
+        host.gpa = counting.allocator();
+        counting.reset();
+        serveConnection(host, &in, &out.writer, .off, .off, .{});
+        r.* = counting.allocs;
+    }
+    // HTTP/1.1 reaches the general-purpose allocator for none of them once its
+    // arena is warm, and one on HTTP/2 does not either: it reuses the stream
+    // and the arena the one before kept (`spare_arena_keep`).
+    try testing.expectEqual(@as(usize, 0), results[1] - results[0]);
+}
+
+test "a WINDOW_UPDATE on a stream nobody has opened is a connection error PROTOCOL_ERROR (§5.1)" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2.writeWindowUpdate(client.w(), 5, 10);
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.goaway().?);
+}
+
+test "a stream that depends on itself is a stream error PROTOCOL_ERROR, by HEADERS and by PRIORITY (§5.3.1)" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    // HEADERS on stream 1 carrying PRIORITY, the dependency being stream 1.
+    var block: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer block.deinit();
+    for (get_fields) |f| try hpack.writeLiteral(&block.writer, f.name, f.value);
+    try h2.writeHeader(client.w(), 5 + block.written().len, .headers, h2.Flags.end_headers | h2.Flags.end_stream | h2.Flags.priority, 1);
+    try client.w().writeAll("\x00\x00\x00\x01\x10");
+    try client.w().writeAll(block.written());
+    // PRIORITY on stream 3 depending on stream 3, then an ordinary request.
+    try h2.writeHeader(client.w(), 5, .priority, 0, 3);
+    try client.w().writeAll("\x80\x00\x00\x03\x10");
+    try h2test.requestOn(&client, 5, .{ .path = "/ping" });
+
+    const got = try converse(&app, &client);
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.rst(1).?);
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.rst(3).?);
+    try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
+    var ex = try h2test.exchangeOf(got, 5);
+    defer ex.deinit();
+    try testing.expectEqualStrings("pong", ex.body);
+}
+
+test "DATA on a request the client already ended, whose answer is still being written, is a stream error STREAM_CLOSED (§5.1)" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    // A window of 0, so the answer waits and the stream is still there.
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 0 }});
+    try h2test.requestOn(&client, 1, .{ .path = "/ping" });
+    try h2.writeHeader(client.w(), 3, .data, 0, 1);
+    try client.w().writeAll("abc");
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.stream_closed, got.rst(1).?);
+    try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
+}
+
+test "a GOAWAY from the client does not stop the frames it sent behind it from being answered" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2.writeHeader(client.w(), 8, .goaway, 0, 0);
+    try client.w().writeAll("\x00\x00\x00\x00\x00\x00\x00\x00");
+    try h2.writeHeader(client.w(), 8, .ping, 0, 0);
+    try client.w().writeAll("h2spec  ");
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    var acked = false;
+    for (got.frames.items) |f| {
+        if (f.head.type == .ping and f.head.has(h2.Flags.ack)) acked = std.mem.eql(u8, f.payload, "h2spec  ");
+    }
+    try testing.expect(acked);
+}
+
+test "a SETTINGS_INITIAL_WINDOW_SIZE of 2^31-1, the most RFC 9113 §6.5.2 allows, is accepted" {
+    var app = try httpApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, h2.max_window }});
+    try h2test.requestOn(&client, 1, .{ .path = "/ping" });
+    var ex = try h2test.exchangeOf(try converse(&app, &client), 1);
+    defer ex.deinit();
+    try testing.expectEqualStrings("pong", ex.body);
+    try testing.expectEqual(@as(?h2.ErrorCode, null), ex.answer.goaway());
 }

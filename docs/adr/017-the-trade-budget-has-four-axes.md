@@ -132,3 +132,4 @@ This ADR spends nothing itself; it is the ledger every other one is checked agai
 | Memory per idle connection | 0 |
 | Throughput and p99 | 0 |
 | Binary size | 0: the table above is the running total other ADRs add to, not a cost of its own |
+| HTTP/2 for every request on the port HTTP/1.1 is on, its connection split from the gRPC envelope ([ADR 259](./259-http2-is-a-framing-of-every-request.md), stages 5.1 to 5.3 of [framing](../design/framing.md)); a build without `-Dhttp2` is byte-identical, and the `-Dhttp2` build pays +12,816 B and +12,800 B more than the `-Dgrpc` build it replaces ([the runs](../../bench/result/http.md#what-any-request-on-http2-costs)) | +0 | +0 |

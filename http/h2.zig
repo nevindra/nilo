@@ -84,7 +84,7 @@ pub const default_max_frame = 16_384;
 /// The window every stream and the connection start with (§6.9.2).
 pub const default_window = 65_535;
 /// The largest a flow-control window may grow (§6.9.1).
-pub const max_window = std.math.maxInt(i31);
+pub const max_window = std.math.maxInt(u31);
 
 pub const Header = struct {
     len: u24,

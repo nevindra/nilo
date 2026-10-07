@@ -43,6 +43,10 @@ const secure = @import("secure.zig");
 const trace_mod = @import("trace.zig");
 const allowance = @import("allowance.zig");
 const patch_mod = @import("patch.zig");
+const h2test = @import("h2test.zig");
+const hpack = @import("hpack.zig");
+const h2 = @import("h2.zig");
+const framing_mod = @import("framing.zig");
 
 const App = app_mod.App;
 const Group = app_mod.Group;
@@ -11683,4 +11687,293 @@ test "a held static file goes out after the chain with the middleware's header" 
     try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
     try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\nalphabet"));
+}
+
+// ---- one request, two framings (ADR 259) ----
+//
+// The same request over HTTP/1.1 and over HTTP/2 reaches the same route and
+// gets the same answer: the status, the headers other than the ones one
+// framing writes for itself (`content-length` where the body is chunked,
+// `date`, `connection`), the body, and the trailers. A table of requests
+// rather than a test each, because what is being held is the sameness.
+
+var framed_db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+
+fn framedWelcome(c: *Ctx) anyerror!void {
+    try c.redirect(302, "/welcome");
+}
+
+fn framedTrailing(c: *Ctx) anyerror!void {
+    try c.setTrailer("x-sum", "ok");
+    try c.sendText(200, "body");
+}
+
+fn framedCookie(c: *Ctx) anyerror!void {
+    try c.sendText(200, if (c.header("cookie")) |h| h.view() else "no cookie");
+}
+
+fn framedSize(c: *Ctx) anyerror!void {
+    var buf: [20]u8 = undefined;
+    try c.sendText(200, std.fmt.bufPrint(&buf, "{d}", .{(try c.body()).view().len}) catch unreachable);
+}
+
+fn framedMedium(c: *Ctx) anyerror!void {
+    try c.send(200, "text/plain", "0123456789" ** 250);
+}
+
+fn framedApp() !App {
+    var app = App.init(testing.allocator);
+    errdefer app.deinit();
+    try app.provide(&framed_db);
+    try app.use(cors.permissive);
+    try app.get("/users/:id", getUser);
+    try app.post("/users", createUser);
+    try app.post("/sum", sumOf);
+    try app.post("/math.Sums/Find", findSum);
+    try app.get("/go", framedWelcome);
+    try app.get("/trailing", framedTrailing);
+    try app.get("/cookie", framedCookie);
+    try app.post("/size", framedSize);
+    try app.get("/medium", framedMedium);
+    try app.resolveChains();
+    return app;
+}
+
+const Spec = struct {
+    method: []const u8 = "GET",
+    path: []const u8,
+    fields: []const hpack.Field = &.{},
+    /// What HTTP/2 sends in `fields`' place, for a request one framing
+    /// spells differently: a client splits a `cookie` for compression.
+    h2_fields: ?[]const hpack.Field = null,
+    body: []const u8 = "",
+    window: ?u32 = null,
+    /// What both must say, so a table of two 404s is not a table of anything.
+    status: u16,
+    says: []const u8 = "",
+};
+
+const Answered = struct {
+    status: u16,
+    headers: []const hpack.Field,
+    body: []const u8,
+    trailers: []const hpack.Field,
+};
+
+/// An HTTP/1.1 answer read back into what an HTTP/2 one carries, in `a`.
+fn readHttp1(a: std.mem.Allocator, response: []const u8, head_only: bool) !Answered {
+    const status = try std.fmt.parseInt(u16, response[9..12], 10);
+    const blank = std.mem.indexOf(u8, response, "\r\n\r\n").?;
+    var headers: std.ArrayList(hpack.Field) = .empty;
+    var lines = std.mem.splitSequence(u8, response[std.mem.indexOf(u8, response, "\r\n").? + 2 .. blank], "\r\n");
+    var chunked = false;
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':').?;
+        const name = try std.ascii.allocLowerString(a, line[0..colon]);
+        const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+        if (std.mem.eql(u8, name, "transfer-encoding")) chunked = true;
+        try headers.append(a, .{ .name = name, .value = value });
+    }
+    var rest = response[blank + 4 ..];
+    if (head_only) rest = "";
+    var body: std.ArrayList(u8) = .empty;
+    var trailers: std.ArrayList(hpack.Field) = .empty;
+    if (chunked) {
+        while (true) {
+            const eol = std.mem.indexOf(u8, rest, "\r\n").?;
+            const n = try std.fmt.parseInt(usize, rest[0..eol], 16);
+            rest = rest[eol + 2 ..];
+            if (n == 0) break;
+            try body.appendSlice(a, rest[0..n]);
+            rest = rest[n + 2 ..];
+        }
+        var tl = std.mem.splitSequence(u8, rest, "\r\n");
+        while (tl.next()) |line| {
+            if (line.len == 0) continue;
+            const colon = std.mem.indexOfScalar(u8, line, ':').?;
+            try trailers.append(a, .{ .name = try std.ascii.allocLowerString(a, line[0..colon]), .value = std.mem.trim(u8, line[colon + 1 ..], " ") });
+        }
+    } else try body.appendSlice(a, rest);
+    return .{ .status = status, .headers = headers.items, .body = body.items, .trailers = trailers.items };
+}
+
+/// Whether `name` is one only one framing writes for itself.
+fn framingOwn(name: []const u8) bool {
+    return std.mem.eql(u8, name, "date") or std.mem.eql(u8, name, "connection") or
+        std.mem.eql(u8, name, "transfer-encoding") or std.mem.eql(u8, name, "keep-alive");
+}
+
+fn valueOf(fields: []const hpack.Field, name: []const u8) ?[]const u8 {
+    for (fields) |f| if (std.mem.eql(u8, f.name, name)) return f.value;
+    return null;
+}
+
+fn expectSameAnswer(app: *App, spec: Spec) !void {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var text: std.Io.Writer.Allocating = .init(a);
+    try text.writer.print("{s} {s} HTTP/1.1\r\nHost: localhost\r\n", .{ spec.method, spec.path });
+    for (spec.fields) |f| try text.writer.print("{s}: {s}\r\n", .{ f.name, f.value });
+    if (spec.body.len > 0) try text.writer.print("Content-Length: {d}\r\n", .{spec.body.len});
+    try text.writer.print("\r\n{s}", .{spec.body});
+
+    var h = Harness.init();
+    defer h.deinit();
+    const head_only = std.mem.eql(u8, spec.method, "HEAD");
+    const one = try readHttp1(a, h.send(app, text.written()).response, head_only);
+
+    var two = try h2test.roundTrip(app, .{
+        .method = spec.method,
+        .path = spec.path,
+        .fields = spec.h2_fields orelse spec.fields,
+        .body = spec.body,
+        .frame = 7_000,
+        .window = spec.window,
+    });
+    defer two.deinit();
+
+    try testing.expectEqual(spec.status, one.status);
+    try testing.expectEqual(one.status, two.status);
+    try testing.expect(std.mem.indexOf(u8, one.body, spec.says) != null);
+    try testing.expectEqualStrings(one.body, two.body);
+
+    // Every header one says, the other says, with the same value, bar the
+    // ones a framing writes for itself and a length HTTP/1.1 chunked away.
+    for (one.headers) |f| {
+        if (framingOwn(f.name)) continue;
+        if (std.mem.eql(u8, f.name, "content-length") and valueOf(two.headers, f.name) == null) continue;
+        try testing.expectEqualStrings(f.value, valueOf(two.headers, f.name) orelse {
+            std.debug.print("HTTP/1.1 sent {s}, HTTP/2 did not\n", .{f.name});
+            return error.HeaderMissingOnHttp2;
+        });
+    }
+    for (two.headers) |f| {
+        if (framingOwn(f.name)) continue;
+        if (std.mem.eql(u8, f.name, "content-length") and valueOf(one.headers, f.name) == null) continue;
+        _ = valueOf(one.headers, f.name) orelse {
+            std.debug.print("HTTP/2 sent {s}, HTTP/1.1 did not\n", .{f.name});
+            return error.HeaderMissingOnHttp1;
+        };
+    }
+    try testing.expect(valueOf(two.headers, "date") != null);
+    try testing.expectEqual(one.trailers.len, two.trailers.len);
+    for (one.trailers) |t| try testing.expectEqualStrings(t.value, valueOf(two.trailers, t.name).?);
+}
+
+test "the same requests over HTTP/1.1 and over HTTP/2 get the same answers" {
+    const previous = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = previous;
+    var app = try framedApp();
+    defer app.deinit();
+
+    const json = [_]hpack.Field{.{ .name = "content-type", .value = "application/json" }};
+    const cross_origin = [_]hpack.Field{.{ .name = "origin", .value = "https://app.example" }};
+    const asks_trailers = [_]hpack.Field{.{ .name = "te", .value = "trailers" }};
+    const connect = [_]hpack.Field{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "connect-protocol-version", .value = "1" } };
+
+    // A GET with a path parameter, and the two ways it can fail to be one.
+    try expectSameAnswer(&app, .{ .path = "/users/7", .status = 200, .says = "wati" });
+    try expectSameAnswer(&app, .{ .path = "/users/8", .status = 404, .says = "no user 8" });
+    try expectSameAnswer(&app, .{ .path = "/users/seven", .status = 400 });
+    try expectSameAnswer(&app, .{ .path = "/nowhere", .status = 404, .says = "there is no /nowhere" });
+    try expectSameAnswer(&app, .{ .method = "DELETE", .path = "/users/7", .status = 405, .says = "not allowed" });
+
+    // A typed body, a body that is not JSON, and one that breaks a rule.
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/sum", .fields = &json, .body = "{\"a\":1,\"b\":2}", .status = 200, .says = "{\"total\":3}" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/users", .fields = &json, .body = "{\"name\":", .status = 400 });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/users", .fields = &json, .body = "{\"name\":\"\"}", .status = 422, .says = "name must not be empty" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/users", .fields = &json, .body = "{\"name\":\"wati\"}", .status = 201, .says = "\"id\":1" });
+
+    // A HEAD has the head a GET would, and a middleware's headers go with it.
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/users/7", .status = 200 });
+    try expectSameAnswer(&app, .{ .path = "/users/7", .fields = &cross_origin, .status = 200, .says = "wati" });
+
+    // Trailers, and a Connect call that fails in Connect's words.
+    try expectSameAnswer(&app, .{ .path = "/trailing", .fields = &asks_trailers, .status = 200, .says = "body" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/math.Sums/Find", .fields = &connect, .body = "{\"a\":-2,\"b\":0}", .status = 404, .says = "\"code\":\"not_found\"" });
+
+    // A body in several DATA frames, an answer written across several
+    // windows, a cookie a client split, and a redirect.
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/size", .body = "x" ** 60_000, .status = 200, .says = "60000" });
+    try expectSameAnswer(&app, .{ .path = "/medium", .window = 700, .status = 200, .says = "0123456789" });
+    try expectSameAnswer(&app, .{
+        .path = "/cookie",
+        .fields = &.{.{ .name = "cookie", .value = "a=1; b=2" }},
+        .h2_fields = &.{ .{ .name = "cookie", .value = "a=1" }, .{ .name = "cookie", .value = "b=2" } },
+        .status = 200,
+        .says = "a=1; b=2",
+    });
+    try expectSameAnswer(&app, .{ .path = "/go", .status = 302 });
+}
+
+test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 from the second on a connection" {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.use(cors.permissive);
+    try app.resolveChains();
+
+    // HTTP/1.1, as the budget test above measures it, counted where its
+    // arena meets the general-purpose allocator: a warm arena keeps what a
+    // request touched, so the second request reaches the allocator for none.
+    var gpa_h1 = budget.Counting{ .child = testing.allocator };
+    var arena = std.heap.ArenaAllocator.init(gpa_h1.allocator());
+    defer arena.deinit();
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+    for (0..3) |_| {
+        var in = std.Io.Reader.fixed(request);
+        var out = std.Io.Writer.fixed(&buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+        lifetime.end();
+        _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+    }
+    gpa_h1.reset();
+    {
+        var in = std.Io.Reader.fixed(request);
+        var out = std.Io.Writer.fixed(&buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+        lifetime.end();
+    }
+    const h1_allocs = gpa_h1.allocs;
+
+    // The same request on HTTP/2: what two and twelve of them reach the
+    // general-purpose allocator for differ by what ten more cost.
+    var gpa_h2 = budget.Counting{ .child = testing.allocator };
+    var totals: [2]usize = undefined;
+    for (&totals, [_]usize{ 2, 12 }) |*total, requests| {
+        var client = try h2test.TestClient.init();
+        defer client.deinit();
+        var id: u31 = 1;
+        for (0..requests) |_| {
+            try h2test.requestOn(&client, id, .{ .path = "/users/7", .fields = &.{
+                .{ .name = "user-agent", .value = "wrk" },
+                .{ .name = "accept", .value = "*/*" },
+                .{ .name = "accept-encoding", .value = "gzip" },
+            } });
+            id += 2;
+        }
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        var host = app.grpcHost();
+        host.gpa = gpa_h2.allocator();
+        gpa_h2.reset();
+        @import("h2conn.zig").serveConnection(host, &in, &out.writer, .off, .off, .{});
+        total.* = gpa_h2.allocs;
+    }
+    const per_request = (totals[1] - totals[0]) / 10;
+    try testing.expectEqual(@as(usize, 0), h1_allocs);
+    try testing.expect(per_request <= h1_allocs);
+    try testing.expectEqual(@as(usize, 0), (totals[1] - totals[0]) % 10);
 }

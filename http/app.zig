@@ -1761,9 +1761,9 @@ pub const App = struct {
                 const app: *App = @ptrCast(@alignCast(ptr));
                 return app.router.match(.POST, path) != null;
             }
-            fn bodyLimit(ptr: *anyopaque, path: []const u8) usize {
+            fn bodyLimit(ptr: *anyopaque, method: []const u8, path: []const u8) usize {
                 const app: *App = @ptrCast(@alignCast(ptr));
-                return app.grpcBodyLimit(path);
+                return app.h2BodyLimit(http1.methodFrom(method), path);
             }
             fn handle(
                 ptr: *anyopaque,
@@ -1797,18 +1797,18 @@ pub const App = struct {
         };
     }
 
-    /// What a gRPC call to `path` may be collected under: the limit of the
-    /// last `maxBody` in the chain of the route it reaches, which is the one
-    /// that would have the last word on HTTP/1, and `listen()`'s `max_body`
-    /// where there is none. Read before the message arrives, so what the
-    /// route says is what the connection collects (ADR 156, ADR 220).
+    /// What a request on HTTP/2 to `path` may be collected under: the limit of
+    /// the last `maxBody` in the chain of the route it reaches, which is the
+    /// one that would have the last word on HTTP/1, and `listen()`'s
+    /// `max_body` where there is none. Read before the body arrives, so what
+    /// the route says is what the connection collects (ADR 156, ADR 220).
     /// Allocates nothing, and does nothing at all for an App that never
     /// called `maxBody`.
-    fn grpcBodyLimit(self: *App, path: []const u8) usize {
+    fn h2BodyLimit(self: *App, method: http1.Method, path: []const u8) usize {
         const base = self.limits.max_body;
         if (self.body_limits.items.len == 0) return base;
         var found: router.Match = undefined;
-        if (!self.router.matchInto(.POST, path, &found)) return base;
+        if (!self.router.matchInto(method, path, &found)) return base;
         const found_route = &self.router.routes.items[found.index];
         if (!found_route.chain_by_path) return self.chainBodyLimit(found.chain, base);
         // A chain that depends on the path: built from the real one, as the
@@ -1833,16 +1833,14 @@ pub const App = struct {
         return limit;
     }
 
-    /// The most any gRPC route may be collected under: what bounds one
-    /// connection's messages together, because `max_body` no longer does once
+    /// The most any route may be collected under: what bounds one
+    /// connection's bodies together, because `max_body` no longer does once
     /// a route raises its own (ADR 220). A route whose chain depends on the
-    /// path counts every limit `maxBody` was given. Only POST routes, which
-    /// is what a call is.
+    /// path counts every limit `maxBody` was given.
     fn grpcBodyCeiling(self: *App) usize {
         var most = self.limits.max_body;
         if (self.body_limits.items.len == 0) return most;
         for (self.router.routes.items) |r| {
-            if (r.method != .POST) continue;
             if (r.chain_by_path) {
                 for (self.body_limits.items) |l| most = @max(most, l.read());
             } else {

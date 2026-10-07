@@ -1438,6 +1438,10 @@ pub const Ctx = struct {
         // Asking twice would hand out two readers into one stream, and the
         // second would get whatever the first left.
         std.debug.assert(self._body == null and self._incoming == null);
+        if (self.onHttp2()) return self.notOnHttp2(
+            "c.bodyStream()",
+            "a request on HTTP/2 is read whole, under the route's maxBody. Use c.body(), or let HTTP/1.1 serve this route.",
+        );
 
         // A stream hands the bytes out as they arrive and holds nothing, so
         // there is nowhere to inflate a gzipped body into: the destination
@@ -1617,17 +1621,45 @@ pub const Ctx = struct {
         return !self.stopping();
     }
 
-    /// `keepAlive` as the `Connection` line the response will carry — which
-    /// for an HTTP/1.1 connection staying open is no line at all (ADR 197).
-    pub fn connection(self: *const Ctx) http1.Connection {
-        return .of(self.keepAlive(), self._request.minor_version);
-    }
-
     /// Whether the server has been told to stop and is draining. What the
     /// health route answers `stopping` on (ADR 154).
     pub fn stopping(self: *const Ctx) bool {
         const flag = self._stopping orelse return false;
         return flag.load(.acquire);
+    }
+
+    /// Whether this request arrived over HTTP/2, whose answer is collected
+    /// whole and framed by the connection's fiber (ADR 259). Comptime-false in
+    /// a build without `-Dhttp2`, so the calls below that ask it cost that
+    /// build nothing.
+    fn onHttp2(self: *const Ctx) bool {
+        if (comptime !framing_mod.http2_built) return false;
+        return self._framing == .http2;
+    }
+
+    /// What a call HTTP/2 cannot carry until stage 6 answers with: a 500 whose
+    /// sentence names the call and says it is not available on HTTP/2 yet, and
+    /// a `warn` line saying the same where the developer reads. Never a 501,
+    /// which would read as the route's own answer (ADR 259). A fail function,
+    /// so the sentence reaches the client in the failure body every other
+    /// failure uses (ADR 006, ADR 024).
+    ///
+    /// `noinline`, because a format string costs stack in whatever frame it is
+    /// inlined into (ADR 062).
+    noinline fn notOnHttp2(self: *const Ctx, comptime what: []const u8, comptime hint: []const u8) fail.Error {
+        std.log.warn("{s} {s}: {s} is not available on HTTP/2 yet; answered 500", .{ @tagName(self.method), self._path, what });
+        return fail.internal(what ++ " is not available on HTTP/2 yet: " ++ hint, .{});
+    }
+
+    /// The refusal of a file's bytes on HTTP/2, called by `sendfile.zig`
+    /// where the body is about to be written (ADR 259). A file is the
+    /// connection's to send from the descriptor, and an HTTP/2 stream has no
+    /// connection of its own until stage 6.
+    pub fn refuseFileOnHttp2(self: *const Ctx) !void {
+        if (self.onHttp2()) return self.notOnHttp2(
+            "c.sendFile()",
+            "a file is sent from disk by the connection, and so is a static file too large to hold in memory. HTTP/1.1 serves it.",
+        );
     }
 
     // ---- the response side ----
@@ -2305,6 +2337,10 @@ pub const Ctx = struct {
         options: stream_mod.Options,
     ) !stream_mod.Stream {
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response, as `send`
+        if (self.onHttp2()) return self.notOnHttp2(
+            "c.stream()",
+            "a streamed answer needs a pipe to the connection. Answer it whole with c.send(), or let HTTP/1.1 serve this route.",
+        );
         try self.contentTypeOk(content_type);
         // `writeHead` drops the framing for these, so the chunks that
         // followed would be read as the next response (ADR 019).
@@ -2428,10 +2464,11 @@ pub const Ctx = struct {
         // A WebSocket takes its connection for the rest of its life, and an
         // HTTP/2 stream has none of its own to give: WebSockets over HTTP/2
         // (RFC 8441) are not served (ADR 253).
-        const wire = self._framing.wire() orelse return fail.badRequest(
-            "a WebSocket needs an HTTP/1.1 connection of its own, and this request came over HTTP/2",
-            .{},
+        if (self.onHttp2()) return self.notOnHttp2(
+            "c.upgrade()",
+            "a WebSocket is HTTP/1.1, which a browser falls back to by itself. RFC 8441 is not served.",
         );
+        const wire = self._framing.wire().?;
         if (!websocket.isUpgrade(self._head)) {
             return fail.badRequest(
                 "this endpoint is a WebSocket; the request needs Upgrade: websocket and Connection: Upgrade",
@@ -2547,6 +2584,10 @@ pub const Ctx = struct {
     /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
     /// back waiting for a buffer to fill.
     pub fn events(self: *Ctx) !stream_mod.Events {
+        if (self.onHttp2()) return self.notOnHttp2(
+            "c.events()",
+            "an event stream needs a pipe to the connection. HTTP/1.1 serves it, which an EventSource falls back to by itself.",
+        );
         try self.setStaticHeader("Cache-Control", "no-cache");
         try self.setStaticHeader("X-Accel-Buffering", "no");
         return .{ .stream = try self.stream(200, stream_mod.Events.content_type) };
@@ -2588,10 +2629,11 @@ pub const Ctx = struct {
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response, as `send`
         // The connection loop runs this stream once the handler has returned,
         // which needs a connection that is this request's alone (ADR 227).
-        const wire = self._framing.wire() orelse return fail.internal(
-            "eventsFrom needs an HTTP/1.1 connection of its own, and this request came over HTTP/2",
-            .{},
+        if (self.onHttp2()) return self.notOnHttp2(
+            "c.eventsFrom()",
+            "an event stream is run by a connection of its own. HTTP/1.1 serves it, which an EventSource falls back to by itself.",
         );
+        const wire = self._framing.wire().?;
         const shape = self._framing.streamShape(null);
 
         var held: stream_mod.RoomEvents = .{

@@ -94,7 +94,9 @@ So `return fail.notFound("no order {d}", .{id})` becomes `NOT_FOUND` with that m
 
 **`grpc-status` and `grpc-message` are trailers, so `c.setHeader` refuses them** with a sentence that points at `setTrailer`. gRPC sends them after the message, and a header would put them before it.
 
-A path no route answers is `UNIMPLEMENTED`, and a message larger than its route's limit is `RESOURCE_EXHAUSTED`: `max_body`, or what the route said with [`nilo.maxBody`](../reference/middleware.md#nilomaxbody), raised or lowered, as on any route. A connection's messages together are held to `max_body`, or the largest limit a route raised to. A request whose `content-type` is not `application/grpc` or `application/grpc+` and a subtype (`application/grpc-web` is another protocol) is a 415, and one that is not well-formed HTTP/2 (a pseudo-header twice, unknown or after a regular field, or no `:scheme`) has its stream reset with `PROTOCOL_ERROR`.
+A path no route answers is `UNIMPLEMENTED`, and a message larger than its route's limit is `RESOURCE_EXHAUSTED`: `max_body`, or what the route said with [`nilo.maxBody`](../reference/middleware.md#nilomaxbody), raised or lowered, as on any route. A connection's messages together are held to `max_body`, or the largest limit a route raised to. A request whose `content-type` is not `application/grpc` or `application/grpc+` and a subtype (`application/grpc-web` is another protocol) is not a gRPC call: it is an ordinary HTTP/2 request, answered as one by its route, and one that is not well-formed HTTP/2 (a pseudo-header twice, unknown or after a regular field, or no `:scheme`) has its stream reset with `PROTOCOL_ERROR`.
+
+The same connection serves any other request, a `GET` or a `POST` with a JSON body, through the router, middleware and handler as HTTP/1.1 does. What a handler cannot do on HTTP/2 yet is refused by name with a 500 that says so: `c.stream`, `c.events`, `c.eventsFrom`, `c.bodyStream`, a file too large to hold whole and `c.upgrade` (a WebSocket is HTTP/1.1). `CONNECT` is answered 501.
 
 ## Deadlines
 

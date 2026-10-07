@@ -168,6 +168,7 @@ const http_above_core = [_][]const u8{
     "logger",    "cors",      "csrf",      "secure",    "allowance", "deadline",
     "maxbody",   "http",      "behaviour", "live",      "profile",
     "fuzz",      "fuzz_main", "fuzz_llhttp", "test_root", "wide",
+    "h2test",
 };
 
 const Layer = struct {

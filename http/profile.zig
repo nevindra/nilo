@@ -257,8 +257,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try messageRoutes(gpa);
     // A call is answered through the framing only a `-Dhttp2` build has
     // (ADR 220), so without the flag there is no gRPC call to time.
-    if (comptime @import("nilo_build").http2) try grpcCalls() else std.debug.print(
-        "\nA gRPC call is timed by `zig build profile -Dhttp2`.\n",
+    if (comptime @import("nilo_build").http2) {
+        try grpcCalls();
+        try http2Gets(whole / rounds);
+    } else std.debug.print(
+        "\nA gRPC call and a GET over HTTP/2 are timed by `zig build profile -Dhttp2`.\n",
         .{},
     );
 
@@ -984,6 +987,130 @@ fn grpcCalls() !void {
         pct(app_best / grpc_calls, per_call),
         per_call -| (decode_best + app_best) / grpc_calls,
         pct(per_call -| (decode_best + app_best) / grpc_calls, per_call),
+    });
+}
+
+// ---- a GET over HTTP/2 beside the same GET over HTTP/1.1 (ADR 259) ----
+
+const get_requests = 1000;
+
+/// The head of `GET /users/7` as `h2conn.zig` hands it to the App: what wrk
+/// sends on HTTP/1.1, without the `Connection` line, and the length of no body.
+const get_call: framing_mod.Call = .{
+    .method = "GET",
+    .target = "/users/7",
+    .head = "\nhost: example.dev\r\nuser-agent: wrk\r\naccept: */*\r\naccept-encoding: gzip\r\ncontent-length: 0\r\n\r\n",
+    .body = "",
+};
+
+/// The routed GET of the main figure, carried as HTTP/2 on one connection and
+/// answered through the connection's own fiber (no Engine runs here, so no
+/// fiber is spawned: `spawnLocal` has nowhere to put one and the request runs
+/// inline). Next to it, what the HTTP/1.1 figure above is.
+fn http2Gets(h1_ns: u64) !void {
+    const gpa = std.heap.smp_allocator;
+    var block: std.Io.Writer.Allocating = .init(gpa);
+    defer block.deinit();
+    const b = &block.writer;
+    try b.writeAll("\x82\x86"); // GET, http
+    try hpack.writeLiteral(b, ":path", "/users/7");
+    try hpack.writeLiteral(b, ":authority", "example.dev");
+    try hpack.writeLiteral(b, "user-agent", "wrk");
+    try hpack.writeLiteral(b, "accept", "*/*");
+    try hpack.writeLiteral(b, "accept-encoding", "gzip");
+
+    var wire: std.Io.Writer.Allocating = .init(gpa);
+    defer wire.deinit();
+    const w = &wire.writer;
+    // Windows as wide as a client that reads at once leaves them, so what is
+    // timed is the framing and not a wait for a WINDOW_UPDATE.
+    try w.writeAll(h2.preface);
+    try h2.writeSettings(w, &.{.{ .initial_window_size, 1 << 30 }});
+    try h2.writeSettingsAck(w);
+    try h2.writeWindowUpdate(w, 0, (1 << 31) - 1 - h2.default_window);
+    var id: u31 = 1;
+    for (0..get_requests) |i| {
+        // The first block opens with the size update to 0 that the ACK obliges
+        // a client to send.
+        const update: []const u8 = if (i == 0) &.{0x20} else &.{};
+        try h2.writeHeader(w, update.len + block.written().len, .headers, h2.Flags.end_headers | h2.Flags.end_stream, id);
+        try w.writeAll(update);
+        try w.writeAll(block.written());
+        id += 2;
+    }
+
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 2048 * get_requests);
+    defer out.deinit();
+    var whole: u64 = std.math.maxInt(u64);
+    for (0..grpc_reps + 3) |rep| {
+        out.clearRetainingCapacity();
+        var in: std.Io.Reader = .fixed(wire.written());
+        const started = clock();
+        h2conn.serveConnection(app.grpcHost(), &in, &out.writer, .off, .off, .{});
+        const took = clock() - started;
+        if (rep >= 3 and took < whole) whole = took;
+    }
+    sink += out.written().len;
+    const per_get = whole / get_requests;
+
+    // The block, decoded with the table at 0.
+    var decoder = hpack.Decoder.init(gpa);
+    defer decoder.deinit();
+    var fields: std.ArrayList(hpack.Field) = .empty;
+    defer fields.deinit(gpa);
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    var decode_best: u64 = std.math.maxInt(u64);
+    for (0..grpc_reps) |_| {
+        const started = clock();
+        for (0..get_requests) |_| {
+            fields.clearRetainingCapacity();
+            _ = decoder.decode(block.written(), scratch.allocator(), &fields, 1 << 16) catch unreachable;
+            _ = scratch.reset(.retain_capacity);
+        }
+        decode_best = @min(decode_best, clock() - started);
+    }
+    sink += fields.items.len;
+
+    // The App's share: the request handed over as `h2conn.zig` hands it.
+    var app_arena = std.heap.ArenaAllocator.init(gpa);
+    defer app_arena.deinit();
+    var app_best: u64 = std.math.maxInt(u64);
+    const host = app.grpcHost();
+    for (0..grpc_reps) |_| {
+        const started = clock();
+        for (0..get_requests) |_| {
+            var request_lifetime = str_mod.Lifetime{};
+            var request_in_flight = fail.InFlight{};
+            var collected: framing_mod.Collected = .{ .arena = app_arena.allocator(), .lines = true };
+            host.handle(host.ptr, app_arena.allocator(), &request_lifetime, &request_in_flight, get_call, &collected, .{}, 0);
+            sink += collected.status;
+            request_lifetime.end();
+            _ = app_arena.reset(.{ .retain_with_limit = arena_keep });
+        }
+        app_best = @min(app_best, clock() - started);
+    }
+
+    std.debug.print(
+        \\
+        \\The same routed GET over HTTP/2, {d}ns each on one connection's fiber
+        \\(HTTP/1.1's is {d}ns above, with no frames and no connection around it),
+        \\answered inline: no Engine runs here, so what a fiber spawn costs is
+        \\not in it.
+        \\
+        \\  HPACK decode of the header block{d:>8}ns {d:>6.1}%
+        \\  the App, handed the request    {d:>7}ns {d:>6.1}%
+        \\  the rest: frames, head, answer{d:>9}ns {d:>6.1}%
+        \\
+    , .{
+        per_get,
+        h1_ns,
+        decode_best / get_requests,
+        pct(decode_best / get_requests, per_get),
+        app_best / get_requests,
+        pct(app_best / get_requests, per_get),
+        per_get -| (decode_best + app_best) / get_requests,
+        pct(per_get -| (decode_best + app_best) / get_requests, per_get),
     });
 }
 

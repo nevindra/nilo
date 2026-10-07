@@ -1047,6 +1047,7 @@ test {
     _ = @import("h2.zig");
     _ = @import("grpc.zig");
     _ = @import("h2conn.zig");
+    _ = @import("h2test.zig");
     _ = @import("fuzz_frames.zig");
     _ = @import("serve.zig");
     _ = @import("wiring.zig");

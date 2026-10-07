@@ -47,7 +47,7 @@ off; the name is deliberately not on `isReservedHeader`'s list.
 
 **The `Connection` line is written only when it carries information.**
 `http1.Connection` has three states — `implied`, `keep_alive`, `close` — and
-`Ctx.connection()` picks one from `keepAlive()` and the request's version.
+The write picks one from `keepAlive()` and the request's version (`Ctx.connection()` was public until ADR 259 removed it).
 `implied` writes nothing.
 
 **The date is formatted once a second per thread, lazily, and never from a

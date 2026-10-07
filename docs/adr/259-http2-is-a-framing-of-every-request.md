@@ -23,19 +23,19 @@ The real clients set the shape. **A browser speaks HTTP/2 only over TLS, chosen 
 
 **The connection is `http/h2conn.zig`, and the envelope stays `http/grpc.zig`.** One file was a gRPC server; two are a framing and an envelope, which is what the direction says they are.
 
-**`Ctx.connection()` leaves the public surface.** It returned an HTTP/1.1 `Connection` line, which means nothing on HTTP/2; `keepAlive()` says the same thing in words that do.
+**`Ctx.connection()` leaves the public surface.** It returned an HTTP/1.1 `Connection` line, which means nothing on HTTP/2; `keepAlive()` says the same thing in words that do. Removed at stage 5.3, with a `CHANGELOG.md` entry.
 
 **What a request on HTTP/2 cannot do until stage 6** is said by name where it is asked for, never answered wrong: a streamed answer, a file, `bodyStream`, an event stream handed to the connection and a WebSocket. No browser reaches HTTP/2 before stage 7, and stage 7 waits for stage 6; a WebSocket stays HTTP/1.1 after it too, below.
 
 ## What it costs
 
-The budget each part is held to, replaced by what was measured when the stage lands ([`bench/result/http.md`](../../bench/result/http.md)):
+The budget each part is held to, with what was measured as each stage landed ([`bench/result/http.md`](../../bench/result/http.md)):
 
 - **A build without `-Dhttp2`**: byte-identical binaries, idle figures and throughput.
 - **An HTTP/1.1 connection in a `-Dhttp2` build**: the idle figure of a build without the choice, read by `bench/mem.py`; a routed `GET` inside the spread of the build before. Measured at stage 5.2: 5,197 to 5,199 bytes at 10,000 connections against 5,197 to 5,198 before, a silent connection 5,192 against 5,198 to 5,199, and 941,916 against 942,434 requests a second (five rounds each, inside both spreads).
-- **A request on HTTP/2**: no more allocations than the same request on HTTP/1.1 from the second request on a connection, held by a test beside the HTTP/1.1 budget test; its time in process on record beside HTTP/1.1's, with what a fiber spawn costs of it.
-- **An idle HTTP/2 connection**: its figure on record, plain and TLS, at 1,000, 5,000 and 10,000 connections, before stage 7 offers `h2` to a browser. One browser opens one HTTP/2 connection where it opened six HTTP/1.1 ones, which the guide says beside the figure.
-- **Binary size**: the `-Dhttp2` build against the `-Dgrpc` build it replaces, in ADR 017's running total. At stage 5.2, `example-hello` is 112 to 144 bytes over the `-Dgrpc` build of `8c64019` and 464 under stage 5.1's.
+- **A request on HTTP/2**: no more allocations than the same request on HTTP/1.1 from the second request on a connection, held by a test beside the HTTP/1.1 budget test; its time in process on record beside HTTP/1.1's, with what a fiber spawn costs of it. Measured at stage 5.3: 0 allocations on both from the second request, a routed `GET` 963 to 971 ns in process against 413 (an inline answer, so the spawn is not in it), and 947k to 1,016k requests a second through `h2load` on `nilo-hello`.
+- **An idle HTTP/2 connection**: its figure on record, plain and TLS, at 1,000, 5,000 and 10,000 connections, before stage 7 offers `h2` to a browser. One browser opens one HTTP/2 connection where it opened six HTTP/1.1 ones, which the guide says beside the figure. Measured at stage 5.3, plain: 9,355 bytes at 10,000 connections after one `GET`, and 10,686 with a stream left open; the HTTP/1.1 figure unchanged at 5,197.
+- **Binary size**: the `-Dhttp2` build against the `-Dgrpc` build it replaces, in ADR 017's running total. At stage 5.2, `example-hello` is 112 to 144 bytes over the `-Dgrpc` build of `8c64019` and 464 under stage 5.1's. Stage 5.3 adds 12,672 to `example-hello` and 12,688 to `example-rest`, and nothing to the default build.
 
 ## What was rejected
 

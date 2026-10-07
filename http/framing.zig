@@ -11,17 +11,17 @@
 //! A generic `Ctx` would compile every handler once per framing and spend the
 //! size axis on it (ADR 017); the union costs one compare of a tag a write,
 //! which the branch predictor never misses on a connection that only ever
-//! has one arm. **The HTTP/2 arm exists only in a build that asked for gRPC**:
+//! has one arm. **The HTTP/2 arm exists only in a build that asked for HTTP/2**:
 //! without `-Dhttp2` its type is `noreturn`, the tag is known while compiling,
 //! and the union is the HTTP/1.1 arm and nothing else, so the default build
 //! pays not even the compare.
 //!
-//! **The HTTP/2 arm collects the answer whole.** A call's answer is framed by
-//! the connection's fiber, never by the call's (ADR 220), so this arm keeps
-//! what `Ctx` hands it in the request arena for that fiber to frame. A stream,
-//! a file and an interim answer are not collected yet, and say so: they need
-//! a pipe from the call's fiber to the connection's with the client's window
-//! in between, which is the roadmap's second direction.
+//! **The HTTP/2 arm collects the answer whole.** A request's answer is framed
+//! by the connection's fiber, never by the request's (ADR 220), so this arm
+//! keeps what `Ctx` hands it in the request arena for that fiber to frame. A
+//! stream and a file are not collected, and `Ctx` refuses them by name before
+//! this arm is asked (ADR 259): they need a pipe from the request's fiber to
+//! the connection's with the client's window in between, which is stage 6.
 //!
 //! A WebSocket and an event stream handed to the connection loop stay HTTP/1.1
 //! only: both take the connection's reader and writer for their whole life,
@@ -174,7 +174,7 @@ pub const Framing = union(enum) {
     ) !void {
         switch (self.*) {
             .http1 => |*h| return h.head(status, content_type, len, keep, extra),
-            .http2 => |c| if (comptime !http2_built) unreachable else return c.head(status, content_type, extra),
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.head(status, content_type, len, extra),
         }
     }
 
@@ -441,6 +441,14 @@ pub const Collected = struct {
     content_type: []const u8 = "",
     headers: []const Header = &.{},
     body: []const u8 = "",
+    /// How long the body a GET would have carried is, for a framing that says
+    /// it in a head: `body.len` for a whole answer, and the length handed over
+    /// for a HEAD, whose `body` is empty. Null for a status that has no body.
+    length: ?u64 = null,
+    /// Whether the route's headers kept as one nameless entry of whole lines
+    /// (`nilo.secure`'s block) are read into fields. HTTP/2 answering as HTTP
+    /// wants them, since a browser reads them; gRPC does not (ADR 259).
+    lines: bool = false,
     /// The allocation `body` sits at the end of, `front` bytes longer, and
     /// empty when no body was handed over.
     room: []u8 = &.{},
@@ -460,6 +468,7 @@ pub const Collected = struct {
         // allocation, so collecting an answer costs the call one where the
         // HTTP/1.1 text it replaced cost one too (ADR 017's hard axis).
         const kept = if (head_only or http1.bodyless(status)) "" else body;
+        self.length = if (http1.bodyless(status)) null else body.len;
         const at = self.front + kept.len;
         const block = try self.arena.alloc(u8, at + content_type.len);
         @memcpy(block[self.front..at], kept);
@@ -472,32 +481,48 @@ pub const Collected = struct {
         self.trailers = try self.fields(trailers);
     }
 
-    noinline fn head(self: *Collected, status: u16, content_type: []const u8, extra: []const Header) !void {
+    noinline fn head(self: *Collected, status: u16, content_type: []const u8, len: u64, extra: []const Header) !void {
         self.status = status;
+        self.length = len;
         self.content_type = try self.arena.dupe(u8, content_type);
         self.headers = try self.fields(extra);
     }
 
     /// `list` copied, its names lowercased. The block `nilo.secure` keeps as
-    /// one nameless entry of whole lines is HTTP/1.1 text and is left out:
-    /// its headers are a browser's, and a gRPC client reads none of them.
+    /// one nameless entry of whole lines is HTTP/1.1 text: it is read into
+    /// fields when `lines` is set, and left out when it is not, because a
+    /// gRPC client reads none of a browser's headers.
     fn fields(self: *Collected, list: []const Header) ![]const Header {
         var kept: usize = 0;
-        for (list) |h| if (h.name.len > 0) {
-            kept += 1;
-        };
+        for (list) |h| {
+            if (h.name.len > 0) {
+                kept += 1;
+            } else if (self.lines) kept += std.mem.count(u8, h.value, "\r\n");
+        }
         if (kept == 0) return &.{};
         const out = try self.arena.alloc(Header, kept);
         var i: usize = 0;
         for (list) |from| {
-            if (from.name.len == 0) continue;
+            if (from.name.len == 0) {
+                if (!self.lines) continue;
+                var rest = from.value;
+                while (std.mem.indexOf(u8, rest, "\r\n")) |end| : (rest = rest[end + 2 ..]) {
+                    const colon = std.mem.indexOfScalar(u8, rest[0..end], ':') orelse continue;
+                    out[i] = .{
+                        .name = try std.ascii.allocLowerString(self.arena, rest[0..colon]),
+                        .value = try self.arena.dupe(u8, std.mem.trim(u8, rest[colon + 1 .. end], " ")),
+                    };
+                    i += 1;
+                }
+                continue;
+            }
             out[i] = .{
                 .name = try std.ascii.allocLowerString(self.arena, from.name),
                 .value = try self.arena.dupe(u8, from.value),
             };
             i += 1;
         }
-        return out;
+        return out[0..i];
     }
 };
 

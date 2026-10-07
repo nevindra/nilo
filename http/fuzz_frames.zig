@@ -1,5 +1,6 @@
-//! What the gRPC listener has to be true for, whatever a stranger sends it
-//! ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
+//! What an HTTP/2 connection has to be true for, whatever a stranger sends it
+//! ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md),
+//! [ADR 259](../docs/adr/259-http2-is-a-framing-of-every-request.md)).
 //!
 //! `fuzz.zig` holds the HTTP/1.1 parser to its properties; this holds the
 //! other thing a stranger feeds directly, a connection speaking HTTP/2. The
@@ -12,7 +13,16 @@
 //! - Every frame on the stream it belongs on: SETTINGS, PING and GOAWAY on
 //!   0, an answer on a stream the client opened.
 //! - A header block uninterrupted (§6.10) and one a decoder reads.
-//! - Nothing sent on a stream after its END_STREAM or its RST_STREAM.
+//! - Nothing sent on a stream after its END_STREAM or its RST_STREAM, bar one
+//!   RST_STREAM with NO_ERROR, which is how a server that has answered a
+//!   request it will not read the rest of says so (RFC 9113 §8.1).
+//! - An answer's first block on a stream is a `:status` ahead of every other
+//!   field, an interim one (1xx) never ends the stream, a later block carries
+//!   no pseudo-header, and no block carries a field HTTP/2 forbids (§8.2).
+//!
+//! What a stranger feeds it is gRPC calls and ordinary requests: any method,
+//! with a body or without one, with the fields that make a request malformed
+//! and the ones that make it a call.
 //!
 //! And the one every fuzzer has, under the safety checks of `ReleaseSafe`:
 //! it does not crash, and it does not leak.
@@ -77,16 +87,19 @@ pub fn dump(bytes: []const u8) void {
 
 // ---- the route behind it ----
 
-/// Three routes, so an answer can be each shape the listener writes: `/e…`
+/// Five routes, so an answer can be each shape the listener writes: `/e…`
 /// echoes the message back, `/f…` fails with text, `/c…` answers with a
-/// header and a trailer of its own. Anything else is no route.
+/// header and a trailer of its own, `/g…` answers HTTP in text with a header
+/// HTTP/2 forbids and one it does not, as a HEAD would and as a GET would, and
+/// `/n…` has no body. Anything else is no route to a gRPC call, and an
+/// ordinary request is answered whatever it names.
 fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
     const Stub = struct {
         fn routes(_: *anyopaque, path: []const u8) bool {
             return path.len > 1 and (path[1] == 'e' or path[1] == 'f' or path[1] == 'c');
         }
 
-        fn limit(_: *anyopaque, _: []const u8) usize {
+        fn limit(_: *anyopaque, _: []const u8, _: []const u8) usize {
             return 1024;
         }
 
@@ -104,6 +117,11 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
             const which = if (arrived.target.len > 1) arrived.target[1] else 'e';
             var to: framing.Framing = .{ .http2 = collected };
             switch (which) {
+                'g' => to.whole(200, "text/plain", "hello", std.mem.eql(u8, arrived.method, "HEAD"), true, &.{
+                    .{ .name = "Connection", .value = "close" },
+                    .{ .name = "X-Seen", .value = "yes" },
+                }, .{ .list = &.{.{ .name = "x-checked", .value = "yes" }} }) catch {},
+                'n' => to.whole(204, "", "", false, true, &.{}, .{}) catch {},
                 'f' => to.whole(404, "text/plain", "no such", false, true, &.{}, .{}) catch {},
                 'c' => to.whole(200, "application/grpc", body, false, true, &.{.{ .name = "X-Kind", .value = "own" }}, .{
                     .list = &.{.{ .name = "x-checked", .value = "yes" }},
@@ -140,10 +158,15 @@ fn answerHolds(gpa: std.mem.Allocator, sent: []const u8, got: []const u8) !void 
     var decoder: hpack.Decoder = .init(gpa);
     defer decoder.deinit();
 
-    // Streams whose last frame has been sent, and the block being assembled.
+    // Streams whose last frame has been sent, those whose final head has,
+    // and the block being assembled.
     var ended: std.AutoHashMapUnmanaged(u31, void) = .empty;
+    var headed: std.AutoHashMapUnmanaged(u31, void) = .empty;
+    var reset: std.AutoHashMapUnmanaged(u31, void) = .empty;
     var block: std.ArrayList(u8) = .empty;
     var block_stream: ?u31 = null;
+    var block_owner: u31 = 0;
+    var block_ends = false;
 
     var rest = got;
     var first = true;
@@ -169,28 +192,63 @@ fn answerHolds(gpa: std.mem.Allocator, sent: []const u8, got: []const u8) !void 
             .window_update => {},
             .headers, .continuation, .data, .rst_stream => {
                 if (head.stream % 2 != 1) return error.AnswerOnAStreamTheClientDidNotOpen;
-                if (ended.contains(head.stream)) return error.SentAfterTheStreamEnded;
+                const closing = head.type == .rst_stream and head.len == 4 and
+                    std.mem.readInt(u32, payload[0..4], .big) == 0 and !reset.contains(head.stream);
+                if (ended.contains(head.stream) and !closing) return error.SentAfterTheStreamEnded;
             },
             else => return error.FrameTypeThisSideNeverSends,
         }
 
         switch (head.type) {
             .headers, .continuation => {
+                if (head.type == .headers) {
+                    block_owner = head.stream;
+                    block_ends = head.has(h2.Flags.end_stream);
+                }
                 try block.appendSlice(a, payload);
                 if (head.has(h2.Flags.end_headers)) {
                     var fields: std.ArrayList(hpack.Field) = .empty;
                     _ = decoder.decode(block.items, a, &fields, std.math.maxInt(u32)) catch return error.BlockDoesNotDecode;
+                    const interim = try answerBlockHolds(fields.items, headed.contains(block_owner), block_ends);
+                    if (!interim) try headed.put(a, block_owner, {});
                     block = .empty;
                     block_stream = null;
                 } else block_stream = head.stream;
                 if (head.type == .headers and head.has(h2.Flags.end_stream)) try ended.put(a, head.stream, {});
             },
             .data => if (head.has(h2.Flags.end_stream)) try ended.put(a, head.stream, {}),
-            .rst_stream => try ended.put(a, head.stream, {}),
+            .rst_stream => {
+                try ended.put(a, head.stream, {});
+                try reset.put(a, head.stream, {});
+            },
             else => {},
         }
     }
     if (block_stream != null) return error.HeaderBlockUnfinished;
+}
+
+/// One decoded block of an answer: the first on a stream is `:status` and
+/// nothing else a pseudo-header, an interim one does not end the stream, a
+/// later one has no pseudo-header at all, and every name is lowercase and not
+/// one HTTP/2 forbids (§8.1, §8.2.1, §8.2.2). True when the block was interim.
+fn answerBlockHolds(fields: []const hpack.Field, headed: bool, ends: bool) !bool {
+    var interim = false;
+    for (fields, 0..) |f, i| {
+        for (f.name) |ch| if (std.ascii.isUpper(ch)) return error.UppercaseFieldName;
+        if (h2.hopByHop(f.name)) return error.ConnectionFieldInAnswer;
+        const pseudo = f.name.len > 0 and f.name[0] == ':';
+        if (headed) {
+            if (pseudo) return error.PseudoHeaderInTrailers;
+            continue;
+        }
+        if (i == 0) {
+            if (!std.mem.eql(u8, f.name, ":status")) return error.AnswerDoesNotStartWithStatus;
+            interim = f.value.len == 3 and f.value[0] == '1';
+        } else if (pseudo) return error.PseudoHeaderBesidesStatus;
+    }
+    if (!headed and (fields.len == 0)) return error.AnswerDoesNotStartWithStatus;
+    if (interim and ends) return error.InterimAnswerEndsTheStream;
+    return interim;
 }
 
 // ---- generating something worth checking ----
@@ -209,7 +267,9 @@ pub fn generate(random: std.Random, buf: []u8) []const u8 {
     const steps = 1 + random.uintLessThan(u8, 8);
     for (0..steps) |_| {
         if (random.uintLessThan(u8, 3) != 0) {
-            wholeCall(random, &w, next) catch return w.buffered();
+            if (random.uintLessThan(u8, 3) == 0) {
+                wholeRequest(random, &w, next) catch return w.buffered();
+            } else wholeCall(random, &w, next) catch return w.buffered();
             next +|= 2;
             continue;
         }
@@ -256,7 +316,8 @@ fn settings(random: std.Random, w: *std.Io.Writer) !void {
 }
 
 /// HEADERS and a DATA that ends the stream: one call, the way a client
-/// writes one, its block sometimes split across a CONTINUATION.
+/// writes one, its block sometimes split across a CONTINUATION. One in three
+/// inputs' steps is `wholeRequest` instead, below.
 fn wholeCall(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
     var block_buf: [256]u8 = undefined;
     const block = headerBlock(random, &block_buf);
@@ -275,6 +336,62 @@ fn wholeCall(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
     try w.writeByte(0);
     try w.writeInt(u32, len, .big);
     for (0..len) |_| try w.writeByte(random.int(u8));
+}
+
+/// An ordinary request, the way a browser or curl writes one: any method, its
+/// fields, and either nothing after them (END_STREAM on the HEADERS) or a body
+/// with no message prefix in front of it, sometimes in two DATA frames.
+fn wholeRequest(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
+    var block_buf: [320]u8 = undefined;
+    const block = requestBlock(random, &block_buf);
+    const bodiless = random.boolean();
+    try h2.writeHeader(w, block.len, .headers, h2.Flags.end_headers | if (bodiless) h2.Flags.end_stream else 0, stream);
+    try w.writeAll(block);
+    if (bodiless) return;
+    const len = random.uintLessThan(u8, 24);
+    const first = if (len > 1 and random.boolean()) random.uintLessThan(u8, len) else len;
+    try h2.writeHeader(w, first, .data, if (first == len) h2.Flags.end_stream else 0, stream);
+    for (0..first) |_| try w.writeByte(random.int(u8));
+    if (first == len) return;
+    try h2.writeHeader(w, len - first, .data, h2.Flags.end_stream, stream);
+    for (0..len - first) |_| try w.writeByte(random.int(u8));
+}
+
+const request_paths = [_][]const u8{ "/g.x", "/g.x", "/e.x", "/f.x", "/n", "/c.x", "/missing", "*", "", "/a b", "/g?x=1" };
+const request_methods = [_][]const u8{ "GET", "GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "CONNECT", "BREW", "" };
+
+/// A request's fields as an ordinary client writes them, with the ones that
+/// make it malformed turning up now and then: a method that is not a token, no
+/// `:scheme`, a `connection` field, `te: gzip`, a `content-length` that is not
+/// the body's, a field name in capitals, a pseudo-header after a regular one.
+fn requestBlock(random: std.Random, buf: []u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    const method = request_methods[random.uintLessThan(usize, request_methods.len)];
+    hpack.writeLiteral(&w, ":method", method) catch {};
+    if (random.uintLessThan(u8, 12) != 0) w.writeAll("\x86") catch {};
+    const path = request_paths[random.uintLessThan(usize, request_paths.len)];
+    hpack.writeLiteral(&w, ":path", path) catch {};
+    if (random.boolean()) hpack.writeLiteral(&w, ":authority", "example.test") catch {};
+    if (random.boolean()) hpack.writeLiteral(&w, "content-type", if (random.boolean()) "text/plain" else "application/json") catch {};
+    if (random.uintLessThan(u8, 3) == 0) {
+        hpack.writeLiteral(&w, "cookie", "a=1") catch {};
+        hpack.writeLiteral(&w, "cookie", "b=2") catch {};
+    }
+    switch (random.uintLessThan(u8, 14)) {
+        0 => hpack.writeLiteral(&w, "connection", "close") catch {},
+        1 => hpack.writeLiteral(&w, "te", "gzip") catch {},
+        2 => hpack.writeLiteral(&w, "te", "trailers") catch {},
+        3 => hpack.writeLiteral(&w, "content-length", "3") catch {},
+        4 => hpack.writeLiteral(&w, "content-length", "x") catch {},
+        5 => hpack.writeLiteral(&w, "X-Upper", "1") catch {},
+        6 => hpack.writeLiteral(&w, "expect", "100-continue") catch {},
+        7 => hpack.writeLiteral(&w, ":scheme", "http") catch {},
+        8 => hpack.writeLiteral(&w, "transfer-encoding", "chunked") catch {},
+        else => {},
+    }
+    const made = w.buffered();
+    if (random.uintLessThan(u8, 16) == 0 and made.len > 0) buf[random.uintLessThan(usize, made.len)] = random.int(u8);
+    return made;
 }
 
 const paths = [_][]const u8{ "/e.S/M", "/e.S/M", "/e.S/M", "/f.S/M", "/f.S/M", "/c.S/M", "/c.S/M", "/x.S/M", "/x.S/M", "", "/e\r\nx: y" };
@@ -389,6 +506,11 @@ const call =
     // DATA, END_STREAM: a two-byte message.
     frame(0x00, 0x01, "\x00\x00\x00\x00\x02hi");
 
+/// HEADERS on stream 1 with `flags`, after the preface and an empty SETTINGS.
+fn request(comptime block: []const u8, comptime flags: u8) []const u8 {
+    return h2.preface ++ "\x00\x00\x00\x04\x00\x00\x00\x00\x00" ++ frame(0x01, flags, block);
+}
+
 /// A frame on stream 1, its length counted rather than written by hand.
 fn frame(comptime t: u8, comptime flags: u8, comptime payload: []const u8) []const u8 {
     comptime {
@@ -419,6 +541,16 @@ const corpus = [_][]const u8{
     // DATA on a call already answered, which once drew an RST_STREAM after
     // the stream's END_STREAM, one for every frame the client sent.
     call ++ frame(0x00, 0x01, "\x00\x00\x00\x00\x00"),
+    // Ordinary requests: a GET with nothing after its HEADERS, the same with
+    // a body and a `content-length` that is not its length, a HEAD, a CONNECT,
+    // and one with the `te` a request may not carry.
+    request("\x82\x86\x04\x04/g.x", 0x05),
+    request("\x82\x86\x04\x04/g.x\x0f\x0d\x01\x35", 0x04) ++ frame(0x00, 0x01, "hello"),
+    request("\x83\x86\x04\x04/e.x\x0f\x0d\x01\x35", 0x04) ++ frame(0x00, 0x01, "hello"),
+    request("\x00\x07:method\x04HEAD\x86\x04\x04/g.x", 0x05),
+    request("\x00\x07:method\x07CONNECT\x00\x0a:authority\x01h", 0x05),
+    request("\x82\x86\x04\x04/g.x\x00\x02te\x04gzip", 0x05),
+    request("\x82\x86\x04\x04/g.x\x00\x06cookie\x03a=1\x00\x06cookie\x03b=2\x00\x06expect\x0c100-continue", 0x04) ++ frame(0x00, 0x01, ""),
     // A frame whose length runs past the end of the input.
     h2.preface ++ "\x00\x00\x00\x04\x00\x00\x00\x00\x00" ++ "\x00\x40\x00\x00\x00\x00\x00\x00\x01",
 };
@@ -433,7 +565,7 @@ fn replace(comptime in: []const u8, comptime from: []const u8, comptime to: []co
 
 const testing = std.testing;
 
-test "the gRPC listener holds its properties over every input we know of" {
+test "the HTTP/2 connection holds its properties over every input we know of" {
     for (corpus) |input| try checkOne(testing.allocator, input);
 }
 
