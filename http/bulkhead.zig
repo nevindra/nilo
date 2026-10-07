@@ -69,6 +69,9 @@
 //!   failures it has already explained in words.
 //! - `debug_io` — wired into `std_options_debug_io` so that `std.log`
 //!   does not block the event loop.
+//! - `beginShield`/`endShield` — keep a cancel from reaching the writes
+//!   between them, so a connection cancelled at shutdown can end the
+//!   streams it holds with their last frames (ADR 260).
 //! - `Binding`/`bindSlot`/`unbindSlot`/`slot` — one pointer bound to the
 //!   unit of work currently running (a fiber, a thread, whatever the
 //!   Engine uses), for hidden per-request state (ADR 006).
@@ -1367,6 +1370,12 @@ pub const Signal = struct {
 /// there are none: how a connection with a great deal to write gives the calls
 /// it is writing for their turn between rounds (ADR 260).
 pub const yield = engine.yield;
+
+/// Run the writes between these two without a cancel reaching them: a
+/// connection cancelled at shutdown uses it to end the streams it holds
+/// before it goes (ADR 260).
+pub const beginShield = engine.beginShield;
+pub const endShield = engine.endShield;
 
 /// Wait, without stopping the thread. Wrapped for the same reason `Mutex`
 /// is: a sleeping fiber is not a held thread.

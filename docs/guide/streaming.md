@@ -84,7 +84,7 @@ fn publish(news: *nilo.Room, headline: nilo.Str) !void {
 }
 ```
 
-`eventsFrom` takes a seat in the room, writes the head and returns. From then on the connection waits on the room the same way an idle connection waits for its next request, and every `say`, `print`, `json` or `event` into the room goes out as an event, one chunk each. While nothing is said, a comment goes out every 30 seconds, so a proxy that closes quiet connections sees this one speak (`.keepalive_ms`, `0` for none). The stream ends when the browser goes away or the server stops.
+`eventsFrom` takes a seat in the room, writes the head and returns. From then on the connection waits on the room the same way an idle connection waits for its next request, and every `say`, `print`, `json` or `event` into the room goes out as an event, one chunk each. While nothing is said, a comment goes out every 30 seconds, so a proxy that closes quiet connections sees this one speak (`.keepalive_ms`, `0` for none). The stream ends when the browser goes away or the server stops. In a `-Dhttp2` build the same call works over HTTP/2, where the connection writes the posts itself, in turn with its other streams, and a client that stops reading is reset at the write limit.
 
 To listen to more than one room, pass a tuple: `c.eventsFrom(.{ lobby, mine }, .{})`, and the stream hears all of them. A room can hold WebSockets and event streams together, so the chat room a socket speaks into can be the one a read-only page listens to. A binary message said into it reaches the sockets and is counted as missed for the streams, because an event is text.
 

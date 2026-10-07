@@ -1660,18 +1660,17 @@ pub const Ctx = struct {
         return self._framing == .http2;
     }
 
-    /// What a call HTTP/2 cannot carry until stage 6 answers with: a 500 whose
-    /// sentence names the call and says it is not available on HTTP/2 yet, and
-    /// a `warn` line saying the same where the developer reads. Never a 501,
-    /// which would read as the route's own answer (ADR 259). A fail function,
-    /// so the sentence reaches the client in the failure body every other
-    /// failure uses (ADR 006, ADR 024).
+    /// What HTTP/2 does not carry, a WebSocket: a 500 whose sentence names the
+    /// call and says it is HTTP/1.1's, and a `warn` line saying the same where
+    /// the developer reads. Never a 501, which would read as the route's own
+    /// answer (ADR 259, ADR 260). A fail function, so the sentence reaches the
+    /// client in the failure body every other failure uses (ADR 006, ADR 024).
     ///
     /// `noinline`, because a format string costs stack in whatever frame it is
     /// inlined into (ADR 062).
     noinline fn notOnHttp2(self: *const Ctx, comptime what: []const u8, comptime hint: []const u8) fail.Error {
-        std.log.warn("{s} {s}: {s} is not available on HTTP/2 yet; answered 500", .{ @tagName(self.method), self._path, what });
-        return fail.internal(what ++ " is not available on HTTP/2 yet: " ++ hint, .{});
+        std.log.warn("{s} {s}: {s} is HTTP/1.1 only; answered 500", .{ @tagName(self.method), self._path, what });
+        return fail.internal(what ++ " is HTTP/1.1 only: " ++ hint, .{});
     }
 
     /// The refusal of a streamed answer, an event stream or a file in a gRPC
@@ -2653,12 +2652,11 @@ pub const Ctx = struct {
     pub fn eventsFrom(self: *Ctx, rooms: anytype, options: stream_mod.FromRooms) !void {
         comptime checkRooms(@TypeOf(rooms));
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response, as `send`
+        // HTTP/2 hands its rooms to the connection, which writes what they post
+        // between the frames of every other stream (ADR 227, ADR 260).
+        if (comptime framing_mod.http2_built) if (self.onHttp2()) return self.eventsFromHttp2(rooms, options);
         // The connection loop runs this stream once the handler has returned,
         // which needs a connection that is this request's alone (ADR 227).
-        if (self.onHttp2()) return self.notOnHttp2(
-            "c.eventsFrom()",
-            "an event stream is run by a connection of its own. HTTP/1.1 serves it, which an EventSource falls back to by itself.",
-        );
         const wire = self._framing.wire().?;
         const shape = self._framing.streamShape(null);
 
@@ -2717,26 +2715,77 @@ pub const Ctx = struct {
         slot.* = .{ .events = .{ .stream = held, .run = stream_mod.RoomEvents.run } };
     }
 
+    /// `eventsFrom` on HTTP/2 (ADR 227, ADR 260). The same seats, the same
+    /// history and the same refusals as HTTP/1.1; the difference is who writes.
+    /// The rooms ring the bell of the stream's `Http2Events`, which wakes the
+    /// connection, and the connection writes what was posted as `DATA` between
+    /// the frames of its other streams. This fiber ends at the return below:
+    /// it has lent nothing, so nothing waits on it.
+    noinline fn eventsFromHttp2(self: *Ctx, rooms: anytype, options: stream_mod.FromRooms) !void {
+        if (!self._framing.canStream()) return self.notInCall("c.eventsFrom()");
+        const feed = try self._arena.create(stream_mod.Http2Events);
+        feed.* = .{ .link = self._framing.eventLink().?, .retry_ms = options.retry_ms };
+
+        const head_only = self.method == .HEAD;
+        const last_id: []const u8 = if (self.header("Last-Event-ID")) |id| id.view() else "";
+        var replays: [roomsIn(@TypeOf(rooms))]Replay = @splat(.{});
+        defer for (&replays) |*kept| kept.release();
+        if (!head_only) {
+            errdefer feed.leave();
+            if (comptime isRoomLike(@TypeOf(rooms))) {
+                try self.seatEvents(rooms, feed, last_id, &replays[0]);
+            } else inline for (rooms, 0..) |in_room, i| {
+                try self.seatEvents(in_room, feed, last_id, &replays[i]);
+            }
+        }
+        errdefer feed.leave();
+        // Before the head, so that nothing after it can fail: the history
+        // moves to the stream, which releases it as it writes it.
+        feed.replays = try self._arena.dupe(Replay, &replays);
+        for (&replays) |*kept| kept.posts = &.{};
+
+        try self.setStaticHeader("Cache-Control", "no-cache");
+        try self.setStaticHeader("X-Accel-Buffering", "no");
+        var shape = self._framing.streamShape(null);
+        shape.bodyless = head_only;
+        self.markAnswered(200);
+        self.tookOver();
+        self._head_written = true;
+        try self._framing.streamHead(200, stream_mod.Events.content_type, shape, null, self.keepAlive(), self.extraHeaders());
+        // A HEAD is the head and nothing else, and ends with it.
+        if (head_only) return self._framing.end(false, .{});
+
+        try self._framing.handOverEvents(.{
+            .state = feed,
+            .step = stream_mod.Http2Events.stepErased,
+            .leave = stream_mod.Http2Events.leaveErased,
+            .keepalive_ms = options.keepalive_ms,
+        });
+    }
+
     /// One seat for `eventsFrom`, in a Room or under a key, with a full room
-    /// said as what it is.
+    /// said as what it is. `sitter` is who sits: a `RoomEvents` on HTTP/1.1,
+    /// whose room rings the request's waker, and an `Http2Events` on HTTP/2,
+    /// whose room rings its own bell. Passed whole and not as a seat and a
+    /// bell, so that the HTTP/1.1 helpers are the ones they were (ADR 017).
     fn seatEvents(
         self: *Ctx,
         target: anytype,
-        held: *stream_mod.RoomEvents,
+        sitter: anytype,
         last_id: []const u8,
         kept: *Replay,
     ) !void {
         if (comptime @TypeOf(target) == *room_mod.Room) {
-            return self.seatIn(target, held, last_id, kept);
+            return self.seatIn(target, sitter, last_id, kept);
         } else {
-            return self.seatNamed(target, held, last_id, kept);
+            return self.seatNamed(target, sitter, last_id, kept);
         }
     }
 
     fn seatNamed(
         self: *Ctx,
         target: rooms_mod.Rooms.Named,
-        held: *stream_mod.RoomEvents,
+        sitter: anytype,
         last_id: []const u8,
         kept: *Replay,
     ) !void {
@@ -2751,13 +2800,13 @@ pub const Ctx = struct {
         // Seated before it is let go, so the Room cannot go back to the pool
         // in between (ADR 228).
         defer target.rooms.unpin(lent);
-        return self.seatIn(&lent.room, held, last_id, kept);
+        return self.seatIn(&lent.room, sitter, last_id, kept);
     }
 
     fn seatIn(
         self: *Ctx,
         in_room: *room_mod.Room,
-        held: *stream_mod.RoomEvents,
+        sitter: anytype,
         last_id: []const u8,
         kept: *Replay,
     ) !void {
@@ -2767,7 +2816,10 @@ pub const Ctx = struct {
             try self._arena.alloc(*room_mod.Post, in_room.keeps())
         else
             &.{};
-        const n = in_room.sitAfter(held.seating(), self._waker, true, last_id, into) catch |err| switch (err) {
+        const n = (if (comptime @TypeOf(sitter) == *stream_mod.RoomEvents)
+            in_room.sitAfter(sitter.seating(), self._waker, true, last_id, into)
+        else
+            in_room.sitAfter(&sitter.seated, sitter.bell(), true, last_id, into)) catch |err| switch (err) {
             error.RoomFull => return fail.status(
                 503,
                 "every seat in this room is taken; the room's seats is the number to raise",
@@ -2781,16 +2833,7 @@ pub const Ctx = struct {
 
 /// The posts one room kept for a client coming back, each holding a
 /// reference until `eventsFrom` writes it (ADR 229).
-const Replay = struct {
-    room: ?*room_mod.Room = null,
-    posts: []*room_mod.Post = &.{},
-
-    fn release(self: *Replay) void {
-        const room = self.room orelse return;
-        for (self.posts) |post| room.release(post);
-        self.posts = &.{};
-    }
-};
+const Replay = stream_mod.Replay;
 
 fn isRoomLike(comptime T: type) bool {
     return T == *room_mod.Room or T == rooms_mod.Rooms.Named;

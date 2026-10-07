@@ -11756,6 +11756,14 @@ fn framedEvents(c: *Ctx) anyerror!void {
     try events.close();
 }
 
+var framed_room: ?*room_mod.Room = null;
+
+/// A GET never ends on either framing, so the table asks it as a HEAD, which
+/// is the head both framings write for a feed without a seat.
+fn framedFeed(c: *Ctx) anyerror!void {
+    return c.eventsFrom(framed_room.?, .{});
+}
+
 var framed_file: ?*bulkhead.Dir = null;
 /// What the file route sends: more than the 65,535 bytes a connection's
 /// window starts at, and more than a buffer of the pipe's.
@@ -11774,6 +11782,7 @@ fn framedApp() !App {
     try app.get("/promised", framedPromised);
     try app.get("/events", framedEvents);
     try app.get("/file", framedFile);
+    try app.get("/feed", framedFeed);
     try app.use(cors.permissive);
     try app.get("/users/:id", getUser);
     try app.post("/users", createUser);
@@ -11998,6 +12007,11 @@ test "a streamed answer, an event stream and a file are the same over HTTP/1.1 a
     try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/streamed", .status = 200 });
     try expectSameAnswer(&app, .{ .path = "/promised", .status = 200, .says = "twelve bytes" });
     try expectSameAnswer(&app, .{ .path = "/events", .status = 200, .says = "event: tick\ndata: 1\n\nid: 2\ndata: two\n\n" });
+    var table_room = try room_mod.Room.initWith(testing.allocator, .{});
+    defer table_room.deinit();
+    framed_room = &table_room;
+    defer framed_room = null;
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/feed", .status = 200 });
     try expectSameAnswer(&app, .{ .path = "/file", .window = 65_535, .status = 200, .says = "0123456789abcdefghijklmnopqrstuvwxyz" });
     try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/file", .status = 200 });
     try expectSameAnswer(&app, .{

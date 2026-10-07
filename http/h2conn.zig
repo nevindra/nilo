@@ -40,9 +40,11 @@
 //! buffer to this file's fiber, which writes `DATA` out of it under both
 //! windows, a round of at most `pump_quantum` bytes to each stream that has
 //! some, and wakes the handler when it has; a client that stops reading holds
-//! the handler there until the write deadline resets the stream. A WebSocket
-//! and an event stream handed to the connection are refused by name by `Ctx`
-//! (ADR 260).
+//! the handler there until the write deadline resets the stream. An event
+//! stream from Rooms is handed to the connection (`pumpEvents`, ADR 260): the
+//! handler ends, the Rooms ring the connection's bell, and the connection
+//! writes their posts in the same rotation as every other stream. A WebSocket
+//! is refused by name by `Ctx`.
 //!
 //! **Unary only for gRPC.** A call carries one message each way. The message
 //! is waited for on the call's fiber (`inbound.Inbox.whole`) and a gzip one is
@@ -179,6 +181,10 @@ const credit_bytes = 1024;
 /// large answer from holding the connection's writer while the others wait.
 const pump_quantum = 64 * 1024;
 
+/// The most the buffer an event is formatted in keeps once a turn is over: an
+/// event larger than this is written from a buffer that is given back.
+const scratch_keep = 16 * 1024;
+
 /// How long a connection with nothing in flight waits before handing its
 /// pages back, the way an HTTP/1.1 connection does between requests
 /// (`serve.idle_peek_ms`).
@@ -233,6 +239,7 @@ pub fn serveConnection(
         .peer = peer,
         .shared = shared,
         .decoder = hpack.Decoder.init(app.gpa),
+        .scratch = .init(app.gpa),
     };
     defer conn.deinit();
     deadlines.armWrite();
@@ -438,6 +445,20 @@ const Stream = struct {
     /// last look, or 0: what the write deadline is counted from. Only the
     /// connection's fiber touches it.
     stuck_since: u64 = 0,
+    /// An event stream whose events the rooms post, handed to this connection
+    /// by the call before it returned (ADR 227). Published by the call and
+    /// read here only once the stream is `.writing`. From then on no fiber
+    /// holds the stream: the rooms ring its bell and this fiber writes.
+    events: ?framing.EventSource = null,
+    /// The connection has counted it in `Conn.events_open` and given it its
+    /// first turn, which writes the head.
+    ev_seen: bool = false,
+    ev_head: bool = false,
+    /// The last turn left an event unfinished for want of window (or turn).
+    ev_blocked: bool = false,
+    /// A turn could not format an event: the stream was reset and is the
+    /// connection's to forget once the round is over.
+    ev_failed: bool = false,
 
     // The answer, filled by the call's fiber.
     head_block: []const u8 = "",
@@ -478,7 +499,17 @@ const Stream = struct {
         return s;
     }
 
+    /// Give up every seat an event stream sits in, before its memory goes:
+    /// the rooms ring a bell that lives in the stream's arena, and a seat is
+    /// given up under the lock a post is pushed under.
+    fn leaveEvents(s: *Stream) void {
+        const source = s.events orelse return;
+        s.events = null;
+        source.leave(source.state);
+    }
+
     fn destroy(s: *Stream) void {
+        s.leaveEvents();
         if (s.out != null) _ = s.shared.streaming.fetchSub(1, .release);
         s.inbox.deinit();
         s.arena.deinit();
@@ -489,6 +520,7 @@ const Stream = struct {
     /// `spare_arena_keep` bytes, the pipe a small buffer, and everything else
     /// is as `create` leaves it.
     fn recycle(s: *Stream) void {
+        s.leaveEvents();
         if (s.out != null) _ = s.shared.streaming.fetchSub(1, .release);
         _ = s.arena.reset(.{ .retain_with_limit = spare_arena_keep });
         s.inbox.recycle(s.app.max_body);
@@ -587,10 +619,22 @@ const Conn = struct {
     /// connection's and the stream's) the flood count does not hold against the client, so a long answer's
     /// updates are not a flood and a flood of them with nothing sent is.
     out_credit: u32 = 0,
+    /// Event streams handed to this connection that it has taken up
+    /// (`Stream.ev_seen`): when it is all the streams there are, the
+    /// connection is only waiting for the rooms, and gives its pages back as
+    /// an idle one does (ADR 062).
+    events_open: u32 = 0,
+    /// Where an event is formatted before it is written, so one that does not
+    /// fit a window is written from where it stopped. One for the connection,
+    /// as large as the largest event it has carried (`scratch_keep`).
+    scratch: std.Io.Writer.Allocating,
 
     goaway_sent: bool = false,
     peer_goaway: bool = false,
     peer_gone: bool = false,
+    /// The fiber was cancelled while the server was stopping: the peer is
+    /// still there, and what it is owed is written under a shield.
+    cancelled: bool = false,
     released: bool = false,
     refused: u32 = 0,
     control_run: u32 = 0,
@@ -650,6 +694,7 @@ const Conn = struct {
         c.streams.deinit(c.gpa);
         c.trailer_block.deinit(c.gpa);
         c.dropSpares();
+        c.scratch.deinit();
         c.decoder.deinit();
         // A call that has handed its stream back still has to let go of
         // `shared`, which a thread it runs on does a moment after.
@@ -681,6 +726,10 @@ const Conn = struct {
             c.service() catch break;
             c.writeReady() catch break;
             c.admit() catch break;
+            // An event stream never ends by itself, so a connection that is
+            // going away ends them: the stream is told, and its seats go,
+            // rather than the client finding the socket gone (ADR 019).
+            if (c.events_open != 0 and (c.goaway_sent or c.peer_goaway)) c.endEvents() catch break;
             // Nothing in flight and nothing more already read: what a client
             // sent behind its GOAWAY is still answered, and closing on it
             // unread would reset the connection under the client's last frames.
@@ -708,7 +757,7 @@ const Conn = struct {
                         .readable => {},
                         .posted => continue,
                         .closed => {
-                            c.peer_gone = true;
+                            c.closedWake();
                             break;
                         },
                         .timed_out => {
@@ -742,12 +791,32 @@ const Conn = struct {
                 break;
             };
         }
+        if (c.cancelled and c.events_open != 0) c.endCancelled();
         // Nothing more is read: a call still waiting for its body is told so.
         c.abortInbound(false);
         c.windDown();
     }
 
     const Waited = enum { readable, posted, again, stop };
+
+    /// A wait ended `.closed`: the fiber was cancelled. A server that is
+    /// stopping cancels its connections to end them, which is not the peer
+    /// going, and a connection holding event streams owes them their end.
+    fn closedWake(c: *Conn) void {
+        if (c.app.stop.isRequested()) c.cancelled = true;
+        c.peer_gone = true;
+    }
+
+    /// The last frames of a connection that was cancelled by a stop: GOAWAY,
+    /// and each event stream's end, written once under a shield, because a
+    /// cancelled fiber's writes would otherwise fail at once (ADR 019, 260).
+    fn endCancelled(c: *Conn) void {
+        bulkhead.beginShield();
+        defer bulkhead.endShield();
+        c.goaway(.no_error) catch return;
+        c.endEvents() catch return;
+        c.out.flush() catch {};
+    }
 
     fn wait(c: *Conn) Waited {
         if (c.streams.items.len != 0) {
@@ -759,12 +828,13 @@ const Conn = struct {
             // own bound and `body_ms` between frames. A body being sent is
             // bounded by the read of the call that waits for it (ADR 260).
             const limit = c.inFlightLimitMs() orelse return .stop;
+            if (c.events_open == c.streams.items.len) return c.waitQuiet(limit);
             return switch (c.waker.wait(limit)) {
                 .readable => .readable,
                 .posted => .posted,
                 .timed_out => c.overdue(),
                 .closed => blk: {
-                    c.peer_gone = true;
+                    c.closedWake();
                     break :blk .stop;
                 },
             };
@@ -774,7 +844,7 @@ const Conn = struct {
                 .readable => return .readable,
                 .posted => return .posted,
                 .closed => {
-                    c.peer_gone = true;
+                    c.closedWake();
                     return .stop;
                 },
                 .timed_out => {
@@ -793,13 +863,57 @@ const Conn = struct {
             .readable => .readable,
             .posted => .posted,
             .closed => blk: {
-                c.peer_gone = true;
+                c.closedWake();
                 break :blk .stop;
             },
             .timed_out => blk: {
                 // Idle past its limit: said with a GOAWAY, which a client
                 // reads as "open a new connection next time".
                 c.goaway(.no_error) catch {};
+                break :blk .stop;
+            },
+        };
+    }
+
+    /// A wait with nothing in flight but event streams: what an HTTP/1.1
+    /// event stream does between events, once for the whole connection. A
+    /// short peek, then the pages go back, and the wait is for a post, a frame,
+    /// the next comment or a deadline. No idle timeout: a stream that is open
+    /// is not idle, and ends when its client goes or the server stops.
+    fn waitQuiet(c: *Conn, limit: u32) Waited {
+        if (!c.released) {
+            const peek = if (limit == 0) idle_peek_ms else @min(limit, idle_peek_ms);
+            switch (c.waker.wait(peek)) {
+                .readable => return .readable,
+                .posted => {
+                    // The pages come back after the next quiet stretch.
+                    return .posted;
+                },
+                .closed => {
+                    c.closedWake();
+                    return .stop;
+                },
+                .timed_out => {
+                    if (limit != 0 and limit <= idle_peek_ms) return c.overdue();
+                    bulkhead.releaseIdlePages(c.in, c.out);
+                    c.dropSpares();
+                    c.scratch.deinit();
+                    c.scratch = .init(c.gpa);
+                    c.waker.releaseStack();
+                    c.released = true;
+                    return .again;
+                },
+            }
+        }
+        return switch (c.waker.wait(limit)) {
+            .readable => .readable,
+            .posted => blk: {
+                c.released = false;
+                break :blk .posted;
+            },
+            .timed_out => c.overdue(),
+            .closed => blk: {
+                c.closedWake();
                 break :blk .stop;
             },
         };
@@ -825,6 +939,11 @@ const Conn = struct {
             // A piece a client has not taken, which its call waits on.
             if (s.stuck_since != 0) {
                 soonest = @min(soonest, s.stuck_since +| @as(u64, c.writeLimitMs()) * std.time.ns_per_ms);
+            } else if (s.state == .writing) {
+                // An event stream owes a comment when its quiet stretch is up.
+                if (s.events) |ev| if (ev.keepalive_ms != 0) {
+                    soonest = @min(soonest, ev.due_ns);
+                };
             }
             if (s.state != .headers) continue;
             collecting = true;
@@ -1694,7 +1813,9 @@ const Conn = struct {
     }
 
     fn writing(c: *const Conn) bool {
-        for (c.streams.items) |s| if (s.state == .writing) return true;
+        // An event stream is always writing, and a WINDOW_UPDATE for it is
+        // progress only because of the bytes written to it (`earnCredit`).
+        for (c.streams.items) |s| if (s.state == .writing and s.events == null) return true;
         return false;
     }
 
@@ -1704,6 +1825,10 @@ const Conn = struct {
     }
 
     fn remove(c: *Conn, s: *Stream) void {
+        if (s.ev_seen) {
+            s.ev_seen = false;
+            c.events_open -= 1;
+        }
         for (c.streams.items, 0..) |x, i| if (x == s) {
             _ = c.streams.orderedRemove(i);
             return;
@@ -1914,6 +2039,7 @@ const Conn = struct {
                 i += 1;
                 continue;
             }
+            if (s.events) |*ev| if (!s.ev_seen) c.takeEvents(s, ev);
             if (s.out) |o| {
                 // Streamed, and its call has returned: written by the pump
                 // below, and let go of here once its end is out.
@@ -1929,13 +2055,31 @@ const Conn = struct {
             if (c.blocked_since == 0) c.blocked_since = bulkhead.monotonicNanos();
         } else c.blocked_since = 0;
         try c.pumpOutputs();
+        if (c.events_open != 0) try c.heartbeats();
         // Streamed answers whose call returned and whose end is written.
         i = 0;
         while (i < c.streams.items.len) {
             const s = c.streams.items[i];
-            if (s.state == .writing) if (s.out) |o| if (try c.settleReturned(s, o)) continue;
+            // An event stream is let go of when it ends, which is not here.
+            if (s.state == .writing and s.events == null) if (s.out) |o| if (try c.settleReturned(s, o)) continue;
             i += 1;
         }
+    }
+
+    /// An event stream handed over by a call that has returned: counted, its
+    /// client's side shut (anything it sends on the stream from here is a
+    /// stream error, as on a stream whose request has ended, which is "a
+    /// client that speaks has gone" for HTTP/1.1's reader), and its first
+    /// comment due a quiet stretch from now.
+    fn takeEvents(c: *Conn, s: *Stream, ev: *framing.EventSource) void {
+        s.ev_seen = true;
+        c.events_open += 1;
+        if (s.open) {
+            s.open = false;
+            c.letGo(s);
+        }
+        s.inbox.fail(.gone);
+        ev.due_ns = bulkhead.monotonicNanos() +| @as(u64, ev.keepalive_ms) * std.time.ns_per_ms;
     }
 
     /// Write as much of one answer as the windows allow. True when it is all
@@ -1982,6 +2126,19 @@ const Conn = struct {
         for (0..n) |k| {
             const at = (first + k) % n;
             const s = c.streams.items[at];
+            // An event stream is written in the same rotation as every other,
+            // so a stream that posts a great deal takes its turn and no more.
+            if (s.state == .writing) if (s.events) |*ev| {
+                switch (try c.pumpEvents(s, ev)) {
+                    .idle => {},
+                    .moved => last = at,
+                    .more => {
+                        last = at;
+                        c.out_more = true;
+                    },
+                }
+                continue;
+            };
             const o = @atomicLoad(?*outbound.Outbox, &s.out, .acquire) orelse continue;
             // Reset before its call began to answer: nothing of it is
             // written, and the call is told on its first write.
@@ -1999,6 +2156,12 @@ const Conn = struct {
             }
         }
         if (last) |at| c.pump_next = at + 1;
+        // Event streams that could not be written, reset above.
+        var i: usize = 0;
+        while (i < c.streams.items.len) {
+            const s = c.streams.items[i];
+            if (s.ev_failed) c.forget(s) else i += 1;
+        }
     }
 
     const Pumped = enum { idle, moved, more };
@@ -2060,6 +2223,144 @@ const Conn = struct {
         }
         if (!complete and quantum == 0) return .more;
         return if (moved) .moved else .idle;
+    }
+
+    /// One event stream's turn: its head if it has not gone, then what the
+    /// rooms posted, as far as both windows and the quantum allow. **Nothing
+    /// here waits and nothing is lent**: the stream holds a reference to the
+    /// post it is partway through and an offset, and a client that stops
+    /// reading leaves the rest in its seats' rings, under the policy the room
+    /// names (ADR 227). The deadline is the outbound pipe's: it runs from the
+    /// last time bytes of the stream went, and a stream with something held
+    /// that takes nothing for the write limit is reset (`overdue`).
+    fn pumpEvents(c: *Conn, s: *Stream, ev: *framing.EventSource) !Pumped {
+        var moved = false;
+        if (!s.ev_head) {
+            s.ev_head = true;
+            if ((try c.pump(s, s.out.?)) != .idle) moved = true;
+        }
+        var wire: framing.EventWire = .{
+            .conn = c,
+            .stream = s,
+            .scratch = &c.scratch,
+            .gpa = c.gpa,
+            .quantum = pump_quantum,
+            .put = putEvent,
+            .room = roomEvent,
+        };
+        const outcome = ev.step(ev.state, &wire) catch |err| switch (err) {
+            error.WriteFailed => return error.WriteFailed,
+            // No room to format an event: this stream is reset, the others
+            // go on (the round forgets it).
+            error.OutOfMemory => {
+                try h2.writeRstStream(c.out, s.id, .internal_error);
+                s.ev_failed = true;
+                s.ev_blocked = false;
+                return .idle;
+            },
+        };
+        if (c.scratch.writer.buffer.len > scratch_keep) {
+            c.scratch.deinit();
+            c.scratch = .init(c.gpa);
+        }
+        const wrote = pump_quantum - wire.quantum;
+        if (wrote > 0) {
+            moved = true;
+            c.earnCredit();
+        }
+        s.ev_blocked = outcome == .blocked;
+        switch (outcome) {
+            .drained => s.stuck_since = 0,
+            .blocked => if (wrote > 0 or s.stuck_since == 0) {
+                s.stuck_since = bulkhead.monotonicNanos();
+            },
+        }
+        if (wrote > 0 and ev.keepalive_ms != 0) {
+            ev.due_ns = bulkhead.monotonicNanos() +| @as(u64, ev.keepalive_ms) * std.time.ns_per_ms;
+        }
+        if (outcome == .blocked and wire.quantum == 0) return .more;
+        return if (moved) .moved else .idle;
+    }
+
+    /// `EventWire.put`: DATA frames for as much of `bytes` as both windows,
+    /// the frame size and the turn allow.
+    fn putEvent(wire: *framing.EventWire, bytes: []const u8) std.Io.Writer.Error!usize {
+        const c: *Conn = @ptrCast(@alignCast(wire.conn));
+        const s: *Stream = @ptrCast(@alignCast(wire.stream));
+        var sent: usize = 0;
+        while (sent < bytes.len and wire.quantum > 0) {
+            const room = @min(c.send_window, s.send_window);
+            if (room <= 0) break;
+            const n: usize = @intCast(@min(@as(i64, @intCast(bytes.len - sent)), room, c.peer_max_frame, @as(i64, @intCast(wire.quantum))));
+            try h2.writeHeader(c.out, n, .data, 0, s.id);
+            try c.out.writeAll(bytes[sent..][0..n]);
+            sent += n;
+            wire.quantum -= n;
+            c.send_window -= @intCast(n);
+            s.send_window -= @intCast(n);
+            c.out_bytes += n;
+        }
+        return sent;
+    }
+
+    fn roomEvent(wire: *const framing.EventWire) usize {
+        const c: *Conn = @ptrCast(@alignCast(wire.conn));
+        const s: *Stream = @ptrCast(@alignCast(wire.stream));
+        const room = @min(c.send_window, s.send_window);
+        return if (room <= 0) 0 else @min(@as(usize, @intCast(room)), wire.quantum);
+    }
+
+    /// The comment each event stream owes when it has said nothing for its
+    /// `keepalive_ms`: three bytes, the least a proxy counts as the connection
+    /// speaking. A stream with something held is not quiet, and one whose
+    /// window has no room for three bytes is not owed one now.
+    fn heartbeats(c: *Conn) !void {
+        const now = bulkhead.monotonicNanos();
+        for (c.streams.items) |s| {
+            if (s.state != .writing) continue;
+            const ev = if (s.events) |*e| e else continue;
+            if (ev.keepalive_ms == 0 or now < ev.due_ns or s.stuck_since != 0) continue;
+            ev.due_ns = now +| @as(u64, ev.keepalive_ms) * std.time.ns_per_ms;
+            if (@min(c.send_window, s.send_window) < 3) continue;
+            try h2.writeHeader(c.out, 3, .data, 0, s.id);
+            try c.out.writeAll(":\n\n");
+            c.send_window -= 3;
+            s.send_window -= 3;
+            c.out_bytes += 3;
+        }
+        c.earnCredit();
+    }
+
+    /// The connection is going: the client said GOAWAY, or the server is
+    /// stopping. Each event stream gets what was posted if the windows take
+    /// it and then its end, or a reset if the client had stopped reading, so
+    /// that it finishes as an HTTP/1.1 one does when the server stops, and
+    /// every seat goes (ADR 019, ADR 260).
+    fn endEvents(c: *Conn) !void {
+        var i: usize = 0;
+        while (i < c.streams.items.len) {
+            const s = c.streams.items[i];
+            const ev = if (s.state == .writing and s.ev_seen) &s.events.? else {
+                i += 1;
+                continue;
+            };
+            // What the windows take of what is posted, a turn at a time while
+            // a turn runs out before the stream does.
+            var rounds: u8 = 0;
+            while (try c.pumpEvents(s, ev) == .more and rounds < 64) rounds += 1;
+            if (s.ev_failed) {
+                c.forget(s);
+                continue;
+            }
+            // An event left unfinished cannot be ended with its stream: it
+            // would be cut short and read as whole. That is a reset, and
+            // it is decided by the event, not by how long the stream has
+            // been waiting.
+            if (s.ev_blocked) {
+                try h2.writeRstStream(c.out, s.id, .cancel);
+            } else try h2.writeHeader(c.out, 0, .data, h2.Flags.end_stream, s.id);
+            c.forget(s);
+        }
     }
 
     /// A streamed answer whose call has returned, and whose last pump has
@@ -2191,6 +2492,7 @@ fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
     if (!s.grpc) collected.streamer = .{
         .link = s.shared.link(),
         .slot = &s.out,
+        .events = &s.events,
         .live = &s.shared.streaming,
         .file_held = &s.shared.file_held,
         .can_park = s.inbox.can_park,
@@ -3613,6 +3915,7 @@ test "a call reset while its message is arriving gives its bytes back to the con
         .peer = .{},
         .shared = shared,
         .decoder = hpack.Decoder.init(testing.allocator),
+        .scratch = .init(testing.allocator),
     };
     defer conn.deinit();
     conn.run();
@@ -3656,6 +3959,7 @@ fn steppedConn(app: *App, in: *std.Io.Reader, out: *std.Io.Writer) !Conn {
         .peer = .{},
         .shared = try Shared.create(testing.allocator, .off),
         .decoder = hpack.Decoder.init(testing.allocator),
+        .scratch = .init(testing.allocator),
     };
 }
 
@@ -4105,12 +4409,6 @@ fn upgradeRoute(c: *Ctx) anyerror!void {
     }.loop, {});
 }
 
-fn eventsFromRoute(c: *Ctx) anyerror!void {
-    var room = try @import("room.zig").Room.init(testing.allocator);
-    defer room.deinit();
-    return c.eventsFrom(&room, .{});
-}
-
 var one_file: ?*OneFile = null;
 
 /// A directory with one file in it, for the route that sends it.
@@ -4156,7 +4454,6 @@ fn httpApp() !App {
     try app.post("/size", sizeRoute);
     try app.get("/stream", streamRoute);
     try app.get("/events", eventsRoute);
-    try app.get("/room", eventsFromRoute);
     try app.get("/ws", upgradeRoute);
     try app.get("/file", fileRoute);
     try app.post("/body-stream", bodyStreamRoute);
@@ -4450,11 +4747,7 @@ fn expectRefusedByName(method: []const u8, path: []const u8, call: []const u8) !
     // the route's own answer.
     try testing.expectEqual(@as(u16, 500), ex.status);
     try testing.expect(std.mem.indexOf(u8, ex.body, call) != null);
-    try testing.expect(std.mem.indexOf(u8, ex.body, "not available on HTTP/2 yet") != null);
-}
-
-test "an event stream handed to the connection is refused by name on HTTP/2" {
-    try expectRefusedByName("GET", "/room", "c.eventsFrom()");
+    try testing.expect(std.mem.indexOf(u8, ex.body, "is HTTP/1.1 only") != null);
 }
 
 test "a WebSocket is refused by name on HTTP/2, and the sentence says it is HTTP/1.1" {
@@ -5316,4 +5609,713 @@ test "updates of a window nothing was written into are a flood" {
     defer got.deinit();
     try testing.expectEqual(h2.ErrorCode.enhance_your_calm, got.goaway().?);
     try testing.expect(piped_failed.load(.acquire));
+}
+
+// ---- an event stream handed to the connection (stage 6.3) ----
+
+const room_file = @import("room.zig");
+const Room = room_file.Room;
+
+var feed_room: ?*Room = null;
+var feed_calls: std.atomic.Value(u32) = .init(0);
+var feed_inside: std.atomic.Value(u32) = .init(0);
+var feed_keepalive: std.atomic.Value(u32) = .init(0);
+var said_count: std.atomic.Value(u32) = .init(0);
+
+fn resetFeed() void {
+    feed_calls.store(0, .release);
+    feed_inside.store(0, .release);
+    feed_keepalive.store(0, .release);
+    said_count.store(0, .release);
+}
+
+/// The handler of a stream the rooms feed, counted going in and coming out, so
+/// a test can say that no handler is left when the stream is open.
+fn feedRoute(c: *Ctx) anyerror!void {
+    _ = feed_calls.fetchAdd(1, .acq_rel);
+    _ = feed_inside.fetchAdd(1, .acq_rel);
+    defer _ = feed_inside.fetchSub(1, .acq_rel);
+    return c.eventsFrom(feed_room.?, .{ .keepalive_ms = feed_keepalive.load(.acquire) });
+}
+
+fn feedRetryRoute(c: *Ctx) anyerror!void {
+    return c.eventsFrom(feed_room.?, .{ .keepalive_ms = 0, .retry_ms = 3000 });
+}
+
+/// Says one numbered line into the room, from another call's fiber.
+fn sayRoute(c: *Ctx) anyerror!void {
+    const n = said_count.fetchAdd(1, .acq_rel);
+    try feed_room.?.print("say {d}", .{n});
+    try c.sendText(200, "said");
+}
+
+fn stopNowRoute(c: *Ctx) anyerror!void {
+    stopping_app.stop.request();
+    try c.sendText(200, "stopping");
+}
+
+fn feedApp() !App {
+    var app = App.init(testing.allocator);
+    errdefer app.deinit();
+    try app.get("/feed", feedRoute);
+    try app.get("/feed/retry", feedRetryRoute);
+    try app.get("/say", sayRoute);
+    try app.get("/stop", stopNowRoute);
+    try app.get("/ping", pingRoute);
+    try app.get("/ws", upgradeRoute);
+    try app.resolveChains();
+    return app;
+}
+
+fn feedRoom(options: room_file.Options) !Room {
+    return Room.initWith(testing.allocator, options);
+}
+
+/// Everything the connection wrote on `stream` as DATA, in order.
+fn dataOn(got: *Answer, stream: u31) ![]const u8 {
+    var all: std.ArrayList(u8) = .empty;
+    for (Answer.of(.data, got, stream)) |f| try all.appendSlice(got.arena.allocator(), f.payload);
+    return all.items;
+}
+
+/// A client's frames after the ones the connection was built over.
+fn nextFrames(conn: *Conn, in: *std.Io.Reader) !void {
+    conn.in = in;
+    while (in.bufferedLen() > 0) try conn.readFrame();
+}
+
+test "an event stream handed to the HTTP/2 connection writes what its room posts as events in order, and no handler is left running" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 8, .backlog = 8 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    {
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+
+        // The handler has returned and holds nothing; the stream is open, in
+        // the room, and the connection's.
+        try testing.expectEqual(@as(u32, 1), feed_calls.load(.acquire));
+        try testing.expectEqual(@as(u32, 0), feed_inside.load(.acquire));
+        try testing.expectEqual(@as(u32, 0), conn.shared.running.load(.acquire));
+        try testing.expectEqual(@as(u32, 1), conn.events_open);
+        try testing.expectEqual(@as(usize, 1), conn.streams.items.len);
+        try testing.expectEqual(@as(usize, 1), room.count());
+
+        try room.sayText("one");
+        try room.event(.{ .name = "tick", .id = "2", .data = "two\nlines" });
+        try room.sayText("three");
+        try conn.writeReady();
+    }
+    // The connection's end gave the seat up.
+    try testing.expectEqual(@as(usize, 0), room.count());
+
+    var ex = try h2test.exchangeOf(try h2test.answerOf(out.written()), 1);
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqualStrings("text/event-stream", ex.header("content-type").?);
+    try testing.expectEqualStrings("no-cache", ex.header("cache-control").?);
+    try testing.expectEqualStrings("data: one\n\nevent: tick\nid: 2\ndata: two\ndata: lines\n\ndata: three\n\n", ex.body);
+    // It has no end: nothing ended the stream, and nothing reset it.
+    for (ex.answer.frames.items) |f| try testing.expect(!f.head.has(h2.Flags.end_stream) or f.head.stream != 1);
+    try testing.expect(ex.answer.rst(1) == null);
+}
+
+test "an event stream on HTTP/2 sends retry first and the history a returning client is owed before anything new" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 8, .backlog = 8, .history = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    try room.event(.{ .id = "1", .data = "one" });
+    try room.event(.{ .id = "2", .data = "two" });
+    try room.event(.{ .id = "3", .data = "three" });
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed/retry", .fields = &.{.{ .name = "last-event-id", .value = "1" }} });
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    {
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        try room.event(.{ .id = "4", .data = "four" });
+        try conn.writeReady();
+    }
+    try testing.expectEqual(@as(usize, 0), room.count());
+    var ex = try h2test.exchangeOf(try h2test.answerOf(out.written()), 1);
+    defer ex.deinit();
+    try testing.expectEqualStrings("retry: 3000\n\nid: 2\ndata: two\n\nid: 3\ndata: three\n\nid: 4\ndata: four\n\n", ex.body);
+}
+
+test "an event stream on HTTP/2 that has said nothing for its keep-alive is sent a comment, and not before" {
+    resetFeed();
+    feed_keepalive.store(150, .release);
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    var conn = try steppedConn(&app, &in, &out.writer);
+    defer conn.deinit();
+    while (in.bufferedLen() > 0) try conn.readFrame();
+    try conn.writeReady();
+    {
+        var early = try h2test.answerOf(out.written());
+        defer early.deinit();
+        try testing.expectEqual(@as(usize, 0), (try dataOn(&early, 1)).len);
+    }
+    // The wait the connection would make is bounded by the comment due.
+    const limit = conn.inFlightLimitMs().?;
+    try testing.expect(limit > 0 and limit <= 150);
+    bulkhead.sleep(200) catch {};
+    try conn.writeReady();
+    var late = try h2test.answerOf(out.written());
+    defer late.deinit();
+    try testing.expectEqualStrings(":\n\n", try dataOn(&late, 1));
+    // Said, so the next is a whole stretch away.
+    try conn.writeReady();
+    var again = try h2test.answerOf(out.written());
+    defer again.deinit();
+    try testing.expectEqualStrings(":\n\n", try dataOn(&again, 1));
+}
+
+test "an event stream on HTTP/2 reset by its client leaves the room, the connection answers the next request, and a post to the room is harmless" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    var second = try TestClient.init();
+    defer second.deinit();
+    // Not a second preface: only the frames.
+    var later: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer later.deinit();
+    try h2.writeRstStream(&later.writer, 1, .cancel);
+    try h2test.requestOn(&second, 3, .{ .path = "/ping" });
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    {
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        try testing.expectEqual(@as(usize, 1), room.count());
+
+        var cancel: std.Io.Reader = .fixed(later.written());
+        try nextFrames(&conn, &cancel);
+        try testing.expectEqual(@as(usize, 0), room.count());
+        try testing.expectEqual(@as(u32, 0), conn.events_open);
+        try testing.expectEqual(@as(usize, 0), conn.streams.items.len);
+        // A room speaking to nobody, and to a connection that was reset.
+        try room.sayText("into nothing");
+
+        const ping_frames = second.buf.written()[h2.preface.len + h2.header_len ..];
+        var ping: std.Io.Reader = .fixed(ping_frames);
+        try nextFrames(&conn, &ping);
+        try conn.writeReady();
+    }
+    var got = try h2test.answerOf(out.written());
+    defer got.deinit();
+    try testing.expectEqualStrings("pong", try dataOn(&got, 3));
+    try testing.expectEqual(@as(usize, 0), (try dataOn(&got, 1)).len);
+    try testing.expect(got.goaway() == null);
+}
+
+test "an event stream on HTTP/2 whose client stops reading holds what its room bounds, and is reset at the write limit while the connection goes on" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4, .backlog = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    // A client whose windows are shut: it takes nothing.
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 0 }});
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    try h2test.requestOn(&client, 3, .{ .path = "/ping" });
+    var later: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer later.deinit();
+    try h2.writeWindowUpdate(&later.writer, 3, 100);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    {
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        conn.deadlines.write_ms = 40;
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        try testing.expectEqual(@as(usize, 1), room.count());
+
+        // Forty events into a room that keeps four for a seat: the rest are
+        // counted as missed, and nothing else is held for a client that reads
+        // none of them.
+        for (0..40) |i| try room.print("event {d}", .{i});
+        try conn.writeReady();
+        const ev: *@import("stream.zig").Http2Events = @ptrCast(@alignCast(conn.streams.items[0].events.?.state));
+        const seat = &room.seats[ev.seated.ticket.index];
+        try testing.expect(seat.count <= 4);
+        try testing.expectEqual(@as(u64, 40 - 4), seat.dropped.load(.monotonic));
+        try testing.expect(ev.held != null);
+        try testing.expect(conn.streams.items[0].stuck_since != 0);
+
+        var update: std.Io.Reader = .fixed(later.written());
+        try nextFrames(&conn, &update);
+        // The ping goes out, so the write limit it was counting is over.
+        try conn.writeReady();
+        bulkhead.sleep(80) catch {};
+        try testing.expectEqual(Conn.Waited.again, conn.overdue());
+        // Cancelled, and gone from the room; the other stream is answered.
+        try testing.expectEqual(@as(usize, 0), room.count());
+        try conn.writeReady();
+    }
+    var got = try h2test.answerOf(out.written());
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.cancel, got.rst(1).?);
+    try testing.expectEqualStrings("pong", try dataOn(&got, 3));
+    try testing.expectEqual(@as(usize, 0), (try dataOn(&got, 1)).len);
+}
+
+test "event streams on HTTP/2 take turns with each other and with a whole answer, and every one gets its event" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 8, .backlog = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    const ids = [_]u31{ 1, 3, 5, 7, 9, 11 };
+    for (ids) |id| try h2test.requestOn(&client, id, .{ .path = "/feed" });
+    // The ping arrives once the window is gone, with ten bytes of it back.
+    var second = try TestClient.init();
+    defer second.deinit();
+    try h2test.requestOn(&second, 13, .{ .path = "/ping" });
+    try h2.writeWindowUpdate(second.w(), 0, 10);
+    var third: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer third.deinit();
+    try h2.writeWindowUpdate(&third.writer, 0, 60_000);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var first: std.Io.Reader = .fixed(client.buf.written());
+    var big: [20_000]u8 = undefined;
+    @memset(&big, 'x');
+    const event_bytes = 20_000 + "data: ".len + "\n\n".len;
+    {
+        var conn = try steppedConn(&app, &first, &out.writer);
+        defer conn.deinit();
+        while (first.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        try testing.expectEqual(@as(u32, 6), conn.events_open);
+        // 6 x 20,008 against a window of 65,535: three go whole and a fourth
+        // in part before the window is gone.
+        try room.sayText(&big);
+        try conn.writeReady();
+        {
+            var got = try h2test.answerOf(out.written());
+            defer got.deinit();
+            var total: usize = 0;
+            var starved: usize = 0;
+            for (ids) |id| {
+                const n = (try dataOn(&got, id)).len;
+                total += n;
+                if (n == 0) starved += 1;
+            }
+            try testing.expectEqual(@as(usize, 65_535), total);
+            try testing.expectEqual(@as(usize, 2), starved);
+        }
+        var ping: std.Io.Reader = .fixed(second.buf.written()[h2.preface.len + h2.header_len ..]);
+        try nextFrames(&conn, &ping);
+        try conn.writeReady();
+        {
+            // Ten bytes of window: the whole answer, which is four of them,
+            // goes before the streams that have waited longest.
+            var got = try h2test.answerOf(out.written());
+            defer got.deinit();
+            try testing.expectEqualStrings("pong", try dataOn(&got, 13));
+        }
+        var more: std.Io.Reader = .fixed(third.written());
+        try nextFrames(&conn, &more);
+        try conn.writeReady();
+    }
+    var got = try h2test.answerOf(out.written());
+    defer got.deinit();
+    for (ids) |id| try testing.expectEqual(@as(usize, event_bytes), (try dataOn(&got, id)).len);
+}
+
+test "a GOAWAY from the client ends an event stream on HTTP/2 after what was posted, and the seat goes" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    try h2test.requestOn(&client, 3, .{ .path = "/say" });
+    try h2.writeGoaway(client.w(), 3, .no_error);
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqualStrings("data: say 0\n\n", try dataOn(&got, 1));
+    const data = Answer.of(.data, &got, 1);
+    try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
+    try testing.expectEqualStrings("said", try dataOn(&got, 3));
+    try testing.expectEqual(@as(usize, 0), room.count());
+    try room.sayText("after the connection");
+}
+
+test "a connection that ends under an event stream on HTTP/2 gives the seat up, and a room that speaks after it is harmless" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    try h2test.requestOn(&client, 3, .{ .path = "/say" });
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqualStrings("data: say 0\n\n", try dataOn(&got, 1));
+    // It was left open: nothing ended it, and the client simply went.
+    for (Answer.of(.data, &got, 1)) |f| try testing.expect(!f.head.has(h2.Flags.end_stream));
+    try testing.expectEqual(@as(usize, 0), room.count());
+    try room.sayText("after the connection");
+    try room.event(.{ .id = "9", .data = "still harmless" });
+}
+
+test "a server that is stopping ends the event streams of an HTTP/2 connection and says GOAWAY" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    stopping_app = &app;
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    try h2test.requestOn(&client, 3, .{ .path = "/stop" });
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.no_error, got.goaway().?);
+    const data = Answer.of(.data, &got, 1);
+    try testing.expect(data.len >= 1 and data[data.len - 1].head.has(h2.Flags.end_stream));
+    try testing.expectEqualStrings("stopping", try dataOn(&got, 3));
+    try testing.expectEqual(@as(usize, 0), room.count());
+}
+
+test "event streams count against the cap of streams like any open stream, and the one past it is refused" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = max_streams + 8 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    var id: u31 = 1;
+    for (0..max_streams + 1) |_| {
+        try h2test.requestOn(&client, id, .{ .path = "/feed" });
+        id += 2;
+    }
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.refused_stream, got.rst(id - 2).?);
+    try testing.expect(got.rst(1) == null);
+    try testing.expectEqual(@as(u32, max_streams), feed_calls.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), room.count());
+}
+
+test "an event stream on HTTP/2 allocates nothing for a post: a hundred cost what one does" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4, .backlog = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var counting = heap_count.Counting{ .child = testing.allocator };
+    var results: [2]usize = undefined;
+    for (&results, [_]usize{ 1, 100 }) |*result, posts| {
+        var client = try TestClient.init();
+        defer client.deinit();
+        try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        conn.scratch.deinit();
+        conn.scratch = .init(counting.allocator());
+        conn.gpa = counting.allocator();
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        // The first event sizes the buffer it is formatted in, once.
+        try room.sayText("warm");
+        try conn.writeReady();
+        counting.reset();
+        for (0..posts) |_| {
+            try room.sayText("0123456789abcdef");
+            try conn.writeReady();
+        }
+        result.* = counting.allocs;
+        var got = try h2test.answerOf(out.written());
+        defer got.deinit();
+        try testing.expectEqual((try dataOn(&got, 1)).len, "data: warm\n\n".len + posts * "data: 0123456789abcdef\n\n".len);
+    }
+    try testing.expectEqual(@as(usize, 0), results[0]);
+    try testing.expectEqual(results[0], results[1]);
+}
+
+test "a WebSocket is still refused by name on HTTP/2 beside an event stream" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    try h2test.requestOn(&client, 3, .{ .path = "/ws" });
+    var ex = try h2test.exchangeOf(try converse(&app, &client), 3);
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 500), ex.status);
+    try testing.expect(std.mem.indexOf(u8, ex.body, "is HTTP/1.1 only") != null);
+    try testing.expectEqual(@as(usize, 0), room.count());
+}
+
+test "a client that gives its window back a byte at a time does not make a held event be formatted again, and is a flood" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4, .backlog = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 0 }});
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    var updates: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer updates.deinit();
+    for (0..max_control_run + 5) |_| try h2.writeWindowUpdate(&updates.writer, 1, 1);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    var conn = try steppedConn(&app, &in, &out.writer);
+    defer conn.deinit();
+    while (in.bufferedLen() > 0) try conn.readFrame();
+    try conn.writeReady();
+
+    const stream_mod = @import("stream.zig");
+    stream_mod.Http2Events.formatted = 0;
+    const big = [_]u8{'x'} ** 5000;
+    try room.sayText(&big);
+    // Nothing can be written: the event is not even formatted.
+    try conn.writeReady();
+    try conn.writeReady();
+    try testing.expectEqual(@as(usize, 0), stream_mod.Http2Events.formatted);
+
+    var feed: std.Io.Reader = .fixed(updates.written());
+    conn.in = &feed;
+    var calm = false;
+    while (feed.bufferedLen() > 0) {
+        conn.readFrame() catch |err| {
+            try testing.expectEqual(error.Calm, err);
+            calm = true;
+            break;
+        };
+        try conn.writeReady();
+    }
+    // A byte a frame is a flood, however the event is written.
+    try testing.expect(calm);
+    // And the event was formatted the once, whatever the turns it took.
+    try testing.expectEqual(@as(usize, 1), stream_mod.Http2Events.formatted);
+}
+
+test "a server that stops ends a busy event stream with its end and everything posted, and a stuck one with a reset" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4, .backlog = 16 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+
+    // Open windows and more posted than one turn writes: the stream is busy,
+    // not stuck, so it is ended and not reset.
+    {
+        var client = try TestClient.init();
+        defer client.deinit();
+        try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 1 << 24 }});
+        try h2.writeWindowUpdate(client.w(), 0, (1 << 24) - 65_535);
+        try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        {
+            var conn = try steppedConn(&app, &in, &out.writer);
+            defer conn.deinit();
+            while (in.bufferedLen() > 0) try conn.readFrame();
+            try conn.writeReady();
+            const piece = [_]u8{'y'} ** 20_000;
+            for (0..12) |_| try room.sayText(&piece);
+            try conn.goaway(.no_error);
+            try conn.endEvents();
+        }
+        var got = try h2test.answerOf(out.written());
+        defer got.deinit();
+        try testing.expect(got.rst(1) == null);
+        const data = Answer.of(.data, &got, 1);
+        try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
+        try testing.expectEqual(@as(usize, 12 * (20_000 + "data: \n\n".len)), (try dataOn(&got, 1)).len);
+        try testing.expectEqual(@as(usize, 0), room.count());
+    }
+
+    // A window of 100 bytes and an event of 5,000: it cannot be finished, so
+    // the stream is reset rather than ended in the middle of an event.
+    {
+        var client = try TestClient.init();
+        defer client.deinit();
+        try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 100 }});
+        try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        {
+            var conn = try steppedConn(&app, &in, &out.writer);
+            defer conn.deinit();
+            while (in.bufferedLen() > 0) try conn.readFrame();
+            try conn.writeReady();
+            const piece = [_]u8{'z'} ** 5000;
+            try room.sayText(&piece);
+            try conn.goaway(.no_error);
+            try conn.endEvents();
+        }
+        var got = try h2test.answerOf(out.written());
+        defer got.deinit();
+        try testing.expectEqual(h2.ErrorCode.cancel, got.rst(1).?);
+        try testing.expectEqual(@as(usize, 100), (try dataOn(&got, 1)).len);
+        try testing.expectEqual(@as(usize, 0), room.count());
+    }
+}
+
+test "an event that cannot be kept for want of memory resets its stream and nothing else" {
+    resetFeed();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var room = try feedRoom(.{ .seats = 4, .backlog = 4 });
+    defer room.deinit();
+    feed_room = &room;
+    defer feed_room = null;
+    var app = try feedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 100 }});
+    try h2test.requestOn(&client, 1, .{ .path = "/feed" });
+    try h2test.requestOn(&client, 3, .{ .path = "/ping" });
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    {
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        // The event goes in part, and the rest has nowhere to be kept.
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        conn.gpa = failing.allocator();
+        const piece = [_]u8{'q'} ** 5000;
+        try room.sayText(&piece);
+        try conn.writeReady();
+        conn.gpa = testing.allocator;
+        try testing.expectEqual(@as(usize, 0), conn.events_open);
+        try testing.expectEqual(@as(usize, 0), room.count());
+        try conn.writeReady();
+    }
+    var got = try h2test.answerOf(out.written());
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.internal_error, got.rst(1).?);
+    try testing.expectEqualStrings("pong", try dataOn(&got, 3));
 }

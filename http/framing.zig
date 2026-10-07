@@ -27,9 +27,13 @@
 //! answers one message, so it has no pipe, and `Ctx` refuses a stream there by
 //! name (`Framing.canStream`).
 //!
-//! A WebSocket and an event stream handed to the connection loop stay HTTP/1.1
-//! only: both take the connection's reader and writer for their whole life,
-//! which `wire` gives them, and a multiplexed connection has none to give.
+//! A WebSocket handed to the connection loop stays HTTP/1.1 only: it takes the
+//! connection's reader and writer for their whole life, which `wire` gives it,
+//! and a multiplexed connection has none to give. **An event stream whose
+//! events come from Rooms is handed over on either framing**: on HTTP/1.1 the
+//! connection loop runs it from its own frame, and on HTTP/2 the connection
+//! keeps an `EventSource` for it, writes what the rooms post as `DATA` when it
+//! wakes, and the handler's fiber has ended (ADR 227, ADR 260).
 //!
 //! **A trailer is the framing's to deliver, and every framing takes it.**
 //! `Ctx` keeps the list a route set (`Ctx.setTrailer`); HTTP/2 sends it as a
@@ -297,6 +301,28 @@ pub const Framing = union(enum) {
         };
     }
 
+    /// Hand the connection an event stream whose events come from Rooms, on
+    /// a framing that writes it from a connection shared with other requests:
+    /// HTTP/2's. The handler returns right after, and holds nothing of the
+    /// stream (ADR 227, ADR 260). Never asked of HTTP/1.1, whose connection
+    /// loop runs the stream from its own frame (`wire`).
+    pub fn handOverEvents(self: *Framing, source: EventSource) !void {
+        switch (self.*) {
+            .http1 => unreachable,
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.handOver(source),
+        }
+    }
+
+    /// The pipe's link to the connection, for a bell a Room rings: what the
+    /// connection is woken through. Null where the framing has no connection
+    /// of its own to wake (HTTP/1.1, whose waker is the request's).
+    pub fn eventLink(self: *const Framing) ?inbound.Link {
+        return switch (self.*) {
+            .http1 => null,
+            .http2 => |c| if (comptime !http2_built) unreachable else if (c.streamer) |st| st.link else null,
+        };
+    }
+
     /// The connection itself, for a WebSocket or an event stream that takes
     /// it over for the rest of its life. Null on a framing that has no
     /// connection of one request's own to give.
@@ -306,6 +332,54 @@ pub const Framing = union(enum) {
             .http2 => if (comptime !http2_built) unreachable else null,
         };
     }
+};
+
+/// An event stream handed to an HTTP/2 connection (ADR 227, ADR 260): what the
+/// connection's fiber holds of it, with nothing of the handler's. The stream's
+/// state lives in the request's arena, and the connection reaches it through
+/// these pointers only, so a server that never calls `eventsFrom` links none
+/// of the rooms behind it, as HTTP/1.1's `Handover.Events.run` does.
+pub const EventSource = struct {
+    state: *anyopaque,
+    /// Write what is posted, as far as the windows and the turn allow.
+    step: *const fn (state: *anyopaque, wire: *EventWire) EventError!Stepped,
+    /// Give up every seat and release what the stream still holds. Safe from
+    /// any thread, and the last thing done with `state`.
+    leave: *const fn (state: *anyopaque) void,
+    /// A comment this often while nothing is said; 0 sends none.
+    keepalive_ms: u32,
+    /// When the connection next owes the stream a comment, as a
+    /// `monotonicNanos` reading. The connection's fiber only.
+    due_ns: u64 = 0,
+};
+
+pub const Stepped = enum {
+    /// Everything posted is written.
+    drained,
+    /// Something posted is held: the windows or the turn ran out.
+    blocked,
+};
+
+pub const EventError = error{ WriteFailed, OutOfMemory };
+
+/// The connection, as an event stream writes to it for the length of one
+/// turn: `put` is the DATA frames of the stream under both windows, and
+/// `quantum` what is left of the turn (`h2conn.pump_quantum`).
+pub const EventWire = struct {
+    conn: *anyopaque,
+    stream: *anyopaque,
+    /// An event is formatted here and written from here, so an event that
+    /// does not fit the window is written from where it stopped. One buffer
+    /// to a connection, however many streams it has.
+    scratch: *std.Io.Writer.Allocating,
+    /// What a stream keeps of an event the windows took only part of.
+    gpa: std.mem.Allocator,
+    quantum: usize,
+    /// Write as much of `bytes` as the windows and the turn allow, as DATA
+    /// frames, and say how much.
+    put: *const fn (wire: *EventWire, bytes: []const u8) std.Io.Writer.Error!usize,
+    /// How many bytes `put` would take now.
+    room: *const fn (wire: *const EventWire) usize,
 };
 
 /// How a streamed body ends.
@@ -470,6 +544,8 @@ pub const Http1 = struct {
 pub const Streamer = struct {
     link: inbound.Link,
     slot: *?*outbound.Outbox,
+    /// Where an event stream handed to the connection is left (`handOver`).
+    events: *?EventSource,
     live: *std.atomic.Value(u32),
     /// Bytes of file buffers the connection's calls hold (`Collected.file`).
     file_held: *std.atomic.Value(usize),
@@ -565,6 +641,18 @@ pub const Collected = struct {
         // Published for the connection's fiber, which looks for it by this
         // pointer and is woken to.
         @atomicStore(?*outbound.Outbox, st.slot, box, .release);
+        box.wakeConnection();
+    }
+
+    /// The stream's body is the connection's from here: its events are written
+    /// from the rooms it sits in, and the call may return without ending it.
+    noinline fn handOver(self: *Collected, source: EventSource) !void {
+        const st = self.streamer orelse return error.NotCollected;
+        const box = self.outbox orelse return error.NotCollected;
+        st.events.* = source;
+        box.handedOver();
+        // Told once more, so a post that arrived while the call was still
+        // running is found when the stream is.
         box.wakeConnection();
     }
 

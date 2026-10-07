@@ -51,6 +51,8 @@ const h2conn = @import("h2conn.zig");
 const h2 = @import("h2.zig");
 const hpack = @import("hpack.zig");
 const core = @import("nilo_core");
+const room_file = @import("room.zig");
+const stream_file = @import("stream.zig");
 
 /// Run each call on a thread of its own, as a test does, so the generated
 /// inputs reach a request whose handler is running while its body arrives
@@ -75,11 +77,33 @@ fn check(gpa: std.mem.Allocator, bytes: []const u8) !void {
     defer out.deinit();
     var in: std.Io.Reader = .fixed(bytes);
     var stop: bulkhead.Stop = .{};
+    var room = try room_file.Room.initWith(gpa, .{});
+    defer room.deinit();
+    feed = &room;
+    defer feed = null;
+    // Posts arrive while the frames are read, from a thread of their own.
+    var done: std.atomic.Value(bool) = .init(false);
+    const poster = try std.Thread.spawn(.{}, post, .{ &room, &done });
     h2conn.serveConnection(stub(gpa, &stop), &in, &out.writer, .off, .off, .{});
+    done.store(true, .release);
+    poster.join();
     answerHolds(gpa, bytes, out.written()) catch |err| {
         dumpAnswer(out.written());
         return err;
     };
+}
+
+/// Says things into the room until the connection is done, a few of them
+/// large enough to need more than one frame.
+fn post(room: *room_file.Room, done: *const std.atomic.Value(bool)) void {
+    var n: u32 = 0;
+    while (!done.load(.acquire)) : (n +%= 1) {
+        if (n % 37 == 0) {
+            const big = [_]u8{'p'} ** 20_000;
+            room.sayText(&big) catch {};
+        } else room.print("post {d}", .{n}) catch {};
+        std.Thread.yield() catch {};
+    }
 }
 
 /// What came back, a frame a line, so a failure says which frame broke it.
@@ -158,6 +182,7 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
             }
             switch (which) {
                 't' => streamed(&to, arrived.method),
+                'v' => evented(&to, arena, arrived.method),
                 'd' => filed(&to, arrived.method),
                 'g' => to.whole(200, "text/plain", "hello", std.mem.eql(u8, arrived.method, "HEAD"), true, &.{
                     .{ .name = "Connection", .value = "close" },
@@ -200,6 +225,46 @@ fn streamed(to: *framing.Framing, method: []const u8) void {
         to.piece(false, "tail", &.{ big[0..8000], "end" }, 1) catch return;
     }
     to.end(false, .{ .list = &.{.{ .name = "x-sum", .value = "ok" }} }) catch return;
+}
+
+/// The room `/v` listens to while `check` runs, with a thread posting to it as
+/// the frames are read (stage 6.3).
+var feed: ?*room_file.Room = null;
+
+/// An event stream handed to the connection: the head, then whatever the room
+/// is told, written by the connection's own fiber under both windows. Without
+/// a room (a replay that did not set one up) it is a short answer.
+fn evented(to: *framing.Framing, arena: std.mem.Allocator, method: []const u8) void {
+    const room = feed orelse {
+        to.whole(200, "text/plain", "no room", false, true, &.{}, .{}) catch {};
+        return;
+    };
+    const link = to.eventLink() orelse return;
+    const events = arena.create(stream_file.Http2Events) catch return;
+    events.* = .{ .link = link };
+    const head_only = std.mem.eql(u8, method, "HEAD");
+    if (!head_only) {
+        _ = room.sitAfter(&events.seated, events.bell(), true, "", &.{}) catch {
+            to.whole(503, "text/plain", "full", false, true, &.{}, .{}) catch {};
+            return;
+        };
+    }
+    var shape = to.streamShape(null);
+    shape.bodyless = head_only;
+    to.streamHead(200, stream_file.Events.content_type, shape, null, true, &.{}) catch {
+        events.leave();
+        return;
+    };
+    if (head_only) {
+        to.end(false, .{}) catch {};
+        return;
+    }
+    to.handOverEvents(.{
+        .state = events,
+        .step = stream_file.Http2Events.stepErased,
+        .leave = stream_file.Http2Events.leaveErased,
+        .keepalive_ms = 20,
+    }) catch events.leave();
 }
 
 /// A file: the head, and `/dev/zero` read into frames through the pipe. A
@@ -483,7 +548,7 @@ fn splitRequest(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
     }
 }
 
-const request_paths = [_][]const u8{ "/g.x", "/g.x", "/s.x", "/e.x", "/f.x", "/n", "/c.x", "/t.x", "/t.x", "/t.x", "/d.x", "/d.x", "/missing", "*", "", "/a b", "/g?x=1" };
+const request_paths = [_][]const u8{ "/g.x", "/g.x", "/s.x", "/e.x", "/f.x", "/n", "/c.x", "/t.x", "/t.x", "/t.x", "/v.x", "/v.x", "/d.x", "/d.x", "/missing", "*", "", "/a b", "/g?x=1" };
 const request_methods = [_][]const u8{ "GET", "GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "CONNECT", "BREW", "" };
 
 /// A request's fields as an ordinary client writes them, with the ones that
@@ -648,6 +713,10 @@ fn requestAfter(comptime more: []const u8, comptime block: []const u8, comptime 
 
 const streamed_get = request("\x82\x86\x04\x04/t.x", 0x05);
 const file_get = request("\x82\x86\x04\x04/d.x", 0x05);
+/// Pings behind the request, each a turn of the connection's loop, which is
+/// where a post that has arrived is noticed and written.
+const pings = ("\x00\x00\x08\x06\x00\x00\x00\x00\x00" ++ "12345678") ** 400;
+const events_get = request("\x82\x86\x04\x04/v.x", 0x05) ++ pings;
 
 /// A frame on the connection, stream 0.
 fn frame0(comptime t: u8, comptime payload: []const u8) []const u8 {
@@ -723,6 +792,15 @@ const corpus = [_][]const u8{
     requestAfter("\x00\x04\x00\x00\x00\x01", "\x82\x86\x04\x04/t.x", 0x05) ++ frame(0x08, 0x00, "\x00\x00\x00\x01"),
     streamed_get ++ frame(0x03, 0x00, "\x00\x00\x00\x08"),
     file_get ++ frame0(0x08, "\x00\x00\x40\x00"),
+    // An event stream with posts arriving as the frames are read, on its own,
+    // as a HEAD, with a window of nothing, reset, and with a GOAWAY behind it.
+    events_get,
+    request("\x00\x07:method\x04HEAD\x86\x04\x04/v.x", 0x05),
+    requestAfter(no_window, "\x82\x86\x04\x04/v.x", 0x05),
+    requestAfter(no_window, "\x82\x86\x04\x04/v.x", 0x05) ++ frame(0x03, 0x00, "\x00\x00\x00\x08"),
+    events_get ++ frame(0x03, 0x00, "\x00\x00\x00\x08"),
+    events_get ++ frame0(0x07, "\x00\x00\x00\x01\x00\x00\x00\x00"),
+    request("\x82\x86\x04\x04/v.x", 0x04) ++ frame(0x08, 0x00, "\x00\x00\x00\x00"),
     // A stream whose answer is written while the client is still sending, or
     // sending frames the protocol forbids: a reset or a frame after its
     // END_STREAM is what these once drew, and a reset reached a call that had
@@ -781,6 +859,31 @@ test "the corpus's streamed answer and file are written in pieces, so the proper
     var bytes: usize = 0;
     for (@import("h2test.zig").Answer.of(.data, &answer, 1)) |f| bytes += f.head.len;
     try testing.expectEqual(@as(usize, 40_000), bytes);
+}
+
+test "the corpus's event stream is written what the room is told as the frames are read, so the property is looking at it" {
+    var seen = false;
+    for (0..200) |_| {
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(events_get);
+        var stop: bulkhead.Stop = .{};
+        var room = try room_file.Room.initWith(testing.allocator, .{});
+        defer room.deinit();
+        feed = &room;
+        defer feed = null;
+        var done: std.atomic.Value(bool) = .init(false);
+        const poster = try std.Thread.spawn(.{}, post, .{ &room, &done });
+        h2conn.serveConnection(stub(testing.allocator, &stop), &in, &out.writer, .off, .off, .{});
+        done.store(true, .release);
+        poster.join();
+        try answerHolds(testing.allocator, events_get, out.written());
+        if (std.mem.indexOf(u8, out.written(), "data: post ") != null) {
+            seen = true;
+            break;
+        }
+    }
+    try testing.expect(seen);
 }
 
 // A generator that stopped producing calls would leave every property above

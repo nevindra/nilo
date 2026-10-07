@@ -75,6 +75,8 @@ zig build autobahn-server      # the echo server `bash bench/autobahn/run.sh` dr
 python3 bench/mem.py --port … --path …          # memory per idle connection, any server
 python3 bench/mem.py --port … --path … --hold   # the same for a stream nobody closes
 python3 bench/mem.py --port … --path … --tls    # the same through TLS 1.3, against bench-tls-server
+python3 bench/mem.py --port … --path … --h2 --streams-per-conn 100   # a held-open HTTP/2 stream, counted a stream
+python3 bench/fanout.py --port … --framing h1|h2     # events written a second to 100 subscribers of one Room
 python3 bench/slowloris.py --port … --path …    # what a body that never finishes holds (VmData, not just VmRSS)
 python3 bench/compress_rss.py ./zig-out/bin/nilo-bench-compress-server  # what the compressor pool keeps resident (ADR 248)
 python3 bench/ws_idle.py both                   # memory per idle WebSocket, nilo and gws

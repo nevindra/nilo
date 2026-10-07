@@ -27,6 +27,7 @@ const bulkhead = @import("bulkhead.zig");
 const framing_mod = @import("framing.zig");
 const Framing = framing_mod.Framing;
 const http1 = @import("http1.zig");
+const inbound = @import("inbound.zig");
 const json_mod = @import("json.zig");
 const room_mod = @import("room.zig");
 const watchdog = @import("watchdog.zig");
@@ -533,7 +534,10 @@ pub const RoomEvents = struct {
     }
 
     /// Write out everything waiting in every seat, as events. Flushed by
-    /// `park`, so a burst is one syscall.
+    /// `park`, so a burst is one syscall. **The same walk as `deliverSeats`,
+    /// written out again on purpose**: calling the shared one through a sink
+    /// cost every program that calls `eventsFrom` 16 bytes of its HTTP/1.1
+    /// path, which ADR 017 does not let a framing it never uses spend.
     fn deliver(self: *RoomEvents) !void {
         var at = self._seated;
         while (at.room) |in_room| {
@@ -616,6 +620,253 @@ pub const RoomEvents = struct {
         bulkhead.releaseIdlePages(self._in, self._out);
         self._waker.releaseStack();
         return self._waker.wait(if (limit == 0) 0 else limit - idle_peek_ms);
+    }
+};
+
+/// **The walk over a stream's seats**, post by post in order, handing each to
+/// `sink.event(room, post)` before releasing it (ADR 227). HTTP/2's sink is
+/// `Http2Events`, which may stop the walk with an error, having kept what it
+/// needs of the post. HTTP/1.1's `RoomEvents.deliver` is the same walk with
+/// its chunk writer in place of the sink, written out beside it and not
+/// calling this: through the sink it cost every program that calls
+/// `eventsFrom` 16 bytes. The wait is only HTTP/1.1's (`RoomEvents.run`):
+/// HTTP/2's connection waits for all its streams at once.
+pub fn deliverSeats(seated: room_mod.Seating, sink: anytype) !void {
+    var at = seated;
+    while (at.room) |in_room| {
+        while (in_room.take(at.ticket)) |post| {
+            defer in_room.release(post);
+            try sink.event(in_room, post);
+        }
+        at = in_room.after(at.ticket);
+    }
+}
+
+/// The posts one room kept for a client coming back, each holding a
+/// reference until the stream writes it (ADR 229).
+pub const Replay = struct {
+    room: ?*room_mod.Room = null,
+    posts: []*room_mod.Post = &.{},
+
+    pub fn release(self: *Replay) void {
+        const in_room = self.room orelse return;
+        for (self.posts) |post| in_room.release(post);
+        self.posts = &.{};
+    }
+};
+
+/// An event stream handed to an HTTP/2 connection, which writes what its
+/// rooms post as `DATA` when it wakes, and whose handler has returned (ADR 227,
+/// ADR 260).
+///
+/// ```zig
+/// fn feed(c: *nilo.Ctx, lobby: *nilo.Room) !void {
+///     return c.eventsFrom(lobby, .{});   // the same call on either framing
+/// }
+/// ```
+///
+/// **What it holds, per stream:** the chain of its seats (16 bytes), the link
+/// to wake the connection by, the bell, the event it has begun and not
+/// finished with how far it got, and whatever a returning client is owed
+/// first (`retry:` and the history, ADR 229). It lives in the request arena,
+/// so nothing of it outlasts the stream.
+///
+/// **What a client that stops reading costs is the room's bound and one
+/// event.** A post is taken from its seat only when the stream is about to
+/// write it, so what a stream that is not read holds is its seat's ring,
+/// `Options.backlog` references to posts the room made once for everybody,
+/// under the policy that room names (`Full`), and the one event it is
+/// partway through, as a reference of its own. Nothing is copied per stream.
+///
+/// **A Room never rings what is gone.** The bell is in the seat; the seat
+/// is given up (`leave`) before the stream's memory is, and a seat is given up
+/// under the lock a post is pushed under (`Room.giveUp`).
+pub const Http2Events = struct {
+    /// The rooms this stream sits in.
+    seated: room_mod.Seating = .{},
+    /// What wakes the connection when a Room rings.
+    link: inbound.Link,
+    /// A post may be waiting. Set by the bell, cleared by `step` before it
+    /// looks, so a post that lands during the walk is found by the next.
+    rung: std.atomic.Value(bool) = .init(true),
+    /// Sent first, once.
+    retry_ms: ?u32 = null,
+    /// What each room kept for a client coming back, written before anything
+    /// new; each post is released as it is written.
+    replays: []Replay = &.{},
+    /// The event begun and not finished, and how many of its bytes are out.
+    held: ?Held = null,
+    /// What is left of the held event once some of it has gone, formatted
+    /// once and kept (from `kept_by`, freed when it is all out or on leave),
+    /// so that a client that gives its window back a byte at a time costs a
+    /// frame a byte and not an event formatted again for each.
+    pending: []u8 = &.{},
+    pending_at: usize = 0,
+    kept_by: ?std.mem.Allocator = null,
+
+    const Held = union(enum) {
+        retry: u32,
+        post: struct { room: *room_mod.Room, post: *room_mod.Post },
+    };
+
+    /// The bell a Room rings for this stream's seats.
+    pub fn bell(self: *Http2Events) bulkhead.Waker {
+        return .{ .target = self, .vtable = &bell_table };
+    }
+
+    const bell_table: bulkhead.Waker.VTable = .{
+        .wait = struct {
+            fn f(_: ?*anyopaque, _: u32) bulkhead.Woken {
+                return .readable;
+            }
+        }.f,
+        .post = ring,
+        .release_stack = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
+        .half_close = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
+    };
+
+    /// Called by a Room, on whatever thread said something, inside the seat's
+    /// lock: say so, and wake the connection, which is told nothing if it
+    /// has gone (`inbound.Link.poke`).
+    fn ring(target: ?*anyopaque) void {
+        const self: *Http2Events = @ptrCast(@alignCast(target.?));
+        // Already rung and not yet looked at: the connection has been woken
+        // for it, or is about to be, and `step` clears the flag before it
+        // looks, so a post that lands after that look rings again. Most
+        // posts of a burst take no lock and wake nobody.
+        if (self.rung.swap(true, .acq_rel)) return;
+        self.link.poke(self.link.ctx);
+    }
+
+    /// Write what is posted, as far as the windows and the turn allow
+    /// (`framing.EventSource.step`).
+    pub fn step(self: *Http2Events, wire: *framing_mod.EventWire) framing_mod.EventError!framing_mod.Stepped {
+        // Cleared before anything is looked at, so a post that lands while
+        // this walks is found by the next call and never lost.
+        const rung = self.rung.swap(false, .acq_rel);
+        if (!rung and self.held == null) return .drained;
+
+        if (self.held) |item| {
+            if (!try self.write(item, wire)) return .blocked;
+            self.held = null;
+            release(item);
+        }
+        while (self.nextOwed()) |item| {
+            // Held while it is written, so that a connection that fails
+            // under it, or a reset, still releases it.
+            self.held = item;
+            if (!try self.write(item, wire)) return .blocked;
+            self.held = null;
+            release(item);
+        }
+        deliverSeats(self.seated, Sink{ .events = self, .wire = wire }) catch |err| switch (err) {
+            error.Blocked => return .blocked,
+            else => |e| return e,
+        };
+        return .drained;
+    }
+
+    /// One event for `deliverSeats`: written if the windows allow, and kept
+    /// by a reference of its own if only some of it went.
+    const Sink = struct {
+        events: *Http2Events,
+        wire: *framing_mod.EventWire,
+
+        fn event(self: Sink, in_room: *room_mod.Room, post: *room_mod.Post) error{ Blocked, WriteFailed, OutOfMemory }!void {
+            const item: Held = .{ .post = .{ .room = in_room, .post = post } };
+            if (try self.events.write(item, self.wire)) return;
+            _ = post.refs.fetchAdd(1, .acq_rel);
+            self.events.held = item;
+            return error.Blocked;
+        }
+    };
+
+    /// `retry:`, then the history, in the order they are owed.
+    fn nextOwed(self: *Http2Events) ?Held {
+        if (self.retry_ms) |millis| {
+            self.retry_ms = null;
+            return .{ .retry = millis };
+        }
+        for (self.replays) |*kept| {
+            if (kept.posts.len == 0) continue;
+            const post = kept.posts[0];
+            kept.posts = kept.posts[1..];
+            return .{ .post = .{ .room = kept.room.?, .post = post } };
+        }
+        return null;
+    }
+
+    /// Count of events formatted, for the test that holds a held event to
+    /// being formatted once.
+    pub var formatted: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {};
+
+    /// Format `item` and write what the windows take of it. True when it is
+    /// all out. An event no window has room for is not formatted at all, and
+    /// one that went only in part keeps its remainder (`pending`), so it is
+    /// formatted once however many turns it takes.
+    fn write(self: *Http2Events, item: Held, wire: *framing_mod.EventWire) framing_mod.EventError!bool {
+        if (wire.room(wire) == 0) return false;
+        if (self.pending.len == 0) {
+            wire.scratch.clearRetainingCapacity();
+            const w = &wire.scratch.writer;
+            if (comptime @import("builtin").is_test) formatted += 1;
+            switch (item) {
+                .retry => |millis| w.print("retry: {d}\n\n", .{millis}) catch return error.OutOfMemory,
+                .post => |p| writeEvent(w, p.room.eventOf(p.post)) catch return error.OutOfMemory,
+            }
+            const bytes = wire.scratch.written();
+            const sent = wire.put(wire, bytes) catch return error.WriteFailed;
+            if (sent == bytes.len) return true;
+            self.pending = wire.gpa.dupe(u8, bytes[sent..]) catch return error.OutOfMemory;
+            self.pending_at = 0;
+            self.kept_by = wire.gpa;
+            return false;
+        }
+        const sent = wire.put(wire, self.pending[self.pending_at..]) catch return error.WriteFailed;
+        self.pending_at += sent;
+        if (self.pending_at < self.pending.len) return false;
+        self.dropPending();
+        return true;
+    }
+
+    fn dropPending(self: *Http2Events) void {
+        if (self.kept_by) |gpa| gpa.free(self.pending);
+        self.pending = &.{};
+        self.pending_at = 0;
+        self.kept_by = null;
+    }
+
+    fn release(item: Held) void {
+        switch (item) {
+            .retry => {},
+            .post => |p| p.room.release(p.post),
+        }
+    }
+
+    /// Give up every seat and release what is still held. The last thing done
+    /// with the stream: from the connection's fiber, or from the thread of a
+    /// call that outlived its connection, and never while `step` runs.
+    pub fn leave(self: *Http2Events) void {
+        while (self.seated.room) |in_room| in_room.stand(&self.seated);
+        if (self.held) |item| release(item);
+        self.held = null;
+        self.dropPending();
+        for (self.replays) |*kept| kept.release();
+    }
+
+    /// `step` and `leave` as the connection holds them (`framing.EventSource`).
+    pub fn stepErased(state: *anyopaque, wire: *framing_mod.EventWire) framing_mod.EventError!framing_mod.Stepped {
+        const self: *Http2Events = @ptrCast(@alignCast(state));
+        return self.step(wire);
+    }
+
+    pub fn leaveErased(state: *anyopaque) void {
+        const self: *Http2Events = @ptrCast(@alignCast(state));
+        self.leave();
     }
 };
 

@@ -765,6 +765,12 @@ Nothing is open at this tier.
 
 **Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
+**A handed-over event stream on HTTP/2 weighs 6.2 KB or 12 KB at 10,000 streams, depending on how fast they were opened.** [`http.md`](../bench/result/http.md#what-an-event-stream-handed-to-the-http2-connection-costs) measured the same server, streams and client twice: opened 1,000 at a time, 6,190 to 6,253 bytes a stream; in one step from 1,000 to 10,000, 11,976 to 12,153. A parked stream and an HTTP/1.1 one do not move with it. What a stream holds that a test can count is about 3.4 KB (the `Stream` 680 bytes, its arena 1,428, the lists, the pipe and the state), and the arena and the `Stream` are 2.1 KB of it that the hand-over could give back.
+
+**What would settle it:** the same 10,000 with the handler fibers on the connection's thread, and the allocator's own count at both readings.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
 ---
 
 ## How this file is written

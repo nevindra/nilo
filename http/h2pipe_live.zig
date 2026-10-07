@@ -182,12 +182,33 @@ const Wire = struct {
 
     /// Read what the server has sent for `wait_ms`, or until it has nothing
     /// more at the moment.
+    /// Read frames until the connection has been quiet for `wait_ms`.
     fn pump(self: *Wire, r: *std.Io.Reader, w: *std.Io.Writer, fd: std.posix.fd_t, wait_ms: i32) !void {
+        return self.pumpWith(r, w, fd, wait_ms, false);
+    }
+
+    /// Wait up to `wait_ms` for the first frame, take what has already come
+    /// with it, and return: for a client that has to act on what it heard and
+    /// not on a silence after it. `pump` returns only after a quiet stretch
+    /// of `wait_ms` once any frame has come, which made a test that waited a
+    /// second for each window update take minutes.
+    fn pumpSome(self: *Wire, r: *std.Io.Reader, w: *std.Io.Writer, fd: std.posix.fd_t, wait_ms: i32) !void {
+        return self.pumpWith(r, w, fd, wait_ms, true);
+    }
+
+    fn pumpWith(self: *Wire, r: *std.Io.Reader, w: *std.Io.Writer, fd: std.posix.fd_t, wait_ms: i32, some: bool) !void {
+        var waited_for_one = false;
         while (true) {
             if (r.bufferedLen() == 0) {
-                var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-                if ((try std.posix.poll(&fds, wait_ms)) == 0) return;
+                if (some and waited_for_one) {
+                    var now = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+                    if ((try std.posix.poll(&now, 0)) == 0) return;
+                } else {
+                    var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+                    if ((try std.posix.poll(&fds, wait_ms)) == 0) return;
+                }
             }
+            waited_for_one = true;
             const head = h2.Header.parse(try r.takeArray(h2.header_len));
             const payload = try r.take(head.len);
             switch (head.type) {
@@ -357,10 +378,10 @@ test "an upload faster than its handler is held to its window, stalls, and then 
             sent += n;
             wire.conn_window -= @intCast(n);
             wire.stream_window -= @intCast(n);
-        } else try wire.pump(&reader.interface, w, fd, 1_000);
+        } else try wire.pumpSome(&reader.interface, w, fd, 1_000);
         if (wire.reset_by_server) return error.Reset;
     }
-    while (!wire.finished) try wire.pump(&reader.interface, w, fd, 3_000);
+    while (!wire.finished) try wire.pumpSome(&reader.interface, w, fd, 3_000);
 
     try testing.expectEqual(@as(?u16, 200), wire.status);
     try testing.expectEqual(total, handler_took.load(.acquire));
@@ -953,4 +974,226 @@ test "a client with a window of one byte that answers each byte with two updates
     try testing.expect(away);
     try testing.expectEqual(@as(?u32, @intFromEnum(h2.ErrorCode.enhance_your_calm)), wire.goaway_code);
     try testing.expect(wire.seen[1].bytes < 1500);
+}
+
+// ---- an event stream handed to the connection (stage 6.3) ----
+
+const room_file = @import("room.zig");
+
+var live_room: ?*nilo.Room = null;
+var live_inside: std.atomic.Value(u32) = .init(0);
+var live_keepalive: std.atomic.Value(u32) = .init(0);
+
+/// The handler of a stream the rooms feed, counted going in and coming out.
+fn liveFeed(c: *nilo.Ctx) anyerror!void {
+    _ = live_inside.fetchAdd(1, .acq_rel);
+    defer _ = live_inside.fetchSub(1, .acq_rel);
+    return c.eventsFrom(live_room.?, .{ .keepalive_ms = live_keepalive.load(.acquire) });
+}
+
+fn resetFeed() void {
+    live_inside.store(0, .release);
+    live_keepalive.store(0, .release);
+}
+
+/// Bounded, as every wait here is.
+fn waitSeats(io: std.Io, room: *nilo.Room, want: usize) !void {
+    for (0..300) |_| {
+        if (room.count() == want) return;
+        std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.SeatsNeverSettled;
+}
+
+/// Posts `n` numbered lines, the second half only once `go` is set, so that a
+/// test can do something between the halves.
+const Poster = struct {
+    room: *nilo.Room,
+    n: usize,
+    go: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *Poster) void {
+        for (0..self.n) |i| {
+            if (i == self.n / 2) while (!self.go.load(.acquire)) bulkhead.sleep(1) catch return;
+            self.room.print("n {d}", .{i}) catch return;
+            bulkhead.sleep(1) catch return;
+        }
+    }
+};
+
+test "event streams handed to an HTTP/2 connection hear a room posted to from another thread, hold no handler, and leave when reset or when the connection ends" {
+    live.hush();
+    reset();
+    resetFeed();
+    var debug: std.heap.DebugAllocator(.{}) = .init;
+    const gpa = debug.allocator();
+    defer testing.expect(debug.deinit() == .ok) catch @panic("an event stream left memory behind");
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try live.SocketDir.init(std.heap.smp_allocator, "h2pipe-feed.sock");
+    defer where.deinit(std.heap.smp_allocator);
+
+    var room = try room_file.Room.initWith(gpa, .{ .seats = 8, .backlog = 256 });
+    defer room.deinit();
+    live_room = &room;
+    defer live_room = null;
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/feed", liveFeed);
+
+    var serving: live.Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, live.Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    try serving.waitUntilUp(io);
+
+    var stream = try live.connect(io, where.path);
+    var closed = false;
+    defer if (!closed) stream.close(io);
+    var out_buf: [4096]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    var in_buf: [32 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    const w = &writer.interface;
+    const fd = stream.socket.handle;
+
+    var wire = Wire.init(std.heap.smp_allocator);
+    defer wire.deinit();
+    wire.keep_body = false;
+    wire.autowindow = true;
+    try w.writeAll(h2.preface);
+    try h2.writeSettings(w, &.{});
+    try w.flush();
+    try wire.pump(&reader.interface, w, fd, 100);
+
+    try writeGet(w, 1, "/feed");
+    try writeGet(w, 3, "/feed");
+    try writeGet(w, 5, "/feed");
+    try w.flush();
+    try waitSeats(io, &room, 3);
+    // Three streams are open and no handler is running for any of them.
+    try wire.pump(&reader.interface, w, fd, 50);
+    try testing.expectEqual(@as(u32, 0), live_inside.load(.acquire));
+    try testing.expectEqual(@as(?u16, 200), wire.seen[1].status);
+
+    const posts = 150;
+    var poster: Poster = .{ .room = &room, .n = posts };
+    const posting = try std.Thread.spawn(.{}, Poster.run, .{&poster});
+    var expected: usize = 0;
+    var line: [32]u8 = undefined;
+    for (0..posts) |i| expected += (std.fmt.bufPrint(&line, "data: n {d}\n\n", .{i}) catch unreachable).len;
+
+    // Stream 3 is reset between the halves, while the others are being fed.
+    const until = bulkhead.monotonicNanos() + 20 * std.time.ns_per_s;
+    while (wire.seen[3].bytes == 0 and bulkhead.monotonicNanos() < until) try wire.pump(&reader.interface, w, fd, 20);
+    try h2.writeRstStream(w, 3, .cancel);
+    try w.flush();
+    try waitSeats(io, &room, 2);
+    poster.go.store(true, .release);
+    while ((wire.seen[1].bytes < expected or wire.seen[5].bytes < expected) and bulkhead.monotonicNanos() < until)
+        try wire.pump(&reader.interface, w, fd, 20);
+    posting.join();
+    try testing.expectEqual(expected, wire.seen[1].bytes);
+    try testing.expectEqual(expected, wire.seen[5].bytes);
+    try testing.expect(wire.seen[3].bytes < expected);
+    try waitSeats(io, &room, 2);
+    try testing.expectEqual(@as(u32, 0), live_inside.load(.acquire));
+
+    // The connection ends under the two that are left.
+    stream.close(io);
+    closed = true;
+    try waitSeats(io, &room, 0);
+    // A room that speaks to nobody.
+    try room.sayText("after");
+}
+
+test "an event stream handed to an HTTP/2 connection is sent comments while it is quiet, hears a post after its pages went back, and is ended when the server stops" {
+    live.hush();
+    reset();
+    resetFeed();
+    live_keepalive.store(1000, .release);
+    var debug: std.heap.DebugAllocator(.{}) = .init;
+    const gpa = debug.allocator();
+    defer testing.expect(debug.deinit() == .ok) catch @panic("an event stream left memory behind");
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try live.SocketDir.init(std.heap.smp_allocator, "h2pipe-quiet.sock");
+    defer where.deinit(std.heap.smp_allocator);
+
+    var room = try room_file.Room.initWith(gpa, .{ .seats = 4 });
+    defer room.deinit();
+    live_room = &room;
+    defer live_room = null;
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/feed", liveFeed);
+
+    var serving: live.Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, live.Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    try serving.waitUntilUp(io);
+
+    var stream = try live.connect(io, where.path);
+    defer stream.close(io);
+    var out_buf: [4096]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    var in_buf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    const w = &writer.interface;
+    const fd = stream.socket.handle;
+
+    var wire = Wire.init(std.heap.smp_allocator);
+    defer wire.deinit();
+    wire.keep_body = false;
+    wire.autowindow = true;
+    try w.writeAll(h2.preface);
+    try h2.writeSettings(w, &.{});
+    try w.flush();
+    try wire.pump(&reader.interface, w, fd, 100);
+
+    try writeGet(w, 1, "/feed");
+    try w.flush();
+    try waitSeats(io, &room, 1);
+
+    // Quiet for longer than the connection's peek, so its pages went back, and
+    // shorter than the keep-alive: nothing has been said.
+    try wire.pump(&reader.interface, w, fd, 450);
+    try testing.expectEqual(@as(usize, 0), wire.seen[1].bytes);
+    try room.sayText("after");
+    const posted = bulkhead.monotonicNanos();
+    while (wire.seen[1].bytes < "data: after\n\n".len and bulkhead.monotonicNanos() < posted + 400 * std.time.ns_per_ms)
+        try wire.pump(&reader.interface, w, fd, 50);
+    try testing.expectEqual("data: after\n\n".len, wire.seen[1].bytes);
+
+    // A comment a stretch after that, and another.
+    const quiet_until = bulkhead.monotonicNanos() + 2600 * std.time.ns_per_ms;
+    while (bulkhead.monotonicNanos() < quiet_until) try wire.pump(&reader.interface, w, fd, 100);
+    const comments = (wire.seen[1].bytes - "data: after\n\n".len) / ":\n\n".len;
+    try testing.expect(comments >= 2 and comments <= 3);
+
+    // The server stops: the stream is ended and the seat goes.
+    app.shutdown();
+    var ended = false;
+    for (0..60) |_| {
+        wire.pump(&reader.interface, w, fd, 100) catch |err| switch (err) {
+            error.SentAway, error.EndOfStream => {},
+            else => return err,
+        };
+        if (wire.seen[1].ended_at != 0) {
+            ended = true;
+            break;
+        }
+    }
+    try testing.expect(ended);
+    try testing.expectEqual(@as(?u32, @intFromEnum(h2.ErrorCode.no_error)), wire.goaway_code);
+    try waitSeats(io, &room, 0);
 }

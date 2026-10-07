@@ -2461,6 +2461,17 @@ pub fn yield() void {
     zio.yield() catch {};
 }
 
+/// Writes and waits made between `beginShield` and `endShield` are not
+/// cancelled: how a connection that was cancelled at shutdown still says what
+/// it owes its peer, once, before it goes (ADR 260). Outside a fiber, nothing.
+pub fn beginShield() void {
+    zio.beginShield();
+}
+
+pub fn endShield() void {
+    zio.endShield();
+}
+
 /// Wait, without stopping the thread. `error.Canceled` if the request was
 /// cancelled while waiting — the same failure `Mutex.lock` has, and it maps
 /// to a 503 already.

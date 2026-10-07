@@ -141,6 +141,10 @@ pub const Outbox = struct {
     ending: bool = false,
     trailers: []const u8 = "",
 
+    /// The call returned leaving the body to the connection: an event stream
+    /// whose events the rooms post (ADR 227). Not an abandoned answer.
+    handed: bool = false,
+
     // Connection to call.
     /// The end of the stream is written.
     done: bool = false,
@@ -312,6 +316,14 @@ pub const Outbox = struct {
         self.wakeLocked();
     }
 
+    /// The body is the connection's from here, and the call may return
+    /// without ending it.
+    pub fn handedOver(self: *Outbox) void {
+        self.link.monitor.enter();
+        defer self.link.monitor.leave();
+        self.handed = true;
+    }
+
     /// Whether the call has begun an answer through this pipe.
     pub fn started(self: *Outbox) bool {
         self.link.monitor.enter();
@@ -324,7 +336,7 @@ pub const Outbox = struct {
     pub fn abandoned(self: *Outbox) bool {
         self.link.monitor.enter();
         defer self.link.monitor.leave();
-        return !self.pending and !self.ending and !self.done and self.failure == null;
+        return !self.pending and !self.ending and !self.done and !self.handed and self.failure == null;
     }
 
     pub fn isDone(self: *Outbox) bool {

@@ -12,7 +12,7 @@ A WebSocket had already solved both halves. [ADR 035](./035-a-broadcast-rings-a-
 
 ## Decision
 
-**`return c.eventsFrom(rooms, .{})` sits an event stream in one Room or a tuple of them, writes the head, and hands the stream to the connection loop, which writes every post as an event until the client goes or the server stops.**
+**`return c.eventsFrom(rooms, .{})` sits an event stream in one Room or a tuple of them, writes the head, and hands the stream to the connection loop, which (on HTTP/2, the connection's own fiber, ADR 260) writes every post as an event until the client goes or the server stops.**
 
 ```zig
 fn feed(c: *nilo.Ctx, lobby: *nilo.Room) !void {
@@ -43,6 +43,10 @@ The handover slot lives on the connection loop's frame, which [ADR 062](./062-wh
 
 The stream's `run` travels in the slot as a pointer, the way a Socket's loop does. The connection loop names every variant, so calling `run` directly linked the stream's loop and the Room behind it into every server: **+6,720 bytes** on `hello`, which has no room and no stream. Through the pointer, only a program that calls `eventsFrom` references it.
 
+## On HTTP/2 the connection's fiber is the writer
+
+A multiplexed connection has no reader and writer to give one stream for the rest of its life, so on HTTP/2 the stream gives the connection a bell and a step instead (`Http2Events`, ADR 260). The Rooms ring the connection, which writes each post as `DATA` under both windows in turn with its other streams; the handler has returned, so the stream holds no fiber, and its cost is the `Stream` and the pipe's state, 6.2 KB at 10,000 against 19.6 KB parked ([the run](../../bench/result/http.md#what-an-event-stream-handed-to-the-http2-connection-costs)). Heartbeats, history, `Last-Event-ID`, the room limits and leaving every Room are the same code: The walk over a stream's seats is `deliverSeats` for HTTP/2, and HTTP/1.1's `RoomEvents.deliver` is the same walk written out beside it (through a sink it cost every program that calls `eventsFrom` 16 bytes, ADR 017); the wait is only HTTP/1.1's loop. The connection reaches the stream through function pointers here too, so a program without `eventsFrom` links none of it.
+
 ## What was rejected
 
 - **A seat for `c.events()`**, the stream kept by its handler and woken by the room: it needs no handover and costs 21,566 bytes a connection, four times what the same feed costs handed over, and it keeps whatever stack the handler touched.
@@ -51,6 +55,7 @@ The stream's `run` travels in the slot as a pointer, the way a Socket's loop doe
 - **Framing a binary post as `data:` lines**, or base64: a stream would receive bytes nobody sent as text. Counting it as missed says what happened.
 - **An optional union for the handover**, above: a tag and its padding on every connection's loop frame.
 - **A direct call to the stream's `run`**, above: 6.7 KB on every server that never streams.
+- **Refusing `eventsFrom` on HTTP/2**, as stage 5.3 did: a browser offered HTTP/2 (ADR 259) would have been refused the one stream shape a browser opens most.
 
 ## What it costs
 

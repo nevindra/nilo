@@ -29,6 +29,7 @@ What is left is designed whole in [ADR 259](./adr/259-http2-is-a-framing-of-ever
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Priorities on HTTP/2 are ignored.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A Connect client's `Connect-Timeout-Ms` is not read.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A Connect GET is a 405.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A handed-over event stream on HTTP/2 weighs 6.2 KB or 12 KB at 10,000 streams, depending on how fast they were opened.
 
 <!-- /gathered -->
 

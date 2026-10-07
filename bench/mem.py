@@ -20,6 +20,8 @@ compounds does not, and no total will say which you have.
     python3 bench/mem.py --port 50051 --path /pkg.Service/Method --grpc
     python3 bench/mem.py --port 8787 --h2                  # HTTP/2, nothing in flight
     python3 bench/mem.py --port 8787 --h2 --get --path /health   # ... after one GET (ADR 259)
+    python3 bench/mem.py --port 8790 --h2 --streams-per-conn 100 --path /events/room --steps 1000,10000
+                                                           # held-open streams, counted a stream (ADR 260)
 
 The server is found by port rather than named, so this works against any of
 them — `nilo-hello`, `nilo-bench-sql-server`, `nilo-bench-fetch-server`, or
@@ -111,7 +113,7 @@ def open_grpc(host, port, path, timeout):
             return s
 
 
-def open_h2(host, port, path, timeout, get):
+def open_h2(host, port, path, timeout, get, streams=0):
     """One HTTP/2 connection on a plain port (ADR 259): the preface and the
     SETTINGS exchange both ways, so the connection is HTTP/2 and has said
     everything a client says before its first request. With `get`, one GET at
@@ -153,6 +155,28 @@ def open_h2(host, port, path, timeout, get):
             s.sendall(frame(0x4, 0x1, 0))
         elif kind == 0x7:
             raise SystemExit("the server sent GOAWAY")
+    if streams:
+        # One request each on `streams` streams, whose answers are heads with
+        # no end: a handed-over event stream sends its head and goes quiet.
+        # Only the first block carries the size update to 0.
+        for i in range(streams):
+            block = (
+                (b"\x20" if i == 0 else b"")
+                + b"\x82\x86"
+                + literal(":path", path)
+                + literal(":authority", host)
+            )
+            s.sendall(frame(0x1, 0x5, 2 * i + 1, block))
+        heads = 0
+        while heads < streams:
+            kind, flags = next_frame()
+            if kind == 0x7:
+                raise SystemExit("the server sent GOAWAY")
+            if kind == 0x3:
+                raise SystemExit("the server reset a stream")
+            if kind == 0x1:
+                heads += 1
+        return s
     if not get:
         return s
 
@@ -275,6 +299,13 @@ def main():
         help="with --h2, make one GET at --path on each connection before it is left idle",
     )
     p.add_argument(
+        "--streams-per-conn",
+        type=int,
+        default=0,
+        help="with --h2, open this many streams on each connection and count streams, not "
+        "connections, in --steps: what a held-open stream costs (ADR 260)",
+    )
+    p.add_argument(
         "--tls",
         action="store_true",
         help="connect through TLS 1.3, against `zig build bench-tls-server -Dtls`",
@@ -299,18 +330,20 @@ def main():
     held = []
     try:
         for want in steps:
-            while len(held) < want:
+            per_conn = args.streams_per_conn if args.h2 else 0
+            while len(held) * max(per_conn, 1) < want:
                 held.append(
                     open_grpc(args.host, args.port, args.path, args.timeout)
                     if args.grpc
-                    else open_h2(args.host, args.port, args.path, args.timeout, args.get)
+                    else open_h2(args.host, args.port, args.path, args.timeout, args.get, per_conn)
                     if args.h2
                     else open_one(args.host, args.port, args.path, args.timeout, args.hold, tls_ctx)
                 )
             time.sleep(args.settle)
             now = rss_kb(pid)
-            per = (now - base) * 1024 / len(held)
-            print(f"{len(held):>12} {str(now) + ' kB':>12} {per:>13.0f} B")
+            units = len(held) * max(per_conn, 1)
+            per = (now - base) * 1024 / units
+            print(f"{units:>12} {str(now) + ' kB':>12} {per:>13.0f} B")
     except OSError as e:
         print(f"stopped at {len(held)} connections: {e}", file=sys.stderr)
     finally:
