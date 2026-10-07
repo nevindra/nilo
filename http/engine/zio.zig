@@ -334,7 +334,7 @@ const Accepting = struct {
     /// of how the acceptor tells them apart.
     secured: ?*Secured = null,
     /// Set on a listener that speaks gRPC (ADR 220). Read only in a build
-    /// with `-Dgrpc`; every other build refuses the listener before this
+    /// with `-Dhttp2`; every other build refuses the listener before this
     /// exists.
     grpc: bool = false,
     /// This listener's place in the list `listen()` was given: 0 for the
@@ -1045,8 +1045,8 @@ const GrpcRefusal = enum {
     fn say(self: GrpcRefusal, address: []const u8) void {
         switch (self) {
             .not_built => std.log.err(
-                "the listener on \"{s}\" sets `.grpc`, and this build has no gRPC in it. Pass " ++
-                    "`.grpc = true` to `b.dependency(\"nilo\", …)` in build.zig (`-Dgrpc` in " ++
+                "the listener on \"{s}\" sets `.grpc`, and this build has no HTTP/2 in it. Pass " ++
+                    "`.http2 = true` to `b.dependency(\"nilo\", …)` in build.zig (`-Dhttp2` in " ++
                     "this repository), or drop `.grpc` from the listener (ADR 220).",
                 .{address},
             ),
@@ -1604,7 +1604,7 @@ pub fn serve(
             refusal.say(want.address);
             return refusal.toError();
         }
-        if (grpcRefusal(nilo_build.grpc, want.grpc)) |refusal| {
+        if (grpcRefusal(nilo_build.http2, want.grpc)) |refusal| {
             refusal.say(want.address);
             return refusal.toError();
         }
@@ -1841,7 +1841,7 @@ pub fn serve(
         /// The plain entry, and the gRPC one (ADR 220): one body, two
         /// handlers. A comptime parameter rather than a branch, so `run` is
         /// the function it was to the byte and a gRPC listener's fiber is a
-        /// copy of it that calls something else. Only `-Dgrpc` analyses the
+        /// copy of it that calls something else. Only `-Dhttp2` analyses the
         /// second.
         const run = Entry(handler).run;
         const runGrpc = Entry(grpc_handler).run;
@@ -2233,11 +2233,11 @@ pub fn serve(
                 // Two entries and one argument list, for the reason on
                 // `Conn.runTls`. `nilo_build.tls` first so that a build
                 // without TLS has no reference to `runTls` to analyse.
-                const spawned = if (nilo_build.tls and nilo_build.grpc and sh.secured != null and sh.grpc)
+                const spawned = if (nilo_build.tls and nilo_build.http2 and sh.secured != null and sh.grpc)
                     connections.spawn(Conn.runTlsGrpc, .{ st, stream, conn_gpa, sizes, sh })
                 else if (nilo_build.tls and sh.secured != null)
                     connections.spawn(Conn.runTls, .{ st, stream, conn_gpa, sizes, sh })
-                else if (nilo_build.grpc and sh.grpc)
+                else if (nilo_build.http2 and sh.grpc)
                     connections.spawn(Conn.runGrpc, .{ st, stream, conn_gpa, sizes, sh })
                 else
                     connections.spawn(Conn.run, .{ st, stream, conn_gpa, sizes, sh });

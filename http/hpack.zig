@@ -571,6 +571,18 @@ pub fn writeLiteral(w: *std.Io.Writer, name: []const u8, value: []const u8) std.
     try w.writeAll(value);
 }
 
+/// A header list as one block: `:status 200` from the static table, every
+/// other field as `writeLiteral` writes it.
+pub fn encodeBlock(a: std.mem.Allocator, fields: []const Field) ![]const u8 {
+    var w: std.Io.Writer.Allocating = try .initCapacity(a, 64);
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.name, ":status") and std.mem.eql(u8, f.value, "200")) {
+            try writeIndexed(&w.writer, 8);
+        } else try writeLiteral(&w.writer, f.name, f.value);
+    }
+    return w.written();
+}
+
 const testing = std.testing;
 
 fn hex(comptime text: []const u8) [text.len / 2]u8 {

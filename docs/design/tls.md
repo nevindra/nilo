@@ -9,7 +9,7 @@ The code is the Engine's TLS connection loop (the only file allowed to name the 
 ## Overview
 
 ```
-                default build: no -Dtls, no -Dgrpc
+                default build: no -Dtls, no -Dhttp2
 internet ──► proxy (Caddy, ALB, Cloudflare) ──► nilo, plaintext HTTP/1.1
                                                  (ADR 027: still the recommendation)
 
@@ -18,7 +18,7 @@ client ──TLS 1.3 handshake──► nilo's listener
              │  record layer, state machine        ── on the executor
              └─ signature over the transcript       ── hopped to the blocking pool,
                                                         fiber parked (ADR 217)
-          h2c or ALPN "h2" ──► a -Dgrpc listener, beside or instead (ADR 220, topic grpc)
+          h2c or ALPN "h2" ──► a -Dhttp2 listener, beside or instead (ADR 220, topic grpc)
 ```
 
 ## Rules
@@ -45,7 +45,7 @@ client ──TLS 1.3 handshake──► nilo's listener
 | [212](../adr/212-tls-is-an-option-a-build-asks-for.md) | TLS 1.3 as a listener option behind `-Dtls`, the key and certificate check, and what it costs builds with and without it |
 | [217](../adr/217-a-handshakes-signature-is-computed-off-the-executor.md) | The handshake's signature runs on the blocking pool, off the executor, so it does not stall every other connection on the same thread |
 
-Related topics: [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md) (topic grpc, no page of its own) is the one exception to "no TLS, no HTTP/2": gRPC runs over h2c or over TLS with ALPN `h2`, needs neither, and has its own listener behind `-Dgrpc`. The Engine, and the rule that only it may name a dependency, are in [`engine.md`](./engine.md) (ADR 001). The four trade-off axes every cost above is measured against are [ADR 017](../adr/017-the-trade-budget-has-four-axes.md) (topic principles, no page). The per-idle-connection minimum that a `-Dtls` build's extra page is added to is in [`memory.md`](./memory.md) (ADR 062).
+Related topics: [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md) (topic grpc, no page of its own) is the one exception to "no TLS, no HTTP/2": gRPC runs over h2c or over TLS with ALPN `h2`, needs neither, and has its own listener behind `-Dhttp2`. The Engine, and the rule that only it may name a dependency, are in [`engine.md`](./engine.md) (ADR 001). The four trade-off axes every cost above is measured against are [ADR 017](../adr/017-the-trade-budget-has-four-axes.md) (topic principles, no page). The per-idle-connection minimum that a `-Dtls` build's extra page is added to is in [`memory.md`](./memory.md) (ADR 062).
 
 ## Open questions
 

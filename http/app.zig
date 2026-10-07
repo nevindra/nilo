@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
-const grpc = @import("grpc.zig");
+const h2conn = @import("h2conn.zig");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const ctx_mod = @import("ctx.zig");
@@ -1708,7 +1708,7 @@ pub const App = struct {
     /// would run it, and does not matter to anything that calls this.
     /// What a listener with `.grpc = true` runs for each connection, in place
     /// of `serve.handleConnection` (ADR 220). Reached only by an Engine
-    /// built with `-Dgrpc`, so a build without it analyses none of `grpc.zig`.
+    /// built with `-Dhttp2`, so a build without it analyses none of `h2conn.zig`.
     fn serveGrpc(
         self: *App,
         in: *std.Io.Reader,
@@ -1717,19 +1717,19 @@ pub const App = struct {
         waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) void {
-        grpc.serveConnection(self.grpcHost(), in, out, deadlines, waker, peer);
+        h2conn.serveConnection(self.grpcHost(), in, out, deadlines, waker, peer);
     }
 
-    /// The App as a gRPC connection sees it (ADR 220). `grpc.zig` is outside
+    /// The App as an HTTP/2 connection sees it (ADR 220). `h2conn.zig` is outside
     /// this core and cannot name `App`, so it is handed the few things it
     /// uses instead: the router's answer to one path, and `serve.serveRequest`.
-    pub fn grpcHost(self: *App) grpc.Host {
+    pub fn grpcHost(self: *App) h2conn.Host {
         // A call is collected into a `framing.Collected`, which a build
-        // without `-Dgrpc` does not have: the arm is `noreturn` there, so
+        // without `-Dhttp2` does not have: the arm is `noreturn` there, so
         // reaching it would be undefined behaviour in ReleaseFast. A compile
         // error says so instead (ADR 220).
-        if (comptime !framing_mod.grpc_built) @compileError(
-            "nilo: the App answers gRPC only in a build with `.grpc = true` (`-Dgrpc`).",
+        if (comptime !framing_mod.http2_built) @compileError(
+            "nilo: the App answers gRPC only in a build with `.http2 = true` (`-Dhttp2`).",
         );
         const Adapter = struct {
             fn routes(ptr: *anyopaque, path: []const u8) bool {

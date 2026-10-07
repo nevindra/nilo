@@ -3,7 +3,7 @@
 //! A **tool module**, the sixth: pure functions over bytes, no event loop, and
 //! it imports nothing, which is why `zig test proto/proto.zig` runs the whole
 //! of it (ADR 038, ADR 039). It is the codec ADR 220 said a caller brings:
-//! gRPC's transport is `http/grpc.zig`, and the message inside a call is this.
+//! gRPC's transport is `http/h2conn.zig`, and the message inside a call is this.
 //!
 //! **Your types are the contract, and the compiler is the check.** A message
 //! is a struct that declares its field numbers next to its fields:

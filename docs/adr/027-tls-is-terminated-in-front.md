@@ -4,7 +4,7 @@
 (TLS 1.3 is a listener option in a build that asked for it with `-Dtls`; the
 default build contains none of it, and the recommendation below stands for a
 server with a proxy in front), and by [ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md)
-(gRPC is served over h2c in a build that asked for it with `-Dgrpc`, because
+(gRPC is served over h2c in a build that asked for it with `-Dhttp2`, because
 it never needed TLS; HTTP/2 for browsers stays refused)
 **Topic:** [tls](../design/tls.md)
 

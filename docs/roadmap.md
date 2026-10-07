@@ -14,7 +14,7 @@ Where nilo is heading: a few directions, each larger than one change, each sayin
 
 **HTTP/1.1 and HTTP/2 become two framings of one request, and gRPC and Connect become envelopes over it, so one typed function can be a JSON route, a protobuf route and a gRPC method at once.** The seam is built: an answer is handed to the framing that carried its request, and an HTTP/2 call enters the App as what was read rather than as HTTP/1.1 text ([ADR 253](./adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)). A typed function now reads a protobuf message and answers one in the spelling it was asked in, JSON or protobuf, a gRPC call included ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), a Connect client that calls it is told a failure as the code it reads ([ADR 257](./adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)), and a struct of such functions is a service served at the paths its `.proto` gives ([ADR 258](./adr/258-a-struct-of-typed-functions-is-an-rpc-service.md)). What it was built for is not yet: one request and one answer still has no room for HTTP/2 on an ordinary route.
 
-What is left, in the order it has to be built, is laid out stage by stage on [the framing page](./design/framing.md#how-the-direction-is-built): one port that answers both HTTP/1.1 and h2c, and HTTP/2 for ordinary routes over TLS with ALPN, which closes the gap [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) opened: a listener may face the internet with no proxy in front, and a browser reaching it gets HTTP/1.1 only. It revises [ADR 027](./adr/027-tls-is-terminated-in-front.md) (HTTP/2 for browsers) in place.
+What is left is designed whole in [ADR 259](./adr/259-http2-is-a-framing-of-every-request.md) and [ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md) and laid out stage by stage on [the framing page](./design/framing.md#how-the-direction-is-built): HTTP/2 carrying every request on the port HTTP/1.1 is on, told apart by its first bytes; a request on HTTP/2 running from its headers, its body and its answer pipes under the client's windows, so a stream, a file, an upload and an event stream work on it as on HTTP/1.1; and then, only then, `h2` offered to a browser by ALPN on a `-Dtls` listener, which closes the gap [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) opened and revises [ADR 027](./adr/027-tls-is-terminated-in-front.md) in place. A session that pushes the numbers further follows it, with its list in the todo entries below.
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
@@ -22,9 +22,12 @@ What is left, in the order it has to be built, is laid out stage by stage on [th
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Ctx.header` reads the head again for every name it is asked, about 40 ns a time inside a request.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · Whether a gRPC listener should keep an HPACK table, to stop decoding the same strings every call.
-- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Ctx.connection()` returns `http1.Connection`.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Ctx.connection()` returns `http1.Connection`, and ADR 259 removes it.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · One port cannot speak both HTTP/1.1 and h2c.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A gRPC listener has no health service, and the guide does not say how to write one.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Every request on HTTP/2 spawns a fiber, where HTTP/1.1 runs it on the connection's.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A file on HTTP/2 over plain TCP has no `sendfile`.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Priorities on HTTP/2 are ignored.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A Connect client's `Connect-Timeout-Ms` is not read.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A Connect GET is a 405.
 
@@ -76,7 +79,7 @@ Independent of the order: each touches files no stage of the direction above doe
 
 **A WebSocket, an event stream, a gRPC stream, a streamed upload and a compressed stream become one kind of handler: one that reads and writes in pieces, on a fiber that lives as long as the stream.** Each exists today in its own form or not at all: a WebSocket is a handler that does not return ([ADR 021](./adr/021-a-websocket-is-a-handler-that-does-not-return.md)), an event stream is written by hand, a gRPC call carries exactly one message, a multipart body is read whole, and a stream is never compressed. They share the one cost that matters, a fiber and its stack for the life of the stream ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)), so they should share the one shape that names it.
 
-It depends on the direction under **Now**: a response that the framing writes in pieces, with trailers at the end, is what lets a gRPC server stream exist at all.
+It depends on the direction under **Now**: the two pipes of [ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md), a body read and an answer written in pieces under the client's windows, are what a gRPC stream is carried on, and what this direction adds is the shape a handler writes one in.
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 

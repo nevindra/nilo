@@ -3453,10 +3453,10 @@ fn s3For(
 /// `wireOptions` below, which every instance of the http module goes through.
 var want_tls: bool = false;
 var in_repo: bool = false;
-/// `-Dgrpc` (ADR 220). No dependency behind it, unlike `-Dtls`: what it
-/// keeps out of a build that did not ask is the code, the binary size ADR 017
-/// counts, rather than a fetch.
-var want_grpc: bool = false;
+/// `-Dhttp2` (ADR 259, ADR 220). No dependency behind it, unlike `-Dtls`: what
+/// it keeps out of a build that did not ask is the code, the binary size ADR
+/// 017 counts, rather than a fetch.
+var want_http2: bool = false;
 
 /// `-Dlibdeflate` (ADR 248): gzip through libdeflate rather than
 /// `std.flate`, for a response and for a static file gzipped at load.
@@ -3480,12 +3480,12 @@ var want_libdeflate: bool = false;
 /// http test root, which links the library whatever the flag says so that
 /// `compress.zig`'s tests hold both backends in one run, while the App
 /// under test keeps the backend a dependent gets by default.
-fn wireOptions(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, mode: std.builtin.OptimizeMode, on: bool, grpc: bool, link_libdeflate: bool) void {
+fn wireOptions(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, mode: std.builtin.OptimizeMode, on: bool, http2: bool, link_libdeflate: bool) void {
     const opts = b.addOptions();
     opts.addOption(bool, "tls", on);
-    // gRPC rides the same options module. It has no library to fetch, so
-    // there is nothing to wire beyond the flag (ADR 220).
-    opts.addOption(bool, "grpc", grpc);
+    // HTTP/2 rides the same options module, and gRPC rides HTTP/2. It has no
+    // library to fetch, so there is nothing to wire beyond the flag (ADR 259).
+    opts.addOption(bool, "http2", http2);
     const linked = link_libdeflate or want_libdeflate;
     opts.addOption(bool, "libdeflate", want_libdeflate);
     opts.addOption(bool, "libdeflate_linked", linked);
@@ -3621,7 +3621,7 @@ fn httpFor(
             .{ .name = "nilo_pw", .module = pwFor(b, target, mode) },
         },
     });
-    wireOptions(b, module, target, mode, want_tls, want_grpc, false);
+    wireOptions(b, module, target, mode, want_tls, want_http2, false);
     return module;
 }
 
@@ -5022,11 +5022,19 @@ pub fn build(b: *std.Build) void {
         "Build the TLS listener into nilo_http and fetch the library it needs (ADR 212). Off until a dependent passes `.tls = true`",
     ) orelse false;
     in_repo = b.pkg_hash.len == 0;
-    want_grpc = b.option(
+    want_http2 = b.option(
         bool,
-        "grpc",
-        "Build the gRPC listener into nilo_http: unary calls over h2c (ADR 220). Off until a dependent passes `.grpc = true`",
+        "http2",
+        "Build HTTP/2 into nilo_http, which gRPC rides (ADR 259, ADR 220). Off until a dependent passes `.http2 = true`",
     ) orelse false;
+    // The flag's old name is declared only to be refused: an undeclared
+    // option is reported at the end of configuration as "invalid option",
+    // which says nothing about what to pass instead.
+    if (b.option(bool, "grpc", "Renamed: pass `-Dhttp2` (ADR 259)") != null) std.process.fatal(
+        "nilo: `-Dgrpc` is `-Dhttp2` now: HTTP/2 serves every request and gRPC rides it (ADR 259). " ++
+            "Pass `.http2 = true` to `b.dependency(\"nilo\", …)`.",
+        .{},
+    );
     // Whether gzip is libdeflate's (ADR 248). Off until asked, the way TLS
     // is: the C is fetched and compiled only behind this flag, and a build
     // without it gzips with `std.flate` exactly as before. What is always
@@ -5195,7 +5203,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "nilo_pw", .module = nilo_pw },
         },
     });
-    wireOptions(b, nilo_http, target, optimize, want_tls, want_grpc, false);
+    wireOptions(b, nilo_http, target, optimize, want_tls, want_http2, false);
 
     // The SQL module: a second module beside the library rather than inside
     // it (ADR 036). It lives in `sql/` rather than under `src/` so that the
@@ -5288,7 +5296,7 @@ pub fn build(b: *std.Build) void {
     // The App's files ask `nilo_build` which deflate to gzip with and
     // whether gRPC is in (ADR 248, ADR 220), so the profile is wired the way
     // every other instance of them is.
-    wireOptions(b, profile.root_module, target, .ReleaseFast, want_tls, want_grpc, false);
+    wireOptions(b, profile.root_module, target, .ReleaseFast, want_tls, want_http2, false);
     const run_profile = b.addRunArtifact(profile);
     // `zig build profile -- --routes <file>` times matching on a route table
     // of the caller's, one `METHOD /pattern` a line.
@@ -5975,7 +5983,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "nilo_fetch", .module = fetchFor(b, target, .ReleaseFast, bench_core) },
         },
     });
-    wireOptions(b, bench_http, target, .ReleaseFast, want_tls, want_grpc, false);
+    wireOptions(b, bench_http, target, .ReleaseFast, want_tls, want_http2, false);
     const bench_nilo_sql = b.createModule(.{
         .root_source_file = b.path("sql/sql.zig"),
         .target = target,
@@ -6473,7 +6481,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_fetch", .module = fetchFor(b, target, mode, core_mod) },
             },
         });
-        wireOptions(b, framework, target, mode, want_tls, want_grpc, false);
+        wireOptions(b, framework, target, mode, want_tls, want_http2, false);
 
         // The test build is the one place this module names an App, and it
         // gets both: `nilo_core` for the module itself, `nilo` for the tests
@@ -6626,7 +6634,7 @@ pub fn build(b: *std.Build) void {
         // feature that is not tested (ADR 032). In-repo only: a dependent
         // running its own tests against nilo is not made to fetch the
         // library for a listener it never asked for.
-        wireOptions(b, lib_tests, target, mode, want_tls or in_repo, want_grpc or in_repo, in_repo);
+        wireOptions(b, lib_tests, target, mode, want_tls or in_repo, want_http2 or in_repo, in_repo);
 
         const library = b.createModule(.{
             .root_source_file = b.path("http/http.zig"),
@@ -6640,7 +6648,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_pw", .module = pw_mod },
             },
         });
-        wireOptions(b, library, target, mode, want_tls, want_grpc, false);
+        wireOptions(b, library, target, mode, want_tls, want_http2, false);
 
         const bench_tests = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
@@ -6721,10 +6729,10 @@ pub fn build(b: *std.Build) void {
         refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
         refusals_step.dependOn(&refused.step);
     }
-    // One refusal holds only in a build without `-Dgrpc`, because with the
+    // One refusal holds only in a build without `-Dhttp2`, because with the
     // flag the same program is correct: asking the App for gRPC where there
     // is no framing to collect a call into (ADR 220).
-    if (!want_grpc) {
+    if (!want_http2) {
         const module = b.createModule(.{
             .root_source_file = b.path("refusals/grpc_without_the_build_flag.zig"),
             .target = target,
@@ -6732,7 +6740,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
         });
         const refused = b.addObject(.{ .name = "grpc_without_the_build_flag", .root_module = module });
-        refused.expect_errors = .{ .contains = "error: nilo: the App answers gRPC only in a build with `.grpc = true` (`-Dgrpc`)." };
+        refused.expect_errors = .{ .contains = "error: nilo: the App answers gRPC only in a build with `.http2 = true` (`-Dhttp2`)." };
         refusals_step.dependOn(&refused.step);
     }
     test_step.dependOn(refusals_step);

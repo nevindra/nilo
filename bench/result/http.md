@@ -3694,3 +3694,22 @@ A program with a message route pays Connect's own code on top, by symbol in `nil
 
 **The decision it moved:** the choice is a pointer the first message route sets, handed the head and the error, and in ADR 017's running total at +96 bytes. **Can it be pushed further:** to zero only by knowing while compiling that an App has no message route, which an App registered at run time does not.
 
+
+## What splitting the HTTP/2 connection from the gRPC envelope costs
+
+**Question.** `grpc.zig` became `h2conn.zig`, the connection, and `grpc.zig`, the envelope, and the flag `-Dgrpc` became `-Dhttp2` ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md), stage 5.1 of [framing](../../docs/design/framing.md)). No behaviour changed, so the plan held it to the `-Dgrpc` build's size within the names.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped for sizes and unstripped for `nm -S`. Before is `8c64019` from `git archive` built with `-Dgrpc=true`; after is the working tree built with `-Dhttp2=true`, the same afternoon.
+
+**Size**, stripped:
+
+| program | build | before | after | |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 (`cmp` equal) |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 (`cmp` equal) |
+| `example-hello` | flag | 1,103,352 | 1,103,960 | +608 |
+| `example-rest` | flag | 1,292,744 | 1,293,336 | +592 |
+
+**It missed the plan's bar, by code and not names.** By `nm -S` the envelope's rules handed back as values cost what the connection used to do in place: `runCall` +172 (the answer returned as a `grpc.Reply` and copied onto the stream), `grpc.envelope` 232 against 107 that left `Conn.dispatch`, and `grpc.untilNs` 360 where `timeoutNanos` was 346. A one-line `refuse` helper was a function of 161 bytes of its own until it was made `inline`, which took the first measurement of +864 and +848 to the figures above.
+
+**The decision it moved:** none; the split ships at this cost, because it lives only in a build that asked for HTTP/2 and stage 5.2 rewrites `Conn.dispatch` for every request. **Can it be pushed further:** yes, by writing the reply straight onto the stream; stage 5.2's own size measurement is taken against `8c64019` so the two are read together.

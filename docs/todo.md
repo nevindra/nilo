@@ -375,9 +375,9 @@ Nothing is open at this tier.
 
 **Needs:** two named signals rather than one flag — "the client half-closed and is waiting" and "the socket is gone". What is already real is a write that fails, and a handler sees that today.
 
-**`Ctx.connection()` returns `http1.Connection`.** It is public ([reference](./reference/ctx.md)) and names an HTTP/1.1 header, which means nothing on HTTP/2; `keepAlive()` says the same thing in neutral words. Leaving it is harmless until HTTP/2 serves ordinary routes, and removing it is a break.
+**`Ctx.connection()` returns `http1.Connection`, and ADR 259 removes it.** It is public ([reference](./reference/ctx.md)) and names an HTTP/1.1 header, which means nothing on HTTP/2; `keepAlive()` says the same thing in neutral words. Nothing in the tree calls it.
 
-**Needs:** a decision to drop it from the public surface, or to keep it documented as HTTP/1.1's, before stage 5 of [the framing page](./design/framing.md#how-the-direction-is-built).
+**Needs:** stage 5.3 of [the framing page](./design/framing.md#how-the-direction-is-built), which removes it with a `CHANGELOG.md` entry.
 
 **Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
@@ -736,6 +736,24 @@ Nothing is open at this tier.
 **Needs:** the same repository, `record.zig`. Last checked at `e04ae44`.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
+**Every request on HTTP/2 spawns a fiber, where HTTP/1.1 runs it on the connection's.** A unary gRPC call is 767 to 773 ns in process against a routed HTTP/1.1 `GET`'s 410, and part of the gap is the spawn; once every request can arrive on HTTP/2 ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)), a browser's small `GET`s pay it too. A finished call's fiber taking the connection's next stream, rather than ending, would pay the spawn once per burst.
+
+**What would settle it:** stage 5.3's `GET` over HTTP/2 against HTTP/1.1 in `zig build profile`, with the spawn's share of it, and the same row with a fiber kept for the next stream.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
+**A file on HTTP/2 over plain TCP has no `sendfile`.** Its pieces are read into frames ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)); a frame header written and its payload sent from the file would take the copy out for h2c, which is a proxy's upstream and not where a browser meets a static-heavy site.
+
+**What would settle it:** a static file's throughput over h2c against HTTP/1.1 with `sendfile`, once stage 6.2 lands, and a deployment that serves files to a proxy over h2c.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
+**Priorities on HTTP/2 are ignored.** Answers ready at once are written in stream order; a browser says which matter first with RFC 9218's `priority` field, and nginx and h2o follow it, so a page whose images are ready before its CSS paints later than it would.
+
+**What would settle it:** a page load in Chromium over HTTP/2 after stage 7 with and without RFC 9218's urgency honoured, its largest contentful paint on record.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 **A Connect client's `Connect-Timeout-Ms` is not read.** A gRPC call's `grpc-timeout` becomes the request's deadline ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)); a Connect call names its own the same way in milliseconds, and nilo answers it with the route's deadline or none, so a client that gave up is still worked for. Its failures already go out in Connect's shape ([ADR 257](./adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)), `deadline_exceeded` included once a deadline fires.
 

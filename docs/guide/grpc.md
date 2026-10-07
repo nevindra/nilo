@@ -10,10 +10,10 @@ It is for callers you do not choose: a service whose contract is a `.proto` file
 
 ## Turning it on
 
-**Build with `.grpc = true` and give gRPC a listener of its own.** In your `build.zig`, ask the dependency for it:
+**Build with `.http2 = true` and give gRPC a listener of its own.** In your `build.zig`, ask the dependency for it:
 
 ```zig
-const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .grpc = true });
+const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .http2 = true });
 ```
 
 Then add a listener next to the one that serves HTTP/1.1:
@@ -36,7 +36,7 @@ fn say(c: *nilo.Ctx) !void {
 
 Port 50051 speaks HTTP/2 with prior knowledge (h2c), which is what every gRPC client sends to a plain address. Port 8080 stays HTTP/1.1 exactly as before, and a request there to `/demo.Echo/Say` is an ordinary `POST`. A server that should speak only gRPC puts `.grpc = true` on `listen()`'s own options instead.
 
-A build that did not pass `.grpc = true` rejects the listener at `listen()` with a message naming the flag, and contains none of the HTTP/2 code: a program that never asks for it pays 8 to 112 bytes of binary.
+A build that did not pass `.http2 = true` rejects the listener at `listen()` with a message naming the flag, and contains none of the HTTP/2 code: a program that never asks for it pays 8 to 112 bytes of binary.
 
 ## Writing a method
 

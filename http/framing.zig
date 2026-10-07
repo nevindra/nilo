@@ -12,7 +12,7 @@
 //! size axis on it (ADR 017); the union costs one compare of a tag a write,
 //! which the branch predictor never misses on a connection that only ever
 //! has one arm. **The HTTP/2 arm exists only in a build that asked for gRPC**:
-//! without `-Dgrpc` its type is `noreturn`, the tag is known while compiling,
+//! without `-Dhttp2` its type is `noreturn`, the tag is known while compiling,
 //! and the union is the HTTP/1.1 arm and nothing else, so the default build
 //! pays not even the compare.
 //!
@@ -36,25 +36,25 @@
 
 const std = @import("std");
 const http1 = @import("http1.zig");
-pub const grpc_built = @import("nilo_build").grpc;
+pub const http2_built = @import("nilo_build").http2;
 
 pub const Header = http1.Header;
 
 /// Where an answer is handed: the connection's writer, or an
-/// answer kept whole for an HTTP/2 connection's fiber. Without `-Dgrpc` the
+/// answer kept whole for an HTTP/2 connection's fiber. Without `-Dhttp2` the
 /// second has no values, as the framing's own second arm has none.
 pub const Sink = union(enum) {
     wire: *std.Io.Writer,
-    collect: if (grpc_built) *Collected else noreturn,
+    collect: if (http2_built) *Collected else noreturn,
 };
 
 /// How a request reaches `serve.serveRequest`: as an HTTP/1.1 head still to
 /// be read from the connection, or as an HTTP/2 call its connection has read
-/// already. Without `-Dgrpc` the second has no values, as `Sink`'s second arm
+/// already. Without `-Dhttp2` the second has no values, as `Sink`'s second arm
 /// has none, so the default build knows the tag while compiling.
 pub const Arrival = union(enum) {
     wire,
-    call: if (grpc_built) *const Call else noreturn,
+    call: if (http2_built) *const Call else noreturn,
 };
 
 /// A request that arrived as HTTP/2 rather than as HTTP/1.1 text, the way
@@ -81,7 +81,7 @@ pub const Call = struct {
 pub fn of(sink: Sink, in: *std.Io.Reader, minor_version: u1) Framing {
     return switch (sink) {
         .wire => |out| .{ .http1 = .{ .in = in, .out = out, .minor_version = minor_version } },
-        .collect => |collected| if (comptime !grpc_built) unreachable else .{ .http2 = collected },
+        .collect => |collected| if (comptime !http2_built) unreachable else .{ .http2 = collected },
     };
 }
 
@@ -125,7 +125,7 @@ fn lastChunk(out: *std.Io.Writer, list: []const Header) anyerror!void {
 
 pub const Framing = union(enum) {
     http1: Http1,
-    http2: if (grpc_built) *Collected else noreturn,
+    http2: if (http2_built) *Collected else noreturn,
 
     /// A whole answer, written and settled. `head_only` is a HEAD: the head a
     /// GET would get, its `Content-Length` the length of `body`, and no body.
@@ -142,7 +142,7 @@ pub const Framing = union(enum) {
     ) !void {
         switch (self.*) {
             .http1 => |*h| return h.whole(status, content_type, body, head_only, keep, extra, trailers),
-            .http2 => |c| if (comptime !grpc_built) unreachable else return c.whole(status, content_type, body, head_only, extra, trailers.list),
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.whole(status, content_type, body, head_only, extra, trailers.list),
         }
     }
 
@@ -155,7 +155,7 @@ pub const Framing = union(enum) {
     pub fn failed(self: *Framing, err: anyerror, message: []const u8) !void {
         switch (self.*) {
             .http1 => {},
-            .http2 => |c| if (comptime !grpc_built) unreachable else {
+            .http2 => |c| if (comptime !http2_built) unreachable else {
                 c.failure = err;
                 c.message = try c.arena.dupe(u8, message);
             },
@@ -174,7 +174,7 @@ pub const Framing = union(enum) {
     ) !void {
         switch (self.*) {
             .http1 => |*h| return h.head(status, content_type, len, keep, extra),
-            .http2 => |c| if (comptime !grpc_built) unreachable else return c.head(status, content_type, extra),
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.head(status, content_type, extra),
         }
     }
 
@@ -187,7 +187,7 @@ pub const Framing = union(enum) {
             // Asked for, and never used: `streamHead`, which comes next,
             // refuses. A shape is still an answer, so nothing here has to be
             // optional.
-            .http2 => if (comptime !grpc_built) unreachable else .{ .chunked = false, .ends_connection = false },
+            .http2 => if (comptime !http2_built) unreachable else .{ .chunked = false, .ends_connection = false },
         };
     }
 
@@ -202,7 +202,7 @@ pub const Framing = union(enum) {
     ) !void {
         switch (self.*) {
             .http1 => |*h| return h.streamHead(status, content_type, shape, length, keep, extra),
-            .http2 => if (comptime !grpc_built) unreachable else return error.NotCollected,
+            .http2 => if (comptime !http2_built) unreachable else return error.NotCollected,
         }
     }
 
@@ -212,7 +212,7 @@ pub const Framing = union(enum) {
     pub fn piece(self: *Framing, chunked: bool, buffered: []const u8, data: []const []const u8, splat: usize) !void {
         switch (self.*) {
             .http1 => |*h| return h.piece(chunked, buffered, data, splat),
-            .http2 => if (comptime !grpc_built) unreachable else return error.NotCollected,
+            .http2 => if (comptime !http2_built) unreachable else return error.NotCollected,
         }
     }
 
@@ -220,7 +220,7 @@ pub const Framing = union(enum) {
     pub fn flush(self: *Framing) !void {
         switch (self.*) {
             .http1 => |*h| return h.out.flush(),
-            .http2 => if (comptime !grpc_built) unreachable else return,
+            .http2 => if (comptime !http2_built) unreachable else return,
         }
     }
 
@@ -230,7 +230,7 @@ pub const Framing = union(enum) {
     pub fn end(self: *Framing, marked: bool, trailers: Trailers) !void {
         switch (self.*) {
             .http1 => |*h| return h.end(marked, trailers),
-            .http2 => if (comptime !grpc_built) unreachable else return,
+            .http2 => if (comptime !http2_built) unreachable else return,
         }
     }
 
@@ -248,7 +248,7 @@ pub const Framing = union(enum) {
     ) !u64 {
         switch (self.*) {
             .http1 => |*h| return h.file(status, content_type, reader, len, keep, extra),
-            .http2 => if (comptime !grpc_built) unreachable else return error.NotCollected,
+            .http2 => if (comptime !http2_built) unreachable else return error.NotCollected,
         }
     }
 
@@ -258,7 +258,7 @@ pub const Framing = union(enum) {
     pub fn interimContinue(self: *Framing) !void {
         switch (self.*) {
             .http1 => |*h| return h.interimContinue(),
-            .http2 => if (comptime !grpc_built) unreachable else return,
+            .http2 => if (comptime !http2_built) unreachable else return,
         }
     }
 
@@ -268,7 +268,7 @@ pub const Framing = union(enum) {
     pub fn wire(self: *const Framing) ?Http1 {
         return switch (self.*) {
             .http1 => |h| h,
-            .http2 => if (comptime !grpc_built) unreachable else null,
+            .http2 => if (comptime !http2_built) unreachable else null,
         };
     }
 };
@@ -452,7 +452,7 @@ pub const Collected = struct {
 
     // `whole` and `head` are `noinline` because the HTTP/1.1 answer pays
     // for them otherwise. Inlined into `Framing.whole`, which every answer
-    // passes through, they made a routed GET in a `-Dgrpc` build 465ns
+    // passes through, they made a routed GET in a `-Dhttp2` build 465ns
     // against 394ns before; kept apart it is 411ns, and the call 905ns
     // against 938ns (bench/result/http.md).
     noinline fn whole(self: *Collected, status: u16, content_type: []const u8, body: []const u8, head_only: bool, extra: []const Header, trailers: []const Header) !void {
@@ -566,7 +566,7 @@ test "an HTTP/1.0 client is never sent a 100 Continue" {
 }
 
 test "an answer collected for HTTP/2 outlives the buffers it was handed in" {
-    if (comptime !grpc_built) return error.SkipZigTest;
+    if (comptime !http2_built) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var collected: Collected = .{ .arena = arena_state.allocator() };
@@ -641,7 +641,7 @@ test "a chunked stream ends with its trailers, and one framed by a length ends w
 }
 
 test "a collected failure keeps its error and its sentence past the buffers they came in" {
-    if (comptime !grpc_built) return error.SkipZigTest;
+    if (comptime !http2_built) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var collected: Collected = .{ .arena = arena_state.allocator() };

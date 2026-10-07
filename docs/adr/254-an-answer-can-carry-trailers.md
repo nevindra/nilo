@@ -31,16 +31,16 @@ Stage 1 ([ADR 253](./253-an-answer-is-handed-to-the-framing-that-carried-its-req
 
 **A failed call's code comes from the error first, and from the status only when the error says nothing.** `error.AlreadyExists` is `ALREADY_EXISTS` (6) and `error.RolledBack` is `ABORTED` (10), where both used to be whatever 409 meant. A code the route set as a trailer still wins, and a deadline that passed still makes `DEADLINE_EXCEEDED`.
 
-**`App.grpcHost` is a compile error in a build without `-Dgrpc`.** The collecting arm is `noreturn` there, so reaching it would be undefined behaviour in ReleaseFast; the profile did reach it, and crashed, before the refusal was written.
+**`App.grpcHost` is a compile error in a build without `-Dhttp2`.** The collecting arm is `noreturn` there, so reaching it would be undefined behaviour in ReleaseFast; the profile did reach it, and crashed, before the refusal was written.
 
 ## What it costs
 
-Measured against `372b766` built the same afternoon, default and `-Dgrpc`, in [`bench/result/http.md`](../../bench/result/http.md#trailers-a-held-answer-and-grpc-answered-from-what-it-collected). The figures are for this change and the hold of ADR 008 together, because they ship as one.
+Measured against `372b766` built the same afternoon, default and `-Dhttp2`, in [`bench/result/http.md`](../../bench/result/http.md#trailers-a-held-answer-and-grpc-answered-from-what-it-collected). The figures are for this change and the hold of ADR 008 together, because they ship as one.
 
 - **Allocations per request:** unchanged for a route that sets no trailer and does not hold; the budget test passes as it was. A trailer is two copies into the arena when set. A gRPC call: 4, 10 and 8 arena allocations on the suite's three services against 4, 9 and 8, and 495, 697 and 824 bytes against 615, 978 and 1,082. The one more is `Meta/Who` copying the headers it sets, which the old path paid inside a larger text.
 - **Memory per idle connection:** unchanged, 5,165 to 5,182 B marginal at 1,000 to 10,000 connections in both builds.
-- **Throughput and p99:** in the default build 1,611 k requests a second against 1,633 k, −1.3% and in every round, p99 59.5 µs on both; with `-Dgrpc` 1,608 k against 1,610 k. In process a unary gRPC call is 902 to 910 ns against 1,083 to 1,118, −17%. The first cut cost a routed GET in a `-Dgrpc` build 18%, because the collecting code inlined into `Framing.whole`; `Collected.whole` and `head` are `noinline` for that, and the GET is 411 ns against 392 to 395.
-- **Binary size:** +3,696 bytes in the default build and −47,008 with `-Dgrpc`, stripped `ReleaseFast` `nilo-hello`. The trailer writers behind a pointer took 2,656 bytes out of the first cut.
+- **Throughput and p99:** in the default build 1,611 k requests a second against 1,633 k, −1.3% and in every round, p99 59.5 µs on both; with `-Dhttp2` 1,608 k against 1,610 k. In process a unary gRPC call is 902 to 910 ns against 1,083 to 1,118, −17%. The first cut cost a routed GET in a `-Dhttp2` build 18%, because the collecting code inlined into `Framing.whole`; `Collected.whole` and `head` are `noinline` for that, and the GET is 411 ns against 392 to 395.
+- **Binary size:** +3,696 bytes in the default build and −47,008 with `-Dhttp2`, stripped `ReleaseFast` `nilo-hello`. The trailer writers behind a pointer took 2,656 bytes out of the first cut.
 
 ## What was rejected
 
@@ -54,4 +54,4 @@ Measured against `372b766` built the same afternoon, default and `-Dgrpc`, in [`
 
 **The gRPC code from the status alone, with a finer status table.** A status already means something of its own: a 409 is a conflict the client may retry and a 503 a server that is down, and neither is what a duplicate row or a rolled-back transaction tells a gRPC client. The error is the only thing that knows.
 
-**An unreachable arm left in a build without `-Dgrpc`.** It compiled, and in ReleaseFast it was undefined behaviour the profile reached; a refusal costs nothing and says which flag.
+**An unreachable arm left in a build without `-Dhttp2`.** It compiled, and in ReleaseFast it was undefined behaviour the profile reached; a refusal costs nothing and says which flag.

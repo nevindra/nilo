@@ -278,8 +278,8 @@ fn spanMethod(method: http1.Method) []const u8 {
 /// as its target, its fields and its body (in `in`) rather than as HTTP/1.1
 /// text to parse back. Only the head differs, and from the parsed head on it
 /// is one body of code: two entries over one inlined core compiled it twice,
-/// and the HTTP/1.1 path of a `-Dgrpc` build paid 6% for the copy
-/// (`bench/result/http.md`). Without `-Dgrpc` the `.call` arm is `noreturn`,
+/// and the HTTP/1.1 path of a `-Dhttp2` build paid 6% for the copy
+/// (`bench/result/http.md`). Without `-Dhttp2` the `.call` arm is `noreturn`,
 /// as `Sink`'s is, and the default build compiles none of it.
 ///
 /// `noinline` deliberately. Everything this touches — the `Ctx`, the
@@ -1248,7 +1248,7 @@ fn sendFinal(sink: framing_mod.Sink, response: http1.Static, status: u16) void {
             http1.writeStatic(out, response) catch return;
             out.flush() catch return;
         },
-        .collect => |collected| if (comptime !framing_mod.grpc_built) unreachable else {
+        .collect => |collected| if (comptime !framing_mod.http2_built) unreachable else {
             collected.status = status;
         },
     }

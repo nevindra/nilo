@@ -28,7 +28,7 @@ Measured in [`bench/result/http.md`](../../bench/result/http.md#a-connect-client
 - **Throughput:** nothing on a request that succeeds. A failure in a program with a message route reads the head once more for the version header, the scan ADR 256 reads `Content-Type` with; a program without one does a null check.
 - **Allocations per request:** none. The body is written into the fixed buffer every failure body is written into.
 - **Memory per idle connection:** nothing.
-- **Binary size:** +96 bytes in every default program stripped (`example-hello`, `example-rest`), +128 with `-Dgrpc`: the choice on the failure path, a null check and a call, the same kind of cost `app.failures` paid (ADR 024). A program with a message route pays about 1.7 KB more by symbol, the header scan and the writer.
+- **Binary size:** +96 bytes in every default program stripped (`example-hello`, `example-rest`), +128 with `-Dhttp2`: the choice on the failure path, a null check and a call, the same kind of cost `app.failures` paid (ADR 024). A program with a message route pays about 1.7 KB more by symbol, the header scan and the writer.
 
 ## What was rejected
 

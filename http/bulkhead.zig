@@ -229,7 +229,7 @@ pub const Options = struct {
         /// (`h2`, and nothing else offered). Each unary call is answered by
         /// the route `app.post` registered at its path
         /// ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
-        /// Needs `.grpc = true` on the dependency, and is refused at
+        /// Needs `.http2 = true` on the dependency, and is refused at
         /// `listen()` without it.
         grpc: bool = false,
     };

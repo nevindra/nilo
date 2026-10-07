@@ -1,5 +1,5 @@
 //! Answering gRPC from a build that was not asked for it. A call is collected
-//! through a framing only `.grpc = true` compiles in, so without it the path
+//! through a framing only `.http2 = true` compiles in, so without it the path
 //! a call would take does not exist, and reaching it in ReleaseFast would be
 //! undefined behaviour rather than an error.
 

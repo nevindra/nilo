@@ -1046,6 +1046,7 @@ test {
     _ = @import("hpack.zig");
     _ = @import("h2.zig");
     _ = @import("grpc.zig");
+    _ = @import("h2conn.zig");
     _ = @import("fuzz_frames.zig");
     _ = @import("serve.zig");
     _ = @import("wiring.zig");
@@ -1062,6 +1063,6 @@ test {
     // build without `-Dtls` does not have; the repository's own test root
     // always does (see `wireTls` in build.zig).
     if (@import("nilo_build").tls) _ = @import("tls_live.zig");
-    if (@import("nilo_build").grpc) _ = @import("grpc_live.zig");
-    if (@import("nilo_build").grpc and @import("nilo_build").tls) _ = @import("grpc_tls_live.zig");
+    if (@import("nilo_build").http2) _ = @import("grpc_live.zig");
+    if (@import("nilo_build").http2 and @import("nilo_build").tls) _ = @import("grpc_tls_live.zig");
 }

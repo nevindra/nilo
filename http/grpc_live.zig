@@ -1,7 +1,7 @@
 //! The tests of a gRPC listener that need a server actually running
 //! ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
 //!
-//! `grpc.zig`'s own tests drive a connection through in-memory buffers, and
+//! `h2conn.zig`'s own tests drive a connection through in-memory buffers, and
 //! there every call runs inline: `bulkhead.spawn` answers `error.NoServer`
 //! outside an Engine. What only a running server reaches is the half the
 //! design rests on, a call on a fiber of its own handing its answer back to
@@ -306,8 +306,8 @@ test "rapid reset: a call the client cancels still counts against the cap until 
     var in_buf: [64 * 1024]u8 = undefined;
     var reader = stream.reader(io, &in_buf);
 
-    const nilo_grpc = @import("grpc.zig");
-    const burst = nilo_grpc.max_streams + 50;
+    const nilo_h2conn = @import("h2conn.zig");
+    const burst = nilo_h2conn.max_streams + 50;
     try writer.interface.writeAll(h2.preface);
     try h2.writeSettings(&writer.interface, &.{});
     var id: u31 = 1;
@@ -331,8 +331,8 @@ test "rapid reset: a call the client cancels still counts against the cap until 
         if (head.type == .goaway) return error.SentAway;
         if (head.type == .ping and head.has(h2.Flags.ack)) break;
     }
-    try testing.expect(most_inside.load(.acquire) <= nilo_grpc.max_streams);
-    try testing.expect(refused >= burst - nilo_grpc.max_streams);
+    try testing.expect(most_inside.load(.acquire) <= nilo_h2conn.max_streams);
+    try testing.expect(refused >= burst - nilo_h2conn.max_streams);
 }
 
 test "a client that holds its window at zero is let go of once the write limit passes" {

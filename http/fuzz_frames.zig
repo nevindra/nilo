@@ -20,7 +20,7 @@
 //! The route behind the listener is a stub rather than an App, for the same
 //! reason `fuzz.zig` drives `http1` rather than the server: what is being
 //! fuzzed is the translation, and an App would put a router and a thousand
-//! allocations between the input and the property. `grpc.Host` is the seam
+//! allocations between the input and the property. `h2conn.Host` is the seam
 //! the App already goes through, so the stub is the same door.
 //!
 //! `zig build fuzz -- --frames` generates inputs for it; `zig build test`
@@ -30,7 +30,7 @@ const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
 const framing = @import("framing.zig");
-const grpc = @import("grpc.zig");
+const h2conn = @import("h2conn.zig");
 const h2 = @import("h2.zig");
 const hpack = @import("hpack.zig");
 const core = @import("nilo_core");
@@ -49,7 +49,7 @@ fn check(gpa: std.mem.Allocator, bytes: []const u8) !void {
     defer out.deinit();
     var in: std.Io.Reader = .fixed(bytes);
     var stop: bulkhead.Stop = .{};
-    grpc.serveConnection(stub(gpa, &stop), &in, &out.writer, .off, .off, .{});
+    h2conn.serveConnection(stub(gpa, &stop), &in, &out.writer, .off, .off, .{});
     answerHolds(gpa, bytes, out.written()) catch |err| {
         dumpAnswer(out.written());
         return err;
@@ -80,7 +80,7 @@ pub fn dump(bytes: []const u8) void {
 /// Three routes, so an answer can be each shape the listener writes: `/e…`
 /// echoes the message back, `/f…` fails with text, `/c…` answers with a
 /// header and a trailer of its own. Anything else is no route.
-fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) grpc.Host {
+fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
     const Stub = struct {
         fn routes(_: *anyopaque, path: []const u8) bool {
             return path.len > 1 and (path[1] == 'e' or path[1] == 'f' or path[1] == 'c');
@@ -442,7 +442,7 @@ test "the corpus's ordinary call is answered, so the property is looking at an a
     defer out.deinit();
     var in: std.Io.Reader = .fixed(call);
     var stop: bulkhead.Stop = .{};
-    grpc.serveConnection(stub(testing.allocator, &stop), &in, &out.writer, .off, .off, .{});
+    h2conn.serveConnection(stub(testing.allocator, &stop), &in, &out.writer, .off, .off, .{});
     // SETTINGS, the ACK of the client's, HEADERS, DATA with "hi", trailers.
     try testing.expect(std.mem.indexOf(u8, out.written(), "\x00\x00\x00\x00\x02hi") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "grpc-status\x010") != null);
@@ -465,7 +465,7 @@ test "generated inputs hold the property, and reach answered calls, failed ones 
         defer out.deinit();
         var in: std.Io.Reader = .fixed(input);
         var stop: bulkhead.Stop = .{};
-        grpc.serveConnection(stub(testing.allocator, &stop), &in, &out.writer, .off, .off, .{});
+        h2conn.serveConnection(stub(testing.allocator, &stop), &in, &out.writer, .off, .off, .{});
         const got = out.written();
         if (std.mem.indexOf(u8, got, "grpc-status\x010") != null) answered += 1;
         if (std.mem.indexOf(u8, got, "grpc-status\x015") != null or std.mem.indexOf(u8, got, "grpc-status\x0212") != null) failed += 1;

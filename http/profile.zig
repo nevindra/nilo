@@ -26,7 +26,7 @@ const body_mod = @import("body.zig");
 const range_mod = @import("range.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
-const grpc = @import("grpc.zig");
+const h2conn = @import("h2conn.zig");
 const h2 = @import("h2.zig");
 const hpack = @import("hpack.zig");
 
@@ -255,10 +255,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (routes_file) |file| try routeTable(gpa, file, whole / rounds);
     try serviceScale(gpa);
     try messageRoutes(gpa);
-    // A call is answered through the framing only a `-Dgrpc` build has
+    // A call is answered through the framing only a `-Dhttp2` build has
     // (ADR 220), so without the flag there is no gRPC call to time.
-    if (comptime @import("nilo_build").grpc) try grpcCalls() else std.debug.print(
-        "\nA gRPC call is timed by `zig build profile -Dgrpc`.\n",
+    if (comptime @import("nilo_build").http2) try grpcCalls() else std.debug.print(
+        "\nA gRPC call is timed by `zig build profile -Dhttp2`.\n",
         .{},
     );
 
@@ -871,7 +871,7 @@ const h2load_block = [_]u8{
 };
 const sum_message = [_]u8{ 0, 0, 0, 0, 4, 0x08, 0x01, 0x10, 0x02 };
 
-/// The call the App is handed for that block, as `grpc.zig` writes it.
+/// The call the App is handed for that block, as `h2conn.zig` writes it.
 const grpc_call: framing_mod.Call = .{
     .method = "POST",
     .target = "/benchmark.BenchmarkService/GetSum",
@@ -921,7 +921,7 @@ fn grpcCalls() !void {
         out.clearRetainingCapacity();
         var in: std.Io.Reader = .fixed(wire.written());
         const started = clock();
-        grpc.serveConnection(grpc_app.grpcHost(), &in, &out.writer, .off, .off, .{});
+        h2conn.serveConnection(grpc_app.grpcHost(), &in, &out.writer, .off, .off, .{});
         const took = clock() - started;
         if (rep >= 3 and took < whole) whole = took;
     }
@@ -947,7 +947,7 @@ fn grpcCalls() !void {
     }
     sink += fields.items.len;
 
-    // The App's share: the call handed over as `grpc.zig` hands it, and its
+    // The App's share: the call handed over as `h2conn.zig` hands it, and its
     // answer collected, the way a call reaches it.
     var app_arena = std.heap.ArenaAllocator.init(gpa);
     defer app_arena.deinit();
