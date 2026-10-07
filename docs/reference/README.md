@@ -119,6 +119,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [Reading](./ctx.md#reading)
   - [Answering](./ctx.md#answering)
   - [Response headers](./ctx.md#response-headers)
+  - [A stream and an event stream on HTTP/2](./ctx.md#a-stream-and-an-event-stream-on-http2)
   - [Trailers](./ctx.md#trailers)
   - [`c.host` and `c.scheme`](./ctx.md#chost-and-cscheme)
   - [Compressed request bodies](./ctx.md#compressed-request-bodies)

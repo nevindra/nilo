@@ -34,9 +34,15 @@
 //! handed over where it lies. What the request has read is given back to
 //! the client as `WINDOW_UPDATE` and to the connection's budget, a half
 //! window at a time, so a stream holds at most its window of what nothing
-//! has read. The answer is still collected whole and framed after the
-//! request's fiber has returned, so a streamed answer, a file, an event
-//! stream and a WebSocket are refused by name by `Ctx` (stage 6.2, ADR 260).
+//! has read. A whole answer is collected and framed after the request's
+//! fiber has returned. A streamed answer, an event stream and a file are
+//! written while it runs, through `outbound.zig`'s pipe: the handler lends its
+//! buffer to this file's fiber, which writes `DATA` out of it under both
+//! windows, a round of at most `pump_quantum` bytes to each stream that has
+//! some, and wakes the handler when it has; a client that stops reading holds
+//! the handler there until the write deadline resets the stream. A WebSocket
+//! and an event stream handed to the connection are refused by name by `Ctx`
+//! (ADR 260).
 //!
 //! **Unary only for gRPC.** A call carries one message each way. The message
 //! is waited for on the call's fiber (`inbound.Inbox.whole`) and a gzip one is
@@ -93,6 +99,7 @@ const framing = @import("framing.zig");
 const grpc = @import("grpc.zig");
 const date = @import("date.zig");
 const inbound = @import("inbound.zig");
+const outbound = @import("outbound.zig");
 
 /// What a gRPC connection asks of the App, handed over by `app.zig` rather
 /// than named here. This file sits outside the App's core (`http_core` in
@@ -159,6 +166,18 @@ const max_refused = 1000;
 /// connection is sent away. Each one is answered, so a flood is a client
 /// making this side write.
 const max_control_run = 1000;
+
+/// Bytes of DATA written that earn the WINDOW_UPDATEs the flood count lets
+/// pass: two (the connection's and the stream's) a `credit_bytes`, however
+/// many frames they were written in. A frame of one byte earns a
+/// thousandth of that, so a client with a window of one, which sends two
+/// updates for each byte it is sent, is counted (ADR 220).
+const credit_bytes = 1024;
+
+/// The most DATA one stream's pipe gets written in a round, before the next
+/// stream with something to send has its turn: what keeps one stream with a
+/// large answer from holding the connection's writer while the others wait.
+const pump_quantum = 64 * 1024;
 
 /// How long a connection with nothing in flight waits before handing its
 /// pages back, the way an HTTP/1.1 connection does between requests
@@ -251,6 +270,15 @@ const Shared = struct {
     /// Calls run on threads of their own, with no Engine (`Fallback`): the
     /// connection settles after what could wake one.
     baton: bool = false,
+    /// Streams whose call has opened an outbound pipe and whose connection has
+    /// not let go of them: one load tells the connection whether any is there
+    /// to write to.
+    streaming: std.atomic.Value(u32) = .init(0),
+    /// The connection will write nothing more (`abortOutbound`), guarded by
+    /// `monitor`: a pipe a late call opens fails at once.
+    dead: bool = false,
+    /// Bytes of file buffers the calls of this connection hold now.
+    file_held: std.atomic.Value(usize) = .init(0),
 
     fn create(gpa: std.mem.Allocator, waker: bulkhead.Waker) !*Shared {
         const s = try gpa.create(Shared);
@@ -279,7 +307,7 @@ const Shared = struct {
 
     /// What a pipe holds of this connection.
     fn link(s: *Shared) inbound.Link {
-        return .{ .monitor = &s.monitor, .blocked = &s.blocked, .ctx = s, .poke = poke };
+        return .{ .monitor = &s.monitor, .blocked = &s.blocked, .ctx = s, .poke = poke, .dead = &s.dead };
     }
 
     /// A call has something to tell the connection: said, and the
@@ -402,6 +430,14 @@ const Stream = struct {
     /// can stop it midway, and still counts against the cap until it does;
     /// its answer is thrown away.
     reset: bool = false,
+    /// The pipe a streamed answer is written through, published by the call
+    /// once its head is out (`@atomicStore`) and null for a whole answer. In
+    /// the arena, so a stream that never streams pays a pointer for it.
+    out: ?*outbound.Outbox = null,
+    /// When the piece the call lent first went unfinished at the connection's
+    /// last look, or 0: what the write deadline is counted from. Only the
+    /// connection's fiber touches it.
+    stuck_since: u64 = 0,
 
     // The answer, filled by the call's fiber.
     head_block: []const u8 = "",
@@ -443,6 +479,7 @@ const Stream = struct {
     }
 
     fn destroy(s: *Stream) void {
+        if (s.out != null) _ = s.shared.streaming.fetchSub(1, .release);
         s.inbox.deinit();
         s.arena.deinit();
         s.gpa.destroy(s);
@@ -452,6 +489,7 @@ const Stream = struct {
     /// `spare_arena_keep` bytes, the pipe a small buffer, and everything else
     /// is as `create` leaves it.
     fn recycle(s: *Stream) void {
+        if (s.out != null) _ = s.shared.streaming.fetchSub(1, .release);
         _ = s.arena.reset(.{ .retain_with_limit = spare_arena_keep });
         s.inbox.recycle(s.app.max_body);
         const kept = .{ s.gpa, s.arena, s.app, s.peer, s.shared, s.inbox };
@@ -466,6 +504,14 @@ const Stream = struct {
             .peer = kept[3],
             .shared = kept[4],
         };
+    }
+
+    /// A streamed answer whose last frame is already written: the stream is
+    /// over from this side, and anything the client sends on it now is
+    /// ignored rather than answered, as for a stream already forgotten.
+    fn answerEnded(s: *const Stream) bool {
+        const o = @atomicLoad(?*outbound.Outbox, &s.out, .acquire) orelse return false;
+        return o.isDone();
     }
 
     fn field(s: *const Stream, name: []const u8) ?[]const u8 {
@@ -523,6 +569,24 @@ const Conn = struct {
     /// What the client may still send on the connection before this side
     /// says more. A window is only a bound if it is held to.
     recv_window: i64 = h2.default_window,
+    /// A stream used its whole turn at the last round and has more to send,
+    /// so there is a round to run before anything waits.
+    out_more: bool = false,
+    /// Where the next round of `pumpOutputs` starts, so that the streams
+    /// share a window between them in turn and the first in the table does
+    /// not take every WINDOW_UPDATE.
+    pump_next: usize = 0,
+    /// Bytes of DATA written since the last credit was earned, below
+    /// `credit_bytes`.
+    out_bytes: usize = 0,
+    /// When `overdue` last looked, so a connection that never waits looks
+    /// about once a millisecond.
+    overdue_at: u64 = 0,
+    /// DATA frames written for streamed answers that no WINDOW_UPDATE has
+    /// answered yet, at most `max_control_run`: each earns two updates (the
+    /// connection's and the stream's) the flood count does not hold against the client, so a long answer's
+    /// updates are not a flood and a flood of them with nothing sent is.
+    out_credit: u32 = 0,
 
     goaway_sent: bool = false,
     peer_goaway: bool = false,
@@ -568,6 +632,7 @@ const Conn = struct {
         // returns and gives its stream back; with no Engine each one is a
         // thread, which is waited for here so nothing outlives the allocator.
         c.abortInbound(true);
+        c.abortOutbound();
         if (c.shared.baton) while (c.shared.running.load(.acquire) != 0) std.Thread.yield() catch {};
         // The calls still running keep `shared` alive and free themselves;
         // everything this side holds goes now.
@@ -630,16 +695,43 @@ const Conn = struct {
                 // Everything answered since the last wait goes out in one
                 // write, rather than a write for every frame read (ADR 220).
                 c.out.flush() catch break;
-                // Spares are for a connection with calls in flight. One that
-                // is about to wait with none gives them back now rather than
-                // at the idle release: held for those 200ms, a burst of
-                // connections measured 5 MB of heap the allocator then kept.
-                if (c.streams.items.len == 0) c.dropSpares();
-                switch (c.wait()) {
-                    .posted => continue,
-                    .again => continue,
-                    .stop => break,
-                    .readable => {},
+                // A stream with more to send than its turn: the calls get
+                // theirs, and the next round is its.
+                if (c.out_more) {
+                    // A stream has more to send than its turn: the calls get
+                    // theirs, and the socket is looked at without waiting, so
+                    // a connection that is only writing still reads the
+                    // WINDOW_UPDATEs that keep a client going, a RST_STREAM,
+                    // a PING or a GOAWAY (ADR 260).
+                    bulkhead.yield();
+                    switch (c.waker.poll()) {
+                        .readable => {},
+                        .posted => continue,
+                        .closed => {
+                            c.peer_gone = true;
+                            break;
+                        },
+                        .timed_out => {
+                            const now = bulkhead.monotonicNanos();
+                            if (now -| c.overdue_at >= std.time.ns_per_ms) {
+                                c.overdue_at = now;
+                                if (c.overdue() == .stop) break;
+                            }
+                            continue;
+                        },
+                    }
+                } else {
+                    // Spares are for a connection with calls in flight. One that
+                    // is about to wait with none gives them back now rather than
+                    // at the idle release: held for those 200ms, a burst of
+                    // connections measured 5 MB of heap the allocator then kept.
+                    if (c.streams.items.len == 0) c.dropSpares();
+                    switch (c.wait()) {
+                        .posted => continue,
+                        .again => continue,
+                        .stop => break,
+                        .readable => {},
+                    }
                 }
             }
             c.released = false;
@@ -730,6 +822,10 @@ const Conn = struct {
         }
         var collecting = false;
         for (c.streams.items) |s| {
+            // A piece a client has not taken, which its call waits on.
+            if (s.stuck_since != 0) {
+                soonest = @min(soonest, s.stuck_since +| @as(u64, c.writeLimitMs()) * std.time.ns_per_ms);
+            }
             if (s.state != .headers) continue;
             collecting = true;
             if (s.collect_until_ns != 0) soonest = @min(soonest, s.collect_until_ns);
@@ -753,6 +849,18 @@ const Conn = struct {
         var i: usize = 0;
         while (i < c.streams.items.len) {
             const s = c.streams.items[i];
+            if (s.stuck_since != 0 and now -| s.stuck_since >= @as(u64, c.writeLimitMs()) * std.time.ns_per_ms) {
+                // A client that stopped reading: its stream is cancelled, its
+                // call's next write fails as it would on a dead socket, and
+                // the connection and every other stream go on.
+                h2.writeRstStream(c.out, s.id, .cancel) catch return .stop;
+                if (@atomicLoad(?*outbound.Outbox, &s.out, .acquire)) |o| o.fail(.slow);
+                // A stream whose call has returned is gone from the table.
+                const gone = s.state == .writing;
+                c.onReset(s);
+                if (!gone) i += 1;
+                continue;
+            }
             if (s.state != .headers) {
                 i += 1;
                 continue;
@@ -819,7 +927,10 @@ const Conn = struct {
                 c.peer_gone = true;
                 break;
             };
-            if (started != 0) continue;
+            if (started != 0 or c.out_more) continue;
+            // A piece waiting on a window that nothing is left to open is not
+            // going to move, and the call that lent it is told so.
+            c.failStuck();
             // What can still move is a call that is running its route, which
             // gives back what it holds when it returns; a call that waits for
             // room moves only when one does, and nobody is reading answers.
@@ -828,10 +939,11 @@ const Conn = struct {
         }
         c.abortInbound(true);
         while (c.shared.running.load(.acquire) != 0) {
-            bulkhead.sleep(1) catch break;
+            if (c.out_more) bulkhead.yield() else bulkhead.sleep(1) catch break;
             if (!c.peer_gone) c.flushReady() catch {
                 c.peer_gone = true;
             };
+            if (c.peer_gone) c.abortOutbound() else c.failStuck();
         }
         if (!c.peer_gone) c.flushReady() catch {};
     }
@@ -1173,6 +1285,14 @@ const Conn = struct {
         }
         if (!s.open) {
             try c.discard(len + pad);
+            // A streamed answer whose end is already written has nothing
+            // left to say to a client that sends after its own end: the
+            // stream is over from this side, and a reset would be a frame
+            // after the END_STREAM, as for a forgotten stream (above).
+            if (s.answerEnded()) {
+                if (len == 0) try c.control();
+                return;
+            }
             // The client ended this request, which is half-closed (remote)
             // while its answer is made and written: more DATA on it is a
             // stream error STREAM_CLOSED (§5.1). Reset, and the stream is
@@ -1416,11 +1536,19 @@ const Conn = struct {
             if (said.owed > 0 and s.open) try c.credit(s, said.owed);
             // Interim, so before the final head, which cannot be written
             // before the call that asked has returned (§8.1).
-            if (said.cont and s.open and !s.head_sent) {
+            if (said.cont and s.open and !s.head_sent and !c.answerStarted(s)) {
                 h2.writeHeaderBlock(c.out, s.id, continue_block, false, c.peer_max_frame) catch return error.Gone;
             }
             if (said.want > 0) c.reserving = true;
         }
+    }
+
+    /// The call has begun its answer through its pipe, which makes any interim
+    /// answer too late.
+    fn answerStarted(c: *const Conn, s: *Stream) bool {
+        _ = c;
+        const o = @atomicLoad(?*outbound.Outbox, &s.out, .acquire) orelse return false;
+        return o.started();
     }
 
     /// The call is no longer waiting on a window: it has started, or it has
@@ -1496,7 +1624,7 @@ const Conn = struct {
         // A client reading an answer sends these as it goes, so one while an
         // answer is being written is progress. One with nothing on the way
         // is not.
-        if (!c.writing()) try c.control();
+        if (!c.writing() and !c.spendCredit()) try c.control();
         if (head.stream == 0) {
             if (increment == 0) return error.Protocol;
             c.send_window += increment;
@@ -1510,6 +1638,8 @@ const Conn = struct {
         // Already reset and still running: its answer is going nowhere, and
         // an RST for every update would be the client making this side write.
         if (s.reset) return;
+        // A streamed answer whose end is written has no window to give.
+        if (s.answerEnded()) return;
         if (increment == 0) {
             h2.writeRstStream(c.out, s.id, .protocol_error) catch return error.Gone;
             c.onReset(s);
@@ -1539,6 +1669,10 @@ const Conn = struct {
                     c.letGo(s);
                 }
                 s.inbox.fail(.gone);
+                s.stuck_since = 0;
+                // A call parked in a write wakes with an error, and what it
+                // lent is never read again.
+                if (@atomicLoad(?*outbound.Outbox, &s.out, .acquire)) |o| o.fail(.reset);
                 c.settle();
             },
             // Still arriving or already written: what it held of the
@@ -1549,6 +1683,14 @@ const Conn = struct {
                 s.destroy();
             },
         }
+    }
+
+    /// A WINDOW_UPDATE for a streamed answer that this side has written DATA
+    /// for, which is progress and not a frame read for nothing.
+    fn spendCredit(c: *Conn) bool {
+        if (c.out_credit == 0) return false;
+        c.out_credit -= 1;
+        return true;
     }
 
     fn writing(c: *const Conn) bool {
@@ -1761,12 +1903,22 @@ const Conn = struct {
             }
             s.state = .writing;
         }
+        // Whole answers first: they are finite, and a streamed one that has
+        // the connection's window every round would leave them none, and the
+        // connection waiting on them past the write limit.
         var i: usize = 0;
         var blocked = false;
         while (i < c.streams.items.len) {
             const s = c.streams.items[i];
             if (s.state != .writing) {
                 i += 1;
+                continue;
+            }
+            if (s.out) |o| {
+                // Streamed, and its call has returned: written by the pump
+                // below, and let go of here once its end is out.
+                i += 1;
+                _ = o;
                 continue;
             }
             if (try c.writeStream(s)) continue;
@@ -1776,6 +1928,14 @@ const Conn = struct {
         if (blocked) {
             if (c.blocked_since == 0) c.blocked_since = bulkhead.monotonicNanos();
         } else c.blocked_since = 0;
+        try c.pumpOutputs();
+        // Streamed answers whose call returned and whose end is written.
+        i = 0;
+        while (i < c.streams.items.len) {
+            const s = c.streams.items[i];
+            if (s.state == .writing) if (s.out) |o| if (try c.settleReturned(s, o)) continue;
+            i += 1;
+        }
     }
 
     /// Write as much of one answer as the windows allow. True when it is all
@@ -1799,6 +1959,159 @@ const Conn = struct {
         }
         if (!s.no_trailers) try h2.writeHeaderBlock(c.out, s.id, s.trailers, true, c.peer_max_frame);
         return c.finished(s);
+    }
+
+    // ---- the outbound pipes ----
+
+    /// Write what the calls that are running have lent: a round of at most
+    /// `pump_quantum` bytes to each stream that has some. A stream that used
+    /// its whole turn with more to send sets `out_more`, and the connection
+    /// runs another round, after the other fibers have had theirs, before it
+    /// waits: so one stream with a large answer takes turns with the others,
+    /// and a call whose piece was written goes on while the large one is
+    /// still being sent.
+    fn pumpOutputs(c: *Conn) !void {
+        c.out_more = false;
+        if (c.shared.streaming.load(.acquire) == 0) return;
+        const n = c.streams.items.len;
+        if (n == 0) return;
+        // From where the last round stopped: the stream that used the window
+        // up goes last the next time, and every stream's turn comes.
+        const first = c.pump_next % n;
+        var last: ?usize = null;
+        for (0..n) |k| {
+            const at = (first + k) % n;
+            const s = c.streams.items[at];
+            const o = @atomicLoad(?*outbound.Outbox, &s.out, .acquire) orelse continue;
+            // Reset before its call began to answer: nothing of it is
+            // written, and the call is told on its first write.
+            if (s.reset) {
+                o.fail(.reset);
+                continue;
+            }
+            switch (try c.pump(s, o)) {
+                .idle => {},
+                .moved => last = at,
+                .more => {
+                    last = at;
+                    c.out_more = true;
+                },
+            }
+        }
+        if (last) |at| c.pump_next = at + 1;
+    }
+
+    const Pumped = enum { idle, moved, more };
+
+    /// One stream's turn: its head if it has not gone, as much of the piece
+    /// its call lent as both windows and the quantum allow, and the end of its
+    /// body when that is all written. Nothing here waits, and nothing is held
+    /// while a byte is written: what the call lent is read without the lock,
+    /// because the call is parked until this fiber wakes it.
+    fn pump(c: *Conn, s: *Stream, o: *outbound.Outbox) !Pumped {
+        const work = o.take();
+        if (work.over) return .idle;
+        var moved = false;
+        if (work.head) |block| {
+            try h2.writeHeaderBlock(c.out, s.id, block, false, c.peer_max_frame);
+            o.headWritten();
+            moved = true;
+        }
+        var complete = !work.pending;
+        var quantum: usize = pump_quantum;
+        if (work.pending) {
+            var sent = work.sent;
+            while (sent < work.lent.len and quantum > 0) {
+                const room = @min(c.send_window, s.send_window);
+                if (room <= 0) break;
+                const n: usize = @intCast(@min(@as(i64, @intCast(work.lent.len - sent)), room, c.peer_max_frame, @as(i64, @intCast(quantum))));
+                try h2.writeHeader(c.out, n, .data, 0, s.id);
+                try work.lent.write(c.out, sent, n);
+                sent += n;
+                quantum -= n;
+                c.send_window -= @intCast(n);
+                s.send_window -= @intCast(n);
+                c.out_bytes += n;
+                moved = true;
+            }
+            complete = sent == work.lent.len;
+            if (sent != work.sent or complete) o.wrote(sent, complete);
+            c.earnCredit();
+            // The deadline is for a client that is not taking the answer: it
+            // runs from the last time bytes went, and stops when a piece is
+            // written whole. A piece that is large and honestly slow is
+            // therefore not cut while it is moving, and one that is only
+            // waiting for its turn after a full quantum is not stuck.
+            if (complete) {
+                s.stuck_since = 0;
+            } else if (sent != work.sent or s.stuck_since == 0) s.stuck_since = bulkhead.monotonicNanos();
+        }
+        if (work.ending and complete) {
+            if (work.head_only) {
+                // A HEAD: the head is the answer, and ends the stream, with no
+                // trailers, which belong to a body there is not.
+                try h2.writeHeaderBlock(c.out, s.id, o.head, true, c.peer_max_frame);
+            } else if (work.trailers.len > 0) {
+                try h2.writeHeaderBlock(c.out, s.id, work.trailers, true, c.peer_max_frame);
+            } else try h2.writeHeader(c.out, 0, .data, h2.Flags.end_stream, s.id);
+            o.ended();
+            s.stuck_since = 0;
+            return .moved;
+        }
+        if (!complete and quantum == 0) return .more;
+        return if (moved) .moved else .idle;
+    }
+
+    /// A streamed answer whose call has returned, and whose last pump has
+    /// run: let the stream go once the end is written. A call that returned
+    /// without ending its body (an error after the head, a handler that
+    /// forgot) leaves an answer that cannot be completed, which is a stream
+    /// error, as a half-sent HTTP/1.1 answer is a closed connection. True
+    /// when the stream has gone from the table.
+    fn settleReturned(c: *Conn, s: *Stream, o: *outbound.Outbox) !bool {
+        if (o.isDone()) return c.finished(s);
+        if (o.isFailed()) {
+            c.forget(s);
+            return true;
+        }
+        if (o.abandoned()) {
+            try h2.writeRstStream(c.out, s.id, .internal_error);
+            c.forget(s);
+            return true;
+        }
+        return false;
+    }
+
+    /// The updates the flood count lets pass for the DATA written: two for
+    /// each `credit_bytes` of it.
+    fn earnCredit(c: *Conn) void {
+        const earned = c.out_bytes / credit_bytes;
+        if (earned == 0) return;
+        c.out_bytes -= earned * credit_bytes;
+        c.out_credit = @intCast(@min(@as(usize, c.out_credit) + earned * 2, max_control_run));
+    }
+
+    /// Fail every pipe whose piece cannot go because the client has no window
+    /// left and nothing more is being read to give it one: a connection that
+    /// is winding down.
+    fn failStuck(c: *Conn) void {
+        for (c.streams.items) |s| {
+            if (s.stuck_since == 0) continue;
+            if (@atomicLoad(?*outbound.Outbox, &s.out, .acquire)) |o| o.fail(.gone);
+        }
+    }
+
+    /// Fail every pipe: the client is gone, or the connection is.
+    fn abortOutbound(c: *Conn) void {
+        // Before the walk, so a pipe published after it still sees the flag
+        // at its first lend (`Outbox.goneLocked`).
+        c.shared.monitor.enter();
+        c.shared.dead = true;
+        c.shared.monitor.leave();
+        for (c.streams.items) |s| {
+            if (s.state != .running) continue;
+            if (@atomicLoad(?*outbound.Outbox, &s.out, .acquire)) |o| o.fail(.gone);
+        }
     }
 
     /// The whole answer is out. A client that is still sending is asked to
@@ -1837,6 +2150,10 @@ fn runCall(s: *Stream, on_engine: bool) void {
     };
 
     answer(s, &in_flight) catch {
+        // An answer whose head is out cannot be replaced by a 500: it is
+        // reset where it stands, which `writeReturned` does for a pipe whose
+        // body was never ended.
+        if (s.out != null) return;
         if (s.grpc) {
             s.head_block = grpc.trailersOnly(s.arena.allocator(), 13, .{ .ours = "the server could not build its answer" }) catch "";
         } else {
@@ -1869,9 +2186,23 @@ fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
     // it. Any other request is answered as HTTP, and a route's headers kept
     // as whole lines are read into fields for it.
     var collected: framing.Collected = .{ .arena = a, .front = if (s.grpc) grpc.prefix_len else 0, .lines = !s.grpc };
+    // Any request but a gRPC call can stream its answer, through a pipe the
+    // connection writes (ADR 260).
+    if (!s.grpc) collected.streamer = .{
+        .link = s.shared.link(),
+        .slot = &s.out,
+        .live = &s.shared.streaming,
+        .file_held = &s.shared.file_held,
+        .can_park = s.inbox.can_park,
+        .head = streamedHead,
+    };
     s.app.handle(s.app.ptr, a, &lifetime, in_flight, call, &collected, s.peer, s.until_ns);
     lifetime.end();
-    if (!s.grpc) return httpReply(s, &collected);
+    if (!s.grpc) {
+        // Written already, a piece at a time: nothing is left to frame.
+        if (collected.outbox != null) return;
+        return httpReply(s, &collected);
+    }
     const reply = try grpc.fromCollected(a, &collected, s.until_ns);
     s.head_block = reply.head_block;
     s.data = reply.data;
@@ -1972,6 +2303,17 @@ fn httpReply(s: *Stream, collected: *const framing.Collected) !void {
         // The head is the whole answer, and ends the stream.
         s.trailers_only = true;
     } else s.no_trailers = true;
+}
+
+/// The head of a streamed answer, encoded on the call's fiber into its arena
+/// for the connection's to write: what `httpReply` makes of a whole one, with
+/// the length the stream promised, if it promised one.
+fn streamedHead(a: std.mem.Allocator, collected: *const framing.Collected) anyerror![]const u8 {
+    var extra: usize = 0;
+    for (collected.headers) |f| extra += f.name.len + f.value.len + 4;
+    var w: std.Io.Writer.Allocating = try .initCapacity(a, 96 + collected.content_type.len + extra);
+    try writeHttpHead(&w.writer, if (collected.status == 0) 500 else collected.status, collected.content_type, collected.length, collected.headers);
+    return w.written();
 }
 
 /// The head of an HTTP answer: `:status`, the content type when there is
@@ -3777,9 +4119,13 @@ const OneFile = struct {
     dir: bulkhead.Dir,
 
     fn init() !OneFile {
+        return initWith("0123456789");
+    }
+
+    fn initWith(bytes: []const u8) !OneFile {
         var tmp = nilo_testing.tmpDir();
         errdefer tmp.cleanup();
-        try tmp.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = "0123456789" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = bytes });
         var path_buf: [128]u8 = undefined;
         const path = try tmp.path(&path_buf, "");
         return .{ .tmp = tmp, .dir = try bulkhead.Dir.open(path) };
@@ -4091,8 +4437,8 @@ test "CONNECT is answered 501, and no tunnel is made" {
     try testing.expectEqual(h2.ErrorCode.no_error, ex.answer.rst(1).?);
 }
 
-/// A route that asks for what HTTP/2 cannot give until stage 6, and the call
-/// it names in its sentence.
+/// A route that asks for what HTTP/2 does not give, and the call it names in
+/// its sentence.
 fn expectRefusedByName(method: []const u8, path: []const u8, call: []const u8) !void {
     const previous = quiet();
     defer testing.log_level = previous;
@@ -4107,9 +4453,7 @@ fn expectRefusedByName(method: []const u8, path: []const u8, call: []const u8) !
     try testing.expect(std.mem.indexOf(u8, ex.body, "not available on HTTP/2 yet") != null);
 }
 
-test "a streamed answer and an event stream are refused by name on HTTP/2" {
-    try expectRefusedByName("GET", "/stream", "c.stream()");
-    try expectRefusedByName("GET", "/events", "c.events()");
+test "an event stream handed to the connection is refused by name on HTTP/2" {
     try expectRefusedByName("GET", "/room", "c.eventsFrom()");
 }
 
@@ -4118,15 +4462,20 @@ test "a WebSocket is refused by name on HTTP/2, and the sentence says it is HTTP
     try expectRefusedByName("GET", "/ws", "a WebSocket is HTTP/1.1");
 }
 
-test "a file is refused by name on HTTP/2, and a HEAD of it, which sends none of it, is not" {
+test "a file is read into frames on HTTP/2, and a HEAD of it sends the head and no DATA" {
     var files = try OneFile.init();
     defer files.deinit();
     one_file = &files;
     defer one_file = null;
-    try expectRefusedByName("GET", "/file", "c.sendFile()");
 
     var app = try httpApp();
     defer app.deinit();
+    var got = try h2test.roundTrip(&app, .{ .path = "/file" });
+    defer got.deinit();
+    try testing.expectEqual(@as(u16, 200), got.status);
+    try testing.expectEqualStrings("10", got.header("content-length").?);
+    try testing.expectEqualStrings("0123456789", got.body);
+
     var ex = try h2test.roundTrip(&app, .{ .method = "HEAD", .path = "/file" });
     defer ex.deinit();
     try testing.expectEqual(@as(u16, 200), ex.status);
@@ -4645,4 +4994,326 @@ test "trailers in flight to a stream this side reset do not end the connection" 
     var got = try h2test.answerOf(out.written());
     defer got.deinit();
     try testing.expect(got.goaway() == null);
+}
+
+// ---- an answer written in pieces through its pipe (stage 6.2, ADR 260) ----
+
+var piped_failed: std.atomic.Value(bool) = .init(false);
+var piped_pieces: std.atomic.Value(usize) = .init(0);
+
+fn resetPiped() void {
+    piped_failed.store(false, .release);
+    piped_pieces.store(0, .release);
+}
+
+/// What a route writing `piece_count` pieces of ten bytes sends.
+const piece_count = 200;
+
+fn expectedPieces(a: std.mem.Allocator) ![]const u8 {
+    var all: std.Io.Writer.Allocating = .init(a);
+    for (0..piece_count) |i| try all.writer.print("piece {d:0>3};", .{i});
+    return all.written();
+}
+
+/// Ten bytes at a time, each flushed, so each is a piece of its own, and a
+/// trailer after the last.
+fn piecesRoute(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    for (0..piece_count) |i| {
+        out.print("piece {d:0>3};", .{i}) catch |err| {
+            piped_failed.store(true, .release);
+            return err;
+        };
+        out.flush() catch |err| {
+            piped_failed.store(true, .release);
+            return err;
+        };
+        _ = piped_pieces.fetchAdd(1, .acq_rel);
+    }
+    try c.setTrailer("x-pieces", "200");
+    try out.finish();
+}
+
+/// One piece and the end, for the count of allocations a piece costs.
+fn pieceRoute(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    try out.writeAll("piece 000;");
+    try out.flush();
+    try c.setTrailer("x-pieces", "1");
+    try out.finish();
+}
+
+const huge_chunk = "0123456789abcdef" ** 256;
+const huge_chunks = 75;
+
+/// 307,200 bytes in the stream's buffer's worth, which is more than the
+/// window a connection starts with.
+fn hugeRoute(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "application/octet-stream");
+    for (0..huge_chunks) |_| out.writeAll(huge_chunk) catch |err| {
+        piped_failed.store(true, .release);
+        return err;
+    };
+    try out.finish();
+}
+
+fn tickRoute(c: *Ctx) anyerror!void {
+    var events = try c.events();
+    try events.send(.{ .name = "tick", .data = "1" });
+    try events.send(.{ .id = "2", .data = "two" });
+    try events.close();
+}
+
+fn promisedRoute(c: *Ctx) anyerror!void {
+    var out = try c.streamWith(200, "text/plain", .{ .length = 12 });
+    try out.writeAll("twelve bytes");
+    try out.finish();
+}
+
+fn bigFileRoute(c: *Ctx) anyerror!void {
+    const file = try one_file.?.dir.openFile("f.bin");
+    return c.sendFile(.{ .file = file, .content_type = "application/octet-stream" });
+}
+
+fn grpcStreamRoute(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    try out.finish();
+}
+
+fn pipedApp() !App {
+    var app = App.init(testing.allocator);
+    errdefer app.deinit();
+    try app.get("/pieces", piecesRoute);
+    try app.get("/piece", pieceRoute);
+    try app.get("/huge", hugeRoute);
+    try app.get("/tick", tickRoute);
+    try app.get("/promised", promisedRoute);
+    try app.get("/file", bigFileRoute);
+    try app.get("/ping", pingRoute);
+    try app.post("/test.Echo/Stream", grpcStreamRoute);
+    try app.resolveChains();
+    return app;
+}
+
+/// The frames of `stream` in the order they were written.
+fn frameKinds(a: std.mem.Allocator, got: *const Answer, stream: u31) ![]const h2.Type {
+    var all: std.ArrayList(h2.Type) = .empty;
+    for (got.frames.items) |f| if (f.head.stream == stream) try all.append(a, f.head.type);
+    return all.items;
+}
+
+test "a streamed answer of many pieces, written across windows smaller than it, arrives in order with its trailers after the last piece" {
+    resetPiped();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .path = "/pieces", .window = 700 });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqualStrings("text/plain", ex.header("content-type").?);
+    try testing.expect(ex.header("content-length") == null);
+    try testing.expectEqualStrings(try expectedPieces(ex.answer.arena.allocator()), ex.body);
+    try testing.expectEqualStrings("200", Answer.value(ex.trailers, "x-pieces").?);
+    try testing.expectEqual(@as(usize, piece_count), piped_pieces.load(.acquire));
+    // The head, the body and then the trailers, which end the stream.
+    const kinds = try frameKinds(ex.answer.arena.allocator(), &ex.answer, 1);
+    try testing.expectEqual(h2.Type.headers, kinds[0]);
+    try testing.expectEqual(h2.Type.headers, kinds[kinds.len - 1]);
+    for (Answer.of(.data, &ex.answer, 1)) |f| try testing.expect(!f.head.has(h2.Flags.end_stream));
+    try testing.expect(Answer.of(.headers, &ex.answer, 1)[1].head.has(h2.Flags.end_stream));
+}
+
+test "a streamed answer larger than the window a connection starts with is sent in frames as the client opens it" {
+    resetPiped();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2test.requestOn(&client, 1, .{ .path = "/huge" });
+    // What the client opens after the 65,535 bytes it started with, which is
+    // read after the call has had to wait for them.
+    try h2.writeWindowUpdate(client.w(), 0, 1_000_000);
+    try h2.writeWindowUpdate(client.w(), 1, 1_000_000);
+    var ex = try h2test.exchangeOf(try converse(&app, &client), 1);
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqual(@as(usize, huge_chunk.len * huge_chunks), ex.body.len);
+    for (0..huge_chunks) |i| try testing.expectEqualStrings(huge_chunk, ex.body[i * huge_chunk.len ..][0..huge_chunk.len]);
+    for (Answer.of(.data, &ex.answer, 1)) |f| try testing.expect(f.head.len <= h2.default_max_frame);
+    // The end is a DATA frame of no bytes, because nothing said it was coming.
+    const data = Answer.of(.data, &ex.answer, 1);
+    try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
+}
+
+test "a stream that promised its length says it in the head, and an event stream carries its two headers" {
+    resetPiped();
+    var app = try pipedApp();
+    defer app.deinit();
+    var promised = try h2test.roundTrip(&app, .{ .path = "/promised" });
+    defer promised.deinit();
+    try testing.expectEqualStrings("12", promised.header("content-length").?);
+    try testing.expectEqualStrings("twelve bytes", promised.body);
+
+    var events = try h2test.roundTrip(&app, .{ .path = "/tick" });
+    defer events.deinit();
+    try testing.expectEqual(@as(u16, 200), events.status);
+    try testing.expectEqualStrings("text/event-stream", events.header("content-type").?);
+    try testing.expectEqualStrings("no-cache", events.header("cache-control").?);
+    try testing.expectEqualStrings("event: tick\ndata: 1\n\nid: 2\ndata: two\n\n", events.body);
+}
+
+test "a HEAD of a streamed route is its head, ending the stream, and no DATA" {
+    resetPiped();
+    var app = try pipedApp();
+    defer app.deinit();
+    var ex = try h2test.roundTrip(&app, .{ .method = "HEAD", .path = "/pieces" });
+    defer ex.deinit();
+    try testing.expectEqual(@as(u16, 200), ex.status);
+    try testing.expectEqual(@as(usize, 0), Answer.of(.data, &ex.answer, 1).len);
+    const heads = Answer.of(.headers, &ex.answer, 1);
+    try testing.expectEqual(@as(usize, 1), heads.len);
+    try testing.expect(heads[0].head.has(h2.Flags.end_stream));
+    try testing.expectEqual(@as(usize, 0), ex.trailers.len);
+}
+
+test "a piece costs no allocation: a stream of two hundred allocates what a stream of one does" {
+    var app = try pipedApp();
+    defer app.deinit();
+    var counting = heap_count.Counting{ .child = testing.allocator };
+    var results: [2]usize = undefined;
+    for (&results, [_][]const u8{ "/piece", "/pieces" }) |*r, path| {
+        var client = try TestClient.init();
+        defer client.deinit();
+        try h2test.requestOn(&client, 1, .{ .path = path });
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        var host = app.grpcHost();
+        host.gpa = counting.allocator();
+        counting.reset();
+        serveConnection(host, &in, &out.writer, .off, .off, .{});
+        r.* = counting.allocs;
+        var got = try h2test.answerOf(out.written());
+        defer got.deinit();
+        try testing.expect(Answer.of(.data, &got, 1).len >= 1);
+    }
+    try testing.expectEqual(results[0], results[1]);
+}
+
+test "a file larger than the window is read into frames, a buffer at a time, and a range of it is a 206" {
+    var bytes: [100_000]u8 = undefined;
+    for (&bytes, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    var files = try OneFile.initWith(&bytes);
+    defer files.deinit();
+    one_file = &files;
+    defer one_file = null;
+    var app = try pipedApp();
+    defer app.deinit();
+
+    var whole = try h2test.roundTrip(&app, .{ .path = "/file", .window = h2.default_window });
+    defer whole.deinit();
+    try testing.expectEqual(@as(u16, 200), whole.status);
+    try testing.expectEqualStrings("100000", whole.header("content-length").?);
+    try testing.expectEqualStrings(&bytes, whole.body);
+
+    var part = try h2test.roundTrip(&app, .{ .path = "/file", .fields = &.{.{ .name = "range", .value = "bytes=26-77" }} });
+    defer part.deinit();
+    try testing.expectEqual(@as(u16, 206), part.status);
+    try testing.expectEqualStrings("bytes 26-77/100000", part.header("content-range").?);
+    try testing.expectEqualStrings(bytes[26..78], part.body);
+}
+
+test "a streamed answer in a gRPC call is refused by name, and says a call answers one message" {
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try client.call(1, "/test.Echo/Stream", "x");
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    const trailers = try got.trailers(1);
+    try testing.expectEqualStrings("13", Answer.value(trailers, "grpc-status").?);
+    const said = Answer.value(trailers, "grpc-message").?;
+    try testing.expect(std.mem.indexOf(u8, said, "c.stream()") != null);
+    try testing.expect(std.mem.indexOf(u8, said, "answers one message") != null);
+}
+
+/// A client whose window is 0, so nothing a call writes can be sent, and the
+/// request for a route that writes.
+fn closedWindow(client: *TestClient, stream: u31, path: []const u8) !void {
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 0 }});
+    try h2test.requestOn(client, stream, .{ .path = path });
+}
+
+test "a stream the client resets wakes the call that waits to write with an error, and the connection answers the next request" {
+    resetPiped();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try closedWindow(&client, 1, "/pieces");
+    try h2.writeRstStream(client.w(), 1, .cancel);
+    try h2test.requestOn(&client, 3, .{ .path = "/ping" });
+    try h2.writeWindowUpdate(client.w(), 3, 100);
+    var next = try h2test.exchangeOf(try converse(&app, &client), 3);
+    defer next.deinit();
+    try testing.expect(piped_failed.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), piped_pieces.load(.acquire));
+    try testing.expectEqualStrings("pong", next.body);
+    try testing.expect(next.answer.goaway() == null);
+}
+
+test "a connection that ends while a call waits on a window wakes it with an error and leaves nothing behind" {
+    resetPiped();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try closedWindow(&client, 1, "/pieces");
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expect(piped_failed.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), piped_pieces.load(.acquire));
+}
+
+test "a GOAWAY from the client and then the end of the connection wakes the call that waits on a window" {
+    resetPiped();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try closedWindow(&client, 1, "/pieces");
+    try h2.writeGoaway(client.w(), 1, .no_error);
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expect(piped_failed.load(.acquire));
+}
+
+test "updates of a window nothing was written into are a flood" {
+    resetPiped();
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var app = try pipedApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    // The stream's window stays at 0, so the connection's grows for nothing:
+    // no DATA is written for any of them, and none of them is progress.
+    try closedWindow(&client, 1, "/pieces");
+    for (0..max_control_run + 5) |_| try h2.writeWindowUpdate(client.w(), 0, 1);
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.enhance_your_calm, got.goaway().?);
+    try testing.expect(piped_failed.load(.acquire));
 }

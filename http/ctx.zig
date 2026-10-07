@@ -1674,15 +1674,22 @@ pub const Ctx = struct {
         return fail.internal(what ++ " is not available on HTTP/2 yet: " ++ hint, .{});
     }
 
-    /// The refusal of a file's bytes on HTTP/2, called by `sendfile.zig`
-    /// where the body is about to be written (ADR 259). A file is the
-    /// connection's to send from the descriptor, and an HTTP/2 stream has no
-    /// connection of its own until stage 6.
-    pub fn refuseFileOnHttp2(self: *const Ctx) !void {
-        if (self.onHttp2()) return self.notOnHttp2(
-            "c.sendFile()",
-            "a file is sent from disk by the connection, and so is a static file too large to hold in memory. HTTP/1.1 serves it.",
-        );
+    /// The refusal of a streamed answer, an event stream or a file in a gRPC
+    /// call, which answers one message and has no pipe to the connection for
+    /// more (ADR 220, ADR 260). Every other request on HTTP/2 streams as one
+    /// on HTTP/1.1 does. A fail function, so the sentence reaches the client
+    /// as every failure does (ADR 006), and `noinline` for the reason
+    /// `notOnHttp2` is.
+    noinline fn notInCall(self: *const Ctx, comptime what: []const u8) fail.Error {
+        std.log.warn("{s} {s}: {s} is not available in a gRPC call; answered 500", .{ @tagName(self.method), self._path, what });
+        return fail.internal(what ++ " is not available in a gRPC call: a call answers one message, so its answer is whole. Answer it with c.send().", .{});
+    }
+
+    /// Whether the answer can be streamed: a request's can on either framing,
+    /// and a gRPC call's cannot. Called by `sendfile.zig` where the body is
+    /// about to be written, and by `stream` and `events` (ADR 260).
+    pub fn refuseFileInCall(self: *const Ctx) !void {
+        if (self.onHttp2() and !self._framing.canStream()) return self.notInCall("c.sendFile()");
     }
 
     // ---- the response side ----
@@ -2360,10 +2367,7 @@ pub const Ctx = struct {
         options: stream_mod.Options,
     ) !stream_mod.Stream {
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response, as `send`
-        if (self.onHttp2()) return self.notOnHttp2(
-            "c.stream()",
-            "a streamed answer needs a pipe to the connection. Answer it whole with c.send(), or let HTTP/1.1 serve this route.",
-        );
+        if (self.onHttp2() and !self._framing.canStream()) return self.notInCall("c.stream()");
         try self.contentTypeOk(content_type);
         // `writeHead` drops the framing for these, so the chunks that
         // followed would be read as the next response (ADR 019).
@@ -2378,8 +2382,10 @@ pub const Ctx = struct {
         // How the body is told apart from the next answer is the framing's.
         // One that only the connection closing can end means that connection
         // cannot carry another request whatever either side asked for.
-        const shape = self._framing.streamShape(options.length);
+        var shape = self._framing.streamShape(options.length);
         if (shape.ends_connection) self._force_close = true;
+        // Only HTTP/2 needs to know before the body ends, and a default build has no such arm.
+        if (comptime framing_mod.http2_built) shape.bodyless = self.method == .HEAD;
 
         self.markAnswered(status);
         self.tookOver();
@@ -2607,10 +2613,7 @@ pub const Ctx = struct {
     /// `X-Accel-Buffering: no` so an nginx in front does not hold the events
     /// back waiting for a buffer to fill.
     pub fn events(self: *Ctx) !stream_mod.Events {
-        if (self.onHttp2()) return self.notOnHttp2(
-            "c.events()",
-            "an event stream needs a pipe to the connection. HTTP/1.1 serves it, which an EventSource falls back to by itself.",
-        );
+        if (self.onHttp2() and !self._framing.canStream()) return self.notInCall("c.events()");
         try self.setStaticHeader("Cache-Control", "no-cache");
         try self.setStaticHeader("X-Accel-Buffering", "no");
         return .{ .stream = try self.stream(200, stream_mod.Events.content_type) };

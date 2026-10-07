@@ -20,9 +20,16 @@
 //!   field, an interim one (1xx) never ends the stream, a later block carries
 //!   no pseudo-header, and no block carries a field HTTP/2 forbids (§8.2).
 //!
+//! - Every DATA frame the pipes write is within the 16,384 bytes the default
+//!   allows, whatever the client raised its maximum to: a piece a handler lends
+//!   is cut where a frame ends, and no route here lends more than one frame.
+//!
 //! What a stranger feeds it is gRPC calls and ordinary requests: any method,
 //! with a body or without one, with the fields that make a request malformed
-//! and the ones that make it a call.
+//! and the ones that make it a call. Two of the routes answer in pieces, one
+//! of them a stream with a trailer and one a file, so a connection is also
+//! asked to write while a call waits on a window, a reset, a zero window, a
+//! GOAWAY and the end of the connection (stage 6.2, ADR 260).
 //!
 //! And the one every fuzzer has, under the safety checks of `ReleaseSafe`:
 //! it does not crash, and it does not leak.
@@ -100,10 +107,16 @@ pub fn dump(bytes: []const u8) void {
 /// echoes the message back, `/f…` fails with text, `/c…` answers with a
 /// header and a trailer of its own, `/g…` answers HTTP in text with a header
 /// HTTP/2 forbids and one it does not, as a HEAD would and as a GET would, and
-/// `/n…` has no body. Anything else is no route to a gRPC call, and an
+/// `/n…` has no body, `/t…` streams five pieces of different sizes and a
+/// trailer, and `/d…` sends a file read from `/dev/zero`, a buffer at a time.
+/// Anything else is no route to a gRPC call, and an
 /// ordinary request is answered whatever it names.
 fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
     const Stub = struct {
+        /// What `/d` reads, which is as long as it is asked to and needs no
+        /// file of the fuzzer's own to leave behind.
+        const zero_length = 40_000;
+
         fn routes(_: *anyopaque, path: []const u8) bool {
             return path.len > 1 and (path[1] == 'e' or path[1] == 'f' or path[1] == 'c');
         }
@@ -144,6 +157,8 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
                 body = pipe.whole(1024) catch "";
             }
             switch (which) {
+                't' => streamed(&to, arrived.method),
+                'd' => filed(&to, arrived.method),
                 'g' => to.whole(200, "text/plain", "hello", std.mem.eql(u8, arrived.method, "HEAD"), true, &.{
                     .{ .name = "Connection", .value = "close" },
                     .{ .name = "X-Seen", .value = "yes" },
@@ -169,9 +184,65 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
     };
 }
 
+/// Five pieces: one of a byte, one of a buffer's worth, one that is a
+/// pattern written many times, one that is empty, one that is a slice of the
+/// handler's own, and then a trailer. A write that fails ends the handler, as
+/// a real one's would.
+fn streamed(to: *framing.Framing, method: []const u8) void {
+    const head_only = std.mem.eql(u8, method, "HEAD");
+    to.streamHead(200, "text/plain", .{ .chunked = false, .ends_connection = false, .bodyless = head_only }, null, true, &.{}) catch return;
+    if (!head_only) {
+        const big = [_]u8{'x'} ** 12_000;
+        to.piece(false, "a", &.{""}, 0) catch return;
+        to.piece(false, big[0..4096], &.{""}, 0) catch return;
+        to.piece(false, "", &.{"-="}, 3000) catch return;
+        to.piece(false, "", &.{""}, 0) catch return;
+        to.piece(false, "tail", &.{ big[0..8000], "end" }, 1) catch return;
+    }
+    to.end(false, .{ .list = &.{.{ .name = "x-sum", .value = "ok" }} }) catch return;
+}
+
+/// A file: the head, and `/dev/zero` read into frames through the pipe. A
+/// HEAD is the head alone.
+fn filed(to: *framing.Framing, method: []const u8) void {
+    var dir = bulkhead.Dir.open("/dev") catch return;
+    defer dir.close();
+    const file = dir.openFile("zero") catch return;
+    defer file.close();
+    var none: [0]u8 = undefined;
+    var reader = file.reader(&none);
+    if (std.mem.eql(u8, method, "HEAD")) {
+        to.head(200, "application/octet-stream", 40_000, true, &.{}) catch {};
+        return;
+    }
+    _ = to.file(200, "application/octet-stream", &reader, 40_000, true, &.{}) catch {};
+}
+
 // ---- the property ----
 
 const not_h2 = "HTTP/1.1 505 HTTP Version Not Supported\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+/// The largest frame this client has said it will take: its last
+/// SETTINGS_MAX_FRAME_SIZE (RFC 9113 §6.5.2), or the default. A server may
+/// fill a frame to it, and a stream written in pieces does.
+fn clientMaxFrame(sent: []const u8) usize {
+    var limit: usize = h2.default_max_frame;
+    var rest = sent[h2.preface.len..];
+    while (rest.len >= h2.header_len) {
+        const head = h2.Header.parse(rest[0..h2.header_len]);
+        if (rest.len - h2.header_len < head.len) break;
+        const payload = rest[h2.header_len..][0..head.len];
+        rest = rest[h2.header_len + head.len ..];
+        if (head.type != .settings or head.stream != 0 or head.has(h2.Flags.ack)) continue;
+        var at: usize = 0;
+        while (at + 6 <= payload.len) : (at += 6) {
+            if (std.mem.readInt(u16, payload[at..][0..2], .big) != 5) continue;
+            const v = std.mem.readInt(u32, payload[at + 2 ..][0..4], .big);
+            if (v >= h2.default_max_frame and v <= 16_777_215) limit = v;
+        }
+    }
+    return limit;
+}
 
 fn answerHolds(gpa: std.mem.Allocator, sent: []const u8, got: []const u8) !void {
     if (!std.mem.startsWith(u8, sent, h2.preface)) {
@@ -195,6 +266,7 @@ fn answerHolds(gpa: std.mem.Allocator, sent: []const u8, got: []const u8) !void 
     var block_owner: u31 = 0;
     var block_ends = false;
 
+    const allowed_frame = clientMaxFrame(sent);
     var rest = got;
     var first = true;
     while (rest.len > 0) {
@@ -204,7 +276,7 @@ fn answerHolds(gpa: std.mem.Allocator, sent: []const u8, got: []const u8) !void 
         const payload = rest[h2.header_len..][0..head.len];
         rest = rest[h2.header_len + head.len ..];
 
-        if (head.len > h2.default_max_frame) return error.FrameTooLarge;
+        if (head.len > allowed_frame) return error.FrameTooLarge;
         if (first and !(head.type == .settings and !head.has(h2.Flags.ack))) return error.SettingsNotFirst;
         first = false;
 
@@ -411,7 +483,7 @@ fn splitRequest(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
     }
 }
 
-const request_paths = [_][]const u8{ "/g.x", "/g.x", "/s.x", "/e.x", "/f.x", "/n", "/c.x", "/missing", "*", "", "/a b", "/g?x=1" };
+const request_paths = [_][]const u8{ "/g.x", "/g.x", "/s.x", "/e.x", "/f.x", "/n", "/c.x", "/t.x", "/t.x", "/t.x", "/d.x", "/d.x", "/missing", "*", "", "/a b", "/g?x=1" };
 const request_methods = [_][]const u8{ "GET", "GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "CONNECT", "BREW", "" };
 
 /// A request's fields as an ordinary client writes them, with the ones that
@@ -565,6 +637,31 @@ fn request(comptime block: []const u8, comptime flags: u8) []const u8 {
     return h2.preface ++ "\x00\x00\x00\x04\x00\x00\x00\x00\x00" ++ frame(0x01, flags, block);
 }
 
+/// SETTINGS_INITIAL_WINDOW_SIZE of 0: nothing a call writes can be sent.
+const no_window = "\x00\x04\x00\x00\x00\x00";
+
+/// `request`, with a second SETTINGS frame of the client's between its
+/// preface and its request.
+fn requestAfter(comptime more: []const u8, comptime block: []const u8, comptime flags: u8) []const u8 {
+    return h2.preface ++ "\x00\x00\x00\x04\x00\x00\x00\x00\x00" ++ frame0(0x04, more) ++ frame(0x01, flags, block);
+}
+
+const streamed_get = request("\x82\x86\x04\x04/t.x", 0x05);
+const file_get = request("\x82\x86\x04\x04/d.x", 0x05);
+
+/// A frame on the connection, stream 0.
+fn frame0(comptime t: u8, comptime payload: []const u8) []const u8 {
+    comptime {
+        var head: [h2.header_len]u8 = undefined;
+        std.mem.writeInt(u24, head[0..3], payload.len, .big);
+        head[3] = t;
+        head[4] = 0;
+        std.mem.writeInt(u32, head[5..9], 0, .big);
+        const out = head ++ payload;
+        return out;
+    }
+}
+
 /// A frame on stream 1, its length counted rather than written by hand.
 fn frame(comptime t: u8, comptime flags: u8, comptime payload: []const u8) []const u8 {
     comptime {
@@ -612,6 +709,28 @@ const corpus = [_][]const u8{
     request("\x83\x86\x04\x04/s.x\x0f\x0d\x01\x32", 0x04) ++ frame(0x00, 0x00, "abc") ++ frame(0x00, 0x01, "defgh"),
     request("\x83\x86\x04\x04/e.x\x00\x06expect\x0c100-continue", 0x04) ++ frame(0x00, 0x00, "abc") ++ frame(0x00, 0x01, "def"),
     request("\x82\x86\x04\x04/g.x\x00\x06cookie\x03a=1\x00\x06cookie\x03b=2\x00\x06expect\x0c100-continue", 0x04) ++ frame(0x00, 0x01, ""),
+    // Answers written in pieces, through the pipe: a stream with a trailer,
+    // the same for a HEAD, a file, and each of them with a client window of
+    // nothing (the call waits, and the connection ending wakes it), with a
+    // reset behind the request, and with a GOAWAY behind it.
+    streamed_get,
+    request("\x00\x07:method\x04HEAD\x86\x04\x04/t.x", 0x05),
+    file_get,
+    request("\x00\x07:method\x04HEAD\x86\x04\x04/d.x", 0x05),
+    requestAfter(no_window, "\x82\x86\x04\x04/t.x", 0x05),
+    requestAfter(no_window, "\x82\x86\x04\x04/d.x", 0x05) ++ frame(0x03, 0x00, "\x00\x00\x00\x08"),
+    requestAfter(no_window, "\x82\x86\x04\x04/t.x", 0x05) ++ frame0(0x07, "\x00\x00\x00\x01\x00\x00\x00\x00"),
+    requestAfter("\x00\x04\x00\x00\x00\x01", "\x82\x86\x04\x04/t.x", 0x05) ++ frame(0x08, 0x00, "\x00\x00\x00\x01"),
+    streamed_get ++ frame(0x03, 0x00, "\x00\x00\x00\x08"),
+    file_get ++ frame0(0x08, "\x00\x00\x40\x00"),
+    // A stream whose answer is written while the client is still sending, or
+    // sending frames the protocol forbids: a reset or a frame after its
+    // END_STREAM is what these once drew, and a reset reached a call that had
+    // not begun to answer before it, which then answered.
+    request("\x00\x07:method\x04HEAD\x86\x04\x04/t.x", 0x04) ++ frame(0x00, 0x00, "abc") ++ frame(0x00, 0x01, "") ++ frame(0x00, 0x00, "more"),
+    streamed_get ++ frame(0x08, 0x00, "\x00\x00\x00\x00"),
+    request("\x82\x86\x04\x04/t.x", 0x04) ++ frame(0x08, 0x00, "\x7f\xff\xff\xff"),
+    request("\x82\x86\x04\x04/d.x", 0x04) ++ frame(0x08, 0x00, "\x00\x00\x00\x00"),
     // A frame whose length runs past the end of the input.
     h2.preface ++ "\x00\x00\x00\x04\x00\x00\x00\x00\x00" ++ "\x00\x40\x00\x00\x00\x00\x00\x00\x01",
 };
@@ -639,6 +758,29 @@ test "the corpus's ordinary call is answered, so the property is looking at an a
     // SETTINGS, the ACK of the client's, HEADERS, DATA with "hi", trailers.
     try testing.expect(std.mem.indexOf(u8, out.written(), "\x00\x00\x00\x00\x02hi") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "grpc-status\x010") != null);
+}
+
+test "the corpus's streamed answer and file are written in pieces, so the property is looking at them" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(streamed_get);
+    var stop: bulkhead.Stop = .{};
+    h2conn.serveConnection(stub(testing.allocator, &stop), &in, &out.writer, .off, .off, .{});
+    // The pieces, in order, and the trailer after the last.
+    const got = out.written();
+    const at = std.mem.indexOf(u8, got, "a") orelse return error.NoPieces;
+    try testing.expect(at > 0);
+    try testing.expect(std.mem.indexOf(u8, got, "x-sum") != null);
+
+    var file: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer file.deinit();
+    var in_file: std.Io.Reader = .fixed(file_get);
+    h2conn.serveConnection(stub(testing.allocator, &stop), &in_file, &file.writer, .off, .off, .{});
+    var answer = try @import("h2test.zig").answerOf(file.written());
+    defer answer.deinit();
+    var bytes: usize = 0;
+    for (@import("h2test.zig").Answer.of(.data, &answer, 1)) |f| bytes += f.head.len;
+    try testing.expectEqual(@as(usize, 40_000), bytes);
 }
 
 // A generator that stopped producing calls would leave every property above

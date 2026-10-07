@@ -964,6 +964,17 @@ const engine_waker: Waker.VTable = .{
             wake.halfClose();
         }
     }.f,
+    .poll = if (!looks_ahead) {} else struct {
+        fn f(target: ?*anyopaque) Woken {
+            const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
+            return switch (wake.lookNow()) {
+                .readable => .readable,
+                .posted => .posted,
+                .timed_out => .timed_out,
+                .closed => .closed,
+            };
+        }
+    }.f,
 };
 
 const engine_deadlines: Deadlines.VTable = .{
@@ -1336,11 +1347,26 @@ pub const Signal = struct {
         return self._cond.wait(&monitor._lock);
     }
 
+    /// `wait` that cancellation cannot end: for a fiber that has lent memory
+    /// of its own to another and must not return, and so free it, until that
+    /// other has said it is done with it (ADR 260). The monitor is held again
+    /// on return.
+    pub fn waitUncancelable(self: *Signal, monitor: *Monitor) void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        self._cond.waitUncancelable(&monitor._lock);
+    }
+
     /// Wake the one that is parked, if any. Held under the monitor or not.
     pub fn wake(self: *Signal) void {
         self._cond.signal();
     }
 };
+
+/// Let the other fibers of this thread run, and come straight back where
+/// there are none: how a connection with a great deal to write gives the calls
+/// it is writing for their turn between rounds (ADR 260).
+pub const yield = engine.yield;
 
 /// Wait, without stopping the thread. Wrapped for the same reason `Mutex`
 /// is: a sleeping fiber is not a held thread.
@@ -1604,6 +1630,9 @@ pub const Woken = enum { readable, posted, timed_out, closed };
 /// was served, or it is HTTP/2 and still to be (ADR 259).
 pub const Hand = enum { done, http2 };
 
+/// Whether the Waker can be asked without waiting; only HTTP/2's connection does.
+const looks_ahead = @import("nilo_build").http2;
+
 pub const Waker = struct {
     target: ?*anyopaque = null,
     vtable: *const VTable = &no_engine,
@@ -1625,7 +1654,16 @@ pub const Waker = struct {
         /// Shut the send side of this connection's socket, and nothing else.
         /// See `halfClose`.
         half_close: *const fn (target: ?*anyopaque) void,
+        /// `wait` without waiting: what has happened already, or `.timed_out`.
+        /// See `poll`.
+        /// Only a `-Dhttp2` build has the field: a default build's Waker is
+        /// the bytes it was.
+        poll: if (looks_ahead) *const fn (target: ?*anyopaque) Woken else void = if (looks_ahead) &nothingYet else {},
     };
+
+    fn nothingYet(_: ?*anyopaque) Woken {
+        return .timed_out;
+    }
 
     /// No Engine underneath: every wait says "go and read", every post is
     /// dropped. `App.handleRequest` called from a test gets this.
@@ -1690,6 +1728,17 @@ pub const Waker = struct {
     /// before the close (ADR 195). Nothing happens with no Engine underneath.
     pub fn halfClose(self: Waker) void {
         self.vtable.half_close(self.target);
+    }
+
+    /// Whether the socket is readable or somebody has posted, without
+    /// waiting: `.timed_out` when neither has happened yet. For a connection
+    /// that is busy writing and must still read what the client sends, where
+    /// `wait` with a limit would cost a millisecond a look and `wait(0)` is no
+    /// limit at all. The same contract as `wait`: one `.readable` per arrival
+    /// of bytes, and the caller has drained its read buffer (ADR 260).
+    pub fn poll(self: Waker) Woken {
+        if (comptime !looks_ahead) unreachable;
+        return self.vtable.poll(self.target);
     }
 };
 

@@ -67,6 +67,10 @@ pub const Link = struct {
     /// this file's.
     ctx: *anyopaque,
     poke: *const fn (ctx: *anyopaque) void,
+    /// Set, under the monitor, when the connection will write nothing more
+    /// and `poke` is dropped: a pipe opened or waited on after that fails at
+    /// once, because nothing would ever wake it.
+    dead: ?*const bool = null,
 };
 
 /// How many bytes a call reads before it tells the connection: a half window,

@@ -62,7 +62,9 @@ const Harness = struct {
     arena: std.heap.ArenaAllocator,
     lifetime: str_mod.Lifetime = .{},
     in_flight: fail.InFlight = .{},
-    buf: [4096]u8 = undefined,
+    /// Room for the largest answer a test reads back whole: the file the
+    /// two-framing table serves is 72,000 bytes.
+    buf: [80_000]u8 = undefined,
     restore_log_level: std.log.Level,
     /// Who these requests come from. No socket by default, which is what
     /// every test that does not care about the address wants.
@@ -11729,10 +11731,49 @@ fn framedMedium(c: *Ctx) anyerror!void {
     try c.send(200, "text/plain", "0123456789" ** 250);
 }
 
+/// A streamed answer, a stream that promised its length, an event stream and
+/// a file, each of which is the same bytes in chunks, in frames or from a
+/// descriptor (ADR 260).
+fn framedStreamed(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    for (0..30) |i| {
+        try out.print("line {d}\n", .{i});
+        try out.flush();
+    }
+    try out.finish();
+}
+
+fn framedPromised(c: *Ctx) anyerror!void {
+    var out = try c.streamWith(200, "text/plain", .{ .length = 12 });
+    try out.writeAll("twelve bytes");
+    try out.finish();
+}
+
+fn framedEvents(c: *Ctx) anyerror!void {
+    var events = try c.events();
+    try events.send(.{ .name = "tick", .data = "1" });
+    try events.send(.{ .id = "2", .data = "two" });
+    try events.close();
+}
+
+var framed_file: ?*bulkhead.Dir = null;
+/// What the file route sends: more than the 65,535 bytes a connection's
+/// window starts at, and more than a buffer of the pipe's.
+const framed_file_bytes = "0123456789abcdefghijklmnopqrstuvwxyz" ** 2_000;
+
+fn framedFile(c: *Ctx) anyerror!void {
+    const file = try framed_file.?.openFile("f.bin");
+    return c.sendFile(.{ .file = file, .content_type = "application/octet-stream" });
+}
+
 fn framedApp() !App {
     var app = App.init(testing.allocator);
     errdefer app.deinit();
     try app.provide(&framed_db);
+    try app.get("/streamed", framedStreamed);
+    try app.get("/promised", framedPromised);
+    try app.get("/events", framedEvents);
+    try app.get("/file", framedFile);
     try app.use(cors.permissive);
     try app.get("/users/:id", getUser);
     try app.post("/users", createUser);
@@ -11788,7 +11829,7 @@ fn readHttp1(a: std.mem.Allocator, response: []const u8, head_only: bool) !Answe
     if (head_only) rest = "";
     var body: std.ArrayList(u8) = .empty;
     var trailers: std.ArrayList(hpack.Field) = .empty;
-    if (chunked) {
+    if (chunked and !head_only) {
         while (true) {
             const eol = std.mem.indexOf(u8, rest, "\r\n").?;
             const n = try std.fmt.parseInt(usize, rest[0..eol], 16);
@@ -11930,6 +11971,42 @@ test "the same requests over HTTP/1.1 and over HTTP/2 get the same answers" {
         .says = "a=1; b=2",
     });
     try expectSameAnswer(&app, .{ .path = "/go", .status = 302 });
+}
+
+test "a streamed answer, an event stream and a file are the same over HTTP/1.1 and over HTTP/2" {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    const previous = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = previous;
+    var tmp = nilo_testing.tmpDir();
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = framed_file_bytes });
+    var path_buf: [128]u8 = undefined;
+    var dir = try bulkhead.Dir.open(try tmp.path(&path_buf, ""));
+    defer dir.close();
+    framed_file = &dir;
+    defer framed_file = null;
+    var app = try framedApp();
+    defer app.deinit();
+
+    var expected_lines: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer expected_lines.deinit();
+    for (0..30) |i| try expected_lines.writer.print("line {d}\n", .{i});
+
+    try expectSameAnswer(&app, .{ .path = "/streamed", .status = 200, .says = expected_lines.written() });
+    try expectSameAnswer(&app, .{ .path = "/streamed", .window = 100, .status = 200, .says = "line 29" });
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/streamed", .status = 200 });
+    try expectSameAnswer(&app, .{ .path = "/promised", .status = 200, .says = "twelve bytes" });
+    try expectSameAnswer(&app, .{ .path = "/events", .status = 200, .says = "event: tick\ndata: 1\n\nid: 2\ndata: two\n\n" });
+    try expectSameAnswer(&app, .{ .path = "/file", .window = 65_535, .status = 200, .says = "0123456789abcdefghijklmnopqrstuvwxyz" });
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/file", .status = 200 });
+    try expectSameAnswer(&app, .{
+        .path = "/file",
+        .fields = &.{.{ .name = "range", .value = "bytes=100-90000" }},
+        .window = 65_535,
+        .status = 206,
+        .says = "0123456789abcdefghijklmnopqrstuvwxyz",
+    });
 }
 
 test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 from the second on a connection" {

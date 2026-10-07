@@ -16,13 +16,16 @@
 //! and the union is the HTTP/1.1 arm and nothing else, so the default build
 //! pays not even the compare.
 //!
-//! **The HTTP/2 arm collects the answer whole.** A request's answer is framed
-//! by the connection's fiber, never by the request's (ADR 220), so this arm
-//! keeps what `Ctx` hands it in the request arena for that fiber to frame. A
-//! stream and a file are not collected, and `Ctx` refuses them by name before
-//! this arm is asked (ADR 259): they need a pipe from the request's fiber to
-//! the connection's with the client's window in between (ADR 260, stage 6.2).
-//! The pipe the other way, the body arriving, is `inbound.zig`.
+//! **The HTTP/2 arm collects a whole answer and pipes a streamed one.** A
+//! request's answer is framed by the connection's fiber, never by the
+//! request's (ADR 220), so this arm keeps what `Ctx` hands it in the request
+//! arena for that fiber to frame. A stream, an event stream and a file are not
+//! collected: `streamHead`, `piece` and `end` hand the connection the head, the
+//! stream's own buffer and the end, through the outbound pipe, and the file is
+//! read a buffer at a time into the same pipe (`outbound.zig`, ADR 260). The
+//! pipe the other way, the body arriving, is `inbound.zig`. A gRPC call
+//! answers one message, so it has no pipe, and `Ctx` refuses a stream there by
+//! name (`Framing.canStream`).
 //!
 //! A WebSocket and an event stream handed to the connection loop stay HTTP/1.1
 //! only: both take the connection's reader and writer for their whole life,
@@ -36,8 +39,10 @@
 //! §6.5.1 allows (ADR 254).
 
 const std = @import("std");
+const hpack = @import("hpack.zig");
 const http1 = @import("http1.zig");
 const inbound = @import("inbound.zig");
+const outbound = @import("outbound.zig");
 pub const http2_built = @import("nilo_build").http2;
 
 pub const Header = http1.Header;
@@ -210,8 +215,18 @@ pub const Framing = union(enum) {
     ) !void {
         switch (self.*) {
             .http1 => |*h| return h.streamHead(status, content_type, shape, length, keep, extra),
-            .http2 => if (comptime !http2_built) unreachable else return error.NotCollected,
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.streamHead(status, content_type, shape, length, extra),
         }
+    }
+
+    /// Whether a streamed answer or a file can be carried: always on HTTP/1.1,
+    /// and on HTTP/2 for every request but a gRPC call, which answers one
+    /// message and has no pipe to the connection for more.
+    pub fn canStream(self: *const Framing) bool {
+        return switch (self.*) {
+            .http1 => true,
+            .http2 => |c| if (comptime !http2_built) unreachable else c.streamer != null,
+        };
     }
 
     /// One piece of a streamed body: what the stream's buffer held, then
@@ -220,7 +235,7 @@ pub const Framing = union(enum) {
     pub fn piece(self: *Framing, chunked: bool, buffered: []const u8, data: []const []const u8, splat: usize) !void {
         switch (self.*) {
             .http1 => |*h| return h.piece(chunked, buffered, data, splat),
-            .http2 => if (comptime !http2_built) unreachable else return error.NotCollected,
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.piece(buffered, data, splat),
         }
     }
 
@@ -238,7 +253,7 @@ pub const Framing = union(enum) {
     pub fn end(self: *Framing, marked: bool, trailers: Trailers) !void {
         switch (self.*) {
             .http1 => |*h| return h.end(marked, trailers),
-            .http2 => if (comptime !http2_built) unreachable else return,
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.endBody(trailers),
         }
     }
 
@@ -256,7 +271,7 @@ pub const Framing = union(enum) {
     ) !u64 {
         switch (self.*) {
             .http1 => |*h| return h.file(status, content_type, reader, len, keep, extra),
-            .http2 => if (comptime !http2_built) unreachable else return error.NotCollected,
+            .http2 => |c| if (comptime !http2_built) unreachable else return c.file(status, content_type, reader, len, extra),
         }
     }
 
@@ -300,6 +315,9 @@ pub const StreamShape = struct {
     /// Nothing marks the end but the connection closing, so it cannot carry
     /// another request: HTTP/1.0 with no length given.
     ends_connection: bool,
+    /// A HEAD: the head a GET would get and no body, which a framing that
+    /// ends the stream with its head has to know before the body ends.
+    bodyless: bool = false,
 };
 
 /// HTTP/1.1, and HTTP/1.0 where it differs: the bytes `http1.zig` writes.
@@ -446,6 +464,19 @@ pub const Http1 = struct {
     }
 };
 
+/// What the connection gives a request that can stream: where its pipe is
+/// published, how to tell the connection, how many pipes are open, and how
+/// the head of its answer is encoded, which only the connection's file knows.
+pub const Streamer = struct {
+    link: inbound.Link,
+    slot: *?*outbound.Outbox,
+    live: *std.atomic.Value(u32),
+    /// Bytes of file buffers the connection's calls hold (`Collected.file`).
+    file_held: *std.atomic.Value(usize),
+    can_park: bool,
+    head: *const fn (a: std.mem.Allocator, answer: *const Collected) anyerror![]const u8,
+};
+
 /// An answer kept for the connection's fiber to frame (ADR 220): what a
 /// route handed `Ctx`, copied into the request arena because the slices it
 /// came in, a handler's buffer and the headers inline in `Ctx`, are gone by
@@ -480,6 +511,11 @@ pub const Collected = struct {
     failure: ?anyerror = null,
     /// The sentence that failure carried, nilo's own words.
     message: []const u8 = "",
+    /// What a streamed answer is written through, when the request can have
+    /// one: set by the connection before the call runs, null for a gRPC call.
+    streamer: ?Streamer = null,
+    /// The pipe a streamed answer is written through, once its head is out.
+    outbox: ?*outbound.Outbox = null,
 
     // `whole` and `head` are `noinline` because the HTTP/1.1 answer pays
     // for them otherwise. Inlined into `Framing.whole`, which every answer
@@ -509,6 +545,103 @@ pub const Collected = struct {
         self.length = len;
         self.content_type = try self.arena.dupe(u8, content_type);
         self.headers = try self.fields(extra);
+    }
+
+    /// The head of a streamed answer: kept as a collected one is, encoded on
+    /// this fiber into the request arena, and handed to the connection, which
+    /// writes it as soon as it looks.
+    noinline fn streamHead(self: *Collected, status: u16, content_type: []const u8, shape: StreamShape, length: ?u64, extra: []const Header) !void {
+        const st = self.streamer orelse return error.NotCollected;
+        self.status = status;
+        self.length = length;
+        self.content_type = try self.arena.dupe(u8, content_type);
+        self.headers = try self.fields(extra);
+        const block = try st.head(self.arena, self);
+        const box = try self.arena.create(outbound.Outbox);
+        box.* = .{ .link = st.link, .arena = self.arena, .can_park = st.can_park };
+        box.open(block, shape.bodyless);
+        self.outbox = box;
+        _ = st.live.fetchAdd(1, .acq_rel);
+        // Published for the connection's fiber, which looks for it by this
+        // pointer and is woken to.
+        @atomicStore(?*outbound.Outbox, st.slot, box, .release);
+        box.wakeConnection();
+    }
+
+    /// One piece, lent to the connection and waited for: no copy, and nothing
+    /// allocated.
+    noinline fn piece(self: *Collected, buffered: []const u8, data: []const []const u8, splat: usize) !void {
+        const box = self.outbox orelse return error.NotCollected;
+        return box.lend(buffered, data, splat);
+    }
+
+    /// The end of a streamed body, with the trailers a route set as a HEADERS
+    /// frame after it (ADR 254).
+    noinline fn endBody(self: *Collected, trailers: Trailers) !void {
+        const box = self.outbox orelse return;
+        var block: []const u8 = "";
+        if (trailers.list.len > 0) {
+            const list = try self.fields(trailers.list);
+            const out = try self.arena.alloc(hpack.Field, list.len);
+            for (list, out) |from, *to| to.* = .{ .name = from.name, .value = from.value };
+            block = try hpack.encodeBlock(self.arena, out);
+        }
+        return box.finish(block);
+    }
+
+    /// How much of a file is read at a time, which is what one lend is: a
+    /// connection's turn (`pump_quantum`), because a lend is a hand-over to
+    /// the connection's fiber and a frame's worth of file per hand-over left
+    /// HTTP/2 at 2.3 GB/s where 64 KiB reaches 3.2 (`bench/result/http.md`,
+    /// ADR 260). Not more: 256 KiB, past the client's window, fell to 0.56.
+    pub const file_buffer = 64 * 1024;
+
+    /// What the file calls of one connection may hold of buffers between
+    /// them, charged when a file starts and given back when it returns. A
+    /// call past it is not failed or made to wait: it reads through a
+    /// smaller buffer (never under `file_floor`), slower but correct, so a
+    /// connection's worth of stalled downloads holds at most this and a
+    /// floor a stream (100 streams: 1 MiB and 400 KB), not 6.4 MB.
+    pub const file_budget = 1024 * 1024;
+    pub const file_floor = 4 * 1024;
+
+    /// The buffer a file of `len` bytes reads through when the connection's
+    /// calls already hold `taken` bytes of them: the file's own size if it is
+    /// smaller than a buffer, and otherwise what the budget has left, never
+    /// under the floor.
+    pub fn fileBufferSize(taken: usize, len: u64) usize {
+        const wanted: usize = @intCast(@min(len, file_buffer));
+        const room = file_budget -| taken;
+        return @min(wanted, @max(room, @min(wanted, file_floor)));
+    }
+
+    /// The head, then the file read into frames a buffer at a time through
+    /// the same pipe: there is no `sendfile` on HTTP/2, because a frame
+    /// header goes between the pieces. What is returned is what was sent,
+    /// short only when the file was cut under the transfer, and then the
+    /// stream is left without its end, which the connection resets.
+    noinline fn file(self: *Collected, status: u16, content_type: []const u8, reader: *std.Io.File.Reader, len: u64, extra: []const Header) !u64 {
+        try self.streamHead(status, content_type, .{ .chunked = false, .ends_connection = false }, len, extra);
+        const box = self.outbox.?;
+        const st = self.streamer.?;
+        // Charged to the connection before the buffer is made, and given
+        // back when the file is done with it.
+        const wanted: usize = @intCast(@min(len, file_buffer));
+        const taken = st.file_held.fetchAdd(wanted, .acq_rel);
+        const size = fileBufferSize(taken, len);
+        if (size < wanted) _ = st.file_held.fetchSub(wanted - size, .acq_rel);
+        defer _ = st.file_held.fetchSub(size, .acq_rel);
+        const buffer = try self.arena.alloc(u8, @max(size, 1));
+        var sent: u64 = 0;
+        while (sent < len) {
+            const want: usize = @intCast(@min(len - sent, buffer.len));
+            const n = reader.interface.readSliceShort(buffer[0..want]) catch return error.ReadFailed;
+            if (n == 0) break;
+            try box.lend(buffer[0..n], &.{}, 0);
+            sent += n;
+        }
+        if (sent == len) try box.finish("");
+        return sent;
     }
 
     /// `list` copied, its names lowercased. The block `nilo.secure` keeps as
@@ -699,4 +832,21 @@ test "a collected failure keeps its error and its sentence past the buffers they
     @memset(&sentence, 'x');
     try testing.expectEqual(@as(?anyerror, error.AlreadyExists), collected.failure);
     try testing.expectEqualStrings("already there", collected.message);
+}
+
+test "a file's buffer is its size when it is small, a buffer when the connection has room, and a floor when it has none" {
+    if (comptime !http2_built) return error.SkipZigTest;
+    const C = Collected;
+    try testing.expectEqual(@as(usize, 10), C.fileBufferSize(0, 10));
+    try testing.expectEqual(@as(usize, 0), C.fileBufferSize(0, 0));
+    try testing.expectEqual(C.file_buffer, C.fileBufferSize(0, 1 << 30));
+    try testing.expectEqual(@as(usize, 10 * 1024), C.fileBufferSize(C.file_budget - 10 * 1024, 1 << 30));
+    try testing.expectEqual(C.file_floor, C.fileBufferSize(C.file_budget, 1 << 30));
+    try testing.expectEqual(C.file_floor, C.fileBufferSize(C.file_budget * 4, 1 << 30));
+    // A hundred streams at once hold the budget and a floor each, not a
+    // buffer each.
+    var held: usize = 0;
+    for (0..100) |_| held += C.fileBufferSize(held, 1 << 30);
+    try testing.expect(held <= C.file_budget + 100 * C.file_floor);
+    try testing.expect(held < 100 * C.file_buffer / 4);
 }

@@ -80,6 +80,7 @@ Two cases where "write the body in pieces" is not available, decided here so the
 - **HTTP/1.0 has no chunked encoding.** A stream to a 1.0 client writes its pieces with no framing, sends `Connection: close`, and the connection ends with the body. That is the only way a 1.0 client can know where the response stopped.
 - **A status that has no body cannot be streamed.** 204, 304 and 1xx have their `Transfer-Encoding` and `Content-Length` dropped by the head writer, because what follows the head would start the next response. `c.stream` and `c.streamWith` return an error under one (a 500 naming the status, if the handler passes it up) before a byte is written. The audit of `http/` at `39896d2` found the head going out with the framing dropped and the chunks after it.
 - **A HEAD gets the head and nothing else.** The stream is created, the handler runs and writes normally, and every write is dropped. A handler should not have to know which verb it is answering (`Ctx.send` already works this way).
+- **On HTTP/2 a stream is the same stream.** The buffer is lent to the connection's fiber for the length of the wait and its `DATA` frames are written straight out of it, so a piece still allocates nothing (a test counts it, [ADR 260](./260-a-request-on-http2-runs-from-its-headers.md)). A HEAD sends the head as a HEADERS frame that ends the stream, with no `DATA`.
 
 ## What is deliberately not decided here
 

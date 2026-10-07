@@ -163,10 +163,10 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !boo
     // Checked now, held or not, so a type that cannot be a header value is a
     // clean 500 from here.
     try c.contentTypeOk(contents.content_type);
-    // The bytes of a file go from the descriptor to the connection, which an
-    // HTTP/2 stream has not got until stage 6 (ADR 259). A HEAD sends none of
-    // them, and a 304 or a 416 never gets here.
-    if (c.method != .HEAD) try c.refuseFileOnHttp2();
+    // On HTTP/2 the bytes are read into frames through the connection's pipe
+    // (ADR 260), which a gRPC call, answering one message, has not got. A
+    // HEAD sends none of them, and a 304 or a 416 never gets here.
+    if (c.method != .HEAD) try c.refuseFileInCall();
 
     if (c._hold) {
         c.markAnswered(status);

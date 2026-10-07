@@ -89,6 +89,10 @@ This page covers reading a request, answering it, its cookies, session and uploa
 
 Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, which a response may carry more than once. `Set-Cookie` because two cookies cannot be folded into one line; `Vary` because two layers can each name their own axis, and replacing one would drop the other ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). Setting either with a name and value that are already present adds nothing.
 
+### A stream and an event stream on HTTP/2
+
+**`c.stream()` and `c.events()` work the same on HTTP/2** (`-Dhttp2`): a write goes to the connection's fiber, which frames it as the client's windows allow, so a write waits when the client's window is full and fails when the stream is reset, the write deadline passes (the stream is reset with `CANCEL`) or the connection closes. A piece allocates nothing, a connection takes turns between its streams, and the buffers a connection's file calls hold are held to 1 MiB (a file past it reads through a smaller buffer, never under 4 KiB). `c.eventsFrom` and `c.upgrade` are refused on HTTP/2 with a 500 that says so.
+
 ### Trailers
 
 **A trailer is a field sent after the body, for what is known only once the body is** (a `Server-Timing` for work the body did, a checksum, a gRPC status) ([ADR 254](../adr/254-an-answer-can-carry-trailers.md)).
@@ -123,6 +127,8 @@ Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, w
 **`c.url` is checked while compiling.** A param with no value, a value with no param, a value a path segment cannot carry, and a `*` catch-all are all compile errors naming the field. Values are matched by name, so `.{ .slug = t, .id = 42 }` and `.{ .id = 42, .slug = t }` give the same URL. `nilo.url.into(buf, pattern, args)` is the same call with your own buffer and no allocation, for code with no request in flight. A text value that is empty, `.` or `..` is `error.BadValue`, because a browser follows `/u/../settings` to `/settings` and reads `%2E` as a dot ([ADR 100](../adr/100-a-route-pattern-is-the-name-of-its-url.md)).
 
 ### `c.sendFile`
+
+**On HTTP/2** (`-Dhttp2`) a file is read into `DATA` frames a buffer at a time, because frame headers go between the pieces and `sendfile` cannot: 3.2 GB/s against `sendfile`'s 6.7 to 7.3 on HTTP/1.1, loopback, one stream ([`bench/result/http.md`](../../bench/result/http.md#what-a-request-on-http2-costs-when-its-answer-is-a-pipe)). `Range`, `If-Range`, `If-None-Match` and `HEAD` answer as on HTTP/1.1.
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`, and uses them to answer `Range`, `If-Range`, `If-None-Match` and `HEAD`. A handler that knows before it runs that it will answer with a file returns [`FileBody`](./handlers.md#handler-returns) instead, which the API description can see.
 

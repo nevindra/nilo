@@ -743,7 +743,7 @@ Nothing is open at this tier.
 
 **A file on HTTP/2 over plain TCP has no `sendfile`.** Its pieces are read into frames ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)); a frame header written and its payload sent from the file would take the copy out for h2c, which is a proxy's upstream and not where a browser meets a static-heavy site.
 
-**What would settle it:** a static file's throughput over h2c against HTTP/1.1 with `sendfile`, once stage 6.2 lands, and a deployment that serves files to a proxy over h2c.
+**What would settle it:** a deployment that serves files to a proxy over h2c, and the cost on record: a 64 MiB file over h2c is 3.2 GB/s against HTTP/1.1 `sendfile`'s 6.7 to 7.3 on loopback, one stream, with the file read 64 KiB at a time ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-when-its-answer-is-a-pipe)).
 
 **Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 

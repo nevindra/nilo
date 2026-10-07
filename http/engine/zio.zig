@@ -738,6 +738,40 @@ pub const Wake = struct {
         socket.shutdown(.send) catch {};
     }
 
+    /// Submit the two halves that are not in the loop's hands: the post half,
+    /// and the readable half, which is armed here, on the way in, and not on
+    /// the way out of a `.readable` (see `wait`).
+    fn arm(self: *Wake) void {
+        if (!self.armed) {
+            self.cq.submit(&self.wake.c) catch unreachable;
+            self.armed = true;
+        }
+        if (!self.poll_armed) {
+            self.cq.submit(&self.poll.c) catch unreachable;
+            self.poll_armed = true;
+        }
+    }
+
+    /// `wait` that does not: what has already completed, `.timed_out` if
+    /// nothing has. The loop has to have run since the socket changed for a
+    /// completion to be there, which is what the caller's yield is for.
+    /// Armed and answered exactly as `wait` is, and a readable poll that has
+    /// not fired stays armed for the next look or wait, so nothing is
+    /// submitted twice (`poll_armed` clears only when it fires).
+    pub fn lookNow(self: *Wake) Woken {
+        self.arm();
+        const done = self.cq.next() orelse return .timed_out;
+        if (done == &self.wake.c) {
+            self.cq.submit(&self.wake.c) catch unreachable;
+            return .posted;
+        }
+        if (done == &self.poll.c) {
+            self.poll_armed = false;
+            return .readable;
+        }
+        return .timed_out;
+    }
+
     /// Park until the socket has something to read or somebody posts.
     ///
     /// Only correct with the connection's read buffer already drained — a
@@ -747,10 +781,7 @@ pub const Wake = struct {
     /// this; the Engine cannot, because it does not know what a frame is.
     /// `limit_ms` of 0 waits with no limit at all.
     pub fn wait(self: *Wake, limit_ms: u32) Woken {
-        if (!self.armed) {
-            self.cq.submit(&self.wake.c) catch unreachable;
-            self.armed = true;
-        }
+        self.arm();
         // Armed on the way *in*, after the caller has read whatever the last
         // `.readable` was about, rather than on the way out of it.
         //
@@ -770,11 +801,6 @@ pub const Wake = struct {
         // belongs to a group or another queue. Nothing closes this queue and
         // both completions are this queue's own, so neither can happen here
         // — which is what `unreachable` states, at every `submit` in this file.
-        if (!self.poll_armed) {
-            self.cq.submit(&self.poll.c) catch unreachable;
-            self.poll_armed = true;
-        }
-
         while (true) {
             // The limit belongs to the wait, not to the connection: it is
             // measured from *this* call, so a client that spoke a moment ago
@@ -2427,6 +2453,13 @@ pub const blocking = zio.blockInPlace;
 /// the pool's `max_threads`, so the call never waits in the queue behind a
 /// job already running (zio#745).
 pub const blockingReserved = zio.blockInPlaceReserved;
+
+/// Let the other fibers on this thread run before this one goes on, and
+/// return at once where there is nothing to switch to. A cancel is left for
+/// the next wait to report.
+pub fn yield() void {
+    zio.yield() catch {};
+}
 
 /// Wait, without stopping the thread. `error.Canceled` if the request was
 /// cancelled while waiting — the same failure `Mutex.lock` has, and it maps
