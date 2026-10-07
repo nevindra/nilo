@@ -135,27 +135,49 @@ const canonical: Canonical = blk: {
 /// The end-of-string symbol, 30 ones. It may only appear as padding.
 const eos_len = 30;
 
-/// Codes of up to this many bits decode with one table lookup. Every byte a
-/// header name or an ordinary value is made of has a code of 5 to 8 bits, so
-/// this is the path nearly every symbol takes; the rest walk `canonical`.
-const fast_bits = 9;
+/// Up to two symbols decode with one table lookup when their codes come to
+/// this many bits or fewer. Every byte a header name or an ordinary value is
+/// made of has a code of 5 to 8 bits, so two of the commonest fit, and one of
+/// anything up to 12 bits; the rest walk `canonical`.
+///
+/// Twelve because it was measured against its neighbours on h2load's five
+/// strings: 165ns for the decoder this replaced, one symbol a lookup at 9
+/// bits; two a lookup, 133 at 10 bits, 97 at 11, 82 at 12 and 77 at 13, where
+/// each bit doubles the table
+/// ([`bench/result/http.md`](../bench/result/http.md#two-huffman-symbols-a-lookup)).
+const fast_bits = 12;
 
-const Fast = struct {
-    sym: u8,
-    /// 0 when the code starting here is longer than `fast_bits`.
+const Fast = extern struct {
+    first: u8,
+    second: u8,
+    /// The first symbol's bits; 0 when the code starting here is longer than
+    /// `fast_bits`.
     len: u8,
+    /// Both symbols' bits; 0 when only the first fits.
+    both: u8,
 };
 
-/// Indexed by the next `fast_bits` bits of input. 512 entries, two bytes
-/// each, built while compiling from the same tables `canonical` is.
+/// Indexed by the next `fast_bits` bits of input: 4,096 entries, four bytes
+/// each, built while compiling from the same tables `canonical` is. A pair is
+/// read off the single-symbol answer for what the first symbol leaves.
 const fast: [1 << fast_bits]Fast = blk: {
     @setEvalBranchQuota(100_000);
-    var t: [1 << fast_bits]Fast = @splat(.{ .sym = 0, .len = 0 });
+    var one: [1 << fast_bits]Fast = @splat(.{ .first = 0, .second = 0, .len = 0, .both = 0 });
     for (0..256) |s| {
-        const len = lengths[s];
+        const len: u32 = lengths[s];
         if (len > fast_bits) continue;
         const first = codes[s] << (fast_bits - len);
-        for (0..(1 << (fast_bits - len))) |i| t[first + i] = .{ .sym = s, .len = len };
+        for (0..(1 << (fast_bits - len))) |i| one[first + i] = .{ .first = s, .second = 0, .len = len, .both = 0 };
+    }
+    var t = one;
+    for (&t, 0..) |*e, i| {
+        if (e.len == 0) continue;
+        // What follows the first code, its low bits zero: a second code that
+        // ends within the real bits is read correctly whatever they are.
+        const after = one[(i << e.len) & ((1 << fast_bits) - 1)];
+        if (after.len == 0 or e.len + after.len > fast_bits) continue;
+        e.second = after.first;
+        e.both = e.len + after.len;
     }
     break :blk t;
 };
@@ -163,37 +185,54 @@ const fast: [1 << fast_bits]Fast = blk: {
 /// Decode a Huffman string into `out`. Padding is at most seven bits and all
 /// ones, and the end-of-string symbol inside a string is an error (§5.2).
 ///
-/// Up to 64 bits of input are held at once and a symbol is taken off the top
-/// of them, rather than a bit at a time: measured at 563ns for the 89-byte
-/// header block h2load sends, 37% of a whole call, before this was written
-/// (ADR 220).
+/// Up to 64 bits of input are held at the top of a word, refilled a word at a
+/// time, and one or two symbols are taken off the top of them a lookup. A bit
+/// at a time was 563ns for the 89-byte header block h2load sends, 37% of a
+/// whole call (ADR 220); one symbol a lookup took that to 165ns of Huffman in
+/// it, and two to 82.
 pub fn huffmanDecode(in: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Error!void {
     // Every symbol is at least five bits, so this is the most it can be.
     try out.ensureUnusedCapacity(gpa, in.len * 8 / 5 + 1);
+    // Written through the slice rather than appended one at a time; each
+    // write is counted, so the reservation above still holds.
+    const buf = out.allocatedSlice();
+    var n = out.items.len;
+    defer out.items.len = n;
+    // Input not yet decoded, at the top of `acc`; the bits below are zeros.
     var acc: u64 = 0;
-    // How many of `acc`'s low bits are input not yet decoded.
     var bits: u32 = 0;
     var next: usize = 0;
     while (true) {
-        while (bits <= 56 and next < in.len) : (next += 1) {
-            acc = (acc << 8) | in[next];
+        if (next + 8 <= in.len) {
+            // A whole word, of which as many bytes as fit below what is held.
+            acc |= std.mem.readInt(u64, in[next..][0..8], .big) >> @intCast(bits);
+            const take = (63 - bits) / 8;
+            next += take;
+            bits += take * 8;
+        } else while (bits <= 56 and next < in.len) : (next += 1) {
+            acc |= @as(u64, in[next]) << @intCast(56 - bits);
             bits += 8;
         }
         if (bits == 0) return;
 
-        // The next `fast_bits` bits, padded with ones past the end of the
-        // input. A code the padding completes is longer than what is left,
-        // which is how the end is told apart from a symbol below.
-        const peek: usize = if (bits >= fast_bits)
-            @intCast((acc >> @intCast(bits - fast_bits)) & ((1 << fast_bits) - 1))
-        else
-            @intCast(((acc << @intCast(fast_bits - bits)) | ((@as(u64, 1) << @intCast(fast_bits - bits)) - 1)) & ((1 << fast_bits) - 1));
-        const hit = fast[peek];
+        // Past the end of the input the bits are zeros. A code that reaches
+        // into them is longer than what is left, which is how the end is
+        // told apart from a symbol below.
+        const hit = fast[@intCast(acc >> (64 - fast_bits))];
+        if (hit.both != 0 and hit.both <= bits) {
+            buf[n] = hit.first;
+            buf[n + 1] = hit.second;
+            n += 2;
+            acc <<= @intCast(hit.both);
+            bits -= hit.both;
+            continue;
+        }
         if (hit.len != 0) {
             if (hit.len > bits) return padding(acc, bits);
-            out.appendAssumeCapacity(hit.sym);
+            buf[n] = hit.first;
+            n += 1;
+            acc <<= @intCast(hit.len);
             bits -= hit.len;
-            acc &= (@as(u64, 1) << @intCast(bits)) - 1;
             continue;
         }
 
@@ -203,12 +242,13 @@ pub fn huffmanDecode(in: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Alloc
         var len: u32 = fast_bits + 1;
         while (true) : (len += 1) {
             if (len > bits) return padding(acc, bits);
-            const code: u32 = @intCast((acc >> @intCast(bits - len)) & ((@as(u64, 1) << @intCast(len)) - 1));
+            const code: u32 = @intCast(acc >> @intCast(64 - len));
             const rel = code -% canonical.first[len];
             if (canonical.count[len] != 0 and code >= canonical.first[len] and rel < canonical.count[len]) {
-                out.appendAssumeCapacity(canonical.symbols[canonical.offset[len] + rel]);
+                buf[n] = canonical.symbols[canonical.offset[len] + rel];
+                n += 1;
+                acc <<= @intCast(len);
                 bits -= len;
-                acc &= (@as(u64, 1) << @intCast(bits)) - 1;
                 break;
             }
             // Thirty bits that are no byte's code: the end-of-string symbol,
@@ -218,12 +258,13 @@ pub fn huffmanDecode(in: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Alloc
     }
 }
 
-/// What is left at the end of a Huffman string: shorter than a byte and
-/// every bit set, or the string is refused.
+/// What is left at the top of `acc` at the end of a Huffman string: shorter
+/// than a byte and every bit set, or the string is refused.
 fn padding(acc: u64, bits: u32) Error!void {
     if (bits > 7) return error.Compression;
+    if (bits == 0) return;
     const ones = (@as(u64, 1) << @intCast(bits)) - 1;
-    if (acc & ones != ones) return error.Compression;
+    if (acc >> @intCast(64 - bits) != ones) return error.Compression;
 }
 
 // ---- the static table (Appendix A) ----
@@ -766,6 +807,30 @@ test "every byte survives a trip through the Huffman code" {
     try huffmanDecode(bits.items, &out, testing.allocator);
     try testing.expectEqual(@as(usize, 256), out.items.len);
     for (out.items, 0..) |b, i| try testing.expectEqual(@as(u8, @intCast(i)), b);
+}
+
+test "every pair of bytes survives a trip through the Huffman code" {
+    // The two-symbol lookups, and each pair at both ends of a string: the
+    // padding after it is 0 to 7 bits, and a pair that ends on it must not
+    // be read past.
+    var bits: std.ArrayList(u8) = .empty;
+    defer bits.deinit(testing.allocator);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    for (0..256) |a| for (0..256) |b| {
+        bits.clearRetainingCapacity();
+        var acc: u64 = (@as(u64, codes[a]) << lengths[b]) | codes[b];
+        var n: u6 = @as(u6, lengths[a]) + lengths[b];
+        while (n >= 8) {
+            n -= 8;
+            try bits.append(testing.allocator, @intCast((acc >> n) & 0xff));
+        }
+        acc &= (@as(u64, 1) << n) - 1;
+        if (n > 0) try bits.append(testing.allocator, @intCast(((acc << (8 - n)) | ((@as(u64, 1) << (8 - n)) - 1)) & 0xff));
+        out.clearRetainingCapacity();
+        try huffmanDecode(bits.items, &out, testing.allocator);
+        try testing.expectEqualSlices(u8, &.{ @intCast(a), @intCast(b) }, out.items);
+    };
 }
 
 test "headers past the list limit are dropped and said so, and the table still moves" {

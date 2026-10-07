@@ -85,23 +85,11 @@ Nothing is open at this tier.
 
 **Needs:** the test reader given the server's read-buffer size, and the jar honouring a past `Expires` and the two prefixes.
 
-**A handler that reads a body nilo does not know takes a `*Ctx`, and the document says nothing about it.** [ADR 157](./adr/157-a-type-can-write-its-own-answer.md) closed this on the way out: a type carrying `nilo_content_type` and `nilo_write` goes out as whatever it writes, under its own label, and the description names it. On the way in there is no third answer yet — a body is JSON, a form, or `c.body()` — so a route receiving protobuf, MsgPack or a vendor's binary takes a `*Ctx`, decodes by hand, and the API description cannot say what the route reads. The mirror is one declaration on the type: the same `nilo_content_type`, and a reader from the body's bytes into `Self`, checked and refused where the type is named the way `nilo_parse` is ([ADR 113](./adr/113-a-path-param-can-parse-itself.md)). nilo supplies the door and the caller brings the codec, which for protobuf is [`nilo_proto`](./reference/proto.md) and for anything else is theirs.
-
-**Needs:** two things. The name — `nilo_read(text, arena) !Self` is already the column protocol ([ADR 049](./adr/049-a-column-type-can-come-from-outside-this-module.md)) with the same shape, and a type can legitimately be both a column and a body. And what the document says for a body with no JSON schema: the content type and a bare description, the way [ADR 016](./adr/016-the-api-description-comes-from-the-signatures.md) words a type that writes its own body, or a `nilo_openapi` the type declares.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is decided in six (`form.fill`, `form.fillCollecting`, `typed.queryValue`, `typed.queryValueCollecting`, `ctx.collectBadBody`, `ctx.describeObject`) and has drifted three times: `Patch` under `Bound`, `?T` in a query and a body, a number described in a query and not in JSON. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
 
 **Needs:** the shape of each shared piece decided — a comptime `FieldRule` that the six callers ask, one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the field rule and the prefix matcher first.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
-
-**Decoding a call's header block is 28% of a unary call, because the HPACK table is advertised at 0.** With no dynamic table every field arrives as a literal and is Huffman-decoded afresh, 244 to 251 ns of an 876 to 887 ns call in process, the largest single row since the call stopped being parsed as HTTP/1.1 ([`bench/result/http.md`](../bench/result/http.md#a-call-handed-to-the-app-as-it-was-read)). The zero is a decision with its price on record: at the default 4,096 bytes a decoder keeps what the client inserts, up to the whole table per connection for a Collector that indexes a fresh `grpc-timeout` every call ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)). A table of its own is idle memory, the hard axis, bought back as CPU on the request path, and a faster Huffman decoder buys some of it with neither.
-
-**Needs:** the Huffman decode's share of those 244 to 251 ns measured on its own, then a decoder that takes several symbols a lookup measured against it; a non-zero table only with its resident bytes per connection measured against the Collector.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 **Does a WebSocket over TLS park with a whole frame already decrypted-able in the record layer's buffer?** `websocket.zig`'s `park` checks only the cleartext buffer before `Wake.wait`, which polls the socket; tls.zig can pull two records in one socket read and decrypts one a call, so the second frame could wait on a socket the kernel has already emptied, until the client sends again or the idle ping fires. Read from the code, not run, and `tls_live.zig` has no WebSocket test.
 
@@ -358,6 +346,24 @@ Nothing is open at this tier.
 **What would settle it:** both, unloaded and behind the pool ([`sql.md` §2](../bench/result/sql.md) is why both); `bench-sql` has the unloaded `.in_fiber` half, and `bench/sql_server.zig` on a SQLite `Db` is the rest, on a box.
 
 ### `nilo_http`
+
+**`Ctx.header` reads the head again for every name it is asked, about 40 ns a time inside a request.** It splits the head into lines and trims each one until a name matches: 27 ns in a loop of its own for the third line of a short head, and about 40 inside a request, where a message read as JSON pays it to learn its spelling and is 52 to 58 ns slower than the same route as a plain struct ([`bench/result/http.md`](../bench/result/http.md#a-body-read-as-what-its-type-says)). A form pays the same read for its `Content-Type`, and every `c.header` call in a handler pays one. Classing the header in the head parser closed the message's gap to 1 to 4% and was refused for putting 1.6 KB on every program's request path ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)); the read itself is the thing to make cheaper.
+
+**What would settle it:** a lookup measured against `Ctx.header` on the message row and a form's in `zig build profile`, held to no size on the request path, and kept only where it is faster on both.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
+**A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.** A message read or written as JSON is nilo's JSON ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), so a `[]const u8` declared `.bytes` in its `wire` table goes out as the bytes themselves and is read back the same way. A Connect client speaking JSON sends and expects base64 there, and the two would disagree without either refusing. Field names and 64-bit integers do not have the problem: a Connect client reads both of nilo's spellings.
+
+**What would settle it:** a decision between writing a `.bytes` field as base64 in a message's JSON, with the document saying so, and refusing JSON for a message that has one; either held by a test with a Connect client's bytes.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
+**Whether a gRPC listener should keep an HPACK table, to stop decoding the same strings every call.** With the table advertised at 0 every field arrives as a literal and its Huffman is decoded afresh, 123 to 125 ns of a 767 to 773 ns call in process, 16% of it, after the decoder went to two symbols a lookup ([`bench/result/http.md`](../bench/result/http.md#two-huffman-symbols-a-lookup)). What is left only a table of the client's own takes away, and that is idle memory, the hard axis: at the default 4,096 bytes a decoder keeps what the client inserts, up to the whole table per connection for a Collector that indexes a fresh `grpc-timeout` every call ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
+
+**What would settle it:** the resident bytes per idle connection at a table of 4,096 and of a few hundred, measured against the Collector and a library called by hand, beside what each saves of a call; a table ships only if ADR 017's idle figure for a gRPC connection is restated with it.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 **Several comments and pages describe code that is no longer there.** `bulkhead.zig`'s header lists a six-parameter `serve` (it has eight) under `src/engine/` (it is `http/engine/`), and leaves out `Peer`'s fields, `spawnLocal`, `Wake.rawIdle` and `Binding`, which a second Engine has to provide; `proxies.zig` says a `Forwarded` header is walked, and nothing reads it; the `accept` comment in `zio.zig` says a failure raises the stop flag; `middleware.zig`'s header and [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md) use `std.time.Timer`, which Zig 0.16 removed; a link in `ctx.zig` says ADR 155 and points at 156.
 
@@ -730,6 +736,18 @@ Nothing is open at this tier.
 **Needs:** the same repository, `record.zig`. Last checked at `e04ae44`.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
+**A Connect client's `Connect-Timeout-Ms` is not read.** A gRPC call's `grpc-timeout` becomes the request's deadline ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)); a Connect call names its own the same way in milliseconds, and nilo answers it with the route's deadline or none, so a client that gave up is still worked for. Its failures already go out in Connect's shape ([ADR 257](./adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)), `deadline_exceeded` included once a deadline fires.
+
+**What would settle it:** a Connect client that sets a timeout against a message route, or a decision to read the header where a message route reads its `Content-Type`, with the cost on a route that has none measured.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
+**A Connect GET is a 405.** Connect lets a side-effect-free unary call be a GET with the message in the query (`?message=…&encoding=json`, base64 for protobuf), so a browser or CDN can cache it; a message route registered with `app.post` answers it as any route answers a verb it was not registered for. A method registered with `app.get` reads a message from the query's fields, not from `message=`.
+
+**What would settle it:** a caller whose Connect client is set to use GET, or a design for reading `message=` that does not put a branch on every GET.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 ---
 

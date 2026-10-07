@@ -603,7 +603,7 @@ pub noinline fn serveRequest(
         // too big to discard, or behind an `Expect` nobody answered. That is
         // the 413 naming `bodyStream()` that a reset would take back.
         const linger = !reusable and http1.readsMore(&r);
-        sendFailure(&c, failure, err, self.failure_write) catch return .{ .keep_alive = false, .handover = handover, .linger = linger };
+        sendFailure(&c, failure, err, self) catch return .{ .keep_alive = false, .handover = handover, .linger = linger };
         return .{ .keep_alive = reusable, .handover = handover, .linger = linger };
     };
     watchdog.finish(&in_flight.watch);
@@ -632,7 +632,7 @@ pub noinline fn serveRequest(
                 .{ @tagName(c.method), path, chain.len - @min(c._chain_left, chain.len) + 1, chain.len },
             );
             failure.clear();
-            sendFailure(&c, failure, error.MiddlewareAnsweredNothing, self.failure_write) catch
+            sendFailure(&c, failure, error.MiddlewareAnsweredNothing, self) catch
                 return .{ .keep_alive = false, .handover = handover, .linger = linger };
             return .{ .keep_alive = reusable, .handover = handover, .linger = linger };
         }
@@ -1271,9 +1271,10 @@ fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) 
 /// Turn a handler failure into a response. A fail function's message is
 /// used if there is one; otherwise the error goes through the mapping
 /// table, and anything unrecognised becomes a 500 logged with its error
-/// name (ADR 004). The body is nilo's own shape, or the one the
-/// application named with `app.failures` (ADR 024).
-noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, shape: ?failurebody.Write) !void {
+/// name (ADR 004). The body is nilo's own shape, the one the application
+/// named with `app.failures` (ADR 024), or Connect's to a Connect call in a
+/// program that has a message route (ADR 257).
+noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, app: *const App) !void {
     const status = fail.resolveStatus(failure, err);
     const message: []const u8 = if (fail.failed(failure, err)) failure.message() else blk: {
         if (status == 500) {
@@ -1301,6 +1302,9 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, sh
 
     var buf: [failure_body_max]u8 = undefined;
     var body: std.Io.Writer = .fixed(&buf);
+    // A Connect call is told in Connect's words whatever shape the App has,
+    // since its client reads nothing else (ADR 257).
+    const shape = if (app.failure_connect) |pick| pick(c._head, err) orelse app.failure_write else app.failure_write;
     // A shape of the application's can outgrow the buffer — an envelope past
     // its 256 bytes — and then nilo's own shape goes out instead, with the
     // sentence intact: the first failure in development shows the wrong

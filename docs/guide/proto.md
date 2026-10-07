@@ -33,17 +33,15 @@ const HelloReply = struct {
     served_at_ms: u64 = 0,
 };
 
-fn sayHello(c: *nilo.Ctx) !void {
-    const body = try c.body();
-    const request = proto.decode(HelloRequest, c.arena(), body.view()) catch
-        return nilo.fail.badRequest("that is not a HelloRequest", .{});
-    const reply = try proto.encode(HelloReply, c.arena(), .{
-        .message = try std.fmt.allocPrint(c.arena(), "hello, {s}", .{request.name}),
+fn sayHello(arena: std.mem.Allocator, request: HelloRequest) !HelloReply {
+    return .{
+        .message = try std.fmt.allocPrint(arena, "hello, {s}", .{request.name}),
         .served_at_ms = @intCast(nilo.nowMillis()),
-    });
-    try c.send(200, "application/grpc", reply);
+    };
 }
 ```
+
+**A handler whose argument is a message reads it, and one that returns a message writes it**, in protobuf to a client that sent protobuf and in JSON to one that sent JSON ([Requests](./requests.md#protobuf-and-other-formats)). `proto.decode` and `proto.encode` below are for everywhere else: a queue, a file, or a handler that wants the bytes.
 
 **The number is on the type and the Zig type is the protobuf type.** `.name = 1` on a `[]const u8` is a string, `.served_at_ms = .{ 2, .fixed64 }` on a `u64` is a `fixed64` rather than a `uint64`. The table says only what the type cannot: a field number, and for a number the encoding it travels as.
 

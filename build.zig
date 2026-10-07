@@ -2055,6 +2055,58 @@ const refusals = [_]Refusal{
         .says = "the handler for route \"/invoices/:id\" returns ownbody_content_type_without_write.Invoice, which names a `nilo_content_type` and has no `nilo_write`.",
     },
     .{
+        .name = "decode_without_content_type",
+        .says = "the request body on route \"/readings\" is a decode_without_content_type.Reading, which has a `nilo_decode` and no `nilo_content_type`.",
+    },
+    .{
+        .name = "decode_wrong_signature",
+        .says = "decode_wrong_signature.Reading's `nilo_decode` is not `fn (body: []const u8, arena: std.mem.Allocator) !decode_wrong_signature.Reading`.",
+    },
+    .{
+        .name = "message_with_its_own_decode",
+        .says = "the request body on route \"/sum\" is a message_with_its_own_decode.Sum, which has both a `wire` table and a `nilo_decode`, so it says two things about how its bytes are read.",
+    },
+    .{
+        .name = "decode_and_parse",
+        .says = "argument 1 of the handler for route \"/readings\" is a decode_and_parse.Reading, which carries both `nilo_parse` and `nilo_decode`, so it could be a path param or the request body.",
+    },
+    .{
+        .name = "bound_message",
+        .says = "the handler for route \"/sum\" binds a bound_message.Sum with `Bound(…)`, which reads a JSON body field by field — and this type's body is read whole, as protobuf or by its own `nilo_decode`.",
+    },
+    .{
+        .name = "message_answering_json",
+        .says = "the handler for route \"/sum\" reads a protobuf message (message_answering_json.Sum) and answers with a message_answering_json.Total, which is not one.",
+    },
+    .{
+        .name = "rpc_not_a_struct",
+        .says = "`app.rpc` was given u32, which is not a struct.",
+    },
+    .{
+        .name = "rpc_without_name",
+        .says = "rpc_without_name.Greeter is given to `app.rpc` and does not say which service it is.",
+    },
+    .{
+        .name = "rpc_bad_name",
+        .says = "rpc_bad_name.Greeter's `nilo_service` is \"hello/Greeter\", which is not a service's full name.",
+    },
+    .{
+        .name = "rpc_name_not_text",
+        .says = "rpc_name_not_text.Greeter's `nilo_service` has to be text, the service's full name: `pub const nilo_service = \"package.Service\";`.",
+    },
+    .{
+        .name = "rpc_method_without_message",
+        .says = "rpc_method_without_message.Greeter.ping is a `pub fn` of an RPC service, so it is served as \"POST /hello.Greeter/Ping\", and it neither reads nor answers a message.",
+    },
+    .{
+        .name = "rpc_methods_collide",
+        .says = "rpc_methods_collide.Greeter.sayHello and rpc_methods_collide.Greeter.SayHello are both served as \"POST /hello.Greeter/SayHello\": a method's name is its function's with the first letter upper-cased.",
+    },
+    .{
+        .name = "rpc_no_methods",
+        .says = "rpc_no_methods.Greeter is given to `app.rpc` and has no `pub fn`, so it serves nothing.",
+    },
+    .{
         .name = "ownbody_write_without_content_type",
         .says = "the handler for route \"/invoices/:id\" returns ownbody_write_without_content_type.Invoice, which has a `nilo_write` and no `nilo_content_type`.",
     },
@@ -2698,6 +2750,7 @@ const Snippets = struct {
         .{ .path = "docs/guide/metrics.md" },
         .{ .path = "docs/guide/tracing.md" },
         .{ .path = "docs/guide/middleware.md" },
+        .{ .path = "docs/guide/requests.md" },
         .{ .path = "docs/guide/responses.md" },
         .{ .path = "docs/guide/grpc.md" },
         .{ .path = "docs/guide/streaming.md" },
@@ -5226,6 +5279,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zio", .module = zio.module("zio") },
                 .{ .name = "nilo_core", .module = coreFor(b, target, .ReleaseFast) },
+                // A message route is timed, and its body is read by
+                // `nilo_proto` (ADR 256).
+                .{ .name = "nilo_proto", .module = protoFor(b, target, .ReleaseFast) },
             },
         }),
     });
@@ -5260,6 +5316,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // gRPC in whatever the flags say, because `--frames` is the gRPC
+    // listener, and without it a call has nowhere to go (ADR 220).
+    wireOptions(b, fuzzer.root_module, target, .ReleaseSafe, false, true, false);
     const run_fuzzer = b.addRunArtifact(fuzzer);
     if (b.args) |args| run_fuzzer.addArgs(args);
     b.step("fuzz", "Throw generated requests at the parser, or with --frames connections at the gRPC listener").dependOn(&run_fuzzer.step);
@@ -5320,7 +5379,10 @@ pub fn build(b: *std.Build) void {
     // The profile is compiled on every run and not run: a measuring tool
     // nothing builds stopped compiling twice before anybody reached for it
     // (it lost `nilo_build` with ADR 248, and `Stream.init` with ADR 253).
+    // The fuzzer is the same case: it lost `nilo_build` when `framing.zig`
+    // started asking it whether gRPC is in, and nothing noticed.
     test_step.dependOn(&profile.step);
+    test_step.dependOn(&fuzzer.step);
 
     // Core, on its own, in both modes (ADR 038). It hangs off `test` rather
     // than beside it because it is the fastest thing in this file — no

@@ -60,6 +60,8 @@ const bytebody = @import("bytebody.zig");
 const json_mod = @import("json.zig");
 const mark = @import("jsonmark.zig");
 const ownbody = @import("ownbody.zig");
+const message = @import("message.zig");
+const proto = @import("nilo_proto");
 const versioned_mod = @import("versioned.zig");
 const verified_mod = @import("verified.zig");
 
@@ -353,6 +355,11 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
     const Wrapper = struct {
         fn run(c: *Ctx) anyerror!void {
             var args: std.meta.ArgsTuple(Fn) = undefined;
+            // Which spelling a message arrived in, for a handler with one in
+            // its signature, so a body read as protobuf is answered as
+            // protobuf without the head being read twice. Zero bytes and no
+            // code for every other handler (ADR 256).
+            var spelling: Spelling(Fn) = if (comptime speaksMessage(Fn)) .unread else {};
             // Before anything else is read, because a replay reads nothing
             // else: the kept answer goes out and the handler never runs
             // (ADR 155). `null` here means there is no such argument.
@@ -417,7 +424,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                             );
                         },
                         .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
-                        .body => args[i] = try c.json(P),
+                        .body => args[i] = try readBody(P, c, &spelling),
                         .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },
                         .header => args[i] = .{ .value = try headerValue(P, c) },
                         .authorization => args[i] = try c.authorization(P.nilo_authorization),
@@ -451,12 +458,12 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                 }
             }
             if (comptime idempotentAt(roles)) |at| {
-                return idempotentFinish(params[at].type.?, c, replaying.?, @call(.auto, f, args));
+                return idempotentFinish(params[at].type.?, c, replaying.?, &spelling, @call(.auto, f, args));
             }
             if (comptime cachedAt(roles)) |at| {
-                return cachedFinish(params[at].type.?, c, caching.?, @call(.auto, f, args));
+                return cachedFinish(params[at].type.?, c, caching.?, &spelling, @call(.auto, f, args));
             }
-            return sendResult(c, @call(.auto, f, args));
+            return sendResult(c, &spelling, @call(.auto, f, args));
         }
     };
     return Wrapper.run;
@@ -651,7 +658,7 @@ fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
 
 /// What the handler answered, kept and then sent — or not kept, when it
 /// failed, so the next retry runs it again (ADR 155).
-fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !void {
+fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, spelling: anytype, result: anytype) !void {
     const Replays = P.nilo_idempotent.replays;
     const replays = c._services.get(*Replays).?; // `idempotentBegin` found it
 
@@ -663,7 +670,7 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, result: anytype) !v
         _ = replays.del(begun.under);
     };
 
-    const answer = try renderAnswer(c, result);
+    const answer = try renderAnswer(c, spelling, result);
 
     // What the replay sends: the headers the handler set through the Ctx
     // (a session cookie, say), then the answer's own, which is the order
@@ -814,7 +821,7 @@ fn cachedBegin(comptime P: type, c: *Ctx) !cached_mod.Outcome {
 
 /// What the handler answered, kept for `ttl_s` and then sent — or not kept,
 /// when it failed, so the next request runs it again (ADR 188).
-fn cachedFinish(comptime P: type, c: *Ctx, begun: cached_mod.Begun, result: anytype) !void {
+fn cachedFinish(comptime P: type, c: *Ctx, begun: cached_mod.Begun, spelling: anytype, result: anytype) !void {
     const spec = P.nilo_cached;
     const Pages = spec.pages;
     const pages = c._services.get(*Pages).?; // `begin` found it
@@ -828,7 +835,7 @@ fn cachedFinish(comptime P: type, c: *Ctx, begun: cached_mod.Begun, result: anyt
         _ = pages.del(begun.under);
     };
 
-    const answer = try renderAnswer(c, result);
+    const answer = try renderAnswer(c, spelling, result);
     try c.setStaticHeader(cached_mod.status_name, cached_mod.miss_value);
     if (!begun.keep) return sendRendered(c, answer);
 
@@ -942,7 +949,7 @@ pub const Rendered = struct {
 /// arena rather than sent. An error the handler returned, and the 404 an
 /// empty `?T` means, come back as errors — for the caller to release its
 /// claim on and pass up, since neither is an answer to keep.
-fn renderAnswer(c: *Ctx, result: anytype) !Rendered {
+fn renderAnswer(c: *Ctx, spelling: anytype, result: anytype) !Rendered {
     const R = @TypeOf(result);
     const value = if (@typeInfo(R) == .error_union) try result else result;
     const T = @TypeOf(value);
@@ -971,6 +978,9 @@ fn renderAnswer(c: *Ctx, result: anytype) !Rendered {
     var kind: idempotent_mod.Kind = .empty;
     var content_type: []const u8 = "";
     var body: []const u8 = "";
+    // Null while compiling for every type that is not a message, so the
+    // branch below is not in their code at all.
+    const proto_bytes: ?[]const u8 = if (comptime message.isMessage(B)) try protoAnswer(c, spelling, present) else null;
     if (B == void) {
         // nothing to render
     } else if (comptime ownbody.writesItsOwnBody(B)) {
@@ -979,6 +989,12 @@ fn renderAnswer(c: *Ctx, result: anytype) !Rendered {
         kind = .own;
         content_type = B.nilo_content_type;
         body = out.written();
+    } else if (proto_bytes) |bytes| {
+        // Kept under the label it went out with, so a replay to a client
+        // that sent protobuf is protobuf (ADR 256).
+        kind = .own;
+        content_type = message.answerType(spelling.*);
+        body = bytes;
     } else if (comptime bytebody.isBytes(B)) {
         // Bytes in hand are kept the way a written answer is: the label is
         // the value's, and its headers go into the record beside the
@@ -1120,6 +1136,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         var idempotent = false;
         var body: ?*const openapi.Schema = null;
         var body_kind: openapi.BodyKind = .json;
+        var body_type: []const u8 = "";
         // Whether nilo can refuse this request before the handler runs.
         // Not a guess — it is exactly the routes with something to convert.
         var can_reject = false;
@@ -1154,6 +1171,14 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             },
             .body => {
                 body = openapi.schemaOf(p.type.?);
+                // What the body is filed under: a message in both its
+                // spellings, a type that reads its own bytes under its label
+                // (ADR 256), and JSON for everything else.
+                if (message.isMessage(p.type.?)) body_kind = .message;
+                if (message.decodesItsOwnBody(p.type.?)) {
+                    body_kind = .own;
+                    body_type = p.type.?.nilo_content_type;
+                }
                 can_reject = true;
                 // A body type that answers its wrong shape with a 422 says
                 // so, and the document says it with it (ADR 251).
@@ -1232,7 +1257,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .security = security,
             .idempotent = idempotent,
             .body = body,
-            .body_kind = body_kind,
+            .body_types = body_kind.contentTypes(body_type),
             .answer = answer,
             .can_reject = can_reject,
             .misfit = misfit,
@@ -1348,6 +1373,7 @@ fn answerWith(comptime status: ?u16, comptime V: type) openapi.Answer {
             .content_type = if (ownbody.writesItsOwnBody(Present)) Present.nilo_content_type else contentTypeFor(Present),
             .schema = openapi.schemaOf(Present),
             .not_found = Present != V,
+            .more_types = if (message.isMessage(Present) and !ownbody.writesItsOwnBody(Present)) &.{"application/proto"} else &.{},
         };
     }
 }
@@ -1406,8 +1432,14 @@ fn checkAnswer(comptime pattern: []const u8, comptime Fn: type) void {
             }
             V = V.nilo_versioned;
         }
-        if (V == void) return;
         if (@typeInfo(V) == .optional) V = @typeInfo(V).optional.child;
+        // Before the `void` return below: a route that reads a message and
+        // answers nothing is allowed, and the check says so itself.
+        for (@typeInfo(Fn).@"fn".params) |p| {
+            const P = p.type orelse continue;
+            if (message.isMessage(P)) message.checkAnswer(pattern, P, V);
+        }
+        if (V == void) return;
         ownbody.check(pattern, V);
     }
 }
@@ -1528,8 +1560,16 @@ fn rolesOf(
                             orMeantAsAParam(param_names, used),
                     );
                     body_at = i;
-                    checkNotRenamed(pattern, readInto(roles[i], P), "request body");
-                    checkReadable(pattern, readInto(roles[i], P));
+                    if (roles[i] == .bound_body) checkBoundIsJson(pattern, P.Value);
+                    // A type that reads its own bytes is not read by
+                    // `std.json`, so neither JSON check below means
+                    // anything for it (ADR 256).
+                    if (message.decodesItsOwnBody(P)) {
+                        message.check(pattern, P);
+                    } else {
+                        checkNotRenamed(pattern, readInto(roles[i], P), "request body");
+                        checkReadable(pattern, readInto(roles[i], P));
+                    }
                 },
                 // A form *is* the body — the same bytes, read by a different
                 // rule — so the two are one slot and asking for both is the
@@ -1791,6 +1831,20 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     // is, and what a type says about itself wins over what its kind would
     // otherwise have meant (ADR 113). Reading the marker is also what checks
     // its shape, so a `nilo_parse` written wrong is refused here.
+    // Before `nilo_parse` too: a type that reads its own body is the body
+    // whatever kind it is, the way one that parses itself is a path param
+    // (ADR 256). One that says both is refused, since nothing at the call
+    // site says which was meant.
+    if (comptime message.decodesItsOwnBody(P)) {
+        if (comptime hasNamedDecl(P, "nilo_parse")) @compileError(
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" is a " ++ naming.of(P) ++ ", which carries both `nilo_parse` and `nilo_decode`, " ++
+                "so it could be a path param or the request body.\n" ++
+                "  A type the handler is given is one or the other. Keep the declaration for the " ++
+                "way this route reads it, and give the other use a type of its own.",
+        );
+        return .body;
+    }
     if (comptime convert_mod.parsesItself(P)) return .{ .param = 0 };
 
     return switch (@typeInfo(P)) {
@@ -2243,7 +2297,7 @@ fn queryValueCollecting(
 /// three say the same thing when the text does not fit (`convert.zig`).
 const convert = convert_mod.convert;
 
-fn sendResult(c: *Ctx, result: anytype) !void {
+fn sendResult(c: *Ctx, spelling: anytype, result: anytype) !void {
     const R = @TypeOf(result);
     const value = if (@typeInfo(R) == .error_union) try result else result;
     const T = @TypeOf(value);
@@ -2274,7 +2328,7 @@ fn sendResult(c: *Ctx, result: anytype) !void {
             "route \"{s}\" answered `unchanged`, and the client did not send that version",
             .{c._path},
         );
-        return sendValue(c, 200, body);
+        return sendValue(c, spelling, 200, body);
     }
     if (comptime hasNamedDecl(T, "nilo_response")) {
         // Copied rather than borrowed, the same as `Ctx.setHeader`: a
@@ -2286,12 +2340,12 @@ fn sendResult(c: *Ctx, result: anytype) !void {
             T.nilo_status
         else
             value.status;
-        return sendValue(c, status, value.value);
+        return sendValue(c, spelling, status, value.value);
     }
-    return sendValue(c, 200, value);
+    return sendValue(c, spelling, 200, value);
 }
 
-fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
+fn sendValue(c: *Ctx, spelling: anytype, status: u16, value: anytype) !void {
     const T = @TypeOf(value);
     // Nothing to describe and nothing to send. Under a 204 that is the whole
     // response; under any other status it is an empty body with no content
@@ -2302,7 +2356,7 @@ fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
     // body `null` — is a thing nobody meant and every client crashes on.
     if (comptime @typeInfo(T) == .optional) {
         const present = value orelse return fail.notFound("there is no {s}", .{c._path});
-        return sendValue(c, status, present);
+        return sendValue(c, spelling, status, present);
     }
     // Here, and not up in `sendResult` beside `Redirect`, because of where
     // the optional is unwrapped. `?Redirect` is not an idiom — a redirect is
@@ -2335,12 +2389,113 @@ fn sendValue(c: *Ctx, status: u16, value: anytype) !void {
         try value.nilo_write(&out.writer);
         return c.sendKept(status, T.nilo_content_type, out.written());
     }
+    // A message, in the spelling the request was sent in (ADR 256): JSON
+    // below when that was JSON or nothing, protobuf here otherwise. Sized
+    // first and written once, the one allocation a JSON answer makes.
+    if (comptime message.isMessage(T)) if (try protoAnswer(c, spelling, value)) |bytes| {
+        return c.sendKept(status, message.answerType(spelling.*), bytes);
+    };
     if (T == Str) return c.sendKept(status, "text/plain", value.view());
     // The same question `contentTypeFor` asks, and it has to be the same
     // answer: a body sent as JSON under a `text/plain` label, or the other way
     // round, is the response and its own description disagreeing.
     if (comptime json_mod.isByteSlice(T)) return c.sendKept(status, "text/plain", value);
     return c.sendJson(status, value);
+}
+
+/// The body argument, read by what its type says it is (ADR 256): its own
+/// decoder under its own label, a message as protobuf when it says so, or
+/// JSON, which is what every other struct by value has always been.
+fn readBody(comptime P: type, c: *Ctx, spelling: anytype) !P {
+    // Every branch but the last is decided on the type, so a JSON body pays
+    // nothing for them, not even the look at its content type.
+    if (comptime message.decodesItsOwnBody(P)) {
+        return message.decodeOwn(P, c._arena, message.contentTypeIn(c._head), (try c.body()).view());
+    }
+    if (comptime message.isMessage(P)) {
+        switch (codecOf(c, spelling)) {
+            .unread => unreachable,
+            .json => {},
+            .proto, .grpc => {
+                const value = try message.decodeProto(P, c._arena, (try c.body()).view());
+                // A message that checks itself is checked as a JSON body is
+                // (ADR 193): the rule is the type's, not the spelling's.
+                try @import("bound.zig").enforce(.body, P, value);
+                return value;
+            },
+        }
+    }
+    return c.json(P);
+}
+
+/// A message as protobuf, in the request arena, when the request sent
+/// protobuf; null for JSON, and for every type that is not a message, which
+/// returns before anything below is compiled for it.
+fn protoAnswer(c: *Ctx, spelling: anytype, value: anytype) !?[]const u8 {
+    const T = @TypeOf(value);
+    if (comptime !message.isMessage(T)) return null;
+    if (!codecOf(c, spelling).isProto()) return null;
+    return try encodeMessage(c, value);
+}
+
+/// The spelling the request's `Content-Type` names, read from the head the
+/// first time a message route asks and kept in the handler's wrapper after,
+/// so a route that reads a message and answers one reads the head once.
+///
+/// **Not in the head parser, and not on the `Ctx`**, both of which were
+/// built and measured: classing the header as it went past was 1.6 KB of
+/// request parsing, and a byte on the `Ctx` 81 bytes of `serveRequest`,
+/// each in every program, where ADR 017 has the request path's size stay
+/// absent for a feature. The parser's was the faster, a message read as
+/// JSON within 4% of a plain struct where this is 13%. Here it is code only
+/// in a handler with a message in its signature (ADR 256).
+fn codecOf(c: *Ctx, spelling: *message.Codec) message.Codec {
+    if (spelling.* == .unread) spelling.* = message.codecOf(message.contentTypeIn(c._head));
+    return spelling.*;
+}
+
+/// What a handler's wrapper keeps the spelling in: a byte when a message is
+/// in its signature, and nothing at all otherwise.
+fn Spelling(comptime Fn: type) type {
+    return if (speaksMessage(Fn)) message.Codec else void;
+}
+
+/// Whether a message is anywhere in the signature: an argument, or the
+/// value the answer carries once its wrappers are taken off.
+fn speaksMessage(comptime Fn: type) bool {
+    return message.speaks(Fn);
+}
+
+/// Whether a route's handler reads or answers a message, which is what
+/// hands the App Connect's failure body (ADR 257).
+pub fn speaksAMessage(comptime pattern: []const u8, comptime f: anytype) bool {
+    return comptime speaksMessage(fnTypeOf(pattern, @TypeOf(f)));
+}
+
+/// A message as protobuf, in the request arena: sized, then written into
+/// exactly that much.
+fn encodeMessage(c: *Ctx, value: anytype) ![]const u8 {
+    const T = @TypeOf(value);
+    const buf = try c._arena.alloc(u8, proto.encodedSize(T, value));
+    // `encodedSize` is exact, which is the contract `proto.encode` itself
+    // leans on the same way: the buffer cannot be short.
+    return proto.encodeInto(T, buf, value) catch unreachable;
+}
+
+/// `Bound(T)` hands the handler each field that did not bind, which is a
+/// thing only a JSON body has: protobuf has no field that fails on its own,
+/// and a type's own decoder answers for the whole of it (ADR 256).
+fn checkBoundIsJson(comptime pattern: []const u8, comptime T: type) void {
+    comptime {
+        if (!message.isMessage(T) and !message.decodesItsOwnBody(T)) return;
+        @compileError(
+            "nilo: the handler for route \"" ++ pattern ++ "\" binds a " ++ naming.of(T) ++
+                " with `Bound(…)`, which reads a JSON body field by field — and this type's body " ++
+                "is read whole, as protobuf or by its own `nilo_decode`.\n" ++
+                "  Take it as an argument of its own: a body that will not decode is a 400 naming " ++
+                "the type, before the handler runs.",
+        );
+    }
 }
 
 fn hasNamedDecl(comptime T: type, comptime name: []const u8) bool {

@@ -254,6 +254,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try routerScale(gpa);
     if (routes_file) |file| try routeTable(gpa, file, whole / rounds);
     try serviceScale(gpa);
+    try messageRoutes(gpa);
     // A call is answered through the framing only a `-Dgrpc` build has
     // (ADR 220), so without the flag there is no gRPC call to time.
     if (comptime @import("nilo_build").grpc) try grpcCalls() else std.debug.print(
@@ -262,6 +263,66 @@ pub fn main(init: std.process.Init.Minimal) !void {
     );
 
     if (sink == 0) unreachable; // keeps the work from being optimised away
+}
+
+// ---- a message read in either spelling (ADR 256) ----
+//
+// One route whose argument is a protobuf message, sent the same two numbers
+// as JSON and as protobuf, beside a control: a plain struct of the same
+// shape, which is what the JSON half of a message has to cost no more than.
+
+const message_rounds = 300_000;
+
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+fn sumMessage(in: SumRequest) SumReply {
+    return .{ .total = in.a + in.b };
+}
+
+fn sumPlain(in: struct { a: i32 = 0, b: i32 = 0 }) struct { total: i32 } {
+    return .{ .total = in.a + in.b };
+}
+
+fn messageRoutes(gpa: std.mem.Allocator) !void {
+    var message_app = App.init(gpa);
+    defer message_app.deinit();
+    try message_app.post("/sum", sumMessage);
+    try message_app.post("/plain", sumPlain);
+    try message_app.resolveChains();
+
+    const requests = [_]struct { []const u8, []const u8 }{
+        .{ "a plain struct, as JSON (the control)", "POST /plain HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}" },
+        .{ "a message, as JSON", "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}" },
+        .{ "a message, as protobuf", "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02" },
+    };
+    var message_arena = std.heap.ArenaAllocator.init(gpa);
+    defer message_arena.deinit();
+    std.debug.print("\nOne POST whose body is two numbers, read and answered in process:\n\n", .{});
+    for (requests) |r| {
+        var best: u64 = std.math.maxInt(u64);
+        for (0..reps + 1) |rep| {
+            const started = clock();
+            for (0..message_rounds) |_| {
+                var in = std.Io.Reader.fixed(r[1]);
+                var out = std.Io.Writer.fixed(&out_buf);
+                sink += @intFromBool(message_app.handleRequest(message_arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{}));
+                lifetime.end();
+                _ = message_arena.reset(.{ .retain_with_limit = arena_keep });
+            }
+            const took = clock() - started;
+            if (rep > 0 and took < best) best = took;
+        }
+        std.debug.print("  {s:<40}{d:>5}ns\n", .{ r[0], best / message_rounds });
+    }
 }
 
 // ---- one service out of several ----

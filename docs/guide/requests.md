@@ -189,6 +189,32 @@ The limits: the compressed bytes are bounded by `max_body`, and so is what they 
 
 `c.bodyStream()` is the exception: a stream hands bytes out as they arrive and holds nothing, so there is nowhere to decompress into, and a gzipped body on a streaming route is a 415 that says so.
 
+## Protobuf and other formats
+
+**A struct with a `wire` table is read as protobuf or as JSON, whichever the request sent, and answered in the same.** One function serves a browser's `fetch` in JSON and another service's client in protobuf, and is a gRPC method too:
+
+<!-- compiles -->
+```zig
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+fn sum(in: SumRequest) SumReply {
+    return .{ .total = in.a + in.b };
+}
+```
+
+`Content-Type: application/proto` is protobuf, the field numbers [`nilo_proto`](./proto.md)'s, and anything else is JSON, as for any struct. Bytes that are not the message are a 400 that says what was wrong with them.
+
+**A format nilo does not know is read by the type itself**: declare the content type and a `nilo_decode` that turns the body's bytes into the value, and the route reads it only when it arrives under that label. MsgPack, a vendor's binary or a CSV upload all fit; see [the reference](../reference/handlers.md#a-body-in-another-format) for both, and what each refuses.
+
 ## Streaming a large body
 
 ```zig

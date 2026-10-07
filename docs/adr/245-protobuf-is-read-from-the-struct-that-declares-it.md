@@ -17,7 +17,7 @@ The questions were the shape of the declaration, where it sits in the layers, an
 
 ### Where it sits
 
-**The Tools layer, importing nothing** ([ADR 038](./038-a-module-sits-where-the-loop-puts-it.md)). It is pure functions over bytes: the allocator and the input are arguments, so `zig test proto/proto.zig` runs the whole suite with no module graph. `nilo_http` names it only in `http/otlp.zig`, which only `app.trace` reaches ([ADR 247](./247-a-request-is-a-span-and-the-trace-leaves-as-otlp.md)), so a program that neither speaks protobuf nor traces links none of it, and a gRPC method stays an ordinary route whose handler calls `proto.decode(Request, c.arena(), body.view())` (the guide shows it).
+**The Tools layer, importing nothing** ([ADR 038](./038-a-module-sits-where-the-loop-puts-it.md)). It is pure functions over bytes: the allocator and the input are arguments, so `zig test proto/proto.zig` runs the whole suite with no module graph. `nilo_http` names it in `http/otlp.zig`, which only `app.trace` reaches ([ADR 247](./247-a-request-is-a-span-and-the-trace-leaves-as-otlp.md)), and in `http/message.zig`, which only a route with a message in its signature reaches ([ADR 256](./256-a-body-is-read-as-what-its-type-says.md)), so a program that neither speaks protobuf nor traces links none of it. A gRPC method is an ordinary route whose argument is the request message and whose return type is the answer; a handler that wants the bytes still calls `proto.decode` itself.
 
 ### The types
 

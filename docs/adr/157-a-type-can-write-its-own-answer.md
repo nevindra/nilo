@@ -72,6 +72,10 @@ the record ahead of the body, so a replay goes out under the same label the
 handler's type chose. Twelve bytes and a string more per kept answer of this
 kind, and none for the other three.
 
+## The way in
+
+The same pair has a mirror on the request side: `nilo_content_type` and `nilo_decode` make a type read its own body, under its own label and only that one ([ADR 256](./256-a-body-is-read-as-what-its-type-says.md)). The content type is the same declaration in both directions, so a type that is written and read carries one.
+
 ## What it costs
 
 **Exactly what JSON costs.** The body is written into the request arena

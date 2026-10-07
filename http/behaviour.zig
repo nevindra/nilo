@@ -1116,7 +1116,7 @@ test "the document names the type's own content type, and its schema only when t
     try testing.expect(std.mem.indexOf(u8, doc, "\"application/xml\":{\"schema\":{\"type\":\"string\"}}") != null);
     // The CSV said nothing, so the document says nothing — `{}` and the
     // note — rather than reflecting two integer fields nobody sends.
-    try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"description\":\"This type writes its own body") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"description\":\"This type reads or writes its own bytes") != null);
     try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"type\":\"object\"") == null);
 }
 
@@ -1142,6 +1142,295 @@ test "an idempotent route keeps an answer a type wrote itself, label and all" {
     try testing.expect(std.mem.indexOf(u8, again, "Idempotent-Replayed: true") != null);
     try testing.expect(std.mem.indexOf(u8, again, "Content-Type: application/xml") != null);
     try testing.expect(std.mem.endsWith(u8, again, "<invoice><number>1</number><total>10</total></invoice>"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+// ---- a body read as what its type says (ADR 256) ----
+
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+fn sumOf(in: SumRequest) SumReply {
+    return .{ .total = in.a + in.b };
+}
+
+fn keepSum(key: typed.Idempotent(FakeReplays, .{}), counter: *OrderCounter, in: SumRequest) !SumReply {
+    _ = key;
+    counter.placed += 1;
+    return .{ .total = in.a + in.b };
+}
+
+/// Six bytes: a sensor and a reading, big-endian, under a label of its own.
+const Reading = struct {
+    sensor: u16,
+    tenths: u32,
+
+    pub const nilo_content_type = "application/x-reading";
+
+    pub fn nilo_decode(body: []const u8, arena: std.mem.Allocator) !Reading {
+        _ = arena;
+        if (body.len != 6) return error.NotSixBytes;
+        if (body[0] == 0xff) return fail.unprocessable("sensor {d} is not one this site has", .{body[1]});
+        return .{ .sensor = std.mem.readInt(u16, body[0..2], .big), .tenths = std.mem.readInt(u32, body[2..6], .big) };
+    }
+};
+
+fn recordReading(r: Reading) typed.Status(201, struct { sensor: u16, tenths: u32 }) {
+    return .{ .value = .{ .sensor = r.sensor, .tenths = r.tenths } };
+}
+
+fn sumRequest(h: *Harness, app: *App, content_type: ?[]const u8, body: []const u8) []const u8 {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.writeAll("POST /sum HTTP/1.1\r\nHost: t\r\n") catch unreachable;
+    if (content_type) |ct| w.print("Content-Type: {s}\r\n", .{ct}) catch unreachable;
+    w.print("Content-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
+    return h.send(app, w.buffered()).response;
+}
+
+test "a message is read and answered in the spelling the request came in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const json = sumRequest(&h, &app, "application/json", "{\"a\":1,\"b\":2}");
+    try testing.expect(std.mem.startsWith(u8, json, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, json, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.endsWith(u8, json, "{\"total\":3}"));
+
+    // Field 1 is 1 and field 2 is 2; the answer is field 1, 3.
+    const proto = sumRequest(&h, &app, "application/proto", "\x08\x01\x10\x02");
+    try testing.expect(std.mem.startsWith(u8, proto, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, proto, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, proto, "\r\n\r\n\x08\x03"));
+
+    // The name older clients send is the same spelling, answered under
+    // Connect's name for it.
+    const older = sumRequest(&h, &app, "Application/X-Protobuf; charset=binary", "\x08\x05");
+    try testing.expect(std.mem.indexOf(u8, older, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, older, "\r\n\r\n\x08\x05"));
+
+    // No content type at all is JSON, as every other body is.
+    const bare = sumRequest(&h, &app, null, "{\"a\":4}");
+    try testing.expect(std.mem.endsWith(u8, bare, "{\"total\":4}"));
+}
+
+test "a message sent under any label but protobuf's is read as JSON, and bytes that are not one a 400 naming the type" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    var h = Harness.init();
+    defer h.deinit();
+
+    // What `curl -d` and a `fetch` of a string send: read as JSON, as a
+    // plain struct would be, and answered in it.
+    for ([_][]const u8{ "application/x-www-form-urlencoded", "text/plain;charset=UTF-8" }) |label| {
+        const sent = sumRequest(&h, &app, label, "{\"a\":1,\"b\":2}");
+        try testing.expect(std.mem.startsWith(u8, sent, "HTTP/1.1 200"));
+        try testing.expect(std.mem.indexOf(u8, sent, "Content-Type: application/json") != null);
+        try testing.expect(std.mem.endsWith(u8, sent, "{\"total\":3}"));
+    }
+
+    // A key with no value after it.
+    const cut = sumRequest(&h, &app, "application/proto", "\x08");
+    try testing.expect(std.mem.startsWith(u8, cut, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, cut, "is not a protobuf behaviour.SumRequest: it ends in the middle of a field") != null);
+}
+
+fn findSum(in: SumRequest) !SumReply {
+    if (in.a < 0) return fail.notFound("no sum starts at {d}", .{in.a});
+    if (in.a == 1000) return error.AlreadyExists;
+    return .{ .total = in.a + in.b };
+}
+
+fn connectCall(h: *Harness, app: *App, path: []const u8, connect: bool, body: []const u8) []const u8 {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.print("POST {s} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n", .{path}) catch unreachable;
+    if (connect) w.writeAll("Connect-Protocol-Version: 1\r\n") catch unreachable;
+    w.print("Content-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
+    return h.send(app, w.buffered()).response;
+}
+
+test "a Connect call that fails is told its code and nilo's sentence, and every other request keeps nilo's shape" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/math.Sums/Find", findSum);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const missing = connectCall(&h, &app, "/math.Sums/Find", true, "{\"a\":-2,\"b\":0}");
+    try testing.expect(std.mem.startsWith(u8, missing, "HTTP/1.1 404"));
+    try testing.expect(std.mem.indexOf(u8, missing, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.endsWith(u8, missing, "{\"code\":\"not_found\",\"message\":\"no sum starts at -2\"}"));
+
+    // The error says more than its 409 does, as it does to a gRPC client.
+    const taken = connectCall(&h, &app, "/math.Sums/Find", true, "{\"a\":1000,\"b\":0}");
+    try testing.expect(std.mem.startsWith(u8, taken, "HTTP/1.1 409"));
+    try testing.expect(std.mem.endsWith(u8, taken, "{\"code\":\"already_exists\",\"message\":\"Conflict\"}"));
+
+    // A body that is not the message, and a path no route answers.
+    const bad = connectCall(&h, &app, "/math.Sums/Find", true, "{\"a\":\"x\"}");
+    try testing.expect(std.mem.startsWith(u8, bad, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, bad, "{\"code\":\"invalid_argument\",\"message\":") != null);
+    const nowhere = connectCall(&h, &app, "/math.Sums/Lose", true, "{}");
+    try testing.expect(std.mem.startsWith(u8, nowhere, "HTTP/1.1 404"));
+    try testing.expect(std.mem.indexOf(u8, nowhere, "{\"code\":\"not_found\",\"message\":") != null);
+
+    // The same failure asked without the header.
+    const plain = connectCall(&h, &app, "/math.Sums/Find", false, "{\"a\":-2,\"b\":0}");
+    try testing.expect(std.mem.endsWith(u8, plain, "{\"error\":\"no sum starts at -2\",\"status\":404}"));
+}
+
+test "a Connect call is answered in Connect's shape over an application's own, and only by a program with a message route" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.failures(ApiError);
+    try app.get("/orders", failsWithASentence);
+    var h = Harness.init();
+    defer h.deinit();
+
+    // No route speaks a message yet: the header means nothing here.
+    const before = h.send(&app, "GET /orders HTTP/1.1\r\nHost: t\r\nConnect-Protocol-Version: 1\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, before, "{\"code\":404,\"detail\":\"no order \\\"7\\\"\"}"));
+
+    try app.post("/math.Sums/Find", findSum);
+    const connect = h.send(&app, "GET /orders HTTP/1.1\r\nHost: t\r\nConnect-Protocol-Version: 1\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, connect, "{\"code\":\"not_found\",\"message\":\"no order \\\"7\\\"\"}"));
+    const own = h.send(&app, "GET /orders HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, own, "{\"code\":404,\"detail\":\"no order \\\"7\\\"\"}"));
+}
+
+const Sums = struct {
+    pub const nilo_service = "math.v1.Sums";
+
+    pub fn add(in: SumRequest) SumReply {
+        return .{ .total = in.a + in.b };
+    }
+
+    pub fn find(in: SumRequest) !SumReply {
+        return findSum(in);
+    }
+
+    /// Not `pub`, so not a method.
+    fn helper() void {}
+};
+
+test "a struct of typed functions is served as a service, each pub fn a method with its first letter upper-cased" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.rpc(Sums);
+    var h = Harness.init();
+    defer h.deinit();
+    Sums.helper();
+
+    const json = h.send(&app, "POST /math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}").response;
+    try testing.expect(std.mem.startsWith(u8, json, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, json, "{\"total\":3}"));
+
+    const proto_answer = h.send(&app, "POST /math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02").response;
+    try testing.expect(std.mem.indexOf(u8, proto_answer, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, proto_answer, "\x08\x03"));
+
+    // The function's own name is not a path, and a method is a POST.
+    const lower = h.send(&app, "POST /math.v1.Sums/add HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, lower, "HTTP/1.1 404"));
+    const get = h.send(&app, "GET /math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, get, "HTTP/1.1 405"));
+
+    const missing = connectCall(&h, &app, "/math.v1.Sums/Find", true, "{\"a\":-1,\"b\":0}");
+    try testing.expect(std.mem.endsWith(u8, missing, "{\"code\":\"not_found\",\"message\":\"no sum starts at -1\"}"));
+}
+
+test "a service registered on a group carries the group's prefix and middleware" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.group("/rpc").rpc(Sums);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const sent = h.send(&app, "POST /rpc/math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":2,\"b\":2}").response;
+    try testing.expect(std.mem.endsWith(u8, sent, "{\"total\":4}"));
+}
+
+test "a type with nilo_decode is read only when it arrives under its own label" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/readings", recordReading);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const ok = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-reading\r\nContent-Length: 6\r\n\r\n\x00\x07\x00\x00\x01\x02").response;
+    try testing.expect(std.mem.startsWith(u8, ok, "HTTP/1.1 201"));
+    try testing.expect(std.mem.endsWith(u8, ok, "{\"sensor\":7,\"tenths\":258}"));
+
+    const wrong = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").response;
+    try testing.expect(std.mem.startsWith(u8, wrong, "HTTP/1.1 415"));
+    try testing.expect(std.mem.indexOf(u8, wrong, "reads application/x-reading") != null);
+
+    const unlabelled = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\n\r\n\x00\x07\x00\x00\x01\x02").response;
+    try testing.expect(std.mem.startsWith(u8, unlabelled, "HTTP/1.1 415"));
+    try testing.expect(std.mem.indexOf(u8, unlabelled, "said nothing about what its body is") != null);
+
+    const short = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-reading\r\nContent-Length: 2\r\n\r\n\x00\x07").response;
+    try testing.expect(std.mem.startsWith(u8, short, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, short, "NotSixBytes") != null);
+
+    // A decoder that fails with a fail function says its own sentence.
+    const unknown = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-reading\r\nContent-Length: 6\r\n\r\n\xff\x09\x00\x00\x01\x02").response;
+    try testing.expect(std.mem.startsWith(u8, unknown, "HTTP/1.1 422"));
+    try testing.expect(std.mem.indexOf(u8, unknown, "sensor 9 is not one this site has") != null);
+}
+
+test "the document files a message under both its spellings, and a type's own body under its label" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    try app.post("/readings", recordReading);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+    const doc = out.written();
+
+    const both = "\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/SumRequest\"}},\"application/proto\":{\"schema\":{\"$ref\":\"#/components/schemas/SumRequest\"}}";
+    try testing.expect(std.mem.indexOf(u8, doc, both) != null);
+    const answered = "\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/SumReply\"}},\"application/proto\":{\"schema\":{\"$ref\":\"#/components/schemas/SumReply\"}}";
+    try testing.expect(std.mem.indexOf(u8, doc, answered) != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"application/x-reading\":{\"schema\":{\"description\":\"This type reads or writes its own bytes") != null);
+}
+
+test "an idempotent route keeps a protobuf answer as protobuf" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/sum", keepSum);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const raw = "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nIdempotency-Key: s-1\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02";
+    const first = h.send(&app, raw).response;
+    try testing.expect(std.mem.indexOf(u8, first, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, first, "\r\n\r\n\x08\x03"));
+
+    const again = h.send(&app, raw).response;
+    try testing.expect(std.mem.indexOf(u8, again, "Idempotent-Replayed: true") != null);
+    try testing.expect(std.mem.indexOf(u8, again, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, again, "\r\n\r\n\x08\x03"));
     try testing.expectEqual(@as(u32, 1), counter.placed);
 }
 
@@ -4428,6 +4717,45 @@ test "the request path stays inside its allocation budget" {
     //     in the `Ctx` itself; the arena only hears about a seventh.
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "a message read and answered as protobuf allocates no more than the same message as JSON" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const count = struct {
+        fn of(a: *App, c: *budget.Counting, ar: *std.heap.ArenaAllocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8, request: []const u8) usize {
+            for (0..4) |round| {
+                if (round == 3) c.reset();
+                var in = std.Io.Reader.fixed(request);
+                var out = std.Io.Writer.fixed(b);
+                _ = a.handleRequest(c.allocator(), l, f, &in, &out, .off, .off, .{});
+                l.end();
+                _ = ar.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+            }
+            return c.allocs;
+        }
+    }.of;
+
+    const json = count(&app, &counting, &arena, &lifetime, &in_flight, &buf, "POST /sum HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}");
+    const proto = count(&app, &counting, &arena, &lifetime, &in_flight, &buf, "POST /sum HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02");
+    // Protobuf is three: the head copied for a request with a body, the
+    // body, and the answer, sized and written once. A message with no
+    // repeated field decodes in place, where the JSON reader allocates once
+    // more. Raising either needs a reason (ADR 256).
+    try testing.expectEqual(@as(usize, 4), json);
+    try testing.expectEqual(@as(usize, 3), proto);
 }
 
 test "a traced request stays inside the same allocation budget" {

@@ -110,6 +110,16 @@ defer parsed.deinit();
 try expectEqualStrings("no user 99", parsed.value.object.get("error").?.string);
 ```
 
+### A Connect client's failure
+
+**A request that says it is a Connect call is answered in Connect's shape**, in a program with a route that reads or answers a protobuf message ([Protobuf and other formats](./requests.md#protobuf-and-other-formats)). Connect clients send `Connect-Protocol-Version: 1`, and when one fails it gets:
+
+```json
+{"code": "not_found", "message": "no order 7"}
+```
+
+The message is the sentence any other client would get. The code comes from the error first, `error.AlreadyExists` as `already_exists` and `error.RolledBack` as `aborted`, and from the status otherwise, by the table [gRPC](./grpc.md#errors-and-grpc-status-codes) uses. The status stays the one nilo chose, so your logs and metrics read the same either way. Connect's shape wins over one you named with `app.failures`, because a Connect client reads nothing else; every request without the header still gets yours ([ADR 257](../adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)).
+
 ## Request ids
 
 **Turn on request ids to match a failed response to its log lines.** Behind the proxy nilo assumes is in front ([ADR 027](../adr/027-tls-is-terminated-in-front.md)), the thing you cannot work out afterwards is *which* log lines belong to the request that went wrong. With request ids on, the answer is on the response:

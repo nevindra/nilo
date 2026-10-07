@@ -30,6 +30,8 @@ const framing_mod = @import("framing.zig");
 const wiring = @import("wiring.zig");
 const health_mod = @import("health.zig");
 const failurebody = @import("failurebody.zig");
+const connect = @import("connect.zig");
+const rpc_mod = @import("rpc.zig");
 const compress_mod = @import("compress.zig");
 const trace_mod = @import("trace.zig");
 
@@ -153,6 +155,10 @@ pub const App = struct {
     /// beside it is what the document says under `Failure`; set together.
     failure_write: ?failurebody.Write = null,
     failure_schema: ?*const openapi.Schema = null,
+    /// Connect's failure body, for a request that says it is a Connect call;
+    /// set by the first route that reads or answers a message and null in a
+    /// program with none, which then links none of it (ADR 257).
+    failure_connect: ?failurebody.Pick = null,
     /// Every counter in the process, or null on a server that never called
     /// `metrics()` — which is what makes the whole feature one branch on the
     /// request path (ADR 079). Sized when the chains are resolved, because
@@ -823,6 +829,14 @@ pub const App = struct {
         try self.route(.POST, pattern, handler);
     }
 
+    /// Serve a struct of typed functions as an RPC service: each `pub fn`
+    /// a method at `POST /<nilo_service>/<Method>`, the name's first letter
+    /// upper-cased, reachable by gRPC, Connect and plain JSON alike
+    /// (ADR 258). The same routes `post` would have registered one by one.
+    pub fn rpc(self: *App, comptime T: type) !void {
+        inline for (comptime rpc_mod.methodsOf(T)) |method| try self.post(method.path, @field(T, method.fn_name));
+    }
+
     pub fn put(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
         comptime typed.check(pattern, handler);
         comptime typed.checkVerb(.PUT, pattern, handler);
@@ -999,6 +1013,7 @@ pub const App = struct {
             break :blk derived;
         };
         try self.router.addNamed(method, pattern, comptime typed.wrap(pattern, handler), route_name);
+        if (comptime typed.speaksAMessage(pattern, handler)) self.failure_connect = &connect.pick;
 
         // Read from the same argument list `wrap` just read, so the
         // description of an endpoint and the code that serves it cannot
@@ -2086,6 +2101,13 @@ pub fn GroupWith(
             comptime typed.check(joined(prefix, pattern), handler);
             comptime typed.checkVerb(.POST, joined(prefix, pattern), handler);
             return self.add(true, .POST, pattern, handler);
+        }
+
+        /// `App.rpc` under this group's prefix and middleware. A gRPC
+        /// client calls `/<nilo_service>/<Method>` from the root, so its
+        /// group has no prefix; a Connect client may call it under one.
+        pub fn rpc(self: Self, comptime T: type) !void {
+            inline for (comptime rpc_mod.methodsOf(T)) |method| try self.post(method.path, @field(T, method.fn_name));
         }
 
         pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {

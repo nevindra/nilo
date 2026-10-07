@@ -12,18 +12,21 @@ Where nilo is heading: a few directions, each larger than one change, each sayin
 
 ### A request is one thing, whatever framing carried it
 
-**HTTP/1.1 and HTTP/2 become two framings of one request, and gRPC and Connect become envelopes over it, so one typed function can be a JSON route, a protobuf route and a gRPC method at once.** The seam is built: an answer is handed to the framing that carried its request, and an HTTP/2 call enters the App as what was read rather than as HTTP/1.1 text ([ADR 253](./adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)). What it was built for is not yet: one request and one answer still has no room for HTTP/2 on an ordinary route, or for a protobuf body a typed function declares.
+**HTTP/1.1 and HTTP/2 become two framings of one request, and gRPC and Connect become envelopes over it, so one typed function can be a JSON route, a protobuf route and a gRPC method at once.** The seam is built: an answer is handed to the framing that carried its request, and an HTTP/2 call enters the App as what was read rather than as HTTP/1.1 text ([ADR 253](./adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md)). A typed function now reads a protobuf message and answers one in the spelling it was asked in, JSON or protobuf, a gRPC call included ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), a Connect client that calls it is told a failure as the code it reads ([ADR 257](./adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)), and a struct of such functions is a service served at the paths its `.proto` gives ([ADR 258](./adr/258-a-struct-of-typed-functions-is-an-rpc-service.md)). What it was built for is not yet: one request and one answer still has no room for HTTP/2 on an ordinary route.
 
-What is left, in the order it has to be built, is laid out stage by stage on [the framing page](./design/framing.md#how-the-direction-is-built): gRPC framing (length prefix, status in trailers) and Connect's moved above the seam, chosen by content type; the body door, so a type with a `wire` table is read and written as `application/proto` by the typed layer; and `app.service(T)`, a struct of typed functions served as `/package.Service/Method`, the way a struct is a table in `nilo_sql`. After that, one port that answers both HTTP/1.1 and h2c, and HTTP/2 for ordinary routes over TLS with ALPN, which closes the gap [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) opened: a listener may face the internet with no proxy in front, and a browser reaching it gets HTTP/1.1 only. It revises [ADR 027](./adr/027-tls-is-terminated-in-front.md) (HTTP/2 for browsers) in place.
+What is left, in the order it has to be built, is laid out stage by stage on [the framing page](./design/framing.md#how-the-direction-is-built): one port that answers both HTTP/1.1 and h2c, and HTTP/2 for ordinary routes over TLS with ALPN, which closes the gap [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) opened: a listener may face the internet with no proxy in front, and a browser reaching it gets HTTP/1.1 only. It revises [ADR 027](./adr/027-tls-is-terminated-in-front.md) (HTTP/2 for browsers) in place.
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · A handler that reads a body nilo does not know takes a `*Ctx`, and the document says nothing about it.
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · Decoding a call's header block is 28% of a unary call, because the HPACK table is advertised at 0.
 - [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · The worst gRPC call is 1.4 s at 256 connections and 3.8 s at 1,024, where tonic's is about 1.1 s on the same four cores
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Ctx.header` reads the head again for every name it is asked, about 40 ns a time inside a request.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · Whether a gRPC listener should keep an HPACK table, to stop decoding the same strings every call.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Ctx.connection()` returns `http1.Connection`.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · One port cannot speak both HTTP/1.1 and h2c.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A gRPC listener has no health service, and the guide does not say how to write one.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A Connect client's `Connect-Timeout-Ms` is not read.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A Connect GET is a 405.
 
 <!-- /gathered -->
 

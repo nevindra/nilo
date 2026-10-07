@@ -91,6 +91,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`Cached(Pages, options)`](./handlers.md#cachedpages-options)
   - [A query field that is a list](./handlers.md#a-query-field-that-is-a-list)
   - [`Bound(W)`](./handlers.md#boundw)
+  - [A body in another format](./handlers.md#a-body-in-another-format)
 - [Handler returns](./handlers.md#handler-returns)
   - [A `*Ctx` handler that returns `void`](./handlers.md#a-ctx-handler-that-returns-void)
   - [A `?` inside a wrapper](./handlers.md#a--inside-a-wrapper)

@@ -63,6 +63,7 @@ const fail = @import("fail.zig");
 const encoded = @import("encoded.zig");
 const core = @import("nilo_core");
 const framing = @import("framing.zig");
+const codes = @import("code.zig");
 
 /// What a gRPC connection asks of the App, handed over by `app.zig` rather
 /// than named here. This file sits outside the App's core (`http_core` in
@@ -1590,7 +1591,7 @@ fn fromCollected(a: std.mem.Allocator, s: *Stream, collected: *const framing.Col
         // it, as far as the client can tell: `nilo.deadline`'s 503 and a wait
         // cut short both read as DEADLINE_EXCEEDED rather than UNAVAILABLE.
         const late = s.until_ns != 0 and bulkhead.monotonicNanos() >= s.until_ns;
-        const code = said.code orelse if (late) 4 else codeFor(collected.failure, collected.status);
+        const code = said.code orelse if (late) 4 else codes.of(collected.failure, collected.status);
         const message: Message = if (said.message) |sent| .{ .routes = sent } else .{ .ours = failureMessage(collected) };
         s.head_block = try trailersOnlyWith(a, code, message, try ownTrailers(a, collected.trailers));
         s.trailers_only = true;
@@ -1687,51 +1688,6 @@ fn failureMessage(collected: *const framing.Collected) []const u8 {
     return "";
 }
 
-/// The code a failed call is answered with: the one its error names when it
-/// names one, the one its status means otherwise (ADR 220).
-pub fn codeFor(failure: ?anyerror, status: u16) u8 {
-    if (failure) |err| if (codeForError(err)) |code| return code;
-    return codeForStatus(status);
-}
-
-/// The gRPC code a failure's error says more precisely than its HTTP status
-/// does. A duplicate row and a lost race are both a 409, and a client is
-/// told to retry the second and not the first: `ALREADY_EXISTS` says the
-/// thing is there, `ABORTED` that the transaction around the call should go
-/// again, which is what a rolled-back one means, where its 503 would read as
-/// `UNAVAILABLE`. Null for every other error, whose status decides.
-pub fn codeForError(err: anyerror) ?u8 {
-    return switch (err) {
-        error.AlreadyExists => 6, // ALREADY_EXISTS
-        error.RolledBack => 10, // ABORTED
-        else => null,
-    };
-}
-
-/// The gRPC code an HTTP status means when a route failed with it. Chosen by
-/// what the status says about the call rather than by gRPC's own table for
-/// proxies, which reads a status as something that went wrong on the way:
-/// a 404 from a route is a thing that was not found, not a method that does
-/// not exist, and a path no route answers never gets here.
-pub fn codeForStatus(status: u16) u8 {
-    return switch (status) {
-        200 => 0,
-        400, 415, 422 => 3, // INVALID_ARGUMENT
-        401 => 16, // UNAUTHENTICATED
-        403 => 7, // PERMISSION_DENIED
-        404 => 5, // NOT_FOUND
-        405, 501 => 12, // UNIMPLEMENTED
-        408, 504 => 4, // DEADLINE_EXCEEDED
-        409 => 10, // ABORTED
-        412 => 9, // FAILED_PRECONDITION
-        413, 429 => 8, // RESOURCE_EXHAUSTED
-        499 => 1, // CANCELLED
-        503 => 14, // UNAVAILABLE
-        500 => 13, // INTERNAL
-        else => if (status >= 400 and status < 500) 9 else 2, // FAILED_PRECONDITION, UNKNOWN
-    };
-}
-
 /// What goes out as `grpc-message`, and whose words it is. nilo's own text
 /// is plain and is encoded whole; a route that set the header itself set
 /// what goes on the wire, already encoded, and only what could not be sent
@@ -1814,17 +1770,6 @@ test "grpc-timeout is eight digits at most and a unit, and anything else is refu
     try testing.expectEqual(@as(?u64, null), timeoutNanos("5"));
     try testing.expectEqual(@as(?u64, null), timeoutNanos("5s"));
     try testing.expectEqual(@as(?u64, null), timeoutNanos("-5S"));
-}
-
-test "the gRPC code a failed route's status means" {
-    try testing.expectEqual(@as(u8, 3), codeForStatus(400));
-    try testing.expectEqual(@as(u8, 16), codeForStatus(401));
-    try testing.expectEqual(@as(u8, 7), codeForStatus(403));
-    try testing.expectEqual(@as(u8, 5), codeForStatus(404));
-    try testing.expectEqual(@as(u8, 8), codeForStatus(429));
-    try testing.expectEqual(@as(u8, 13), codeForStatus(500));
-    try testing.expectEqual(@as(u8, 14), codeForStatus(503));
-    try testing.expectEqual(@as(u8, 2), codeForStatus(302));
 }
 
 const ctx_mod = @import("ctx.zig");
@@ -2025,10 +1970,32 @@ fn clockRoute(c: *Ctx) anyerror!void {
     try c.send(200, "application/grpc", "");
 }
 
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+/// A service of typed functions: its message read, and its answer written,
+/// by the type (ADR 256), and `sum` served as `/test.Math/Sum` (ADR 258).
+const Math = struct {
+    pub const nilo_service = "test.Math";
+
+    pub fn sum(in: SumRequest) SumReply {
+        return .{ .total = in.a + in.b };
+    }
+};
+
 fn testApp() !App {
     var app = App.init(testing.allocator);
     errdefer app.deinit();
     try app.post("/test.Echo/Say", echoRoute);
+    try app.rpc(Math);
     try app.post("/test.Orders/Get", missingRoute);
     try app.post("/test.Meta/Who", metadataRoute);
     try app.post("/test.Clock/Check", clockRoute);
@@ -2055,6 +2022,27 @@ test "a unary call reaches its route as a POST, and its answer comes back framed
     try testing.expectEqualStrings("hello over h2c", try got.message(1));
     const trailers = try got.trailers(1);
     try testing.expectEqualStrings("0", Answer.value(trailers, "grpc-status").?);
+}
+
+test "a method of a service of typed functions reads its message and answers one, with no proto call in it" {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try client.call(1, "/test.Math/Sum", "\x08\x01\x10\x02");
+    // A key with nothing after it: not a SumRequest.
+    try client.call(3, "/test.Math/Sum", "\x08");
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    const head = try got.fields(Answer.of(.headers, &got, 1)[0].payload);
+    try testing.expectEqualStrings("application/grpc", Answer.value(head, "content-type").?);
+    try testing.expectEqualStrings("\x08\x03", try got.message(1));
+    try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
+
+    const refused = try got.trailers(3);
+    try testing.expectEqualStrings("3", Answer.value(refused, "grpc-status").?);
+    try testing.expect(std.mem.indexOf(u8, Answer.value(refused, "grpc-message").?, "not a protobuf") != null);
 }
 
 test "the server's own SETTINGS ask for an HPACK table of 0, and cap the calls at max_streams" {

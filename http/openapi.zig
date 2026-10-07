@@ -216,6 +216,10 @@ pub const Answer = struct {
     /// rather than claiming 200 — a document that guesses is worse than one
     /// that only promises what the signature settles.
     binary: bool = false,
+    /// Content types the answer is also filed under, with the same schema:
+    /// a protobuf message goes out as JSON or as protobuf by the request's
+    /// content type (ADR 256).
+    more_types: []const []const u8 = &.{},
     /// Whether this endpoint answers with an `ETag` and a 304 to a client
     /// that sends it back — a `Versioned(T)` (ADR 189). The body described
     /// is `T`'s; what this adds is the header on the 200 and the 304 beside
@@ -231,12 +235,24 @@ pub const BodyKind = enum {
     json,
     urlencoded,
     multipart,
+    /// A protobuf message, which is read as JSON or as protobuf by the
+    /// request's content type and so is filed under both, with one schema:
+    /// the schema is the message's fields, and the media type how they are
+    /// spelled (ADR 256).
+    message,
+    /// A type that reads its own bytes, filed under its own label
+    /// (`Operation.body_type`), the mirror of ADR 157 (ADR 256).
+    own,
 
-    pub fn contentType(self: BodyKind) []const u8 {
-        return switch (self) {
-            .json => "application/json",
-            .urlencoded => "application/x-www-form-urlencoded",
-            .multipart => "multipart/form-data",
+    /// The content types a body of this kind is filed under, decided while
+    /// compiling so the writer only walks a list. `own` is the type's label.
+    pub fn contentTypes(comptime self: BodyKind, comptime own_type: []const u8) []const []const u8 {
+        return comptime switch (self) {
+            .json => &.{"application/json"},
+            .message => &.{ "application/json", "application/proto" },
+            .urlencoded => &.{"application/x-www-form-urlencoded"},
+            .multipart => &.{"multipart/form-data"},
+            .own => &.{own_type},
         };
     }
 };
@@ -268,7 +284,9 @@ pub const Operation = struct {
     /// answer 409 and 422 on the key alone (ADR 155).
     idempotent: bool = false,
     body: ?*const Schema,
-    body_kind: BodyKind = .json,
+    /// What the body is filed under, from `BodyKind.contentTypes`: one
+    /// content type, or a message's two (ADR 256).
+    body_types: []const []const u8 = &.{"application/json"},
     answer: Answer,
     /// Whether nilo itself can refuse this request with a 400 before the
     /// handler runs — true as soon as there is anything to convert or
@@ -405,8 +423,9 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
         // (ADR 157): the bytes under its label are whatever `nilo_write`
         // put there, and the only thing this document can say about them
         // is what the type says with `nilo_openapi` — or that it said
-        // nothing, which is the same discipline as above.
-        if (@import("ownbody.zig").writesItsOwnBody(T)) {
+        // nothing, which is the same discipline as above. The same holds
+        // for a type that reads its own bytes (ADR 256).
+        if (@import("ownbody.zig").writesItsOwnBody(T) or @import("message.zig").decodesItsOwnBody(T)) {
             if (@hasDecl(T, "nilo_openapi")) return held(.{ .told = toldOf(T) });
             return held(.untold);
         }
@@ -1182,10 +1201,14 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
 
     if (op.body) |body| {
         try w.writeAll(",\"requestBody\":{\"required\":true,\"content\":{");
-        try writeString(w, op.body_kind.contentType());
-        try w.writeAll(":{\"schema\":");
-        try writeSchema(w, components, body);
-        try w.writeAll("}}}");
+        for (op.body_types, 0..) |content_type, i| {
+            if (i != 0) try w.writeByte(',');
+            try writeString(w, content_type);
+            try w.writeAll(":{\"schema\":");
+            try writeSchema(w, components, body);
+            try w.writeByte('}');
+        }
+        try w.writeAll("}}");
     }
 
     // Before the responses, and written whether or not the route can be
@@ -1303,6 +1326,13 @@ fn writeAnswer(w: *std.Io.Writer, components: *const Components, answer: Answer)
     try writeString(w, answer.content_type);
     try w.writeAll(":{\"schema\":");
     try writeSchema(w, components, answer.schema.?);
+    // A message answers in the spelling it was asked in (ADR 256).
+    for (answer.more_types) |content_type| {
+        try w.writeAll("},");
+        try writeString(w, content_type);
+        try w.writeAll(":{\"schema\":");
+        try writeSchema(w, components, answer.schema.?);
+    }
     try w.writeAll("}}");
     if (answer.versioned) {
         try w.writeAll(",\"headers\":{\"ETag\":{\"description\":\"the version of the body; " ++
@@ -1441,8 +1471,8 @@ fn writeSchema(
         // document should be told it is a gap somebody can close rather than a
         // shape nobody could name (ADR 016).
         .untold => try w.writeAll(
-            "{\"description\":\"This type writes its own body, and has not said what it looks like." ++
-                " Add `pub const nilo_openapi = .{ .type = \\\"string\\\" };` to it to describe the value it sends.\"}",
+            "{\"description\":\"This type reads or writes its own bytes, and has not said what they look like." ++
+                " Add `pub const nilo_openapi = .{ .type = \\\"string\\\" };` to it to describe them.\"}",
         ),
 
         .choice => |names| {
@@ -1964,7 +1994,7 @@ test "a custom writer that says nothing is visibly silent rather than confidentl
     // The one thing that must not happen: describing `secret`, which the
     // writer above never sends. That was the bug (ADR 016).
     try testing.expect(std.mem.indexOf(u8, json, "secret") == null);
-    try testing.expect(std.mem.indexOf(u8, json, "writes its own body") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "reads or writes its own bytes") != null);
     try testing.expect(std.mem.indexOf(u8, json, "nilo_openapi") != null);
 }
 

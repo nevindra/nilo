@@ -974,6 +974,10 @@ test {
     _ = @import("names.zig");
     _ = @import("patch.zig");
     _ = @import("convert.zig");
+    _ = @import("message.zig");
+    _ = @import("code.zig");
+    _ = @import("connect.zig");
+    _ = @import("rpc.zig");
     _ = @import("cookie.zig");
     _ = @import("session.zig");
     _ = @import("password.zig");

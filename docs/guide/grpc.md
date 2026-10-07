@@ -4,7 +4,7 @@
 
 **Reference:** [`listen` options (`grpc`, `also`)](../reference/app.md#listen-options) · **Design:** none; the decision is [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md)
 
-`app.post("/package.Service/Method", handler)` registers a method, the handler reads the message with `c.body()` and answers with `c.send`. Middleware, fail functions, deadlines, counters and the log all see a call as the request it became.
+`app.rpc(T)` serves a struct's functions as a service's methods, or `app.post("/package.Service/Method", handler)` registers one, and a handler whose argument is the request message and whose return type is the reply is the whole of it. Middleware, fail functions, deadlines, counters and the log all see a call as the request it became.
 
 It is for callers you do not choose: a service whose contract is a `.proto` file, an OpenTelemetry Collector exporting OTLP, a Kubernetes plugin, an Envoy filter. It supports unary calls only, and it has to be built in ([ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
 
@@ -40,9 +40,38 @@ A build that did not pass `.grpc = true` rejects the listener at `listen()` with
 
 ## Writing a method
 
-**The route path is the one in the `.proto`: package, service and method**, such as `/helloworld.Greeter/SayHello`. `c.body()` is the message with gRPC's five-byte prefix removed, and gunzipped if the client sent `grpc-encoding: gzip`, which the Collector does on every call. `c.send(200, "application/grpc", bytes)` is the answer, framed on the way out.
+**A service is a struct of yours, and its `pub fn`s are the methods.** `nilo_service` is the service's full name from the `.proto`, and each method is served at `/helloworld.Greeter/SayHello`, the function's name with its first letter upper-cased. **The message is a struct of yours with its field numbers on it** ([Protobuf messages](./proto.md)), and a function that takes one and returns one is a method:
 
-**The message is a struct of yours, read and written by [`nilo_proto`](../reference/proto.md)** ([Protobuf messages](./proto.md)). `proto.decode(Request, c.arena(), body.view())` reads the call and `proto.encode(Reply, c.arena(), reply)` writes the answer, with the field numbers declared on the types and nothing generated. A type generator such as [zig-protobuf](https://github.com/Arwalk/zig-protobuf) works as well: nilo reads and writes bytes and never looks inside them.
+<!-- compiles -->
+```zig
+const HelloRequest = struct {
+    pub const wire = .{ .name = 1 };
+    name: []const u8 = "",
+};
+
+const HelloReply = struct {
+    pub const wire = .{ .message = 1 };
+    message: []const u8 = "",
+};
+
+const Greeter = struct {
+    pub const nilo_service = "helloworld.Greeter";
+
+    pub fn sayHello(arena: std.mem.Allocator, in: HelloRequest) !HelloReply {
+        return .{ .message = try std.fmt.allocPrint(arena, "hello, {s}", .{in.name}) };
+    }
+};
+
+fn mountGreeter(app: *nilo.App) !void {
+    try app.rpc(Greeter);
+}
+```
+
+Each method is an ordinary route, the one `app.post("/helloworld.Greeter/SayHello", Greeter.sayHello)` would register, so it takes services and middleware as any route does. A `pub fn` that neither reads nor answers a message is a compile error, since it would otherwise be served; a helper stays private. `app.with(requireLogin).rpc(Greeter)` puts middleware in front of a whole service ([ADR 258](../adr/258-a-struct-of-typed-functions-is-an-rpc-service.md)).
+
+The call's message is read from the body with gRPC's five-byte prefix removed, and gunzipped if the client sent `grpc-encoding: gzip`, which the Collector does on every call; the reply is written as protobuf and framed on the way out. Bytes that are not a `HelloRequest` are `INVALID_ARGUMENT` with a sentence saying what was wrong. The same function on the HTTP/1.1 listener answers JSON to a client that sends JSON ([ADR 256](../adr/256-a-body-is-read-as-what-its-type-says.md)).
+
+**A handler that wants the bytes takes a `*Ctx`**: `c.body()` is the message and `c.send(200, "application/grpc", bytes)` the answer, which is how a type generator such as [zig-protobuf](https://github.com/Arwalk/zig-protobuf) is used, since nilo reads and writes bytes and never looks inside them.
 
 A call's metadata arrives as request headers, so `c.header("x-tenant")` reads it, and a header the route sets with `c.setHeader` goes back as metadata. Metadata that goes after the message is a trailer, set with `c.setTrailer` ([trailers](./responses.md#trailers)).
 
@@ -63,6 +92,8 @@ A call's metadata arrives as request headers, so `c.header("x-tenant")` reads it
 | 500 | `INTERNAL` (13) |
 
 So `return fail.notFound("no order {d}", .{id})` becomes `NOT_FOUND` with that message, and the handler does not need to know gRPC is involved. For a code no error names, answer with the code yourself, as a trailer: `try c.setTrailer("grpc-status", "5")`. A `grpc-status` trailer the route set wins over the one nilo would have chosen.
+
+**A Connect client that calls the same method is told the same code, by name.** A request carrying `Connect-Protocol-Version: 1` that fails is answered `{"code":"already_exists","message":"…"}` from this table, with the message the failure carried, in place of nilo's usual shape; any other request keeps that ([Errors](./errors.md#a-connect-clients-failure)).
 
 **`grpc-status` and `grpc-message` are trailers, so `c.setHeader` refuses them** with a sentence that points at `setTrailer`. gRPC sends them after the message, and a header would put them before it.
 

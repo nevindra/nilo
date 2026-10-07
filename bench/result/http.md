@@ -3589,3 +3589,108 @@ The before column is the after column of the stage 2 entry above, to the byte. T
 **Idle memory** (`bench/mem.py`, `nilo-hello` built with `-Dgrpc`, `/users/1`, server on cores 0 to 3, 1,000, 5,000 and 10,000 idle connections, two rounds interleaved): 9,253 to 9,257, 9,276 and 9,278 bytes a connection before; 9,253, 9,275 to 9,276 and 9,277 to 9,278 after. Unchanged. The default build is the same binary, so its figure is unchanged by construction.
 
 **The decision it moved:** the stage ships with one entry and an `Arrival`, and ADR 253's rejected list carries the two-entry shape with these numbers. **Can it be pushed further:** (1) the route's `c.body()` copies the message once more into the arena it already lies in; handing the `Call`'s body to `Ctx` as already read would take a copy of every message off a call, at the cost of a second way for a body to be read. (2) HPACK decode is now the largest single row of a call, 28%, with a table advertised at 0, so every field is a Huffman-coded literal decoded afresh.
+
+## Two Huffman symbols a lookup
+
+The HPACK row of a unary gRPC call, 28% of it with the table advertised at 0 ([ADR 220](../../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)), taken apart and the larger half rebuilt. **The question: how much of the decode is Huffman, and how much of that a wider lookup buys back without a byte of idle memory.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, pinned to one core (`taskset -c 2`). Before is `40e9f45` exported with `git archive`; after is the working tree on top of it, same afternoon, same flags.
+
+**Huffman is most of the decode.** h2load's 89-byte block carries eight fields, five of them Huffman-coded strings, 68 bytes in all. Timed standalone against `hpack.zig` (best of 30 runs of 1,000): the whole block 209 to 210 ns, those five strings alone 163 to 164. The rest is the integers, the static table and the arena.
+
+**Candidates**, each checked first against the decoder in the tree on about five million inputs (every byte, random strings whole, truncated and with a bit flipped, and random bytes), all agreeing on the bytes and on every refusal; then timed on h2load's five strings and on nine a Collector-like call carries (its path, authority, user agent, content and accepted codings, `grpc-timeout`, `traceparent`):
+
+| decoder | table | h2load's five | a Collector-like call |
+|---|---|---|---|
+| one symbol a lookup, 9 bits (`40e9f45`) | 1 KB | 162 to 165 ns | 352 ns |
+| the same, its input a word at a time at the top of a register | 1 KB | 133 to 134 ns | 300 to 305 ns |
+| two symbols a lookup, 10 bits | 4 KB | 133 to 135 ns | 290 to 293 ns |
+| two symbols a lookup, 11 bits | 8 KB | 94 to 97 ns | 209 to 212 ns |
+| two symbols a lookup, 12 bits | 16 KB | 79 to 84 ns | 184 to 186 ns |
+| two symbols a lookup, 13 bits | 32 KB | 77 ns | 173 ns |
+
+Twelve bits is where a pair of the 5- and 6-bit codes that lowercase letters, digits and `/.-:` have fits, which is most of what a header is made of; thirteen buys 3 to 8% more for twice the table.
+
+**What ships**, `zig build profile -Dgrpc`, four rounds interleaved:
+
+| row | before | after |
+|---|---|---|
+| routed GET, `-Dgrpc` build | 419 to 430 ns | 419 to 424 ns |
+| unary gRPC call over h2c, end to end | 865 to 879 ns | 767 to 773 ns |
+| of which HPACK decode | 244 to 245 ns | 123 to 125 ns |
+| the App, handed the call | 196 to 200 ns | 197 to 199 ns |
+| the rest: frames, the call, answer | 422 to 437 ns | 445 to 451 ns |
+
+The call is 11 to 12% faster, and the HPACK row is half what it was. **The call saved about 100 ns where the row saved 120**, and the difference landed in the rest, which is what is left of the call once the two timed rows are taken off it. It is not the table's size: an 11-bit build, half the table, run in the same three rounds (calls of 787 to 795 ns, its HPACK row 137 to 140) moved the rest by the same 30 ns. What it is was not found; the reading that the rows timed in a loop of their own are warmer than they are inside a call is consistent with it and not shown. The end-to-end row is the one to quote.
+
+**Size**, stripped `ReleaseFast`: `example-hello` built with `-Dgrpc` 1,087,864 to 1,103,160 bytes, +15,296, the table less the one it replaces; the default build 1,013,248 both sides, since nothing without gRPC reaches `hpack.zig`. **Allocations and idle memory** are unchanged by construction: the decoder writes into the capacity it reserved before, and no connection holds anything new.
+
+**The decision it moved:** the decoder takes two symbols a lookup at 12 bits, and the todo entry that asked for it narrows to the table it was weighed against. **Can it be pushed further:** HPACK is now 16% of a call. What is left of it is mostly the five strings decoded afresh every call, and only a table of the client's own keeps them, which is idle memory: the Collector's measured in ADR 220 fills one. Three symbols a lookup would need a 16-bit table, 256 KB, past where a lookup stays in the first cache.
+
+## A body read as what its type says
+
+The first piece of the framing's fourth stage ([ADR 256](../../docs/adr/256-a-body-is-read-as-what-its-type-says.md)): a struct with a `wire` table read as JSON or as protobuf by the request's `Content-Type` and answered in the same, and `nilo_decode` for a type that reads its own bytes. **The questions: what a message costs in each spelling, what everything that is not a message pays for it, and where the `Content-Type` is read.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, pinned to one core (`taskset -c 2`). Before is `40e9f45` exported with `git archive`, with this entry's `http/profile.zig` copied in so both binaries time the same three requests; after is the working tree on top of it, which also carries [two Huffman symbols a lookup](#two-huffman-symbols-a-lookup), a change to the gRPC build only.
+
+**The rows** (`zig build profile`, "one POST whose body is two numbers"): a plain struct read from JSON and answered as JSON, the control; the same two numbers into a message read from JSON; and from protobuf. At `40e9f45` the message is an ordinary struct and the protobuf request is a 400, so only its first two rows mean anything.
+
+**Where the `Content-Type` is read was the design question, and three places were built and measured.**
+
+| where | message as JSON | protobuf | what every program pays |
+|---|---|---|---|
+| `Ctx.header`, read twice (body, then answer) | 454 to 466 ns | 371 to 384 ns | nothing |
+| a byte on the `Ctx`, read once | 421 to 428 ns | 297 to 310 ns | 81 bytes of `serve.serveRequest` |
+| classed by the head parser into a byte `http1.Request` packs | 381 to 386 ns | 274 to 276 ns | 1.6 KB of request parsing, after it was cut from 5.2 KB |
+| the handler's wrapper, read once by a scan of its own (**ships**) | 410 to 418 ns | 282 to 284 ns | nothing |
+
+The control was 359 to 377 ns across these runs. A read of the head through `Ctx.header` is 27 ns in a loop of its own and about 40 inside a request, and classing the value 13 more until `application/json` was given a path of its own. The head parser's place was the fastest, and it put code on every program's request path, which [ADR 017](../../docs/adr/017-the-trade-budget-has-four-axes.md) does not allow for a feature at any size: the classing function alone was 4 KB written with `eqlIgnoreCase` and 969 bytes rewritten as a switch on the length. The `Ctx` byte sat in padding, `@sizeOf(Ctx)` 992 either way, and still cost `serveRequest` 81 bytes to initialise. What ships keeps the spelling on the stack of a handler's own wrapper, a byte where a message is in the signature and a zero-sized `void` everywhere else.
+
+**What ships**, four rounds interleaved:
+
+| row | before | after |
+|---|---|---|
+| routed GET | 402 to 403 ns | 410 to 414 ns |
+| a plain struct, as JSON (the control) | 360 to 361 ns | 341 to 342 ns |
+| a message, as JSON | 358 to 360 ns | 410 to 418 ns |
+| a message, as protobuf | (a 400) | 282 to 284 ns |
+
+**A message read as JSON is 52 to 58 ns slower than the same route was**, the read of its `Content-Type`, 15%; read as protobuf it is 21% faster than the same message as JSON was. The GET and the control moved 2 to 3% and −5% in opposite directions with `serve.serveRequest`, the router and the JSON reader the same bytes on both sides (`nm`), so those two are the layout of the profile binary, and a band of 5% is what a margin here has to clear.
+
+**Size**, stripped `ReleaseFast`: `example-hello` 1,013,248 to 1,013,312 bytes in the default build and 1,103,160 to 1,103,224 with `-Dgrpc`, +64 each, and by symbol it is `openapi.write` (+175), the route table it is built from (−112 in `main`) and its rows: the document's content types became a list decided while compiling, where the first cut branched on a body kind at runtime and cost 496. Nothing on the request path changed size.
+
+**Allocations** (`behaviour.zig`, held by a test): the same message is four allocations a request as JSON and three as protobuf, the head copied for a request with a body, the body and the answer; a message with no repeated field decodes in place. **Idle memory** (`bench/mem.py`, `nilo-hello`, `/users/1`, server on cores 0 to 3, two rounds): 9,351, 9,295 and 9,287 bytes a connection at 1,000, 5,000 and 10,000 before, and 9,347 to 9,351, 9,294 to 9,295 and 9,287 after.
+
+**The decision it moved:** the codec follows the request's `Content-Type`, read only by a handler with a message in its signature, and the parser's faster place is in ADR 256's rejected list with its 1.6 KB. **Can it be pushed further:** the 52 to 58 ns are a read of the head that the parser has already done once; a cheaper `Ctx.header` takes it down for every caller of it at once, forms included, and is in [`todo.md`](../../docs/todo.md).
+
+## A Connect client told its failure
+
+The second piece of the framing's fourth stage ([ADR 257](../../docs/adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)): a request carrying `Connect-Protocol-Version: 1` that fails is answered in Connect's error shape, in a program with a message route. **The question: what every program pays for a choice on the failure path that only some programs use, and where to put it so that is least.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped for sizes and unstripped for `nm -S`. Before is the working tree of [a body read as what its type says](#a-body-read-as-what-its-type-says), copied aside; after is the same tree with this change.
+
+**Three placements of the choice were built**, measured by `serve.sendFailure` in `example-hello`, which has no message route:
+
+| what `sendFailure` does | `sendFailure` |
+|---|---|
+| a `Connect` writer that returns whether it wrote, its error handled in place | +157 bytes |
+| a `Pick` from the head, and the error handed to the shape as a fourth argument of `Write` | +182 bytes |
+| a `Pick` from the head and the error, returning a writer already knowing the code the error names (**ships**) | +84 bytes |
+
+Of the 84, 20 are the App handed to `sendFailure` in place of its shape, which `serveRequest` pays 6 bytes less for, and the rest is the null check, the call and the registers it moves. **The error kept live across the shape's call was most of the second row**: the instructions added were a dozen, and the rest was every register below it chosen again.
+
+**Size**, stripped:
+
+| program | build | before | after | |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,312 | 1,013,408 | +96 |
+| `example-hello` | `-Dgrpc` | 1,103,224 | 1,103,352 | +128 |
+| `example-rest` | default | 1,221,224 | 1,221,320 | +96 |
+| `example-orders` | default | 1,392,136 | 1,392,248 | +112 |
+
+A program with a message route pays Connect's own code on top, by symbol in `nilo-profile`: `connect.pick` 825 bytes (the header scan inlined), `writeBody` 588, the writer whose code comes from the status 220 and the two whose code the error named 12 and 15. The two specialised writers were 556 bytes each before they shared `writeBody`.
+
+**Not measured:** time. Nothing on a request that succeeds changed (`serveRequest` is 6 bytes smaller, by `nm`), and a failure in a program with a message route reads the head once more for the version header, the scan the message row of the entry above times inside its 52 to 58 ns.
+
+**The decision it moved:** the choice is a pointer the first message route sets, handed the head and the error, and in ADR 017's running total at +96 bytes. **Can it be pushed further:** to zero only by knowing while compiling that an App has no message route, which an App registered at run time does not.
+

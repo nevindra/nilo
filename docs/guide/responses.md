@@ -407,6 +407,8 @@ fn showInvoice(number: u32) ?Invoice {
 
 Return it the way you would return a struct (bare, in a `?`, in a `Status(201, …)` or a `Response(…)`) and the wrappers mean what they always mean. The difference from `c.send` is that the route is described: the document names `application/xml`, and says what the body looks like if the type adds `pub const nilo_openapi = .{ .type = "string" };`. See [the reference](../reference/handlers.md#a-type-that-writes-its-own-answer).
 
-Write both declarations or neither: a content type with no `nilo_write`, or the other way round, is a compile error naming the route.
+Write both declarations or neither: a content type with no `nilo_write`, or the other way round, is a compile error naming the route. The same content type with `nilo_decode` reads the format on the way in ([Requests](./requests.md#protobuf-and-other-formats)).
+
+**A protobuf message answers in the spelling it was asked in**: a struct with a `wire` table goes out as protobuf to a request that sent protobuf and as JSON to everything else, with no declaration ([Requests](./requests.md#protobuf-and-other-formats)).
 
 Static files get their type from the file extension. See [Static files](./static-files.md).

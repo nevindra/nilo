@@ -142,6 +142,10 @@ _Avoid_: Server, Router, Engine
 A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type. Shared across every request being served at once, so one that gets written to needs a `nilo.Mutex`.
 _Avoid_: dependency, state, context value, DI container
 
+**RPC service**:
+A struct of typed functions given to `app.rpc`, served as the service its `nilo_service` names: each `pub fn` is a method at `/<package>.<Service>/<Method>`, reached by gRPC, Connect or plain JSON alike. Called a service only with "RPC" in front, because a Service alone is the thing `app.provide` registers.
+_Avoid_: service (alone), controller, handler group
+
 **Config**:
 A struct of the caller's own, one field per setting, filled from a Source before the socket opens. Field names are the variable names upper-cased, a field's default is what "not set" means, and reading one either answers the struct or names every setting that could not be read. It is text and numbers and nothing else: a Config opens no files, and what it cannot become is a compile error rather than a startup one.
 _Avoid_: settings object, options, env, configuration file

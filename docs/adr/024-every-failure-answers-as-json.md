@@ -63,6 +63,8 @@ A 405 still carries its `Allow` header, and an unset `WWW-Authenticate` challeng
 
 **The five answers that go out before there is a Ctx keep nilo's own shape, never the application's.** A malformed head, a head too long, a head that timed out, a body under a coding nilo cannot read, and a request shed past `max_in_flight` are constants written in one `writeAll`, to a client that did not manage to send a request nilo could route; a shed request costing one write is worth more than an application's envelope.
 
+**A Connect call is answered in Connect's shape, over the application's.** A request carrying `Connect-Protocol-Version: 1`, to a program with a route that reads or answers a message, fails as `{"code":"not_found","message":"…"}` with the same sentence, because its client reads nothing else; every other request keeps the shape above ([ADR 257](./257-a-connect-client-is-told-its-failure-in-connect-words.md)).
+
 ## What was rejected
 
 **Negotiating on `Accept`.** `fetch()` sends `Accept: */*` and so does `curl`, so the header cannot tell the browser from the terminal, the two cases this would exist to separate; choosing JSON for `*/*` is the same as choosing JSON always, with a rule on top that never fires.
