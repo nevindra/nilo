@@ -333,9 +333,10 @@ const Accepting = struct {
     /// Set on a TLS listener and null on a plain one, which is the whole
     /// of how the acceptor tells them apart.
     secured: ?*Secured = null,
-    /// Set on a listener that speaks gRPC (ADR 220). Read only in a build
-    /// with `-Dhttp2`; every other build refuses the listener before this
-    /// exists.
+    /// Set on a listener whose option `.grpc` is set (ADR 220). Read only in
+    /// a build with `-Dhttp2`, and only to choose `h2` alone by ALPN on a TLS
+    /// listener: a plain listener sniffs the first bytes whatever this says
+    /// (ADR 259). Every other build refuses the listener before this exists.
     grpc: bool = false,
     /// This listener's place in the list `listen()` was given: 0 for the
     /// first, then each `also` entry in order (ADR 252). Copied into each
@@ -1475,6 +1476,8 @@ pub fn serve(
     comptime stopping: anytype,
     comptime handler: anytype,
     comptime grpc_handler: anytype,
+    comptime plain_handler: anytype,
+    comptime hand_on: anytype,
 ) !void {
     const State = @TypeOf(state);
     const Options = @TypeOf(options);
@@ -1547,7 +1550,7 @@ pub fn serve(
         accepting: Accepting,
         /// What `listen()` was told, for the log line.
         address: []const u8,
-        /// Speaks gRPC over h2c rather than HTTP/1.1 (ADR 220).
+        /// The option `.grpc` was set (ADR 220); see `Accepting.grpc`.
         grpc: bool,
         /// Set once the socket is closed and its path removed, which a stop
         /// does as soon as the acceptors are gone rather than at the end.
@@ -1838,15 +1841,17 @@ pub fn serve(
     };
 
     const Conn = struct {
-        /// The plain entry, and the gRPC one (ADR 220): one body, two
-        /// handlers. A comptime parameter rather than a branch, so `run` is
-        /// the function it was to the byte and a gRPC listener's fiber is a
-        /// copy of it that calls something else. Only `-Dhttp2` analyses the
-        /// second.
-        const run = Entry(handler).run;
-        const runGrpc = Entry(grpc_handler).run;
+        /// The plain entry: one body for every connection a plain listener
+        /// takes. In a `-Dhttp2` build it is handed `plain_handler`, which
+        /// reads the first bytes, serves HTTP/1.1 itself and answers `.http2`
+        /// for an HTTP/2 connection, which `hand_on` then runs from this
+        /// entry's frame once the choosing has returned (ADR 259, ADR 062);
+        /// in any other build it is `handler` and this is the function it
+        /// was to the byte. A comptime parameter rather than a branch, so a
+        /// build without the flag analyses none of the choosing.
+        const run = if (nilo_build.http2) Entry(plain_handler, hand_on).run else Entry(handler, null).run;
 
-        fn Entry(comptime connection: anytype) type {
+        fn Entry(comptime connection: anytype, comptime hand_on_to: anytype) type {
             return struct {
         fn run(
             st: State,
@@ -1926,7 +1931,14 @@ pub fn serve(
             };
             peer._len = writePeer(&peer._text, stream.socket.address);
 
-            connection(st, &link.reader.interface, &link.writer.interface, &clocks, &wake, peer);
+            const handed = connection(st, &link.reader.interface, &link.writer.interface, &clocks, &wake, peer);
+            // A plain listener of a `-Dhttp2` build answers which framing it
+            // read, and HTTP/2 is run from here, with the choosing returned
+            // from, rather than from inside it (ADR 259). Nothing here in a
+            // build without the flag: `connection` returns `void`.
+            if (comptime @TypeOf(handed) != void) {
+                if (handed == .http2) hand_on_to(&st, &link.reader.interface, &link.writer.interface, &clocks, &wake, &peer);
+            }
         }
             };
         }
@@ -2237,8 +2249,6 @@ pub fn serve(
                     connections.spawn(Conn.runTlsGrpc, .{ st, stream, conn_gpa, sizes, sh })
                 else if (nilo_build.tls and sh.secured != null)
                     connections.spawn(Conn.runTls, .{ st, stream, conn_gpa, sizes, sh })
-                else if (nilo_build.http2 and sh.grpc)
-                    connections.spawn(Conn.runGrpc, .{ st, stream, conn_gpa, sizes, sh })
                 else
                     connections.spawn(Conn.run, .{ st, stream, conn_gpa, sizes, sh });
                 spawned catch |err| {

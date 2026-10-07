@@ -46,7 +46,7 @@ const nilo = @import("nilo_http");
 8. [Sessions](./sessions.md): a struct of yours sealed into one cookie, with nothing kept on the server, and checking the password that opens one.
 9. [Streaming](./streaming.md): writing an answer whose length is not known yet, and server-sent events.
 10. [WebSocket](./websocket.md): a handler that keeps a connection open for a while.
-11. [gRPC](./grpc.md): a gRPC method as a route, on a listener of its own, in a build that asks for it.
+11. [gRPC](./grpc.md): a gRPC method as a route, on the port HTTP/1.1 is on, in a build that asks for it.
 
 ## Building an application
 

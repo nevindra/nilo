@@ -214,6 +214,122 @@ test "a gRPC listener answers a unary call on a running server, beside a plain p
     try testing.expectEqualStrings("over a real socket", calls[0].message.items[5..]);
 }
 
+fn hi(c: *nilo.Ctx) anyerror!void {
+    try c.sendText(200, "hi there");
+}
+
+fn connectTcp(io: std.Io, port: u16) !std.Io.net.Stream {
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const stream = try address.connect(io, .{ .mode = .stream });
+    const limit: std.posix.timeval = .{ .sec = 5, .usec = 0 };
+    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&limit));
+    return stream;
+}
+
+/// One HTTP/1.1 request that asks to be closed after, and what came back
+/// whole: the connection ends, so a short read is the end of the answer.
+fn getAndClose(io: std.Io, stream: *std.Io.net.Stream, out: []u8) ![]const u8 {
+    return getWith(io, stream, out, "");
+}
+
+/// The same with `extra` header lines, each ending in CRLF.
+fn getWith(io: std.Io, stream: *std.Io.net.Stream, out: []u8, extra: []const u8) ![]const u8 {
+    var out_buf: [512]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    var in_buf: [1024]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    try writer.interface.writeAll("GET /hi HTTP/1.1\r\nHost: t\r\nConnection: close\r\n");
+    try writer.interface.writeAll(extra);
+    try writer.interface.writeAll("\r\n");
+    try writer.interface.flush();
+    const n = try reader.interface.readSliceShort(out);
+    return out[0..n];
+}
+
+test "one plain port answers HTTP/1.1 and an HTTP/2 gRPC call, and a listener that set .grpc answers HTTP/1.1 too" {
+    // ADR 259, stage 5.2: the first bytes choose, on every plain listener.
+    // The first listener here is a plain TCP port the kernel chose, the
+    // second a unix socket with `.grpc` set, which used to answer an
+    // HTTP/1.1 client with a 505 and chooses nothing now.
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try SocketDir.init(gpa, "grpc-one-port.sock");
+    defer where.deinit(gpa);
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.post("/test.Echo/Say", echo);
+    try app.get("/hi", hi);
+
+    var serving: Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    try serving.waitUntilUp(io);
+    const port = app.boundPort().?;
+
+    var answer: [1024]u8 = undefined;
+
+    // HTTP/1.1 on the port.
+    {
+        var stream = try connectTcp(io, port);
+        defer stream.close(io);
+        const got = try getAndClose(io, &stream, &answer);
+        try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 "));
+        try testing.expect(std.mem.endsWith(u8, got, "hi there"));
+    }
+
+    // `Upgrade: h2c` is ignored: an HTTP/1.1 request, answered as one.
+    {
+        var stream = try connectTcp(io, port);
+        defer stream.close(io);
+        const got = try getWith(io, &stream, &answer, "Upgrade: h2c\r\nHTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n");
+        try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 "));
+        try testing.expect(std.mem.endsWith(u8, got, "hi there"));
+    }
+
+    // HTTP/2 with prior knowledge on the same port, the preface split across
+    // two writes with a pause between them: a preface seen in pieces is one.
+    {
+        var stream = try connectTcp(io, port);
+        defer stream.close(io);
+        var out_buf: [1024]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        var in_buf: [32 * 1024]u8 = undefined;
+        var reader = stream.reader(io, &in_buf);
+
+        try writer.interface.writeAll(h2.preface[0..9]);
+        try writer.interface.flush();
+        std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
+        try writer.interface.writeAll(h2.preface[9..]);
+        try h2.writeSettings(&writer.interface, &.{});
+        try writeCall(&writer.interface, 1, "/test.Echo/Say", "on the shared port");
+        try writer.interface.flush();
+
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        var calls: [1]Call = .{.{}};
+        try readAnswers(arena.allocator(), &reader.interface, &writer.interface, &calls);
+        try testing.expectEqualStrings("0", calls[0].status.?);
+        try testing.expectEqualStrings("on the shared port", calls[0].message.items[5..]);
+    }
+
+    // HTTP/1.1 on the listener that set `.grpc`.
+    {
+        var stream = try connect(io, where.path);
+        defer stream.close(io);
+        const got = try getAndClose(io, &stream, &answer);
+        try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 "));
+        try testing.expect(std.mem.endsWith(u8, got, "hi there"));
+    }
+}
+
 test "two calls on one connection run at once, and the quick one is not held behind the slow one" {
     hush();
     const gpa = std.heap.smp_allocator;

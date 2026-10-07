@@ -310,7 +310,7 @@ Either way, bind nilo to `127.0.0.1` so nothing reaches it except through the pr
 
 **Or listen on a unix socket instead of a port.** `.address = "unix:/run/nilo.sock"` listens on a path, and then "who may connect" becomes "who may write to that directory": `proxy_pass http://unix:/run/nilo.sock;` in nginx, `reverse_proxy unix//run/nilo.sock` in Caddy. `port` is not read. A request that arrives this way has no client address of its own, so `clientIp()` reads the proxy's header through `.trusted_proxies`, and it is allowed to because nothing remote can open a unix socket ([ADR 103](../adr/103-a-path-is-an-address-to-listen-on.md)).
 
-One consequence is worth knowing before you need it: **HTTP/2 is not available for your routes.** Browsers only speak it over TLS, negotiated during the handshake, and the listener below offers only `http/1.1`. **gRPC is the exception**, because it runs over HTTP/2 without TLS: a build that asks for it serves unary calls on a listener of its own ([gRPC](./grpc.md)).
+One consequence is worth knowing before you need it: **HTTP/2 is not available for your routes.** Browsers only speak it over TLS, negotiated during the handshake, and the listener below offers only `http/1.1`. **gRPC is the exception**, because it runs over HTTP/2 without TLS: a build that asks for it serves unary calls, on the port HTTP/1.1 is on or over TLS ([gRPC](./grpc.md)).
 
 ### TLS without a proxy
 

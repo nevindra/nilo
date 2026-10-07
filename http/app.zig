@@ -1402,6 +1402,7 @@ pub const App = struct {
             serverStopping,
             serve.handleConnection,
             serveGrpc,
+            if (framing_mod.http2_built) serveSniffed else serve.handleConnection,
         );
     }
 
@@ -1706,9 +1707,33 @@ pub const App = struct {
     /// connection loop wants. A handler that upgrades has its socket loop run
     /// here, on this frame — which is a page deeper than the connection loop
     /// would run it, and does not matter to anything that calls this.
-    /// What a listener with `.grpc = true` runs for each connection, in place
-    /// of `serve.handleConnection` (ADR 220). Reached only by an Engine
-    /// built with `-Dhttp2`, so a build without it analyses none of `h2conn.zig`.
+    /// What a plain listener of a `-Dhttp2` build runs for each connection:
+    /// the first bytes choose HTTP/2 (the preface) or HTTP/1.1 (anything
+    /// else) (ADR 259). HTTP/1.1 is served from here, `handleConnection`
+    /// inlined as it is without the flag, so that an HTTP/1.1 connection
+    /// parks in the frame it parked in before the flag existed; HTTP/2 is
+    /// answered as `.http2` and run by the Engine after this has returned.
+    inline fn serveSniffed(
+        self: *App,
+        in: *std.Io.Reader,
+        out: *std.Io.Writer,
+        deadlines: bulkhead.Deadlines,
+        waker: bulkhead.Waker,
+        peer: bulkhead.Peer,
+    ) bulkhead.Hand {
+        switch (serve.sniffFraming(in, out, deadlines, waker)) {
+            .gone => out.flush() catch {},
+            .http1 => @call(.always_inline, serve.handleConnection, .{ self, in, out, deadlines, waker, peer }),
+            .http2 => return .http2,
+        }
+        return .done;
+    }
+
+    /// What a TLS listener with `.grpc = true` runs for each connection, in
+    /// place of `serve.handleConnection` (ADR 220), and what a plain
+    /// listener runs once `serveSniffed` has seen the HTTP/2 preface. Reached
+    /// only by an Engine built with `-Dhttp2`, so a build without it analyses
+    /// none of `h2conn.zig`.
     fn serveGrpc(
         self: *App,
         in: *std.Io.Reader,
@@ -2575,4 +2600,33 @@ test "a fail function in app.before work leaves its words for the boot's line" {
     // a fallback slot left pointing at this frame would be a dangling
     // pointer for the next fail function on this thread.
     try testing.expectEqual(@as(?*anyopaque, null), bulkhead.slot());
+}
+
+fn servedBySniffing(app: *App, in_bytes: []const u8, wire: []u8) struct { hand: bulkhead.Hand, answer: []const u8 } {
+    // A buffer of the connection's own over the bytes, as a socket is read.
+    // Only the choosing is driven here: an HTTP/1.1 connection runs on a
+    // task, which a test with no Engine does not have, so it is served by
+    // `grpc_live.zig`'s tests against a running server.
+    var underlying = std.Io.Reader.fixed(in_bytes);
+    var read_buf: [4096]u8 = undefined;
+    var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
+    var out = std.Io.Writer.fixed(wire);
+    const hand = App.serveSniffed(app, &limited.interface, &out, .off, .off, .{});
+    return .{ .hand = hand, .answer = out.buffered() };
+}
+
+test "a plain listener of a -Dhttp2 build hands the HTTP/2 preface on unanswered, and closes an empty connection" {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.resolveChains();
+    var wire: [4096]u8 = undefined;
+
+    const h2c = servedBySniffing(&app, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", &wire);
+    try testing.expectEqual(bulkhead.Hand.http2, h2c.hand);
+    try testing.expectEqual(@as(usize, 0), h2c.answer.len);
+
+    const empty = servedBySniffing(&app, "", &wire);
+    try testing.expectEqual(bulkhead.Hand.done, empty.hand);
+    try testing.expectEqual(@as(usize, 0), empty.answer.len);
 }

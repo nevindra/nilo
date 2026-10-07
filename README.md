@@ -294,7 +294,7 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 ## 🚫 What it won't do
 
 - **Templates.** If your app is mostly HTML, [jetzig](https://www.jetzig.dev/) is built for it.
-- **HTTP/2 for your routes.** Put a proxy in front if you need it. TLS 1.3 is built in behind `.tls = true`, or a proxy can terminate it ([deploying guide](./docs/guide/deploying.md#tls-and-a-reverse-proxy)). gRPC is served, unary calls on a listener of its own, behind `.http2 = true` ([gRPC guide](./docs/guide/grpc.md)).
+- **HTTP/2 for your routes.** Put a proxy in front if you need it. TLS 1.3 is built in behind `.tls = true`, or a proxy can terminate it ([deploying guide](./docs/guide/deploying.md#tls-and-a-reverse-proxy)). gRPC is served, unary calls on the port HTTP/1.1 is on, behind `.http2 = true` ([gRPC guide](./docs/guide/grpc.md)).
 - **Revoking a session.** Sessions are sealed into the cookie, so there's no session table to delete from.
 
 Each of these was decided on purpose; [`docs/decided.md`](./docs/decided.md) says why.

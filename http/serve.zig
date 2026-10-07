@@ -27,6 +27,7 @@ const handover_mod = @import("handover.zig");
 const metrics_mod = @import("metrics.zig");
 const failurebody = @import("failurebody.zig");
 const framing_mod = @import("framing.zig");
+const h2 = @import("h2.zig");
 const json = @import("json.zig");
 const trace_mod = @import("trace.zig");
 
@@ -74,7 +75,19 @@ pub fn handleConnection(
         // down TLB entries on all of them. So the pages only go once a
         // short read has come back empty, which a connection under load
         // never sees and a browser tab between clicks always does.
-        if (!waitForRequest(in, out, deadlines, waker)) {
+        //
+        // In a `-Dhttp2` build `sniffFraming` calls `waitForRequest` too, and
+        // two callers would take it out of line: this connection would then
+        // wait one frame deeper than it did before the flag existed, and the
+        // plain park sits under 300 bytes short of a page (ADR 259). It is
+        // inlined here by name where that is so, and left to the compiler
+        // where it is not, which is the function a build without the flag
+        // was to the byte.
+        const waited = if (comptime framing_mod.http2_built)
+            @call(.always_inline, waitForRequest, .{ in, out, deadlines, waker })
+        else
+            waitForRequest(in, out, deadlines, waker);
+        if (!waited) {
             out.flush() catch {};
             return;
         }
@@ -207,6 +220,51 @@ pub fn waitForRequest(
     deadlines.armIdle();
     if (in.seek == in.end) in.fillMore() catch return false;
     return true;
+}
+
+/// Which framing a connection arrived in.
+pub const Framing = enum { http1, http2, gone };
+
+/// Wait for a connection's first bytes and say whether they are the HTTP/2
+/// preface, which is the whole of how one port serves both framings (ADR
+/// 259). Nothing is consumed: the bytes stay in `in` for whichever loop is
+/// chosen.
+///
+/// **Decided at the first byte that differs from the preface**, not at its
+/// end. A request is never waited on for bytes it does not have, so an
+/// HTTP/1.0 request of ten bytes (`GET /\r\n\r\n`) is `.http1` at its first,
+/// and `PO` of a `POST` at its second. Only a client that has sent a proper
+/// prefix of the preface and stopped is waited on, for the head's time, and
+/// that is a client claiming HTTP/2.
+///
+/// **The first wait is `waitForRequest`'s**, so an idle connection gives its
+/// pages and stack back exactly as an HTTP/1.1 one does, whichever framing
+/// it turns out to be (ADR 062). `.gone` is a connection that closed, broke
+/// or ran out of time before saying enough to choose.
+///
+/// **`inline`, and `waitForRequest` inlined by name in here, because a
+/// connection that has said nothing yet waits in this frame.** Out of line,
+/// the wait is one frame deeper than the HTTP/1.1 loop's own and a
+/// connection that never sends a byte costs a page more (5,263 bytes against
+/// 9,363, `bench/result/http.md`). Reached only by a build with `-Dhttp2`.
+pub inline fn sniffFraming(
+    in: *std.Io.Reader,
+    out: *std.Io.Writer,
+    deadlines: bulkhead.Deadlines,
+    waker: bulkhead.Waker,
+) Framing {
+    if (!@call(.always_inline, waitForRequest, .{ in, out, deadlines, waker })) return .gone;
+    const preface = h2.preface;
+    while (true) {
+        const have = in.buffered();
+        const n = @min(have.len, preface.len);
+        if (!std.mem.eql(u8, have[0..n], preface[0..n])) return .http1;
+        if (n == preface.len) return .http2;
+        // A proper prefix of the preface and nothing more yet: the rest of
+        // it has the head's time, as the rest of an HTTP/1.1 head does.
+        deadlines.armHeader();
+        in.fillMore() catch return .gone;
+    }
 }
 
 /// What one request left behind.
@@ -1589,4 +1647,90 @@ test "a status a fail function sends outside the old table still has its phrase"
 
     const bad = serveAnswer(&app, "GET /gateway HTTP/1.1\r\nHost: x\r\n\r\n", &wire);
     try testing.expect(std.mem.startsWith(u8, bad.answer, "HTTP/1.1 502 Bad Gateway\r\n"));
+}
+
+/// A peer whose bytes arrive `step` at a time, each in a read of its own, and
+/// which counts the reads asked of it: what shows that a connection was
+/// decided at the byte that decided it and not waited on past it.
+const Drip = struct {
+    data: []const u8,
+    step: usize,
+    at: usize = 0,
+    reads: usize = 0,
+    reader: std.Io.Reader,
+
+    fn init(data: []const u8, step: usize, buffer: []u8) Drip {
+        return .{
+            .data = data,
+            .step = step,
+            .reader = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .end = 0, .seek = 0 },
+        };
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *Drip = @alignCast(@fieldParentPtr("reader", r));
+        if (self.at >= self.data.len) return error.EndOfStream;
+        self.reads += 1;
+        const part = self.data[self.at..][0..@min(self.step, self.data.len - self.at)];
+        const dest = limit.slice(try w.writableSliceGreedy(part.len));
+        const n = @min(part.len, dest.len);
+        @memcpy(dest[0..n], part[0..n]);
+        w.advance(n);
+        self.at += n;
+        return n;
+    }
+
+    fn sniff(self: *Drip) Framing {
+        var sink: [64]u8 = undefined;
+        var out = std.Io.Writer.fixed(&sink);
+        return sniffFraming(&self.reader, &out, .off, .off);
+    }
+};
+
+test "the HTTP/2 preface is recognised whole, in pieces and a byte at a time, and nothing is consumed" {
+    const settings = "\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+    for ([_]usize{ 64, 24, 7, 1 }) |step| {
+        var buffer: [4096]u8 = undefined;
+        var drip = Drip.init(h2.preface ++ settings, step, &buffer);
+        try testing.expectEqual(Framing.http2, drip.sniff());
+        try testing.expect(std.mem.startsWith(u8, drip.reader.buffered(), h2.preface));
+        try testing.expectEqual(@as(usize, 0), drip.reader.seek);
+    }
+}
+
+test "a request that differs from the preface is HTTP/1.1 at the first byte that differs" {
+    // The byte it differs at, and a read for every byte before it: a byte at
+    // a time, the sniff may ask for exactly as many as it takes to be sure.
+    const cases = [_]struct { request: []const u8, differs_at: usize }{
+        .{ .request = "GET / HTTP/1.1\r\nHost: t\r\n\r\n", .differs_at = 0 },
+        .{ .request = "POST /x HTTP/1.1\r\nHost: t\r\n\r\n", .differs_at = 1 },
+        .{ .request = "PRIORITY / HTTP/1.1\r\nHost: t\r\n\r\n", .differs_at = 3 },
+        .{ .request = h2.preface[0..23] ++ "X and then more bytes", .differs_at = 23 },
+    };
+    for (cases) |case| {
+        var buffer: [4096]u8 = undefined;
+        var drip = Drip.init(case.request, 1, &buffer);
+        try testing.expectEqual(Framing.http1, drip.sniff());
+        try testing.expectEqual(case.differs_at + 1, drip.reads);
+        // Left for the HTTP/1.1 loop exactly as it arrived.
+        try testing.expectEqualStrings(case.request[0 .. case.differs_at + 1], drip.reader.buffered());
+    }
+}
+
+test "a short HTTP/1.0 request is chosen on its first read and never waited past" {
+    for ([_][]const u8{ "GET /\r\n\r\n", "GET / HTTP/1.0\r\n\r\n", "G" }) |request| {
+        var buffer: [4096]u8 = undefined;
+        var drip = Drip.init(request, 64, &buffer);
+        try testing.expectEqual(Framing.http1, drip.sniff());
+        try testing.expectEqual(@as(usize, 1), drip.reads);
+    }
+}
+
+test "a connection that sends nothing, or stops inside the preface, is gone" {
+    var buffer: [4096]u8 = undefined;
+    var empty = Drip.init("", 1, &buffer);
+    try testing.expectEqual(Framing.gone, empty.sniff());
+
+    var half = Drip.init(h2.preface[0..14], 1, &buffer);
+    try testing.expectEqual(Framing.gone, half.sniff());
 }

@@ -3713,3 +3713,51 @@ A program with a message route pays Connect's own code on top, by symbol in `nil
 **It missed the plan's bar, by code and not names.** By `nm -S` the envelope's rules handed back as values cost what the connection used to do in place: `runCall` +172 (the answer returned as a `grpc.Reply` and copied onto the stream), `grpc.envelope` 232 against 107 that left `Conn.dispatch`, and `grpc.untilNs` 360 where `timeoutNanos` was 346. A one-line `refuse` helper was a function of 161 bytes of its own until it was made `inline`, which took the first measurement of +864 and +848 to the figures above.
 
 **The decision it moved:** none; the split ships at this cost, because it lives only in a build that asked for HTTP/2 and stage 5.2 rewrites `Conn.dispatch` for every request. **Can it be pushed further:** yes, by writing the reply straight onto the stream; stage 5.2's own size measurement is taken against `8c64019` so the two are read together.
+
+## What one port for HTTP/1.1 and HTTP/2 costs
+
+**Question.** Stage 5.2 of [framing](../../docs/design/framing.md) makes every plain listener of a `-Dhttp2` build read the client's first bytes and serve HTTP/2 on the preface and HTTP/1.1 on anything else ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md)). The bar the ADR set: an HTTP/1.1 connection in that build holds the idle figure it held before, the routed `GET` stays inside its spread, and a build without the flag is byte-identical. The ADR named two ways to build it, a tail call from the choosing into the loop chosen, and, where the ABI refuses that, the choice inside `serve.handleConnection`'s first wait with a `noinline` hand-on, and said `bench/mem.py` decides.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `45459d1` and, for the size, `8c64019` (`-Dgrpc=true`), each from `git archive`; after is the working tree on `45459d1`. Everything the same afternoon, interleaved. Memory: `bench/mem.py --port 8787 --path /health` against `nilo-hello` (`bench/main.zig`), `ulimit -n 65536`. Throughput: wrk 4.2.0 `-t2 -c64`, 5 s of warm-up then 15 s, `/users/42`, the server on `taskset -c 0-3` and wrk on `-c 4,5` (four physical cores and two, SMT siblings idle), five rounds alternating the two builds.
+
+**Size**, stripped:
+
+| program | build | `45459d1` | `8c64019` | after | against `45459d1` | against `8c64019` |
+|---|---|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 1,013,408 | 0 (`cmp` equal) | 0 |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 1,221,320 | 0 (`cmp` equal) | 0 |
+| `nilo-hello` | default | 1,020,968 | | 1,020,968 | 0 (`cmp` equal) | |
+| `example-hello` | flag | 1,103,960 | 1,103,352 | 1,103,496 | -464 | +144 |
+| `example-rest` | flag | 1,293,336 | 1,292,744 | 1,292,856 | -480 | +112 |
+
+The flag build is smaller than stage 5.1's because a plain listener no longer has a fiber function of its own for the HTTP/2 loop (`Entry(grpc_handler)` is gone); it is 112 to 144 bytes over the `-Dgrpc` build it replaces, from the sniff and the hand-on.
+
+**Idle HTTP/1.1 connection**, bytes a connection after one request, `mem.py` at 1,000 and 10,000, two interleaved rounds (a range is the two rounds):
+
+| build | 1,000 | 10,000 |
+|---|---|---|
+| default, `45459d1` | 5,251 to 5,255 | 5,191 |
+| default, after | 5,251 to 5,255 | 5,191 |
+| `-Dhttp2`, `45459d1` | 5,317 to 5,321 | 5,197 to 5,198 |
+| `-Dhttp2`, after | 5,321 | 5,197 to 5,199 |
+
+A connection that never says a word (10,000 sockets opened and left, the RSS read after the first wait has given its pages back): default 5,184 to 5,206, `-Dhttp2` before 5,198 to 5,325, after 5,192 to 5,267.
+
+An idle HTTP/2 connection on the shared port, after one unary call (`mem.py --grpc`, a method no route answers, so a trailers-only call): 10,334 at 1,000, 10,092 at 5,000, 9,946 at 10,000. Plain and no call in flight is stage 5.3's to measure; this is the figure for the record.
+
+**Routed `GET`**, `-Dhttp2` build, requests a second, five rounds each:
+
+| build | rounds | mean | p99 |
+|---|---|---|---|
+| `45459d1` | 936,504; 946,841; 944,073; 939,836; 942,328 | 941,916 | 69 to 70 µs (122 µs once) |
+| after | 941,053; 942,020; 941,199; 947,026; 940,870 | 942,434 | 69 to 72 µs |
+
+Inside the spread of either, so unchanged.
+
+**What the first attempts cost, and why the third ships.** The tail call compiles (`@call(.always_tail, serve.handleConnection, …)` from a chooser whose signature is the loops'; `noinline` on the chooser is refused, since the callee's type must match) and an HTTP/1.1 connection then cost **9,417 at 1,000 and 9,293 at 10,000, one page more**. Moving the choice to the first wait with a `noinline` hand-on taking pointers cost the same 9,417. Neither was the choosing's frame. `waitForRequest` had gained a second caller (the sniff's) and so stopped being inlined into the loop: the park sat one call frame deeper, and the plain park sits under 300 bytes short of a page ([ADR 212](../../docs/adr/212-tls-is-an-option-a-build-asks-for.md)). Naming it `@call(.always_inline)` in `handleConnection` under `-Dhttp2` gave 5,197. The tail call was not measured again after that, so it is not shown to be worse; what ships is the choice inlined into the Engine's entry, with the HTTP/2 loop run by the entry itself once the choosing has returned `.http2`, through a `noinline` function whose arguments are pointers to what the entry already keeps live (`bulkhead.Hand`, `Bridge.runPlain`, `Bridge.handOn`). That keeps the HTTP/1.1 frame the frame it was and puts no outgoing-argument area in it, the 272 bytes a by-value `Peer` costs ([ADR 212](../../docs/adr/212-tls-is-an-option-a-build-asks-for.md)).
+
+**A connection that has said nothing is a second figure, and was a page more.** With `sniffFraming` out of line the first wait parked in its frame and a silent connection cost 9,363 at 1,000 and 9,288 at 10,000. Inlined, with `waitForRequest` named inline inside it, 5,263 and 5,192. A listener's health check or a browser's pre-connect is that connection.
+
+**Outside the suite**, `example-hello -Dhttp2` on one port: `curl` gets the 200 and `wati`; `curl --http2` (an `Upgrade: h2c` offer) is answered as HTTP/1.1; `curl --http2-prior-knowledge` to a plain route is reset `PROTOCOL_ERROR`, which is what the HTTP/2 connection says of anything that is not a call until stage 5.3; a gRPC `POST` to the same port with prior knowledge is answered `grpc-status: 12`, no route; `printf 'GET /\r\n\r\n' | nc` is answered at once, a 400, never waited on.
+
+**The decision it moved:** the choice ships as an inlined chooser with a hand-on from the entry, where the ADR's first preference was a tail call, because that is the one the idle figure held for and measured; ADR 259's text says so. **Can it be pushed further:** the tail call is the open question, and is worth one more measurement with `waitForRequest` inlined as above; nothing in a figure here asks for it. A TLS listener still runs `handleConnection` unchanged and is measured by stage 7.

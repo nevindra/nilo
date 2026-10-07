@@ -224,13 +224,16 @@ pub const Options = struct {
         /// a plain port and a TLS port in one process is what the field
         /// exists for, and each certificate is that listener's alone.
         tls: ?Tls = null,
-        /// Speak gRPC on this one rather than HTTP/1.1: HTTP/2 with prior
-        /// knowledge (h2c), or with `tls` set as well, HTTP/2 chosen by ALPN
-        /// (`h2`, and nothing else offered). Each unary call is answered by
-        /// the route `app.post` registered at its path
-        /// ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
-        /// Needs `.http2 = true` on the dependency, and is refused at
-        /// `listen()` without it.
+        /// Offer HTTP/2 alone by ALPN on a TLS listener: with `tls` set as
+        /// well, `h2` and nothing else, which is how gRPC over TLS is served
+        /// until a TLS listener offers both (ADR 259, ADR 220). **On a plain
+        /// listener it chooses nothing and is ignored**: every plain listener
+        /// of a `-Dhttp2` build answers HTTP/2 with prior knowledge and
+        /// HTTP/1.1 on the same port, by the client's first bytes, so a port
+        /// for gRPC needs no flag. The option goes when a TLS listener offers
+        /// both. Each unary call is answered by the route `app.post`
+        /// registered at its path. Needs `.http2 = true` on the dependency,
+        /// and is refused at `listen()` without it.
         grpc: bool = false,
     };
 
@@ -369,11 +372,11 @@ pub const Options = struct {
     /// port, is dropped when the first of those runs out.
     tls: ?Tls = null,
 
-    /// Speak gRPC on `address` and `port` rather than HTTP/1.1, the way
-    /// `Listener.grpc` does on an entry in `also`: h2c, or HTTP/2 by ALPN when
-    /// `tls` is set. For a server that answers nothing but gRPC; one that
-    /// serves both gives gRPC an entry in `also` instead
-    /// ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
+    /// What `Listener.grpc` does on an entry in `also`: on a TLS listener,
+    /// offer `h2` alone by ALPN; on a plain one, nothing, because a plain
+    /// listener of a `-Dhttp2` build already answers HTTP/2 and HTTP/1.1 by
+    /// the first bytes ([ADR 259](../docs/adr/259-http2-is-a-framing-of-every-request.md),
+    /// [ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
     grpc: bool = false,
 
     /// More addresses to answer on, beside the one `address` and `port`
@@ -800,6 +803,7 @@ pub fn serve(
     comptime stopping: anytype,
     comptime handler: anytype,
     comptime grpc_handler: anytype,
+    comptime plain_handler: anytype,
 ) !void {
     const State = @TypeOf(state);
 
@@ -823,9 +827,47 @@ pub fn serve(
             handler(carried.state, in, out, deadlines, waker, peer);
         }
 
-        /// The same for a listener that speaks gRPC (ADR 220). Its own
-        /// function rather than a flag on `run`, for the reason the Engine
-        /// keeps `runTls` apart: nothing is added to the plain path.
+        /// The same for a plain listener of a `-Dhttp2` build, which chooses
+        /// its framing from the first bytes (ADR 259) and says which it chose
+        /// by what it returns. Its own function rather than a flag on `run`,
+        /// for the reason the Engine keeps `runTls` apart: nothing is added
+        /// to the path a build without the flag, or a TLS listener, runs.
+        fn runPlain(
+            carried: Carried,
+            in: *std.Io.Reader,
+            out: *std.Io.Writer,
+            clocks: *engine.Clocks,
+            wake: *engine.Wake,
+            peer: Peer,
+        ) Hand {
+            var deadlines = carried.limits;
+            deadlines.target = clocks;
+            const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
+            return plain_handler(carried.state, in, out, deadlines, waker, peer);
+        }
+
+        /// What the Engine runs once `runPlain` has answered `.http2`, from
+        /// the entry's own frame after the choosing has returned, so that the
+        /// HTTP/1.1 connection that did not need it holds none of what it
+        /// takes: its arguments are pointers to what the entry already keeps
+        /// live, and it is `noinline` so none of its frame is the entry's
+        /// (ADR 259, ADR 062).
+        noinline fn handOn(
+            carried: *const Carried,
+            in: *std.Io.Reader,
+            out: *std.Io.Writer,
+            clocks: *engine.Clocks,
+            wake: *engine.Wake,
+            peer: *const Peer,
+        ) void {
+            var deadlines = carried.limits;
+            deadlines.target = clocks;
+            const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
+            grpc_handler(carried.state, in, out, deadlines, waker, peer.*);
+        }
+
+        /// The same for a TLS listener that offers `h2` alone (ADR 220).
+        /// Its own function for the same reason.
         fn runGrpc(
             carried: Carried,
             in: *std.Io.Reader,
@@ -868,7 +910,7 @@ pub fn serve(
             .body_grace_ms = options.body_grace_ms,
             .write_ms = options.write_timeout_ms,
         },
-    }, Bridge.start, Bridge.winddown, Bridge.run, Bridge.runGrpc);
+    }, Bridge.start, Bridge.winddown, Bridge.run, Bridge.runGrpc, Bridge.runPlain, Bridge.handOn);
 }
 
 const engine_waker: Waker.VTable = .{
@@ -1494,6 +1536,10 @@ pub const Woken = enum { readable, posted, timed_out, closed };
 /// straight has bytes in a fixed buffer or it does not; there is nobody to
 /// post to it, and a `receive` that parked waiting for one would hang the
 /// suite rather than fail it.
+/// What a plain listener's choosing of a framing returned: the connection
+/// was served, or it is HTTP/2 and still to be (ADR 259).
+pub const Hand = enum { done, http2 };
+
 pub const Waker = struct {
     target: ?*anyopaque = null,
     vtable: *const VTable = &no_engine,

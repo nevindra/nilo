@@ -409,12 +409,6 @@ Nothing is open at this tier.
 
 **Direction:** [A stream is one shape](./roadmap.md#a-stream-is-one-shape)
 
-**One port cannot speak both HTTP/1.1 and h2c.** A gRPC listener is a listener of its own ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)), and a connection that does not open with the HTTP/2 preface gets a 505. Choosing on the first 24 bytes would put a branch in front of every HTTP/1.1 connection's first read on that port, where a listener of its own leaves that path as it was; it is also what HttpArena's `unary-grpc` profile needs, along with HTTP/2 for plain GET routes, which stays refused.
-
-**Needs:** the branch in front of an HTTP/1.1 connection's first read measured on all four axes, which is stage 5 of [the framing page](./design/framing.md#how-the-direction-is-built).
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **A gRPC listener has no health service, and the guide does not say how to write one.** Kubernetes' gRPC probe and most load balancers call `grpc.health.v1.Health/Check`, which is an ordinary route under [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) and nothing documents; server reflection, which `grpcurl` wants, is not on record either way.
 
 **Needs:** a guide section showing `grpc.health.v1.Health/Check` as an ordinary route, and a decision on server reflection.

@@ -185,7 +185,7 @@ Cutting a release (the version bumps, the pinned `?ref=#commit`, the release pag
 
 ## Refused on the record
 
-Templates and HTTP/2 for ordinary routes are decisions, not gaps (README "What it won't do", ADR 027); propose a change to the ADR instead of adding them. gRPC moved the same way: behind `-Dhttp2`, unary only, on a listener of its own (ADR 220), with streaming and h1 plus h2c on one port on the roadmap. TLS is the precedent for moving one: an option behind a build flag, the default build unchanged on the memory axis and 2.8 KB on the size one, and every number on the record before it shipped (ADR 212).
+Templates and HTTP/2 for ordinary routes are decisions, not gaps (README "What it won't do", ADR 027); propose a change to the ADR instead of adding them. gRPC moved the same way: behind `-Dhttp2`, unary only, and a plain listener of that build answers HTTP/1.1 and HTTP/2 on one port by the client's first bytes (ADR 259, ADR 220), with streaming on the roadmap. TLS is the precedent for moving one: an option behind a build flag, the default build unchanged on the memory axis and 2.8 KB on the size one, and every number on the record before it shipped (ADR 212).
 
 <!-- devrun:begin -->
 ## Running this project's services

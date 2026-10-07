@@ -23,7 +23,6 @@ What is left is designed whole in [ADR 259](./adr/259-http2-is-a-framing-of-ever
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · Whether a gRPC listener should keep an HPACK table, to stop decoding the same strings every call.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Ctx.connection()` returns `http1.Connection`, and ADR 259 removes it.
-- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · One port cannot speak both HTTP/1.1 and h2c.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A gRPC listener has no health service, and the guide does not say how to write one.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Every request on HTTP/2 spawns a fiber, where HTTP/1.1 runs it on the connection's.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · A file on HTTP/2 over plain TCP has no `sendfile`.
