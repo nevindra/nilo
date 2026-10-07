@@ -23,7 +23,7 @@ const hpack = @import("hpack.zig");
 
 const testing = std.testing;
 
-fn hush() void {
+pub fn hush() void {
     std.testing.log_level = .err;
 }
 
@@ -40,7 +40,7 @@ fn slowEcho(c: *nilo.Ctx) anyerror!void {
     return echo(c);
 }
 
-const Serving = struct {
+pub const Serving = struct {
     app: *nilo.App,
     path: []const u8,
     write_timeout_ms: u32 = 30_000,
@@ -49,7 +49,7 @@ const Serving = struct {
     body_min_rate: u32 = 8 * 1024,
     bound: std.atomic.Value(bool) = .init(true),
 
-    fn run(self: *Serving) void {
+    pub fn run(self: *Serving) void {
         var buf: [std.Io.net.UnixAddress.max_len + 8]u8 = undefined;
         const beside = std.fmt.bufPrint(&buf, "unix:{s}", .{self.path}) catch unreachable;
         self.app.tryListen(.{
@@ -67,7 +67,7 @@ const Serving = struct {
     }
 
     /// Bounded, for the reason every wait in `live.zig` is.
-    fn waitUntilUp(self: *const Serving, io: std.Io) !void {
+    pub fn waitUntilUp(self: *const Serving, io: std.Io) !void {
         for (0..300) |_| {
             if (self.app.boundPort() != null) return;
             if (!self.bound.load(.acquire)) return error.ServerNeverCameUp;
@@ -77,11 +77,11 @@ const Serving = struct {
     }
 };
 
-const SocketDir = struct {
+pub const SocketDir = struct {
     tmp: nilo.testing.TmpDir,
     path: [:0]u8,
 
-    fn init(gpa: std.mem.Allocator, name: []const u8) !SocketDir {
+    pub fn init(gpa: std.mem.Allocator, name: []const u8) !SocketDir {
         var tmp = nilo.testing.tmpDir();
         errdefer tmp.cleanup();
         return .{
@@ -90,7 +90,7 @@ const SocketDir = struct {
         };
     }
 
-    fn deinit(self: *SocketDir, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *SocketDir, gpa: std.mem.Allocator) void {
         gpa.free(self.path);
         self.tmp.cleanup();
     }
@@ -164,7 +164,7 @@ fn readAnswers(a: std.mem.Allocator, r: *std.Io.Reader, w: *std.Io.Writer, calls
     }
 }
 
-fn connect(io: std.Io, path: []const u8) !std.Io.net.Stream {
+pub fn connect(io: std.Io, path: []const u8) !std.Io.net.Stream {
     const address = try std.Io.net.UnixAddress.init(path);
     const stream = try address.connect(io);
     const limit: std.posix.timeval = .{ .sec = 5, .usec = 0 };

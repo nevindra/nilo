@@ -57,6 +57,8 @@ This page covers reading a request, answering it, its cookies, session and uploa
 | `c.arena()` | `std.mem.Allocator`: memory that lasts exactly this request. Never freed by hand. Several threads may allocate from it at once, so a handler can give it to threads it starts inside `nilo.blocking` and return a value that borrows from it, once they are joined |
 | `c.str(bytes)` | `Str`: text you allocated from `c.arena()`, stamped with this request's lifetime |
 
+**Both read the same on HTTP/1.1 and on HTTP/2** (`-Dhttp2`). On HTTP/2 the handler starts when the headers are in, `body` waits for the whole of the body and hands it over where it arrived, and `bodyStream` reads it in pieces while the client's window is given back as the handler reads, so an upload faster than its handler holds the connection to one window and no more ([ADR 260](../adr/260-a-request-on-http2-runs-from-its-headers.md)).
+
 ### Answering
 
 | | |

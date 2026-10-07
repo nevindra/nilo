@@ -11717,6 +11717,14 @@ fn framedSize(c: *Ctx) anyerror!void {
     try c.sendText(200, std.fmt.bufPrint(&buf, "{d}", .{(try c.body()).view().len}) catch unreachable);
 }
 
+fn framedCapped(c: *Ctx) anyerror!void {
+    var incoming = c.bodyStreamWith(.{ .max_bytes = 8 }) catch
+        return fail.tooLarge("that upload is bigger than this endpoint takes", .{});
+    var buf: [8]u8 = undefined;
+    while (try incoming.read(&buf)) |_| {}
+    try c.sendText(200, "took it");
+}
+
 fn framedMedium(c: *Ctx) anyerror!void {
     try c.send(200, "text/plain", "0123456789" ** 250);
 }
@@ -11734,6 +11742,8 @@ fn framedApp() !App {
     try app.get("/trailing", framedTrailing);
     try app.get("/cookie", framedCookie);
     try app.post("/size", framedSize);
+    try app.post("/store", storeUpload);
+    try app.post("/capped", framedCapped);
     try app.get("/medium", framedMedium);
     try app.resolveChains();
     return app;
@@ -11899,6 +11909,18 @@ test "the same requests over HTTP/1.1 and over HTTP/2 get the same answers" {
     // A body in several DATA frames, an answer written across several
     // windows, a cookie a client split, and a redirect.
     try expectSameAnswer(&app, .{ .method = "POST", .path = "/size", .body = "x" ** 60_000, .status = 200, .says = "60000" });
+    // A body read in pieces, as it arrives on HTTP/2 and as it is read
+    // out of the buffer on HTTP/1.1, and one the route holds to a limit.
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/store", .body = "x" ** 60_000, .status = 200, .says = "\"stored\":60000" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/capped", .body = "abcdefgh", .status = 200, .says = "took it" });
+    try expectSameAnswer(&app, .{
+        .method = "POST",
+        .path = "/capped",
+        .body = "abcdefghijklmnopqrst",
+        .h2_fields = &.{.{ .name = "content-length", .value = "20" }},
+        .status = 413,
+        .says = "bigger than this endpoint takes",
+    });
     try expectSameAnswer(&app, .{ .path = "/medium", .window = 700, .status = 200, .says = "0123456789" });
     try expectSameAnswer(&app, .{
         .path = "/cookie",

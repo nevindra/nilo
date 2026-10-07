@@ -65,6 +65,11 @@ pub const Encoding = enum {
     other,
 };
 
+/// Whether a build has a framing whose body the transport frames, which is
+/// what `Request.ends_with_stream` is for. A build without it has no such
+/// field, so `Request` is the struct it always was.
+const transport_framed = @import("nilo_build").http2;
+
 pub const Request = struct {
     /// Slices into the reader's buffer. Valid until the next read from the
     /// same connection (including `discardBody`) — after that the contents
@@ -117,6 +122,12 @@ pub const Request = struct {
     /// `Upgrade: websocket`: what this answers is "might this connection be
     /// read from again", and the only wrong answer is a false negative.
     upgrade: bool = false,
+    /// Whether the body is framed by the transport and ends where the stream
+    /// does: a request on HTTP/2, whose `DATA` is read through the pipe the
+    /// connection fills (ADR 260). `content_length` is then only what the
+    /// client announced, when `has_content_length`, and the connection holds
+    /// the `DATA` to it. Free in memory for the reason `has_content_length` is.
+    ends_with_stream: if (transport_framed) bool else void = if (transport_framed) false else {},
     /// Whether the client said `Expect: 100-continue` and is holding its body
     /// back until the server answers (ADR 073). `Ctx` sends the interim
     /// response at the moment it commits to reading, and `App` reads this to

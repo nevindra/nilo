@@ -45,6 +45,15 @@ const h2 = @import("h2.zig");
 const hpack = @import("hpack.zig");
 const core = @import("nilo_core");
 
+/// Run each call on a thread of its own, as a test does, so the generated
+/// inputs reach a request whose handler is running while its body arrives
+/// (`h2conn.Fallback`). A generator run from the command line would otherwise
+/// reach the inline fallback, which runs a call only once its stream has
+/// ended.
+pub fn useThreads() void {
+    h2conn.fallback = .threads;
+}
+
 /// Run one input through a connection and check what came back. A failure
 /// prints the input as a corpus line first, the way `fuzz.checkOne` does.
 pub fn checkOne(gpa: std.mem.Allocator, bytes: []const u8) !void {
@@ -105,7 +114,7 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
 
         fn handle(
             _: *anyopaque,
-            _: std.mem.Allocator,
+            arena: std.mem.Allocator,
             _: *core.Lifetime,
             _: *fail.InFlight,
             arrived: framing.Call,
@@ -113,9 +122,27 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
             _: bulkhead.Peer,
             _: u64,
         ) void {
-            const body = arrived.body;
             const which = if (arrived.target.len > 1) arrived.target[1] else 'e';
             var to: framing.Framing = .{ .http2 = collected };
+            // A request that was not over when it started reads what is left
+            // of it through the pipe, whole, or, on `/s`, a few bytes at a
+            // time, which is a handler slower than its client.
+            var body = arrived.body;
+            if (arrived.inbox) |pipe| {
+                if (which == 's') {
+                    var total: usize = 0;
+                    var tiny: [7]u8 = undefined;
+                    while (true) {
+                        const n = pipe.reader.readSliceShort(&tiny) catch break;
+                        total += n;
+                        if (n < tiny.len) break;
+                    }
+                    body = std.fmt.allocPrint(arena, "{d}", .{total}) catch "";
+                    to.whole(200, "text/plain", body, false, true, &.{}, .{}) catch {};
+                    return;
+                }
+                body = pipe.whole(1024) catch "";
+            }
             switch (which) {
                 'g' => to.whole(200, "text/plain", "hello", std.mem.eql(u8, arrived.method, "HEAD"), true, &.{
                     .{ .name = "Connection", .value = "close" },
@@ -267,9 +294,11 @@ pub fn generate(random: std.Random, buf: []u8) []const u8 {
     const steps = 1 + random.uintLessThan(u8, 8);
     for (0..steps) |_| {
         if (random.uintLessThan(u8, 3) != 0) {
-            if (random.uintLessThan(u8, 3) == 0) {
-                wholeRequest(random, &w, next) catch return w.buffered();
-            } else wholeCall(random, &w, next) catch return w.buffered();
+            switch (random.uintLessThan(u8, 6)) {
+                0, 1 => wholeRequest(random, &w, next) catch return w.buffered(),
+                2, 3 => splitRequest(random, &w, next) catch return w.buffered(),
+                else => wholeCall(random, &w, next) catch return w.buffered(),
+            }
             next +|= 2;
             continue;
         }
@@ -357,7 +386,32 @@ fn wholeRequest(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
     for (0..len - first) |_| try w.writeByte(random.int(u8));
 }
 
-const request_paths = [_][]const u8{ "/g.x", "/g.x", "/e.x", "/f.x", "/n", "/c.x", "/missing", "*", "", "/a b", "/g?x=1" };
+/// A request whose body is still to come when its HEADERS are read, so its
+/// handler is running while DATA arrives: the pieces sometimes with another
+/// stream's frames between them, the end sometimes a reset, sometimes an empty
+/// DATA that ends it, sometimes never.
+fn splitRequest(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
+    var block_buf: [320]u8 = undefined;
+    const block = requestBlock(random, &block_buf);
+    try h2.writeHeader(w, block.len, .headers, h2.Flags.end_headers, stream);
+    try w.writeAll(block);
+    const pieces = random.uintLessThan(u8, 4);
+    for (0..pieces) |i| {
+        if (random.uintLessThan(u8, 4) == 0) try oneFrame(random, w, stream +| 2);
+        const len = random.uintLessThan(u8, 40);
+        const last = i + 1 == pieces and random.boolean();
+        try h2.writeHeader(w, len, .data, if (last) h2.Flags.end_stream else 0, stream);
+        for (0..len) |_| try w.writeByte(random.int(u8));
+        if (last) return;
+    }
+    switch (random.uintLessThan(u8, 4)) {
+        0 => try h2.writeRstStream(w, stream, .cancel),
+        1 => try h2.writeHeader(w, 0, .data, h2.Flags.end_stream, stream),
+        else => {},
+    }
+}
+
+const request_paths = [_][]const u8{ "/g.x", "/g.x", "/s.x", "/e.x", "/f.x", "/n", "/c.x", "/missing", "*", "", "/a b", "/g?x=1" };
 const request_methods = [_][]const u8{ "GET", "GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "CONNECT", "BREW", "" };
 
 /// A request's fields as an ordinary client writes them, with the ones that
@@ -550,6 +604,13 @@ const corpus = [_][]const u8{
     request("\x00\x07:method\x04HEAD\x86\x04\x04/g.x", 0x05),
     request("\x00\x07:method\x07CONNECT\x00\x0a:authority\x01h", 0x05),
     request("\x82\x86\x04\x04/g.x\x00\x02te\x04gzip", 0x05),
+    // A request still being sent when it starts: its body in three pieces, the
+    // handler reading it in sevens (`/s`), one cut off by a reset, and one
+    // told a length it does not keep.
+    request("\x83\x86\x04\x04/s.x", 0x04) ++ frame(0x00, 0x00, "abcdefghij") ++ frame(0x00, 0x00, "klm") ++ frame(0x00, 0x01, "n"),
+    request("\x83\x86\x04\x04/s.x", 0x04) ++ frame(0x00, 0x00, "abcdefghij") ++ frame(0x03, 0x00, "\x00\x00\x00\x08"),
+    request("\x83\x86\x04\x04/s.x\x0f\x0d\x01\x32", 0x04) ++ frame(0x00, 0x00, "abc") ++ frame(0x00, 0x01, "defgh"),
+    request("\x83\x86\x04\x04/e.x\x00\x06expect\x0c100-continue", 0x04) ++ frame(0x00, 0x00, "abc") ++ frame(0x00, 0x01, "def"),
     request("\x82\x86\x04\x04/g.x\x00\x06cookie\x03a=1\x00\x06cookie\x03b=2\x00\x06expect\x0c100-continue", 0x04) ++ frame(0x00, 0x01, ""),
     // A frame whose length runs past the end of the input.
     h2.preface ++ "\x00\x00\x00\x04\x00\x00\x00\x00\x00" ++ "\x00\x40\x00\x00\x00\x00\x00\x00\x01",

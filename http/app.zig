@@ -1781,8 +1781,10 @@ pub const App = struct {
                 // socket: the connection's fiber frames it (ADR 220,
                 // ADR 253). A call cannot hand a socket over, so there is no
                 // handover to run.
-                var in: std.Io.Reader = .fixed(call.body);
-                _ = serve.serveRequest(app, arena, lifetime, in_flight, &in, .{ .call = &call }, .{ .collect = collected }, .{ .until_ns = until_ns }, .{}, peer);
+                var fixed: std.Io.Reader = .fixed(call.body);
+                const in = if (call.inbox) |inbox| &inbox.reader else &fixed;
+                collected.inbound = call.inbox;
+                _ = serve.serveRequest(app, arena, lifetime, in_flight, in, .{ .call = &call }, .{ .collect = collected }, .{ .until_ns = until_ns }, .{}, peer);
             }
         };
         return .{

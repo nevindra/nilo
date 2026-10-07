@@ -97,6 +97,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 /// leak is reported on the input that made it rather than at the end.
 fn fuzzFrames(iterations: usize, seed: u64) void {
     std.debug.print("fuzzing the gRPC listener: {d} connections, seed 0x{x}\n", .{ iterations, seed });
+    fuzz_frames.useThreads();
     var prng = std.Random.DefaultPrng.init(seed);
     var buf: [4096]u8 = undefined;
     for (0..iterations) |n| {

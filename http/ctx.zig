@@ -1319,7 +1319,9 @@ pub const Ctx = struct {
             defer watchdog.waited(self._watch, w);
 
             var received: []const u8 = undefined;
-            if (self._request.chunked) {
+            if (framing_mod.http2_built and self._request.ends_with_stream) {
+                received = try self.readStreamBody();
+            } else if (self._request.chunked) {
                 try self.aboutToReadBody();
                 // A chunked body announces nothing, so the only length there
                 // is to size a deadline from is the most it may be. That
@@ -1392,6 +1394,26 @@ pub const Ctx = struct {
         return Str.fromRequest(self._body.?, self._lifetime);
     }
 
+    /// The body of a request on HTTP/2, which ends where its stream does:
+    /// waited for where it has not arrived, and handed over where it lies,
+    /// with no copy, where it has (ADR 260). Held to `max_body` as a chunked
+    /// body is, and to the bound a chunked body's read is held to, by the
+    /// pipe the wait is on. `noinline`: a request that reads no body does not
+    /// carry it.
+    noinline fn readStreamBody(self: *Ctx) ![]const u8 {
+        const r = self._request;
+        if (r.has_content_length and r.content_length == 0) return "";
+        if (r.content_length > self._limits.max_body) return error.BodyTooLarge;
+        try self.aboutToReadBody();
+        const inbox = self._framing.inbox().?;
+        inbox.setDeadline(self._deadlines.until_ns);
+        return inbox.whole(self._limits.max_body) catch |err| {
+            if (err == error.BodyTooLarge) return err;
+            self._stream_desynced = true;
+            return self.slowBody(err);
+        };
+    }
+
     /// A body read that ended because the client was too slow, told apart
     /// from one that ended because the connection broke.
     ///
@@ -1438,11 +1460,6 @@ pub const Ctx = struct {
         // Asking twice would hand out two readers into one stream, and the
         // second would get whatever the first left.
         std.debug.assert(self._body == null and self._incoming == null);
-        if (self.onHttp2()) return self.notOnHttp2(
-            "c.bodyStream()",
-            "a request on HTTP/2 is read whole, under the route's maxBody. Use c.body(), or let HTTP/1.1 serve this route.",
-        );
-
         // A stream hands the bytes out as they arrive and holds nothing, so
         // there is nowhere to inflate a gzipped body into: the destination
         // that `body()` uses as the inflater's window is the caller's buffer
@@ -1461,7 +1478,13 @@ pub const Ctx = struct {
         if (!self._request.chunked and self._request.content_length > options.max_bytes) {
             return error.BodyTooLarge;
         }
-        if (self._request.chunked or self._request.content_length > 0) try self.aboutToReadBody();
+        // A body the transport frames has no length to look at, so what asks
+        // is the pipe: a client that announced none, and sent none, is told
+        // nothing is wanted.
+        const transport = framing_mod.http2_built and self._request.ends_with_stream and
+            !(self._request.has_content_length and self._request.content_length == 0);
+        if (self._request.chunked or self._request.content_length > 0 or transport) try self.aboutToReadBody();
+        if (transport) self._framing.inbox().?.setDeadline(self._deadlines.until_ns);
 
         self.tookOver();
         self._incoming = .start(self._request, options.max_bytes);

@@ -260,6 +260,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (comptime @import("nilo_build").http2) {
         try grpcCalls();
         try http2Gets(whole / rounds);
+        try http2JsonPosts();
     } else std.debug.print(
         "\nA gRPC call and a GET over HTTP/2 are timed by `zig build profile -Dhttp2`.\n",
         .{},
@@ -935,7 +936,7 @@ fn grpcCalls() !void {
     var decoder = hpack.Decoder.init(gpa);
     defer decoder.deinit();
     var fields: std.ArrayList(hpack.Field) = .empty;
-    defer fields.deinit(gpa);
+    // Not freed here: the decoder appends to it with the scratch arena, which owns it.
     var scratch = std.heap.ArenaAllocator.init(gpa);
     defer scratch.deinit();
     var decode_best: u64 = std.math.maxInt(u64);
@@ -1057,7 +1058,7 @@ fn http2Gets(h1_ns: u64) !void {
     var decoder = hpack.Decoder.init(gpa);
     defer decoder.deinit();
     var fields: std.ArrayList(hpack.Field) = .empty;
-    defer fields.deinit(gpa);
+    // Not freed here: the decoder appends to it with the scratch arena, which owns it.
     var scratch = std.heap.ArenaAllocator.init(gpa);
     defer scratch.deinit();
     var decode_best: u64 = std.math.maxInt(u64);
@@ -1112,6 +1113,65 @@ fn http2Gets(h1_ns: u64) !void {
         per_get -| (decode_best + app_best) / get_requests,
         pct(per_get -| (decode_best + app_best) / get_requests, per_get),
     });
+}
+
+/// A POST of a small JSON body over HTTP/2, the request that has to wait for
+/// its body once the handler starts (ADR 260). With no Engine it is run
+/// inline once its stream has ended, so this is the framing and the pipe's
+/// share, and the wait itself, which needs a scheduler to park on, is timed
+/// by a server and not here.
+fn http2JsonPosts() !void {
+    const gpa = std.heap.smp_allocator;
+    var posts_app = App.init(gpa);
+    defer posts_app.deinit();
+    try posts_app.post("/plain", sumPlain);
+    try posts_app.resolveChains();
+
+    var block: std.Io.Writer.Allocating = .init(gpa);
+    defer block.deinit();
+    const b = &block.writer;
+    try b.writeAll("\x83\x86"); // POST, http
+    try hpack.writeLiteral(b, ":path", "/plain");
+    try hpack.writeLiteral(b, ":authority", "example.dev");
+    try hpack.writeLiteral(b, "content-type", "application/json");
+    try hpack.writeLiteral(b, "content-length", "13");
+
+    var wire: std.Io.Writer.Allocating = .init(gpa);
+    defer wire.deinit();
+    const w = &wire.writer;
+    try w.writeAll(h2.preface);
+    try h2.writeSettings(w, &.{.{ .initial_window_size, 1 << 30 }});
+    try h2.writeSettingsAck(w);
+    try h2.writeWindowUpdate(w, 0, (1 << 31) - 1 - h2.default_window);
+    var id: u31 = 1;
+    for (0..get_requests) |i| {
+        const update: []const u8 = if (i == 0) &.{0x20} else &.{};
+        try h2.writeHeader(w, update.len + block.written().len, .headers, h2.Flags.end_headers, id);
+        try w.writeAll(update);
+        try w.writeAll(block.written());
+        try h2.writeHeader(w, 13, .data, h2.Flags.end_stream, id);
+        try w.writeAll("{\"a\":1,\"b\":2}");
+        id += 2;
+    }
+
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 2048 * get_requests);
+    defer out.deinit();
+    var whole: u64 = std.math.maxInt(u64);
+    for (0..grpc_reps + 3) |rep| {
+        out.clearRetainingCapacity();
+        var in: std.Io.Reader = .fixed(wire.written());
+        const started = clock();
+        h2conn.serveConnection(posts_app.grpcHost(), &in, &out.writer, .off, .off, .{});
+        const took = clock() - started;
+        if (rep >= 3 and took < whole) whole = took;
+    }
+    sink += out.written().len;
+    std.debug.print(
+        \\
+        \\A POST of {{"a":1,"b":2}} as JSON over HTTP/2, {d}ns each on one connection's
+        \\fiber, answered inline once its stream has ended.
+        \\
+    , .{whole / get_requests});
 }
 
 fn pct(part: u64, whole: u64) f64 {

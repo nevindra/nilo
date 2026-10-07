@@ -21,7 +21,8 @@
 //! keeps what `Ctx` hands it in the request arena for that fiber to frame. A
 //! stream and a file are not collected, and `Ctx` refuses them by name before
 //! this arm is asked (ADR 259): they need a pipe from the request's fiber to
-//! the connection's with the client's window in between, which is stage 6.
+//! the connection's with the client's window in between (ADR 260, stage 6.2).
+//! The pipe the other way, the body arriving, is `inbound.zig`.
 //!
 //! A WebSocket and an event stream handed to the connection loop stay HTTP/1.1
 //! only: both take the connection's reader and writer for their whole life,
@@ -36,6 +37,7 @@
 
 const std = @import("std");
 const http1 = @import("http1.zig");
+const inbound = @import("inbound.zig");
 pub const http2_built = @import("nilo_build").http2;
 
 pub const Header = http1.Header;
@@ -72,8 +74,14 @@ pub const Call = struct {
     /// `:path`.
     target: []const u8,
     head: []const u8,
-    /// The body, whole, with whatever envelope carried it taken off.
+    /// The body, whole, with whatever envelope carried it taken off. Empty
+    /// where `inbox` is set.
     body: []const u8,
+    /// The body still arriving: the stream's `DATA` after its headers, read
+    /// through the pipe the connection fills (ADR 260). Null for a request
+    /// that sent none and for a gRPC call, whose message the connection has
+    /// read already.
+    inbox: ?*inbound.Inbox = null,
 };
 
 /// The framing a request's answers go to, from where `serveRequest` was told
@@ -253,13 +261,25 @@ pub const Framing = union(enum) {
     }
 
     /// `100 Continue`, for a client that asked to be told before it sends its
-    /// body (RFC 9110 §10.1.1). Nothing on HTTP/2, whose body has arrived by
-    /// the time a call is collected.
+    /// body (RFC 9110 §10.1.1). On HTTP/2 the connection is asked, and says it
+    /// if the body has not started to arrive.
     pub fn interimContinue(self: *Framing) !void {
         switch (self.*) {
             .http1 => |*h| return h.interimContinue(),
-            .http2 => if (comptime !http2_built) unreachable else return,
+            // Asked of the connection, whose fiber writes it: the one that
+            // touches the socket (ADR 260).
+            .http2 => |collected| if (comptime !http2_built) unreachable else {
+                if (collected.inbound) |pipe| pipe.askContinue();
+            },
         }
+    }
+
+    /// The pipe the request's body arrives through, on HTTP/2.
+    pub fn inbox(self: *const Framing) ?*inbound.Inbox {
+        return switch (self.*) {
+            .http1 => null,
+            .http2 => |collected| if (comptime !http2_built) unreachable else collected.inbound,
+        };
     }
 
     /// The connection itself, for a WebSocket or an event stream that takes
@@ -453,6 +473,9 @@ pub const Collected = struct {
     /// empty when no body was handed over.
     room: []u8 = &.{},
     trailers: []const Header = &.{},
+    /// The pipe the request's body arrives through, when it has one: how the
+    /// framing reaches the connection to ask for a `100 Continue`.
+    inbound: ?*inbound.Inbox = null,
     /// The error the answer is a failure for, when it is one (`Framing.failed`).
     failure: ?anyerror = null,
     /// The sentence that failure carried, nilo's own words.

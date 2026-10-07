@@ -93,6 +93,15 @@
 //! - `spawn`/`spawnLocal`: start a fiber the running server owns, dealt
 //!   to the next executor or kept on the caller's. An Engine with one
 //!   thread has one answer to both (ADR 028, ADR 220).
+//! - `Monitor`/`Signal`: a call waiting on its connection, and the connection
+//!   telling it so. `Monitor` is the Engine's `Mutex`, taken where a refusal
+//!   has nowhere to go, and `Signal` is its `Condition` parked on that
+//!   mutex, with or without a limit on how long. They are what the inbound
+//!   pipe of an HTTP/2 request waits on (ADR 260), and they have to be
+//!   thread-safe, because `spawnLocal` keeps a call on its connection's
+//!   executor only where the Engine can: where tasks work steal it deals the
+//!   call to another thread. An Engine that has a parking lock and a wait
+//!   queue on it (the same two `Gate` is built on) has both already.
 //! - `blocking`/`sleep` — the general form of that same problem. A handler
 //!   that calls anything blocking stops every other request sharing its
 //!   thread, and the Engine is the only layer that knows how to wait
@@ -1275,6 +1284,61 @@ pub const Gate = struct {
                 return err;
             };
         }
+    }
+};
+
+/// The lock a call and its connection share while one of them is waiting on
+/// the other (ADR 260): the Engine's `Mutex`, taken in a section that is short
+/// and cannot itself wait, so taking it is never refused.
+///
+/// A wrapper for the reason `Mutex` is, and apart from `Mutex` because what is
+/// held under it is the pair's: the section is a handful of loads and stores,
+/// no allocation of a request's and no socket, and it is entered on every
+/// `DATA` frame and every read of a body, which `Mutex.lock`'s `Canceled` has
+/// no place in.
+pub const Monitor = struct {
+    _lock: engine.Mutex = .init,
+
+    pub const init: Monitor = .{};
+
+    pub fn enter(self: *Monitor) void {
+        // Free almost always, and then nothing was waited for to report.
+        if (self._lock.tryLock()) return;
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        self._lock.lockUncancelable();
+    }
+
+    pub fn leave(self: *Monitor) void {
+        self._lock.unlock();
+    }
+};
+
+/// A place to park on a `Monitor` until somebody says there is something new
+/// (ADR 260). One fiber waits on one of these, and `wake` is the other side
+/// saying so, from any thread.
+///
+/// Like the Engine's condition it wraps, a wait can end with nothing changed:
+/// the caller checks what it waited for in a loop, with the monitor held.
+pub const Signal = struct {
+    _cond: engine.Condition = .init,
+
+    pub const init: Signal = .{};
+
+    /// Park, releasing `monitor` for as long as it takes and holding it again
+    /// on every return, an error included. `error.TimedOut` when `limit_ms`
+    /// went by with no `wake`; `error.Canceled` when the fiber is being shut
+    /// down. No limit when `limit_ms` is null.
+    pub fn wait(self: *Signal, monitor: *Monitor, limit_ms: ?u64) error{ Canceled, TimedOut }!void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        if (limit_ms) |ms| return engine.waitWithin(&self._cond, &monitor._lock, @max(ms, 1));
+        return self._cond.wait(&monitor._lock);
+    }
+
+    /// Wake the one that is parked, if any. Held under the monitor or not.
+    pub fn wake(self: *Signal) void {
+        self._cond.signal();
     }
 };
 

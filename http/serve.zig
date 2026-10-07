@@ -713,7 +713,15 @@ inline fn parseArrived(arrival: framing_mod.Arrival, head: []const u8, r: *http1
         .call => |call| {
             try http1.applyTarget(call.method, call.target, r);
             try http1.parseFields(head, r);
-            if (r.chunked or r.content_length != call.body.len) return error.BadHeader;
+            // Framed by the transport, so a field that frames it again is a
+            // framing that broke its side of `Call`. A body still arriving is
+            // read to where its stream ends, and the connection holds it to
+            // the length the client said (ADR 260); one that has arrived is
+            // the length of what it is.
+            if (r.chunked) return error.BadHeader;
+            if (call.inbox != null) {
+                if (comptime framing_mod.http2_built) r.ends_with_stream = true;
+            } else if (r.content_length != call.body.len) return error.BadHeader;
         },
     }
 }
@@ -920,6 +928,10 @@ fn rebase(from: []const u8, to: []const u8, slice: []const u8) []const u8 {
 /// an unknown byte, so the connection has to go; the response, though, is
 /// still owed and still sent.
 fn drain(c: *Ctx, in: *std.Io.Reader, r: *const http1.Request) bool {
+    // A body the transport frames is not on a connection this request shares
+    // with the next: the HTTP/2 connection discards what the handler left and
+    // resets the stream if the client is still sending (ADR 260).
+    if (comptime framing_mod.http2_built) if (r.ends_with_stream) return true;
     if (!c.keepAlive() or c._stream_desynced) return false;
     if (c._body != null) return true;
     // The client said `Expect: 100-continue` and nothing here ever answered

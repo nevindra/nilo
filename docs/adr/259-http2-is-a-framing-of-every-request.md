@@ -25,7 +25,7 @@ The real clients set the shape. **A browser speaks HTTP/2 only over TLS, chosen 
 
 **`Ctx.connection()` leaves the public surface.** It returned an HTTP/1.1 `Connection` line, which means nothing on HTTP/2; `keepAlive()` says the same thing in words that do. Removed at stage 5.3, with a `CHANGELOG.md` entry.
 
-**What a request on HTTP/2 cannot do until stage 6** is said by name where it is asked for, never answered wrong: a streamed answer, a file, `bodyStream`, an event stream handed to the connection and a WebSocket. No browser reaches HTTP/2 before stage 7, and stage 7 waits for stage 6; a WebSocket stays HTTP/1.1 after it too, below.
+**What a request on HTTP/2 cannot do until stage 6** is said by name where it is asked for, never answered wrong: a streamed answer, a file, an event stream handed to the connection and a WebSocket (`bodyStream` stopped being one of them in stage 6.1). No browser reaches HTTP/2 before stage 7, and stage 7 waits for stage 6; a WebSocket stays HTTP/1.1 after it too, below.
 
 ## What it costs
 

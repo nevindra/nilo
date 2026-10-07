@@ -473,6 +473,12 @@ Nothing is open at this tier.
 
 ---
 
+**The pipe of a request on HTTP/2 costs 30 to 85 ns a request in process and 70 to 139 bytes an idle connection, which is over the stage's bar of one wait.** A unary gRPC call is 912 to 918 ns against 850 to 860 collected, a 13 byte JSON `POST` 897 to 906 against 811 to 827, and an HTTP/2 connection after one `GET` 9,560 against 9,429 bytes ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-when-its-body-is-a-pipe)). Through `h2load` with a real wait on every request the spreads overlap, so the bar is missed in process and not seen through a server. What it is made of is not isolated: a `Stream` that grew from 392 to 616 bytes with its `Inbox` and is rebuilt for each recycle, a monitor taken at every step, and a request that starts twice where it is deferred until its stream has ended. An `Inbox` per connection rather than per stream, a start that does not happen twice, and a pipe that takes no lock where nothing else touches it are the three to try.
+
+**What would settle it:** the three changes measured one at a time on the message rows of `zig build profile -Dhttp2` and on `mem.py --h2`, each against `ab11878`'s figures on the record.
+
+**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+
 ## P3: no evidence yet
 
 ### `nilo_core`
@@ -646,6 +652,10 @@ Nothing is open at this tier.
 **Needs:** `std.Io` handing a Service a fiber identity, or a design that gets one without it. Last checked at 0.16.0.
 
 ### `nilo_http`
+
+**A HEADERS frame on an HTTP/2 stream the connection has already forgotten ends the connection.** A stream at or below the highest id seen and no longer in the table is answered with a connection `PROTOCOL_ERROR` (`h2conn.zig`, `onHeaders`). RFC 9113 §5.1 allows that for a stream closed long ago, but a client's trailers in flight when the server answered early and forgot the stream would take every other stream on the connection down with it. With the dynamic table at 0 the block costs nothing to decode and ignore, which a stream reset but still running already does (stage 6.1).
+
+**What would settle it:** a client seen sending trailers after an early answer, or h2spec or a browser in stage 7 tripping it.
 
 **Client certificates on a TLS listener.** The library has `client_auth` with a CA bundle and `.require`/`.request`; nothing in `Options.tls` names it, and nothing on `Ctx` would say who the client was. The second half is the design question: a verified subject is request data, so it wants to be a typed argument the way `Session(T)` is, not a header.
 

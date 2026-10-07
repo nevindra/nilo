@@ -173,6 +173,9 @@ pub const Request = struct {
     /// Regular fields, in the order written, after the four pseudo-headers.
     fields: []const hpack.Field = &.{},
     body: []const u8 = "",
+    /// HEADERS that do not end the stream although there is no body to send
+    /// after them yet: a request whose client is still to send it.
+    open: bool = false,
     /// The body split across DATA frames of at most this many bytes.
     frame: usize = 16_000,
     /// The client's SETTINGS_INITIAL_WINDOW_SIZE, when it is not the default,
@@ -208,7 +211,7 @@ pub fn requestOn(c: *TestClient, stream: u31, req: Request) !void {
     try hpack.writeLiteral(&block.writer, ":path", req.path);
     try hpack.writeLiteral(&block.writer, ":authority", "localhost");
     for (req.fields) |f| try hpack.writeLiteral(&block.writer, f.name, f.value);
-    const bodiless = req.body.len == 0;
+    const bodiless = req.body.len == 0 and !req.open;
     try h2.writeHeaderBlock(c.w(), stream, block.written(), bodiless, h2.default_max_frame);
     var rest = req.body;
     while (rest.len > 0) {

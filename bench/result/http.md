@@ -3794,3 +3794,58 @@ The 12.7 KB is the §8 checks, the `HTTP` answer and its head, and the stage-6 r
 **Outside the suite.** `curl --http2-prior-knowledge` against `example-hello` and `example-rest -Dhttp2`: a GET, a POST with a JSON body, a `HEAD` (no `DATA`), a 404 and a route's own headers all answer as on HTTP/1.1. h2spec 2.6.0 over the same port fails 67 of 146 as shipped. Nearly all of them are one thing: the suite sends the first header block without a dynamic table size update after our `SETTINGS_HEADER_TABLE_SIZE` of 0, which RFC 7541 §4.2 requires of the client, so the connection answers a compression error where the suite expected the stream to work. On a scratch copy with the table at 4096 the suite's own blocks decode, and what it then showed that was a real violation is fixed here: a stream depending on itself (§5.3.1), a `WINDOW_UPDATE` or `DATA` on a stream that is not open (§5.1), a window past 2^31-1 (`max_window` was one bit short), and a `GOAWAY` that dropped the frames already read. Run again on the tree as committed, with only the table widened to 4096 in a scratch copy (`example-hello`, `ReleaseSafe`): **142 of 146 pass**. The four left are choices, not defects: §3.5/2 sends a preface that differs from HTTP/2's, which one port serves as HTTP/1.1 by design (ADR 259) rather than answering `GOAWAY`; §5.1/8 and §5.1/11 send `DATA` on a stream the client reset or ended, which the connection counts against its window and ignores, because a reset for every such frame is a client making the server write uncounted (ADR 220); §5.4.1/1 sees the connection closed by a reset rather than a FIN after the `GOAWAY`, because the client's unread bytes are still in the socket when it closes. As shipped, with the table at 0, h2spec cannot test the rest: its encoder never sends the size update, which curl does (its requests above decode); a browser is put to it in stage 7.
 
 **The decision it moved:** none. `Ctx.connection()` goes (ADR 253's open question), a `Collected` answer carries its length and a pre-written field block so HTTP is framed without a second copy, and the frame fuzzer holds the answer's block against the same properties. Whether a request on HTTP/2 can be made cheaper than 963 ns is the optimisation session's: reusing a finished call's fiber for the next stream is the first thing it tries ([`todo.md`](../../docs/todo.md)).
+
+## What a request on HTTP/2 costs when its body is a pipe
+
+**Question.** Stage 6.1 of [framing](../../docs/design/framing.md) runs a request on HTTP/2 when its header block is whole and reads what the client sends after it through a pipe the connection fills, the gRPC envelope and `c.body()` included, where the connection used to collect a call whole before it ran ([ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md)). The bars it set: a build without the flag byte-identical, the idle figures unchanged, the HTTP/1.1 path unchanged, the message rows of `zig build profile` within one wait of collected, `c.body()` on a body that arrived whole allocating nothing, and an upload faster than its handler holding the connection to its budget.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `ab11878` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved. Server on cores 0 to 3, the client on 4 and 5 (Docker, host network, `arena-wrk` and `arena-h2load`).
+
+**Size**, stripped, `ReleaseFast`:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 (`cmp` identical) |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 (`cmp` identical) |
+| `example-hello` | `-Dhttp2` | 1,116,152 | 1,130,800 | +14,648 |
+| `example-rest` | `-Dhttp2` | 1,305,528 | 1,321,376 | +15,848 |
+
+The 14.6 KB is the pipe, the wait, the budget moved onto the call's fiber and the `bodyStream` path on HTTP/2. It is paid only by a build that asked for HTTP/2. **The default build was not identical at first**: `Request.ends_with_stream` as a `bool` and a sixth and seventh variant on `Body`'s `Progress.State` shrank `serve.serveRequest` by 217 bytes and moved a jump table, with no HTTP/2 in the program. The field is `void` and the transport's body a flag beside the state, both absent without the flag, and the two programs are the same bytes.
+
+**Idle connection**, `mem.py` against `nilo-hello -Dhttp2` (HTTP/1.1 after one `GET /health`, HTTP/2 after one `GET /users/42`, as the entries above), three interleaved rounds, bytes a connection:
+
+| connection | at | before | after |
+|---|---|---|---|
+| HTTP/1.1 | 1,000 | 5,313 | 5,313 |
+| HTTP/1.1 | 10,000 | 5,197 | 5,197 |
+| HTTP/2, `--h2` | 1,000 | 9,429 | 9,560 to 9,568 |
+| HTTP/2, `--h2` | 10,000 | 9,352 to 9,353 | 9,423 to 9,424 |
+| HTTP/2, `--h2 --get` | 1,000 | 10,375 | 10,199 |
+| HTTP/2, `--h2 --get` | 10,000 | 9,853 to 9,955 | 9,641 to 9,657 |
+
+**The HTTP/1.1 figure is unchanged and the HTTP/2 one is not**: +131 to +139 bytes at 1,000 and +70 to +72 at 10,000 after one `GET`, 176 bytes fewer at 1,000 and 196 to 314 fewer at 10,000 with the stream left open. The first is real and is what the pipe weighs: `Shared` went from 64 to 80 bytes, `Conn` from 408 to 432, and a `Stream` from 392 to 608 with its 208-byte `Inbox`, the spare one a connection keeps for the next call. The second the pipe made smaller by taking the message out of a state of the connection's. An HTTP/2 connection is still 1.8 times an HTTP/1.1 one.
+
+**Routed `GET` over HTTP/1.1**, `-Dhttp2` build, wrk, 64 connections, 8 s, five interleaved rounds each: before 864,194; 878,745; 893,978; 899,211; 895,174, after 890,982; 895,442; 897,818; 895,040; 902,401 requests a second (p99 103 to 1,220 µs before, 107 to 555 after; the high ones are the first round, a cold server). Inside the spread, so unchanged.
+
+**In process**, `zig build profile -Dhttp2`, one core, six interleaved runs, ns a call, answered inline because no Engine runs there, so what a wait costs is not in them:
+
+| row | before | after | difference |
+|---|---|---|---|
+| a routed `GET` over HTTP/1.1 | 421 to 426 | 417 to 421 | none |
+| a unary gRPC call | 850 to 860 | 912 to 918 | +62 (+7%) |
+| the same `GET` over HTTP/2 | 960 to 977 | 992 to 1,008 | +30 (+3%) |
+| a JSON `POST` over HTTP/2, 13 byte body (new row) | 811 to 827 | 897 to 906 | +85 (+10%) |
+
+**The pipe costs 30 to 85 ns a request in process, and this is the number that went the wrong way**: the message rows are 7 and 10% slower, where ADR 260 asked for within one wait. A wait is not in the rows, so what they pay is the pipe's bookkeeping with nothing to wait for: a buffer kept, a monitor taken at every step (a try-lock first, which took about 15 ns back), the grant of the window, a request that starts twice where it is deferred until its stream has ended. Whether it is within one wait is the next row's to say.
+
+**Through a real server**, `h2load -n 2,000,000 -c 64 -m 10 -t 2 -d <1 KiB>` (nghttp2 1.59.0) on `nilo-bench-body-server -Dhttp2`, `POST /echo` (`c.body()`), five interleaved runs each: before 1,781,458; 1,898,028; 1,906,623; 1,908,785; 1,914,009 requests a second, after 1,728,244; 1,761,981; 1,921,359; 1,948,752; 1,948,868, every one a 2xx. **The two spreads overlap**: a handler that starts at the HEADERS and parks for the DATA, a real wait through the Engine on every request, is not resolved from the collected one by this load. A request is about 2.1 µs of server CPU at this rate, and the spread of either is 4 to 8% of it, so a wait that costs more than about 100 ns would have shown. `POST /stream` (`c.bodyStream()`, which HTTP/2 refused before): 1,769,168; 1,881,579; 1,862,499, every one a 2xx.
+
+**An upload faster than its handler**, `http/h2pipe_live.zig`, a client that obeys the server's WINDOW_UPDATEs against a handler that does not read for 400 ms and then reads 4 KiB at a time, a counting allocator under the server: the client could send the window, 65,535 bytes, and then had to stop; the stream was given no credit while the handler read nothing; **68,425 bytes** were held above idle while it stalled, and **98,890** at the peak of the whole 8 MiB, which then completed with every byte counted by the handler (Debug build, `NILO_UPLOAD_REPORT=1`). The bound is the window and one buffer growing into it, and it does not depend on how long the upload is: the test asserts a peak of three windows. Before the buffer was capped at the window by the doubling it held 130,890 bytes while stalled, two windows.
+
+**Allocations.** `test "a body that arrived whole before the handler read it costs the request no allocation of its own"` in `http/h2conn.zig`, counting at the allocator under the arena: 0 a request from the second on a connection for a 3,000 byte body, and `test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1…"` unchanged at 0. `Inbox.whole` returns the bytes where they lie, by a test that compares the pointer.
+
+**Correctness.** h2spec 2.6.0 against `example-hello -Dhttp2` on a scratch copy with the table at 4096: 142 of 146, the four it failed before (3.5 invalid preface, 5.1 closed-stream DATA twice, 7 GOAWAY with an unknown code), no new one. `zig build fuzz -- --frames` with calls on threads, 200,000 connections under three seeds and `--iterations 200000` for the parser, every property held, in `ReleaseSafe`.
+
+**A bug in the tool, found by this run.** `zig build profile -Dhttp2` crashed with a segmentation fault when pinned to one core, in the tree before this change as well: its two HPACK rows decoded into an `ArrayList` with the scratch arena and freed it with the general-purpose allocator, which `SmpAllocator` turns into a corrupted free list once it has one arena and anything allocates after. Fixed in `profile.zig`; the figures above are from the fixed tool, and the earlier entries' were not affected, because nothing allocated after those rows.
+
+**The decision it moved:** none. The pipe's cost per request in process is on the record for the session that tries to make it cheaper: a connection that keeps its `Inbox` out of the stream (one per connection, not per stream) and a start that does not happen twice where no Engine runs.
