@@ -6417,6 +6417,23 @@ pub fn build(b: *std.Build) void {
         b.step("bench-tls-server", "The benchmark server over TLS, for what the encryption costs a request and an idle connection")
             .dependOn(&b.addInstallArtifact(bench_tls_server, .{}).step);
 
+        // A page with a dozen subresources over TLS, for what a browser
+        // gets from `h2` against `http/1.1`; `bench/page_load.mjs` drives it
+        // (stage 7 of framing, ADR 259).
+        const bench_page_server_module = b.createModule(.{
+            .root_source_file = b.path("bench/page_server.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .strip = stripMeasured(strip, .ReleaseFast),
+            .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+        });
+        const bench_page_server = b.addExecutable(.{
+            .name = "nilo-bench-page-server",
+            .root_module = bench_page_server_module,
+        });
+        b.step("bench-page-server", "A page with a dozen subresources over TLS, for what a browser gets from h2 against http/1.1")
+            .dependOn(&b.addInstallArtifact(bench_page_server, .{}).step);
+
         // Both directions loaded at once, which is the one thing the server
         // above does not do: a 10 KB body in and the same 10 KB out, with
         // TLS a switch rather than a second binary so the plain run is the

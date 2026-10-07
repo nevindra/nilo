@@ -91,12 +91,6 @@ Nothing is open at this tier.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
-**Does a WebSocket over TLS park with a whole frame already decrypted-able in the record layer's buffer?** `websocket.zig`'s `park` checks only the cleartext buffer before `Wake.wait`, which polls the socket; tls.zig can pull two records in one socket read and decrypts one a call, so the second frame could wait on a socket the kernel has already emptied, until the client sends again or the idle ping fires. Read from the code, not run, and `tls_live.zig` has no WebSocket test.
-
-**What would settle it:** a live test sending two frames in one TLS write and timing the second; if it stalls, `Wake.wait` returns `.readable` while the raw buffer holds a whole record.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
 **An idle connection grew 512 bytes between v0.2.0 and v0.3.0, and no ADR states it.** 4,674 to 5,186 on the benchmark server, unchanged since, while ADR 017 and the principles page still quote 4,669 ([`releases.md`](../bench/result/releases.md)). A hard axis moved, so either a feature owes its line in ADR 017 or the bytes are a leak of frame depth ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)).
 
 **What would settle it:** `bench/release.py --only http` bisecting the commits between the two tags, then the park depth on either side of the step. An afternoon.
@@ -112,8 +106,6 @@ Nothing is open at this tier.
 **The worst gRPC call is 1.4 s at 256 connections and 3.8 s at 1,024, where tonic's is about 1.1 s on the same four cores** ([`http.md`](../bench/result/http.md#a-grpc-listener-built)). h2load gives mean and maximum and no percentiles, so where the tail comes from is not known.
 
 **What would settle it:** `ghz` or another client with a latency histogram against `spike/grpc/server`, before and after a spawn homed on the calling executor. An afternoon.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 ---
 
@@ -347,23 +339,31 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
+**A held 1 MiB file is served 35 to 40% slower over HTTP/2 than over HTTP/1.1 on a TLS listener.** 1.65 to 1.76 GB/s against 2.70 to 2.71 on one stream with AES instructions in the target, 553 to 589 µs a request against 359 ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)). Not traced: a `DATA` frame is a 9-byte head and its payload, and each may be sealed as a record of its own where HTTP/1.1's body is one write; the fiber a stream spawns is also in it.
+
+**What would settle it:** the records a frame becomes counted with `strace` or a hook in the writer, and the same file at a frame size that fills a record.
+
+**A spilled 64 MiB file is served 2.6 times slower over HTTP/1.1 than over HTTP/2 on a TLS listener.** 593 to 603 MB/s against 1.57 to 1.58 GB/s, the same file opened per request in the same build; with a held file the order is the other way. Something in the HTTP/1.1 body path of a spilled file over a record layer is small: likely the buffer a `filebody` reads into, which here is the connection's write buffer ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)).
+
+**What would settle it:** the same file over a plain listener and over TLS with `write_buffer` at 8 KiB and at 64 KiB.
+
+**A WebSocket over TLS has no test of its own for a second frame that arrived with the first.** `Wake.wait` answers `.readable` while the record layer holds ciphertext or decrypted bytes ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)), which a WebSocket's `park` waits in too, so the stall the HTTP/2 connection over TLS showed (one in a thousand) is closed for it by the same line. The test that holds it is HTTP/2's, `grpc_tls_live.zig`; `tls_live.zig` has no WebSocket test, so a change to how `park` waits could lose it unseen.
+
+**What would settle it:** a live test in `tls_live.zig` sending two WebSocket frames in one TLS write and timing the second.
+
+**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
 **`Ctx.header` reads the head again for every name it is asked, about 40 ns a time inside a request.** It splits the head into lines and trims each one until a name matches: 27 ns in a loop of its own for the third line of a short head, and about 40 inside a request, where a message read as JSON pays it to learn its spelling and is 52 to 58 ns slower than the same route as a plain struct ([`bench/result/http.md`](../bench/result/http.md#a-body-read-as-what-its-type-says)). A form pays the same read for its `Content-Type`, and every `c.header` call in a handler pays one. Classing the header in the head parser closed the message's gap to 1 to 4% and was refused for putting 1.6 KB on every program's request path ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)); the read itself is the thing to make cheaper.
 
 **What would settle it:** a lookup measured against `Ctx.header` on the message row and a form's in `zig build profile`, held to no size on the request path, and kept only where it is faster on both.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 **A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.** A message read or written as JSON is nilo's JSON ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), so a `[]const u8` declared `.bytes` in its `wire` table goes out as the bytes themselves and is read back the same way. A Connect client speaking JSON sends and expects base64 there, and the two would disagree without either refusing. Field names and 64-bit integers do not have the problem: a Connect client reads both of nilo's spellings.
 
 **What would settle it:** a decision between writing a `.bytes` field as base64 in a message's JSON, with the document saying so, and refusing JSON for a message that has one; either held by a test with a Connect client's bytes.
 
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **Whether a gRPC listener should keep an HPACK table, to stop decoding the same strings every call.** With the table advertised at 0 every field arrives as a literal and its Huffman is decoded afresh, 123 to 125 ns of a 767 to 773 ns call in process, 16% of it, after the decoder went to two symbols a lookup ([`bench/result/http.md`](../bench/result/http.md#two-huffman-symbols-a-lookup)). What is left only a table of the client's own takes away, and that is idle memory, the hard axis: at the default 4,096 bytes a decoder keeps what the client inserts, up to the whole table per connection for a Collector that indexes a fresh `grpc-timeout` every call ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
 
 **What would settle it:** the resident bytes per idle connection at a table of 4,096 and of a few hundred, measured against the Collector and a library called by hand, beside what each saves of a call; a table ships only if ADR 017's idle figure for a gRPC connection is restated with it.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 **Several comments and pages describe code that is no longer there.** `bulkhead.zig`'s header lists a six-parameter `serve` (it has eight) under `src/engine/` (it is `http/engine/`), and leaves out `Peer`'s fields, `spawnLocal`, `Wake.rawIdle` and `Binding`, which a second Engine has to provide; `proxies.zig` says a `Forwarded` header is walked, and nothing reads it; the `accept` comment in `zio.zig` says a failure raises the stop flag; `middleware.zig`'s header and [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md) use `std.time.Timer`, which Zig 0.16 removed; a link in `ctx.zig` says ADR 155 and points at 156.
 
@@ -406,8 +406,6 @@ Nothing is open at this tier.
 **A gRPC listener has no health service, and the guide does not say how to write one.** Kubernetes' gRPC probe and most load balancers call `grpc.health.v1.Health/Check`, which is an ordinary route under [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) and nothing documents; server reflection, which `grpcurl` wants, is not on record either way.
 
 **Needs:** a guide section showing `grpc.health.v1.Health/Check` as an ordinary route, and a decision on server reflection.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 **A number inside a map or a `std.json.Value` field is still read by `std.json`'s grammar.** `"1_0"` there is 10, where [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md) refuses it everywhere else in a body, because a type with its own `jsonParse` is handed to `std.json.innerParse` unchanged. The write half is closed: a float that is not finite is `null` on every path out ([ADR 096](./adr/096-a-byte-that-is-not-text-is-not-a-string.md)).
 
@@ -476,8 +474,6 @@ Nothing is open at this tier.
 **The pipe of a request on HTTP/2 costs 30 to 85 ns a request in process and 70 to 139 bytes an idle connection, which is over the stage's bar of one wait.** A unary gRPC call is 912 to 918 ns against 850 to 860 collected, a 13 byte JSON `POST` 897 to 906 against 811 to 827, and an HTTP/2 connection after one `GET` 9,560 against 9,429 bytes ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-when-its-body-is-a-pipe)). Through `h2load` with a real wait on every request the spreads overlap, so the bar is missed in process and not seen through a server. What it is made of is not isolated: a `Stream` that grew from 392 to 616 bytes with its `Inbox` and is rebuilt for each recycle, a monitor taken at every step, and a request that starts twice where it is deferred until its stream has ended. An `Inbox` per connection rather than per stream, a start that does not happen twice, and a pipe that takes no lock where nothing else touches it are the three to try.
 
 **What would settle it:** the three changes measured one at a time on the message rows of `zig build profile -Dhttp2` and on `mem.py --h2`, each against `ab11878`'s figures on the record.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 ## P3: no evidence yet
 
@@ -655,7 +651,7 @@ Nothing is open at this tier.
 
 **A HEADERS frame on an HTTP/2 stream the connection has already forgotten ends the connection.** A stream at or below the highest id seen and no longer in the table is answered with a connection `PROTOCOL_ERROR` (`h2conn.zig`, `onHeaders`). RFC 9113 §5.1 allows that for a stream closed long ago, but a client's trailers in flight when the server answered early and forgot the stream would take every other stream on the connection down with it. With the dynamic table at 0 the block costs nothing to decode and ignore, which a stream reset but still running already does (stage 6.1).
 
-**What would settle it:** a client seen sending trailers after an early answer, or h2spec or a browser in stage 7 tripping it.
+**What would settle it:** a client seen sending trailers after an early answer. Neither h2spec over TLS (142 of 146, the four constant failures) nor Chromium loading a page of nineteen subresources tripped it.
 
 **Client certificates on a TLS listener.** The library has `client_auth` with a CA bundle and `.require`/`.request`; nothing in `Options.tls` names it, and nothing on `Ctx` would say who the client was. The second half is the design question: a verified subject is request data, so it wants to be a typed argument the way `Session(T)` is, not a header.
 
@@ -739,37 +735,25 @@ Nothing is open at this tier.
 
 **What would settle it:** the spawn's share of a `GET` over HTTP/2 measured through the Engine (not inline, as `zig build profile` does), and the same row with a fiber kept for the next stream.
 
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **A file on HTTP/2 over plain TCP has no `sendfile`.** Its pieces are read into frames ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)); a frame header written and its payload sent from the file would take the copy out for h2c, which is a proxy's upstream and not where a browser meets a static-heavy site.
 
 **What would settle it:** a deployment that serves files to a proxy over h2c, and the cost on record: a 64 MiB file over h2c is 3.2 GB/s against HTTP/1.1 `sendfile`'s 6.7 to 7.3 on loopback, one stream, with the file read 64 KiB at a time ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-when-its-answer-is-a-pipe)).
 
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **Priorities on HTTP/2 are ignored.** Answers ready at once are written in stream order; a browser says which matter first with RFC 9218's `priority` field, and nginx and h2o follow it, so a page whose images are ready before its CSS paints later than it would.
 
-**What would settle it:** a page load in Chromium over HTTP/2 after stage 7 with and without RFC 9218's urgency honoured, its largest contentful paint on record.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
+**What would settle it:** the page load in Chromium over HTTP/2 that stage 7 put on record ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)) run again with RFC 9218's urgency honoured and without, its largest contentful paint on record; on loopback the page's nineteen requests are inside the spread of HTTP/1.1's, so it needs a page whose images are ready before its CSS.
 
 **A Connect client's `Connect-Timeout-Ms` is not read.** A gRPC call's `grpc-timeout` becomes the request's deadline ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)); a Connect call names its own the same way in milliseconds, and nilo answers it with the route's deadline or none, so a client that gave up is still worked for. Its failures already go out in Connect's shape ([ADR 257](./adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)), `deadline_exceeded` included once a deadline fires.
 
 **What would settle it:** a Connect client that sets a timeout against a message route, or a decision to read the header where a message route reads its `Content-Type`, with the cost on a route that has none measured.
 
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **A Connect GET is a 405.** Connect lets a side-effect-free unary call be a GET with the message in the query (`?message=…&encoding=json`, base64 for protobuf), so a browser or CDN can cache it; a message route registered with `app.post` answers it as any route answers a verb it was not registered for. A method registered with `app.get` reads a message from the query's fields, not from `message=`.
 
 **What would settle it:** a caller whose Connect client is set to use GET, or a design for reading `message=` that does not put a branch on every GET.
 
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
-
 **A handed-over event stream on HTTP/2 weighs 6.2 KB or 12 KB at 10,000 streams, depending on how fast they were opened.** [`http.md`](../bench/result/http.md#what-an-event-stream-handed-to-the-http2-connection-costs) measured the same server, streams and client twice: opened 1,000 at a time, 6,190 to 6,253 bytes a stream; in one step from 1,000 to 10,000, 11,976 to 12,153. A parked stream and an HTTP/1.1 one do not move with it. What a stream holds that a test can count is about 3.4 KB (the `Stream` 680 bytes, its arena 1,428, the lists, the pipe and the state), and the arena and the `Stream` are 2.1 KB of it that the hand-over could give back.
 
 **What would settle it:** the same 10,000 with the handler fibers on the connection's thread, and the allocator's own count at both readings.
-
-**Direction:** [A request is one thing, whatever framing carried it](./roadmap.md#a-request-is-one-thing-whatever-framing-carried-it)
 
 ---
 

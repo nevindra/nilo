@@ -60,7 +60,7 @@ pub const Serving = struct {
             .body_timeout_ms = self.body_timeout_ms,
             .body_grace_ms = self.body_grace_ms,
             .body_min_rate = self.body_min_rate,
-            .also = &.{.{ .address = beside, .grpc = true }},
+            .also = &.{.{ .address = beside }},
         }) catch {
             self.bound.store(false, .release);
         };
@@ -246,11 +246,12 @@ fn getWith(io: std.Io, stream: *std.Io.net.Stream, out: []u8, extra: []const u8)
     return out[0..n];
 }
 
-test "one plain port answers HTTP/1.1 and an HTTP/2 gRPC call, and a listener that set .grpc answers HTTP/1.1 too" {
+test "one plain port answers HTTP/1.1 and an HTTP/2 gRPC call, and so does a unix socket beside it" {
     // ADR 259, stage 5.2: the first bytes choose, on every plain listener.
     // The first listener here is a plain TCP port the kernel chose, the
-    // second a unix socket with `.grpc` set, which used to answer an
-    // HTTP/1.1 client with a 505 and chooses nothing now.
+    // second a unix socket, which answers an HTTP/1.1 client as well (a
+    // listener of gRPC's own used to answer it with a 505, and the option
+    // that made one went with stage 7).
     hush();
     const gpa = std.heap.smp_allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -320,7 +321,7 @@ test "one plain port answers HTTP/1.1 and an HTTP/2 gRPC call, and a listener th
         try testing.expectEqualStrings("on the shared port", calls[0].message.items[5..]);
     }
 
-    // HTTP/1.1 on the listener that set `.grpc`.
+    // HTTP/1.1 on the unix socket beside it.
     {
         var stream = try connect(io, where.path);
         defer stream.close(io);

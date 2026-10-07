@@ -219,7 +219,7 @@ pub const Options = struct {
         key: []const u8,
     };
 
-    /// One more address to answer on, named by `also`. The three fields a
+    /// One more address to answer on, named by `also`. The fields a
     /// second listener can differ in and no others: everything else about
     /// a connection — its buffers, its deadlines, how many the process
     /// holds — is the server's rather than the port's
@@ -236,17 +236,6 @@ pub const Options = struct {
         /// a plain port and a TLS port in one process is what the field
         /// exists for, and each certificate is that listener's alone.
         tls: ?Tls = null,
-        /// Offer HTTP/2 alone by ALPN on a TLS listener: with `tls` set as
-        /// well, `h2` and nothing else, which is how gRPC over TLS is served
-        /// until a TLS listener offers both (ADR 259, ADR 220). **On a plain
-        /// listener it chooses nothing and is ignored**: every plain listener
-        /// of a `-Dhttp2` build answers HTTP/2 with prior knowledge and
-        /// HTTP/1.1 on the same port, by the client's first bytes, so a port
-        /// for gRPC needs no flag. The option goes when a TLS listener offers
-        /// both. Each unary call is answered by the route `app.post`
-        /// registered at its path. Needs `.http2 = true` on the dependency,
-        /// and is refused at `listen()` without it.
-        grpc: bool = false,
     };
 
     /// An IPv4 or IPv6 address in the usual notation: `"127.0.0.1"` and
@@ -383,13 +372,6 @@ pub const Options = struct {
     /// client that connects and goes quiet, or speaks plain HTTP to this
     /// port, is dropped when the first of those runs out.
     tls: ?Tls = null,
-
-    /// What `Listener.grpc` does on an entry in `also`: on a TLS listener,
-    /// offer `h2` alone by ALPN; on a plain one, nothing, because a plain
-    /// listener of a `-Dhttp2` build already answers HTTP/2 and HTTP/1.1 by
-    /// the first bytes ([ADR 259](../docs/adr/259-http2-is-a-framing-of-every-request.md),
-    /// [ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
-    grpc: bool = false,
 
     /// More addresses to answer on, beside the one `address` and `port`
     /// name ([ADR 213](../docs/adr/213-a-server-answers-on-more-than-one-address.md)).
@@ -814,7 +796,7 @@ pub fn serve(
     comptime ready: anytype,
     comptime stopping: anytype,
     comptime handler: anytype,
-    comptime grpc_handler: anytype,
+    comptime h2_handler: anytype,
     comptime plain_handler: anytype,
 ) !void {
     const State = @TypeOf(state);
@@ -858,8 +840,9 @@ pub fn serve(
             return plain_handler(carried.state, in, out, deadlines, waker, peer);
         }
 
-        /// What the Engine runs once `runPlain` has answered `.http2`, from
-        /// the entry's own frame after the choosing has returned, so that the
+        /// What the Engine runs once `runPlain` has answered `.http2`, or a
+        /// TLS handshake has chosen `h2` (stage 7), from the entry's own
+        /// frame after the choosing has returned, so that the
         /// HTTP/1.1 connection that did not need it holds none of what it
         /// takes: its arguments are pointers to what the entry already keeps
         /// live, and it is `noinline` so none of its frame is the entry's
@@ -875,23 +858,7 @@ pub fn serve(
             var deadlines = carried.limits;
             deadlines.target = clocks;
             const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
-            grpc_handler(carried.state, in, out, deadlines, waker, peer.*);
-        }
-
-        /// The same for a TLS listener that offers `h2` alone (ADR 220).
-        /// Its own function for the same reason.
-        fn runGrpc(
-            carried: Carried,
-            in: *std.Io.Reader,
-            out: *std.Io.Writer,
-            clocks: *engine.Clocks,
-            wake: *engine.Wake,
-            peer: Peer,
-        ) void {
-            var deadlines = carried.limits;
-            deadlines.target = clocks;
-            const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
-            grpc_handler(carried.state, in, out, deadlines, waker, peer);
+            h2_handler(carried.state, in, out, deadlines, waker, peer.*);
         }
 
         /// The startup hook, unwrapped from what the Engine carries. The
@@ -922,7 +889,7 @@ pub fn serve(
             .body_grace_ms = options.body_grace_ms,
             .write_ms = options.write_timeout_ms,
         },
-    }, Bridge.start, Bridge.winddown, Bridge.run, Bridge.runGrpc, Bridge.runPlain, Bridge.handOn);
+    }, Bridge.start, Bridge.winddown, Bridge.run, Bridge.runPlain, Bridge.handOn);
 }
 
 const engine_waker: Waker.VTable = .{

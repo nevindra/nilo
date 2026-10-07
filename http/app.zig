@@ -1401,7 +1401,7 @@ pub const App = struct {
             serverStarting,
             serverStopping,
             serve.handleConnection,
-            serveGrpc,
+            serveHttp2,
             if (framing_mod.http2_built) serveSniffed else serve.handleConnection,
         );
     }
@@ -1729,12 +1729,12 @@ pub const App = struct {
         return .done;
     }
 
-    /// What a TLS listener with `.grpc = true` runs for each connection, in
-    /// place of `serve.handleConnection` (ADR 220), and what a plain
+    /// What a TLS listener runs for a connection whose handshake chose `h2`,
+    /// in place of `serve.handleConnection` (ADR 259), and what a plain
     /// listener runs once `serveSniffed` has seen the HTTP/2 preface. Reached
     /// only by an Engine built with `-Dhttp2`, so a build without it analyses
     /// none of `h2conn.zig`.
-    fn serveGrpc(
+    fn serveHttp2(
         self: *App,
         in: *std.Io.Reader,
         out: *std.Io.Writer,

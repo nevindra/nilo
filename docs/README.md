@@ -59,7 +59,7 @@ In the order the guide teaches them. Each row is one guide page and the referenc
 | [Sessions](./guide/sessions.md) | `nilo_http`, `nilo_pw` | [`Session(T)`](./reference/ctx.md#sessiont), [`session_secret` and the other `listen` options](./reference/app.md#listen-options), [password calls on `Ctx`](./reference/ctx.md#reading), [`nilo_pw`](./reference/pw.md) | [Cookies and sessions](./design/cookies-sessions.md) |
 | [Streaming](./guide/streaming.md) | `nilo_http` | [`Stream`](./reference/streaming.md#stream), [`Events`](./reference/streaming.md#events), [`Room`](./reference/streaming.md#room), [`Rooms`](./reference/streaming.md#rooms) | [Responses](./design/responses.md) |
 | [WebSocket](./guide/websocket.md) | `nilo_http` | [`c.upgrade`](./reference/ctx.md#answering), [`Socket`](./reference/streaming.md#socket), [`Room`](./reference/streaming.md#room), [`Rooms`](./reference/streaming.md#rooms) | [WebSockets](./design/websocket.md) |
-| [gRPC](./guide/grpc.md) | `nilo_http` | [`listen` options (`grpc`, `also`)](./reference/app.md#listen-options) | none; the decision is [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) |
+| [gRPC](./guide/grpc.md) | `nilo_http` | [`listen` options (`also`, `tls`)](./reference/app.md#listen-options) | none; the decision is [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) |
 
 ### Building an application
 

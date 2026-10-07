@@ -20,6 +20,7 @@ compounds does not, and no total will say which you have.
     python3 bench/mem.py --port 50051 --path /pkg.Service/Method --grpc
     python3 bench/mem.py --port 8787 --h2                  # HTTP/2, nothing in flight
     python3 bench/mem.py --port 8787 --h2 --get --path /health   # ... after one GET (ADR 259)
+    python3 bench/mem.py --port 8787 --tls --h2 --get --path /health   # ... over TLS, `h2` by ALPN (ADR 259)
     python3 bench/mem.py --port 8790 --h2 --streams-per-conn 100 --path /events/room --steps 1000,10000
                                                            # held-open streams, counted a stream (ADR 260)
 
@@ -113,9 +114,10 @@ def open_grpc(host, port, path, timeout):
             return s
 
 
-def open_h2(host, port, path, timeout, get, streams=0):
+def open_h2(host, port, path, timeout, get, streams=0, tls=None):
     """One HTTP/2 connection on a plain port (ADR 259): the preface and the
-    SETTINGS exchange both ways, so the connection is HTTP/2 and has said
+    SETTINGS exchange both ways (through TLS with `h2` chosen by ALPN when
+    `tls` is a context, stage 7), so the connection is HTTP/2 and has said
     everything a client says before its first request. With `get`, one GET at
     `path` is answered and drained as well. What is left is a connection with
     no request in flight, which is a browser's tab between clicks.
@@ -125,6 +127,12 @@ def open_h2(host, port, path, timeout, get, streams=0):
     §4.2)."""
     s = socket.create_connection((host, port), timeout=timeout)
     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    scheme = b"\x86"  # :scheme http
+    if tls:
+        s = tls.wrap_socket(s, server_hostname=host)
+        if s.selected_alpn_protocol() != "h2":
+            raise SystemExit(f"h2 was not negotiated, got {s.selected_alpn_protocol()!r}")
+        scheme = b"\x87"  # :scheme https
     s.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(0x4, 0, 0))
     buf = b""
 
@@ -162,7 +170,8 @@ def open_h2(host, port, path, timeout, get, streams=0):
         for i in range(streams):
             block = (
                 (b"\x20" if i == 0 else b"")
-                + b"\x82\x86"
+                + b"\x82"
+                + scheme
                 + literal(":path", path)
                 + literal(":authority", host)
             )
@@ -182,7 +191,8 @@ def open_h2(host, port, path, timeout, get, streams=0):
 
     block = (
         b"\x20"  # the size update to 0
-        + b"\x82\x86"  # :method GET, :scheme http
+        + b"\x82"  # :method GET
+        + scheme
         + literal(":path", path)
         + literal(":authority", host)
     )
@@ -308,7 +318,7 @@ def main():
     p.add_argument(
         "--tls",
         action="store_true",
-        help="connect through TLS 1.3, against `zig build bench-tls-server -Dtls`",
+        help="connect through TLS 1.3, against `zig build bench-tls-server -Dtls`; with --h2, HTTP/2 over it",
     )
     args = p.parse_args()
 
@@ -319,6 +329,10 @@ def main():
         tls_ctx.check_hostname = False
         tls_ctx.verify_mode = ssl.CERT_NONE
         tls_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        # `h2` for --h2 and `http/1.1` otherwise, so a `-Dhttp2` build's
+        # listener is made to choose (stage 7); a build without the flag
+        # offers `http/1.1` alone and ignores nothing it was asked.
+        tls_ctx.set_alpn_protocols(["h2"] if args.h2 else ["http/1.1"])
     pid = find_pid(args.port)
 
     time.sleep(args.settle)
@@ -335,7 +349,7 @@ def main():
                 held.append(
                     open_grpc(args.host, args.port, args.path, args.timeout)
                     if args.grpc
-                    else open_h2(args.host, args.port, args.path, args.timeout, args.get, per_conn)
+                    else open_h2(args.host, args.port, args.path, args.timeout, args.get, per_conn, tls_ctx)
                     if args.h2
                     else open_one(args.host, args.port, args.path, args.timeout, args.hold, tls_ctx)
                 )

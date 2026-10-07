@@ -24,7 +24,7 @@ try app.get("/healthz", health);                              // every listener
 try app.onListener(&.{ingest}).post("/v1/logs", receiveLogs); // listener 1 only
 try app.group("/api").onListener(&.{public}).get("/users", users);
 
-try app.listen(.{ .port = 8080, .also = &.{.{ .port = 4317, .grpc = true }} });
+try app.listen(.{ .port = 8080, .also = &.{.{ .port = 4317 }} });
 ```
 
 **The number is the position in the list `listen()` was given.** `0` is the listener `.address` and `.port` name, `1` is `also[0]`, and so on. A number the program wrote by writing the list, not a port, because a port can be 0 (the kernel's choice, ADR 213) and a unix socket has none. It is a `u8`, so a server answers on at most 256 addresses, which `listen()` refuses past with `error.TooManyListeners`.

@@ -3972,3 +3972,77 @@ A read-only review found no use-after-free, deadlock or lost event, and these de
 - **The upload test took minutes.** `Wire.pump` of `http/h2pipe_live.zig` returns only after a quiet stretch of `wait_ms` once any frame has come, and the test waited 1,000 ms after each window update, and 3,000 ms after the end. `pumpSome` waits for one frame and takes what came with it. `an upload faster than its handler is held to its window, stalls, and then completes` took 3 min 32 s before and 0.6 s after, asserting what it did (68,497 bytes held while stalled, 98,962 at the peak).
 
 **The decision it moved:** the stream's `Room` bell is a value a framing hands to the seating, so a Room rings the HTTP/2 connection or the HTTP/1.1 request's waker through the same call, and the HTTP/2 walk over a stream's seats is `deliverSeats` while HTTP/1.1's stays written out in `RoomEvents.deliver`. What would push the HTTP/2 figure further: the idle bytes of a stream are the arena and the `Stream` (about 2.1 KB of the 3.4 that can be counted), which the hand-over could give back down to the `Http2Events` the stream keeps, and a stream's per-round share of the connection's fiber is the fan-out's limit, which more than one fiber a connection would change and nilo does not do (ADR 260).
+
+## What offering h2 to a browser costs
+
+**Question.** Stage 7 of [framing](../../docs/design/framing.md) makes a TLS listener of a `-Dtls -Dhttp2` build offer `h2` and `http/1.1` by ALPN and serve what the handshake chose, through one call after it, and removes the listener option `.grpc` ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md), revising [ADR 027](../../docs/adr/027-tls-is-terminated-in-front.md) in place). The bar the ADR set: an HTTP/1.1 connection over TLS holds the idle figure of the same build before, the figure of an HTTP/2 connection over TLS on record before a browser is offered `h2`, a page load in Chromium over both protocols, a static file over TLS on both, h2spec over TLS, and a build without the flags unchanged.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `4e2644a` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved, two rounds. The server on cores 0 to 3, the client on 4 to 7 (physical cores, SMT siblings idle). Memory: `bench/mem.py --tls` (`--h2 --get` for HTTP/2, which now negotiates `h2` and refuses to go on if it is not what was chosen) against `nilo-bench-tls-server`, `ulimit -n 65536`. The page: `bench/page_server.zig` and `bench/page_load.mjs`, a fresh Chromium and profile each run, the cache off. Files: `h2load` (nghttp2 1.59.0, Docker, host network) against the same server built `-Dcpu=native`.
+
+**Where the choice is made.** The handshake's ALPN list is `h2` then `http/1.1` in a `-Dhttp2` build and `http/1.1` alone in any other; tls.zig picks the first of the server's list the client also offered (server preference) and reports it in `conn.alpn_protocol`. The Engine's one TLS entry reads it after the handshake: `h2` runs `hand_on`, the `noinline` function a plain listener's HTTP/2 connection already runs from the entry's frame (ADR 062), and anything else runs the HTTP/1.1 handler as it did. `runTlsGrpc`, the second instantiation of the entry, is gone, and so is `.grpc`.
+
+**A stall it found, and fixed.** The first `mem.py --tls --h2 --get` stopped with a read timeout at 946, 1, and 1,328 connections in three of four runs: a client that sends the preface and SETTINGS in one TLS record and its `HEADERS` in the next, back to back, has both records in the server's first read, the server decrypts one, finds its cleartext buffer empty and parks on the socket, which the kernel has already emptied. `Wake.wait` now answers `.readable` while the record layer holds ciphertext or decrypted bytes (`Wake.held`), and a poll that fired meanwhile is checked against the socket once (`believe`). `test "a second TLS record that arrived with the first is answered, not waited for on an emptied socket"` puts both records in one socket write, twenty times, and was seen to fail without the fix (so did the ordinary `GET` test beside it, which sends its two records one after the other). It is the question [`todo.md`](../../docs/todo.md) carried for a WebSocket over TLS, answered from the code before and by this now; the fix is in `Wake.wait`, which a WebSocket parks in too. After it, two runs of `mem.py --h2` to 10,000 connections each and every Chromium load completed.
+
+**A review's refinement: only a whole record counts.** `Wake.held` first answered for any ciphertext in the record layer's buffer, but tls.zig peeks a record's five-byte header and takes its payload, so the buffer can hold a header or half a payload behind a record already decrypted. Answering `.readable` for that sends the caller into a read that blocks on the socket until the rest arrives or the read deadline runs out, deaf meanwhile to a handler's post, to the other streams' answers on an HTTP/2 connection and to a WebSocket broadcast, and `lookNow` (the `out_more` probe) would have answered it every round. `held` now answers for decrypted leftover, or for `buffered >= 5` and `buffered >= 5 + length` from the header, peeked and not consumed; a partial record falls through to the poll, which fires when the rest arrives because the socket is drained. A whole record that is not application data (a ticket, a KeyUpdate) cannot be told apart cheaply: every record after the handshake is type 23 on the wire and only decrypting says what it holds, so it is answered like any whole one and the read after it waits for the next record. Four tests send a whole record (a PING frame, or a masked WebSocket text frame the loop says to its room) and 3 or 12 bytes of a second in one socket write, then post into the room, and the client has five seconds to receive the post: HTTP/2 and WebSocket, header only and half a payload. All four, and the two before them, failed with the whole-record test replaced by "any buffered byte" and pass with it. Not tested: `lookNow` (the HTTP/2 `out_more` probe) with a partial record; it shares `held`. Re-measured after it: `-Dtls -Dhttp2` HTTP/1.1 at 10,000 connections 9,341 and 9,370 against 9,335 and 9,335 before (6 to 35 bytes, inside the 30-byte jitter two runs of one binary showed), `-Dtls` 9,364 and 9,335 against 9,364 and 9,364, HTTP/2 after a `GET` 9,589 and 9,550 (9,564 to 9,581 earlier).
+
+**Size**, stripped:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,328 | -80 |
+| `example-rest` | default | 1,221,320 | 1,221,240 | -80 |
+| `example-hello` | `-Dtls` | 1,614,640 | 1,615,008 | +368 |
+| `example-rest` | `-Dtls` | 1,822,248 | 1,822,456 | +208 |
+| `example-hello` | `-Dhttp2` | 1,147,760 | 1,147,680 | -80 |
+| `example-rest` | `-Dhttp2` | 1,337,984 | 1,337,888 | -96 |
+| `example-hello` | `-Dtls -Dhttp2` | 1,753,504 | 1,751,104 | -2,400 |
+| `example-rest` | `-Dtls -Dhttp2` | 1,943,920 | 1,941,296 | -2,624 |
+
+No build is `cmp` equal, so the bar of a byte-identical default build is not met to the letter: the 80 to 96 bytes under the default and `-Dhttp2` builds are `.grpc` going from `Options`, `Listener` and the Engine's per-listener state, and its refusal's text. The 208 to 368 over a `-Dtls` build is `Wake.held` and `believe`, which only a build with TLS in it compiles (gated on `nilo_build.tls`, so the default build pays none of it; without the gate the default build was 336 bytes over). The `-Dtls -Dhttp2` build is 2.4 to 2.6 KB smaller because one entry is instantiated where two were.
+
+**Idle HTTP/1.1 connection over TLS**, bytes a connection after one request, `mem.py --tls`, `http/1.1` offered, two interleaved rounds (a range is the rounds):
+
+| build | 1,000 | 5,000 | 10,000 |
+|---|---|---|---|
+| `-Dtls`, `4e2644a` | 9,826 to 10,441 | 9,448 to 9,513 | 9,364 to 9,628 |
+| `-Dtls`, after | 9,826 | 9,390 to 9,447 | 9,363 to 9,364 |
+| `-Dtls -Dhttp2`, `4e2644a` | 9,826 to 10,117 | 9,390 to 9,448 | 9,364 |
+| `-Dtls -Dhttp2`, after | 9,892 to 10,183 | 9,403 to 9,461 | 9,370 |
+
+The 1,000 column is noisy in every build, run to run, by 600 bytes. At 10,000 the `-Dtls -Dhttp2` build holds **6 bytes more**, and the marginal cost from 1,000 to 10,000 is the same to the byte (9,312 before and after in the first round): the 6 bytes are about 64 KB of resident memory that does not grow with the connections, the size of the code the TLS entry now touches, and not a page a connection. The page ADR 212 measured is unchanged: a `-Dtls` build is 9.4 KB against 5.2 KB on a plain listener, with and without `-Dhttp2`. A plain listener, `example-hello`, two rounds: default 5,247 and 5,190, `-Dhttp2` 5,378 and 5,204, at 1,000 and 10,000, before and after to the byte.
+
+**Idle HTTP/2 connection over TLS**, after one `GET /health` (the stream finished, nothing in flight), `mem.py --tls --h2 --get`, after only (before there was no `h2` on a TLS listener):
+
+| connections | round 1 | round 2 |
+|---|---|---|
+| 1,000 | 10,215 | 10,224 |
+| 5,000 | 9,705 | 9,608 |
+| 10,000 | 9,581 | 9,564 |
+
+That is 194 to 211 bytes over an HTTP/1.1 connection on the same listener at 10,000, where on a plain listener it is 4,158 over (9,355 against 5,197): the TLS page is the cost both pay, and the HTTP/2 connection's own state fits beside it. **One browser opens one such connection where it opened six HTTP/1.1 ones**: about 9.6 KB against 6 x 9.37 = 56.2 KB.
+
+**A page load in Chromium** (Chromium 152.0.7977.82, headless, `--ignore-certificate-errors`, a page of nineteen subresources: four stylesheets, four scripts, eight images, a `fetch` of JSON, an `EventSource` and a WebSocket, `page_load.mjs`), `loadEventEnd` in ms, median and range of five runs a batch, three batches interleaved:
+
+| | HTTP/2 (`h2` offered) | HTTP/1.1 (`--disable-http2`) |
+|---|---|---|
+| loopback | 47.7 (40.8 to 51.6); 46.8 (40.9 to 52.7); 48.5 (40.7 to 59.6) | 49.4 (42.3 to 58.5); 46.3 (39.1 to 51.8); 49.8 (48.2 to 56.2) |
+| connections for the page | 1 | 4 to 6 |
+| `nextHopProtocol` | `h2` | `http/1.1` |
+| +20 ms on every request (`Network.emulateNetworkConditions`), two batches | 80.4 (77.0 to 83.8); 76.5 (73.1 to 84.7) | 120.8 (115.8 to 122.4); 117.4 (111.7 to 118.4) |
+
+On loopback there is nothing to wait for and the protocols are the same inside their spread. With 20 ms added, six connections serialise nineteen requests and one does not: 77 to 80 ms against 117 to 121. The `-Dtls` server (no `h2` in the handshake) gives 48.6 (39.2 to 63.3) over six connections, the same as `--disable-http2` against the `-Dhttp2` one. **Chromium works with `SETTINGS_HEADER_TABLE_SIZE` of 0**: every request of every run was answered, on the one connection, so it sends the size update the server's decoder requires. The `fetch`, the `EventSource` (`eventsFrom` in a Room, a message after the page poked it) and the WebSocket all completed in every run. **The WebSocket is on a connection of its own**: its handshake is the 101 of HTTP/1.1, and the server holds two sockets for the page, the HTTP/2 connection and the WebSocket's (nilo sends no `SETTINGS_ENABLE_CONNECT_PROTOCOL`).
+
+**A static file over TLS**, `h2load -c 1 -m 1`, one stream, `-Dcpu=native` (AES instructions; at the baseline target the cipher is 59 MB/s for either protocol and the framing does not show), no `sendfile` on either ([ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md)):
+
+| file | HTTP/1.1 | HTTP/2 |
+|---|---|---|
+| 1 MiB, held in memory (1,000 requests, three rounds) | 2.70, 2.71, 2.71 GB/s (359 µs a request) | 1.66, 1.76, 1.65 GB/s (553 to 589 µs) |
+| 64 MiB, opened per request (12 requests, three rounds) | 599, 603, 593 MB/s | 1.57, 1.57, 1.58 GB/s |
+
+**Both went a way worth saying.** A held 1 MiB file is **35 to 40% slower over HTTP/2** than over HTTP/1.1 on TLS; and a spilled 64 MiB file is **2.6 times slower over HTTP/1.1**, which is the odd one: the same file read the same way is 600 MB/s on one framing and 1.6 GB/s on the other, so the HTTP/1.1 spilled path over TLS is leaving something on the table. Neither is traced here (both are in [`todo.md`](../../docs/todo.md)).
+
+**h2spec over TLS** (`summerwind/h2spec -t -k -P /`, a scratch copy with the HPACK table widened to 4,096 in both places, since h2spec's encoder never sends a size update, three runs): **142 of 146 every time**, failing 3.5/2, 5.1/8, 5.1/9 and 5.1/11, the constant four of the plain baseline (139 to 142 of 146); 5.4.1/1 passed, which it does not on a plain port, and 3.8/1 and 7/1 did not flake.
+
+**Routed `GET` over TLS**, `h2load --h1 -c 64 -t 2`, `/users/42`, `-Dtls -Dhttp2` build at the baseline CPU target, three rounds interleaved: before 183,901; 185,254; 184,975 requests a second, after 192,610; 188,447; 190,067. Not slower; the sign is the same in all three pairs and no cause is claimed. **`curl --http2 -k`** negotiates `h2` and is answered, `curl --http1.1 -k` negotiates `http/1.1` and is answered, `openssl s_client` with no ALPN and with `-alpn http/1.1` is answered HTTP/1.1, and with `-alpn spdy/3` alone fails with alert 120, `no_application_protocol`: RFC 7301 §3.2 says a server that supports none of the protocols offered SHALL answer that alert, and tls.zig does; every browser and client library offers `http/1.1`, so this is a client offering nothing the listener speaks. A client with no ALPN is served, since the library selects nothing when it is not asked.
+
+**The decision it moved:** ALPN is offered `h2` first in a `-Dhttp2` build, the choice is read in the one TLS entry and HTTP/2 is run from its frame through the `noinline` hand-on a plain listener already uses; `.grpc` goes, with Zig's own "no field named" error as its refusal; and `Wake.wait` answers from bytes the record layer holds. **Can it be pushed further:** the 6 bytes at 10,000 and the 64 KB under them are worth tracing only if a dependent asks; a held 1 MiB file over HTTP/2 and a spilled one over HTTP/1.1 on TLS are the two numbers that went the wrong way, and the second one is likely a buffer size.

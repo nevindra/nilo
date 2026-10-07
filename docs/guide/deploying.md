@@ -310,7 +310,7 @@ Either way, bind nilo to `127.0.0.1` so nothing reaches it except through the pr
 
 **Or listen on a unix socket instead of a port.** `.address = "unix:/run/nilo.sock"` listens on a path, and then "who may connect" becomes "who may write to that directory": `proxy_pass http://unix:/run/nilo.sock;` in nginx, `reverse_proxy unix//run/nilo.sock` in Caddy. `port` is not read. A request that arrives this way has no client address of its own, so `clientIp()` reads the proxy's header through `.trusted_proxies`, and it is allowed to because nothing remote can open a unix socket ([ADR 103](../adr/103-a-path-is-an-address-to-listen-on.md)).
 
-One consequence is worth knowing before you need it: **HTTP/2 is not available for your routes.** Browsers only speak it over TLS, negotiated during the handshake, and the listener below offers only `http/1.1`. **gRPC is the exception**, because it runs over HTTP/2 without TLS: a build that asks for it serves unary calls, on the port HTTP/1.1 is on or over TLS ([gRPC](./grpc.md)).
+One consequence is worth knowing before you need it: **a browser gets HTTP/2 from nilo only over TLS, and only in a build that asked for both** ([HTTP/2 for a browser](#http2-for-a-browser)). Browsers speak it only over TLS, negotiated during the handshake, so a plain listener never sees one; a proxy that terminates TLS speaks HTTP/1.1 to nilo (or h2c, with `.http2 = true`), and that is the usual shape. **gRPC does not need TLS**: a build with `.http2 = true` serves unary calls on the port HTTP/1.1 is on, and over TLS ([gRPC](./grpc.md)).
 
 ### TLS without a proxy
 
@@ -342,6 +342,30 @@ What it costs, so the choice is an informed one ([ADR 212](../adr/212-tls-is-an-
 - **The library has not been audited.** ADR 027's trust argument still holds: a deployment that chooses this is deliberately choosing an unaudited TLS stack over an audited one, for a server that would otherwise have none. On the internet, put Caddy in front and leave this off.
 
 `.tls` together with a unix socket is refused: the socket file's permissions already control access, and there is nobody on the path to encrypt against. The handshake is limited by `header_timeout_ms`, because until it is done a connection is a client that has not yet sent a request. A scanner that connects and goes quiet, or speaks plain HTTP to the port, is dropped when that runs out. `clientIp()` on this listener is the real address, since no proxy is in the way.
+
+### HTTP/2 for a browser
+
+**Pass `.http2 = true` as well as `.tls = true`, and a TLS listener offers `h2` and `http/1.1` and serves every route on whichever the client chose** ([ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)). Nothing else changes in the program: a route is the same function on both, a stream, an event stream, a file and an upload work on both, and a gRPC call arrives on the listener the browser uses.
+
+```zig
+// build.zig
+const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .tls = true, .http2 = true });
+```
+
+What a client gets, by what it offers in the handshake:
+
+| the client offers | it gets |
+|---|---|
+| `h2` (every browser, `curl --http2`, a gRPC client) | HTTP/2, whatever else it offers: the server prefers `h2` |
+| `http/1.1` alone, or no ALPN at all | HTTP/1.1, as before |
+| only a protocol nilo does not speak (`spdy/3`) | the handshake fails with RFC 7301's `no_application_protocol` alert |
+| `h2` to a build without `.http2` | HTTP/1.1: that build offers `http/1.1` alone, and nothing about it changed |
+
+**One browser opens one HTTP/2 connection where it opened six HTTP/1.1 ones, and that is where the memory goes the other way.** An idle HTTP/2 connection over TLS holds 9,564 to 9,581 bytes after one `GET`, at 10,000 connections, against 9,370 for an idle HTTP/1.1 one on the same listener: 194 to 211 bytes more, and one of them where there were six, so a browser holds about 9.6 KB where it held 56 KB. The HTTP/1.1 figure in this build is the figure of a build without `.http2` to within 6 bytes, and a build without `.tls` is untouched ([ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)).
+
+**What it buys depends on the round trip.** A page with nineteen requests loaded in headless Chromium takes 47 to 49 ms over either protocol on loopback, where a request costs nothing to wait for. With 20 ms added to every request it takes 77 to 80 ms over HTTP/2 on one connection and 117 to 121 ms over six HTTP/1.1 ones, which is the case a page over the internet is in. A large file is not a reason for it: a 1 MiB file held in memory is served at 2.7 GB/s over HTTP/1.1 and 1.7 over HTTP/2, a 64 MiB one read from the disk at 0.6 GB/s over HTTP/1.1 and 1.6 over HTTP/2, neither with `sendfile`, which nothing over TLS can use ([`bench/result/http.md`](../../bench/result/http.md#what-offering-h2-to-a-browser-costs)).
+
+**A WebSocket stays HTTP/1.1.** nilo does not send `SETTINGS_ENABLE_CONNECT_PROTOCOL`, so a browser that negotiated `h2` opens its WebSocket on a connection of its own, which is the 101 upgrade it always was (measured: two sockets open for a page with a WebSocket, one of them the HTTP/2 connection). An event stream (`EventSource`) is an ordinary request and rides the HTTP/2 connection. A proxy in front changes none of it: put one there anyway when the server faces the internet ([ADR 027](../adr/027-tls-is-terminated-in-front.md)), when the certificate has to renew without a restart, or when the connections should be held by something audited, and let it speak HTTP/1.1 or h2c to nilo.
 
 ### Listening on more than one address
 

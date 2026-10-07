@@ -18,13 +18,14 @@ client ──TLS 1.3 handshake──► nilo's listener
              │  record layer, state machine        ── on the executor
              └─ signature over the transcript       ── hopped to the blocking pool,
                                                         fiber parked (ADR 217)
-          h2c or ALPN "h2" ──► a -Dhttp2 listener, beside or instead (ADR 220, topic grpc)
+          -Dhttp2 as well: ALPN offers "h2" then "http/1.1" ──► HTTP/2 or HTTP/1.1 by what was chosen,
+                           from the entry's one frame after the handshake (ADR 259)
 ```
 
 ## Rules
 
 1. **nilo does not act as a TLS server on the public internet, and a proxy in front is still the recommendation.** Every comparable server plugs into someone else's audited implementation; Zig has none to plug into, and writing one is ruled out. [ADR 027](../adr/027-tls-is-terminated-in-front.md)
-2. **HTTP/2 for browsers and ordinary routes is still ruled out**, because browsers only negotiate it over TLS, through ALPN. gRPC is the one exception, decided separately (see Related topics). [ADR 027](../adr/027-tls-is-terminated-in-front.md)
+2. **In a build with `-Dtls` and `-Dhttp2`, a TLS listener offers `h2` and `http/1.1` by ALPN, `h2` first, and serves what was chosen.** A client that sends no ALPN at all is served HTTP/1.1; a client that offers ALPN with neither protocol in it gets RFC 7301's `no_application_protocol` alert. Without `-Dhttp2` the handshake offers `http/1.1` alone, as it always did. A WebSocket stays HTTP/1.1 ([ADR 260](../adr/260-a-request-on-http2-runs-from-its-headers.md)). [ADR 027](../adr/027-tls-is-terminated-in-front.md), [ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)
 3. **TLS 1.3 is a listener option in a build that asks for it, and the default build contains none of it.** A dependent passes `.tls = true` to `b.dependency("nilo", …)` (`-Dtls` in this repository). The library is fetched through `b.lazyDependency` only under that flag, so a build without it fetches and links nothing. [ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md)
 4. **Without the flag, `.tls` is rejected at `listen()` with a one-line message**, like a port that is already taken, and is never served as plain HTTP on a port the caller thought was encrypted. The same message rejects `.tls` on a unix socket. [ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md)
 5. **A private key that does not belong to the certificate is rejected at `listen()`, before the port is taken.** The public keys are compared by scheme (the EC point, the RSA modulus, the Ed25519 bytes); a scheme the check does not know is accepted rather than rejected. [ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md)
@@ -45,7 +46,7 @@ client ──TLS 1.3 handshake──► nilo's listener
 | [212](../adr/212-tls-is-an-option-a-build-asks-for.md) | TLS 1.3 as a listener option behind `-Dtls`, the key and certificate check, and what it costs builds with and without it |
 | [217](../adr/217-a-handshakes-signature-is-computed-off-the-executor.md) | The handshake's signature runs on the blocking pool, off the executor, so it does not stall every other connection on the same thread |
 
-Related topics: [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md) (topic grpc, no page of its own) is the one exception to "no TLS, no HTTP/2": gRPC runs over h2c or over TLS with ALPN `h2`, needs neither, and has its own listener behind `-Dhttp2`. The Engine, and the rule that only it may name a dependency, are in [`engine.md`](./engine.md) (ADR 001). The four trade-off axes every cost above is measured against are [ADR 017](../adr/017-the-trade-budget-has-four-axes.md) (topic principles, no page). The per-idle-connection minimum that a `-Dtls` build's extra page is added to is in [`memory.md`](./memory.md) (ADR 062).
+Related topics: [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md) (topic grpc, no page of its own) is where gRPC runs over h2c or over TLS with ALPN `h2`, behind `-Dhttp2`; [ADR 259](../adr/259-http2-is-a-framing-of-every-request.md) (topic framing) is where a TLS listener came to offer `h2` and `http/1.1` together. The Engine, and the rule that only it may name a dependency, are in [`engine.md`](./engine.md) (ADR 001). The four trade-off axes every cost above is measured against are [ADR 017](../adr/017-the-trade-budget-has-four-axes.md) (topic principles, no page). The per-idle-connection minimum that a `-Dtls` build's extra page is added to is in [`memory.md`](./memory.md) (ADR 062).
 
 ## Open questions
 

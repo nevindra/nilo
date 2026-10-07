@@ -2,7 +2,7 @@
 
 **A gRPC method is an ordinary route: a build with HTTP/2 in it turns each unary call into a `POST` and the route's answer back into a gRPC response.**
 
-**Reference:** [`listen` options (`grpc`, `also`)](../reference/app.md#listen-options) · **Design:** none; the decision is [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md)
+**Reference:** [`listen` options (`also`, `tls`)](../reference/app.md#listen-options) · **Design:** none; the decision is [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md)
 
 `app.rpc(T)` serves a struct's functions as a service's methods, or `app.post("/package.Service/Method", handler)` registers one, and a handler whose argument is the request message and whose return type is the reply is the whole of it. Middleware, fail functions, deadlines, counters and the log all see a call as the request it became.
 
@@ -31,9 +31,9 @@ fn say(c: *nilo.Ctx) !void {
 }
 ```
 
-Port 8080 answers both. A connection that opens with HTTP/2's 24-byte preface is HTTP/2 with prior knowledge (h2c), which is what every gRPC client sends to a plain address, and anything else is HTTP/1.1, decided at the first byte that differs, so a short request is never waited on. An HTTP/1.1 request to `/demo.Echo/Say` is an ordinary `POST`, and an HTTP/1.1 connection costs what it did before ([ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)). A port for gRPC alone is an `also` listener like any other. `.grpc = true` on a plain listener is accepted and does nothing; it goes when a TLS listener can offer HTTP/2 and HTTP/1.1 together, and it is the only way, for now, to make a TLS listener offer `h2` alone.
+Port 8080 answers both. A connection that opens with HTTP/2's 24-byte preface is HTTP/2 with prior knowledge (h2c), which is what every gRPC client sends to a plain address, and anything else is HTTP/1.1, decided at the first byte that differs, so a short request is never waited on. An HTTP/1.1 request to `/demo.Echo/Say` is an ordinary `POST`, and an HTTP/1.1 connection costs what it did before ([ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)). A port for gRPC alone is an `also` listener like any other, and there is no option to set on it.
 
-A build that did not pass `.http2 = true` rejects a listener that sets `.grpc` at `listen()` with a message naming the flag, and contains none of the HTTP/2 code: a program that never asks for it pays 8 to 112 bytes of binary.
+A build that did not pass `.http2 = true` contains none of the HTTP/2 code: a program that never asks for it pays nothing in binary.
 
 ## Writing a method
 
@@ -104,12 +104,11 @@ The same connection serves any other request, a `GET` or a `POST` with a JSON bo
 
 ## gRPC over TLS
 
-**A listener with both `.tls` and `.grpc` offers only `h2` by ALPN**, in a build that also passed `.tls = true` ([TLS without a proxy](./deploying.md#tls-without-a-proxy)). A client that offers only `http/1.1` fails the handshake there, and a TLS listener without `.grpc` still offers only `http/1.1`.
+**An ordinary TLS listener serves it**, in a build that also passed `.tls = true` ([TLS without a proxy](./deploying.md#tls-without-a-proxy)): the handshake offers `h2` and `http/1.1`, a gRPC client offers `h2`, and the call arrives as it does on a plain port. The option `.grpc` that used to make a TLS listener offer `h2` alone is gone ([ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)), so a program that set it deletes the line.
 
 ## What it does not do
 
 - **Streaming calls.** One message in, one out. A call that sends a second message is answered `INTERNAL`.
-- **HTTP/2 for anything but gRPC.** A browser, or `curl --http2` to a plain route, still reaches nilo as HTTP/1.1; for HTTP/2 there, put a proxy in front.
 - **`Upgrade: h2c`.** Ignored: a request carrying it is served as HTTP/1.1, which RFC 9113 allows. A client that wants HTTP/2 on a plain port speaks it with prior knowledge, as every gRPC client and `curl --http2-prior-knowledge` do.
 - **Many large gzip calls side by side on one connection.** The inflated copy of a gzip message is held to the room the connection has, which is `max_body` less what the other calls on it hold, and a call that does not fit waits, holding only its compressed bytes, until the calls ahead of it finish. A call alone on its connection has all of it, and a waiting call whose `grpc-timeout` passes is answered `DEADLINE_EXCEEDED` without running. **A Collector sending batches of a few MB on one connection gets one or a few running at a time**, the rest waiting rather than retried; raise `max_body` for more side by side ([the arithmetic](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md#what-the-budget-does-to-an-opentelemetry-collector)).
 - **Compressed answers.** A client's gzip is read; the answer goes back uncompressed.
