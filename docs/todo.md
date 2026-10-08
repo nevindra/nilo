@@ -292,6 +292,10 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
+**A gRPC stop test fails when the machine is busy, so a red gate can be a false one.** `a server stop that lands in a burst of calls ends the connection promptly` (`http/grpc_live.zig`) asserts the stop took under 2.5 s against handlers that sleep 4 s. It failed once in a `test-all -Dsql` on the shared two-core vCPU, while the gate's other compilations ran beside it, and the same test binary then passed three runs out of three on the idle machine. A bound measured on wall time is a bound on the scheduler as much as on the stop.
+
+**Needs:** an assertion that does not race the scheduler: the stop observed as the connection closing before any `Hang` handler returns, rather than a wall-clock figure, or a margin derived from the handlers' 4 s that a loaded machine cannot reach.
+
 **A WebSocket over TLS has no test of its own for a second frame that arrived with the first.** `Wake.wait` answers `.readable` while the record layer holds ciphertext or decrypted bytes ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)), which a WebSocket's `park` waits in too, so the stall the HTTP/2 connection over TLS showed (one in a thousand) is closed for it by the same line. The test that holds it is HTTP/2's, `grpc_tls_live.zig`; `tls_live.zig` has no WebSocket test, so a change to how `park` waits could lose it unseen.
 
 **What would settle it:** a live test in `tls_live.zig` sending two WebSocket frames in one TLS write and timing the second.
