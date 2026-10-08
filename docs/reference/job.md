@@ -137,7 +137,7 @@ The next tick is a row with the unique key `"schedule"`, so several instances se
 
 ### Errors
 
-**A `run` that fails is retried according to its `retry`, and is then dead**: kept in the table with the error's name, counted by `stats`, and listed by `deadOnes`. A `run` that goes past `timeout_ms` is an attempt that failed with `TimedOut`. `error.Canceled` inside `run` means shutdown: the row goes back untouched and whichever worker starts next takes it. A payload this binary cannot parse is dead at once; one that could not be read for want of memory is retried like a failed `run`. A row whose kind this binary has no job for is put back, with a warning, for the binary that does.
+**A `run` that fails is retried according to its `retry`, and is then dead**: kept in the table with the error's name, counted by `stats`, and listed by `deadOnes`. A `run` that goes past `timeout_ms` is an attempt that failed with `TimedOut`. A shutdown that cuts a `run` off puts the row back untouched, and whichever worker starts next takes it; an `error.Canceled` that `run` returns without a shutdown, from a child future it cancelled itself, is an ordinary failure. A payload this binary cannot parse is dead at once; one that could not be read for want of memory is retried like a failed `run`. A row whose kind this binary has no job for is put back, with a warning, for the binary that does.
 
 [`docs/guide/jobs.md`](../guide/jobs.md) covers all of it, and [`bench/result/job.md`](../../bench/result/job.md) has what a claim and a push cost on each store.
 

@@ -37,12 +37,6 @@ Nothing is open at this tier.
 
 ## P1: a large cost, and a real one
 
-### `nilo_job`
-
-**One cancelled child future stops every worker, and the queue stays stopped until the process restarts.** A run that returns `error.Canceled`, which is what a job gets by `try`ing a child future it cancelled, is read as the server going (`job/job.zig:1020`): the row is released and `stopping` is set for every worker (`:1043`), so a job that races two calls and cancels the loser halts the whole queue, and nothing tells it apart from a shutdown.
-
-**Needs:** `going` read from the worker's own cancellation only, with a test whose job cancels a child while a second job still runs after it.
-
 ### `nilo_sql`
 
 **An index on a big live Postgres table cannot be built without blocking its writes.** Every version is one transaction, and Postgres refuses `CREATE INDEX CONCURRENTLY` inside one, so a generated `create_index` on an existing table takes a lock that makes every write to it wait until the build finishes. On a table of a few thousand rows that is milliseconds; on one of fifty million it is an outage. The step's `why` says so today, and that is a warning rather than a way out. The way out is a step that runs outside its version's transaction and is recorded in the ledger on its own, because a `CONCURRENTLY` build that fails halfway leaves an invalid index behind that has to be dropped before the next attempt.

@@ -347,6 +347,21 @@ pub fn Jobs(comptime options: anytype) type {
         /// Set once the server is going, so a worker that has just finished
         /// a row does not claim another.
         stopping: std.atomic.Value(bool) = .init(false),
+        /// Set by `serveOn` the moment it is cancelled, before it cancels the
+        /// workers. A cancellation a run has already answered with
+        /// `error.Canceled` cannot be asked of the fiber any more (the `Io`
+        /// does not signal it twice), so this is how a worker knows an
+        /// `error.Canceled` came from the shutdown and not from a child future
+        /// the run cancelled itself (ADR 243).
+        shutdown: std.atomic.Value(bool) = .init(false),
+        /// What `serveOn` waits on while the workers run, so that it, and not
+        /// a worker, is the fiber the shutdown reaches first.
+        halt: std.atomic.Value(u32) = .init(0),
+        /// Whether the one worker is `serveOn`'s own fiber, on an `Io` that
+        /// cannot start another. Nothing then cancels the workers through
+        /// `serveOn`, so an `error.Canceled` is read as the shutdown, as it
+        /// was before ADR 243; there is no second fiber for a run to race.
+        lone: std.atomic.Value(bool) = .init(false),
         /// Bumped by every `push` and every `wake`, and what an idle worker
         /// sleeps on. A worker reads it before it asks the store and sleeps
         /// only while it is still that number, so a push that lands between
@@ -717,6 +732,8 @@ pub fn Jobs(comptime options: anytype) type {
                 _ = late_checked;
             }
             self.serving.store(true, .release);
+            self.shutdown.store(false, .release);
+            self.lone.store(false, .release);
             // A worker process with no server never called `nilo_start`, and
             // `wake` needs an `Io` to reach a sleeping worker through. The one
             // the workers run on is the right one.
@@ -739,9 +756,20 @@ pub fn Jobs(comptime options: anytype) type {
             if (started == 0) {
                 // No concurrency to be had — a single-threaded `Io`. This
                 // fiber is the one worker, then.
+                self.lone.store(true, .release);
                 return worker(self, io);
             }
-            return group.await(io);
+            // The wait is cancelled first, and says so before the workers hear
+            // of it: `group.await` would cancel them itself and leave no
+            // moment in which to say it. Nothing wakes `halt`, so the only way
+            // out is the cancellation.
+            while (true) {
+                io.futexWait(u32, &self.halt.raw, 0) catch {
+                    self.shutdown.store(true, .release);
+                    group.cancel(io);
+                    return error.Canceled;
+                };
+            }
         }
 
         /// Run everything that is due, now, on this thread, and say how many.
@@ -1012,12 +1040,19 @@ pub fn Jobs(comptime options: anytype) type {
                 timed_out = bound.fired();
                 bound.release();
             }
-            // The server is going when the run says so, or when it says
-            // something else about a statement a cancellation cut off:
-            // nilo_sql answers that `QueryFailed` and leaves the cancellation
-            // pending, so the fiber is what to ask — before the protection
-            // below, under which it would answer that nothing is pending.
-            const going = if (outcome) |_| false else |err| !timed_out and (err == error.Canceled or self.cancelPending());
+            // The server is going when the worker was told so, not when the
+            // run says `error.Canceled`: a run that cancels a child future of
+            // its own and `try`s it returns that too, and is an ordinary
+            // failure (ADR 243). The worker was told so when `serveOn` was
+            // cancelled (`shutdown`, set before the workers hear of it,
+            // because a run that answered the cancellation has spent it and
+            // the fiber would say nothing is pending), or when a statement it
+            // cut off left the cancellation pending (nilo_sql answers
+            // `QueryFailed` and re-arms it, ADR 223), which the fiber is
+            // asked before the protection below, under which it would answer
+            // that nothing is pending.
+            const going = if (outcome) |_| false else |err| !timed_out and
+                (self.cancelPending() or (err == error.Canceled and (self.shutdown.load(.acquire) or self.lone.load(.acquire))));
             // What the row is told from here on is cleanup, and a shutdown
             // must not stop it: a cancellation a statement handed back
             // pending (ADR 223) would fail the `done`, the `retry` or the
@@ -2613,6 +2648,170 @@ test "a worker with no Engine cancels a run at its timeout, and no second worker
     try testing.expectEqual(@as(u32, 0), nap.finished.load(.acquire));
     const dead = try jobs.deadOnes(&run);
     try testing.expectEqualStrings("TimedOut", dead[0].err);
+}
+
+// -- a cancellation is the worker's, not the error's (ADR 243) -------------
+
+/// What `CancelsItsChild` waits on, so that only its own `cancel` ends it.
+fn napsForever(io: std.Io) std.Io.Cancelable!void {
+    try io.sleep(.fromMilliseconds(60_000), .awake);
+}
+
+/// Races a child future and cancels it itself, then `try`s the answer, which
+/// is `error.Canceled`: the job's, though the worker was never cancelled.
+const CancelsItsChild = struct {
+    pub const nilo_job = "cancels-its-child";
+    pub const retry: Retry = .none;
+
+    pub fn run(self: CancelsItsChild, scope: *core.Run, nap: *Napper) !void {
+        _ = self;
+        _ = scope;
+        var child = try nap.io.concurrent(napsForever, .{nap.io});
+        try child.cancel(nap.io);
+    }
+};
+
+/// A job that only says it ran.
+const Marks = struct {
+    pub const nilo_job = "marks";
+    pub const retry: Retry = .none;
+
+    pub fn run(self: Marks, scope: *core.Run, nap: *Napper) !void {
+        _ = self;
+        _ = scope;
+        _ = nap.finished.fetchAdd(1, .acq_rel);
+    }
+};
+
+const RaceJobs = Jobs(.{ .kinds = .{ CancelsItsChild, Marks }, .store = Memory, .deps = struct { nap: *Napper } });
+
+/// What an Engine's limits are when nothing is due: not `engineless`, so a
+/// run stays on the worker's own fiber, and it never fires.
+const Inert = struct {
+    fn arm(_: ?*anyopaque, _: *anyopaque, _: u32) void {}
+    fn release(_: ?*anyopaque, _: *anyopaque) void {}
+    fn fired(_: ?*anyopaque, _: *anyopaque) bool {
+        return false;
+    }
+    const vtable: core.Limits.VTable = .{
+        .arm = arm,
+        .release = release,
+        .fired = fired,
+        .waiting = core.Limits.noop.waiting,
+        .waited = core.Limits.noop.waited,
+    };
+    const limits: core.Limits = .{ .vtable = &vtable };
+};
+
+fn expectChildCancelFailsAlone(on_worker_fiber: bool) !void {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = try Memory.open(testing.allocator, .{ .bytes = 64 << 10 });
+    defer store.deinit();
+    var nap: Napper = .{ .io = io };
+    var jobs: RaceJobs = .open(testing.allocator, &store, .{ .nap = &nap }, .{ .workers = 1, .poll_ms = 5 });
+    try jobs.nilo_start(io, if (on_worker_fiber) Inert.limits else .none);
+
+    var run: core.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try jobs.push(&run, CancelsItsChild{}, .{});
+    _ = try jobs.push(&run, Marks{}, .{});
+
+    var serving = try io.concurrent(RaceJobs.serveOn, .{ &jobs, io });
+    defer serving.cancel(io) catch {};
+
+    // The second job runs, which it cannot if the first one stopped the only
+    // worker. Bounded: a stopped queue would otherwise wait for ever.
+    var waited: u32 = 0;
+    while (nap.finished.load(.acquire) == 0 and waited < 2_000) : (waited += 1) try io.sleep(.fromMilliseconds(1), .awake);
+    try testing.expectEqual(@as(u32, 1), nap.finished.load(.acquire));
+    try testing.expect(!jobs.stopping.load(.acquire));
+    try testing.expectEqual(@as(u32, 1), jobs.alive.load(.acquire));
+    // The first is an ordinary failure, dead on its only attempt under the
+    // name it returned.
+    const dead = try jobs.deadOnes(&run);
+    try testing.expectEqual(@as(usize, 1), dead.len);
+    try testing.expectEqualStrings("Canceled", dead[0].err);
+}
+
+test "a run that cancels its own child future fails alone and does not stop the queue" {
+    try expectChildCancelFailsAlone(false);
+}
+
+test "a run on the worker's own fiber that cancels its child future fails alone too" {
+    try expectChildCancelFailsAlone(true);
+}
+
+/// Waits far longer than any test, on the worker's own fiber (the test gives
+/// it limits that are not `engineless`): only a shutdown ends it.
+const WaitsInline = struct {
+    pub const nilo_job = "waits-inline";
+    pub const retry: Retry = .none;
+
+    pub fn run(self: WaitsInline, scope: *core.Run, nap: *Napper) !void {
+        _ = self;
+        _ = scope;
+        _ = nap.starts.fetchAdd(1, .acq_rel);
+        try nap.io.sleep(.fromMilliseconds(60_000), .awake);
+    }
+};
+
+/// The same wait under a `timeout_ms`, which with no Engine puts the run on
+/// a task of its own that the worker waits for.
+const WaitsInTask = struct {
+    pub const nilo_job = "waits-in-task";
+    pub const retry: Retry = .none;
+    pub const timeout_ms = 60_000;
+
+    pub fn run(self: WaitsInTask, scope: *core.Run, nap: *Napper) !void {
+        _ = self;
+        _ = scope;
+        _ = nap.starts.fetchAdd(1, .acq_rel);
+        try nap.io.sleep(.fromMilliseconds(60_000), .awake);
+    }
+};
+
+fn expectShutdownReleases(comptime K: type, limits: core.Limits) !void {
+    const WaitJobs = Jobs(.{ .kinds = .{K}, .store = Memory, .deps = struct { nap: *Napper } });
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var store = try Memory.open(testing.allocator, .{ .bytes = 64 << 10 });
+    defer store.deinit();
+    var nap: Napper = .{ .io = io };
+    var jobs: WaitJobs = .open(testing.allocator, &store, .{ .nap = &nap }, .{ .workers = 1, .poll_ms = 5 });
+    try jobs.nilo_start(io, limits);
+
+    var run: core.Run = .init(testing.allocator);
+    defer run.deinit();
+    _ = try jobs.push(&run, K{}, .{});
+
+    var serving = try io.concurrent(WaitJobs.serveOn, .{ &jobs, io });
+    defer serving.cancel(io) catch {};
+
+    var waited: u32 = 0;
+    while (nap.starts.load(.acquire) == 0 and waited < 2_000) : (waited += 1) try io.sleep(.fromMilliseconds(1), .awake);
+    try testing.expectEqual(@as(u32, 1), nap.starts.load(.acquire));
+
+    try testing.expectError(error.Canceled, serving.cancel(io));
+    // With `retry = .none` a failure would be dead; a row the shutdown cut off
+    // is back in the queue, untouched.
+    const s = try jobs.stats(&run);
+    try testing.expectEqual(@as(u64, 1), s.queued);
+    try testing.expectEqual(@as(u64, 0), s.dead);
+    try testing.expectEqual(@as(u64, 0), s.running);
+    try testing.expect(jobs.stopping.load(.acquire));
+}
+
+test "a shutdown in the middle of a run on the worker's own fiber puts the row back" {
+    try expectShutdownReleases(WaitsInline, Inert.limits);
+}
+
+test "a shutdown while the worker waits for a run's task puts the row back" {
+    try expectShutdownReleases(WaitsInTask, .none);
 }
 
 // -- a worker that lost its lease (ADR 160) --------------------------------

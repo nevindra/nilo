@@ -28,11 +28,21 @@ before its sleep collected the cancellation.
 
 ## Decision
 
-**After a run, the worker asks the fiber rather than the error.** A run that
-failed without its own deadline firing, and either returned `error.Canceled`
-or left a cancellation pending (`checkCancel`, then `recancel` so the loop
-still leaves on it), was cut off by the server going: its row is released,
-with the attempt given back, as ADR 160 says.
+**After a run, the worker asks whether it was told to stop, never what the
+error was called.** A run that failed without its own deadline firing, and
+either left a cancellation pending (`checkCancel`, then `recancel` so the loop
+still leaves on it) or returned `error.Canceled` while `serveOn` had been
+cancelled, was cut off by the server going: its row is released, with the
+attempt given back, as ADR 160 says. `serveOn` waits on a futex while its
+workers run, and the cancellation reaches that wait first: it sets `shutdown`
+and only then cancels the workers. A flag is needed because a run that
+answered the cancellation with `error.Canceled` has spent it (the `Io` signals
+a cancellation once), so the fiber can no longer be asked. An
+`error.Canceled` with no shutdown, from a child future the run cancelled
+itself and `try`d, is an ordinary failure of that run, retried or dead by its
+kind's `retry`. The one exception is an `Io` that cannot start a second fiber,
+where `serveOn`'s own fiber is the only worker and no run has a child to race:
+there the error name still stands for the shutdown.
 
 **Everything the worker then writes about the row is cleanup** and runs with
 cancellation held off (`swapCancelProtection(.blocked)`), the way nilo_sql
@@ -45,6 +55,10 @@ it at its next check.
 logging a failure.
 
 ## Rejected
+
+**Read `error.Canceled` from a run as the shutdown** (the first rule). A run
+that races two calls and cancels the loser returns it too, and one such run
+stopped every worker, the queue staying stopped until the process restarted.
 
 **Treat `QueryFailed` as a shutdown.** A statement fails for many reasons; a
 real failure would be released forever instead of retried and, in the end,
