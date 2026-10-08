@@ -926,7 +926,16 @@ fn Reader(comptime T: type) type {
                 // a syntax error the moment the span is read on its own. A union
                 // at the top of a body happens to work either way, which is
                 // exactly why this is worth a comment.
-                _ = try source.peekNextTokenType();
+                //
+                // **A stray `}` or `]` is peeked as what it is, and `skipValue`
+                // is `unreachable` on both**, so a body such as
+                // `[{"signal":"queued"},}]` would abort the process in
+                // ReleaseFast. They and the end of the input are a syntax
+                // error here, before anything skips.
+                switch (try source.peekNextTokenType()) {
+                    .object_end, .array_end, .end_of_document => return error.SyntaxError,
+                    else => {},
+                }
                 const start = source.cursor;
                 try source.skipValue();
                 return fromSpan(gpa, source.input[start..source.cursor], options);

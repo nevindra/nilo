@@ -10996,6 +10996,66 @@ test "a second discriminator in a tagged body is a 400 naming the key" {
     try testing.expect(try Harness.saysFailure(twice, "\"kind\""));
 }
 
+const Queue = struct {
+    steps: []const Step,
+
+    /// Every variant a plain struct.
+    const Step = union(enum) {
+        pub const nilo_json = .{ .tag = "signal" };
+        pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+
+        queued,
+        run: struct { pid: u8 },
+    };
+};
+
+const Pairs = struct {
+    steps: []const Step,
+
+    /// A variant that is a tuple.
+    const Step = union(enum) {
+        pub const nilo_json = .{ .tag = "signal" };
+        pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+
+        queued,
+        run: struct { u8 },
+    };
+};
+
+fn takeQueue(incoming: Queue) !struct { n: usize } {
+    return .{ .n = incoming.steps.len };
+}
+
+fn takePairs(incoming: Pairs) !struct { n: usize } {
+    return .{ .n = incoming.steps.len };
+}
+
+test "a stray closing bracket where a tagged value should start is a 400, not an abort" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/queue", takeQueue);
+    try app.post("/pairs", takePairs);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const bodies = [_][]const u8{
+        "{\"steps\":[{\"signal\":\"queued\"},{\"signal\":\"queued\"}},{}]}",
+        "{\"steps\":[{\"signal\":\"queued\"}]}",
+        "{\"steps\":[{\"signal\":\"queued\"},]}",
+        "{\"steps\":[{\"signal\":\"queued\"}",
+        "{\"steps\":[{\"signal\":\"queued\"},}",
+        "{\"steps\":[}",
+    };
+    for (bodies, 0..) |body, i| {
+        for ([_][]const u8{ "/queue", "/pairs" }) |path| {
+            const answer = postJson(&h, &app, path, body);
+            // The one well-formed body is the only 200.
+            const want = if (i == 1) "HTTP/1.1 200 OK\r\n" else "HTTP/1.1 400 Bad Request\r\n";
+            try testing.expect(std.mem.startsWith(u8, answer, want));
+        }
+    }
+}
+
 // ---- a type that skips the keys it does not know (ADR 168) ----
 
 const LooseNote = struct {

@@ -40,6 +40,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ### Fixed
 
+- **A body such as `{"steps":[{"signal":"queued"},}]}` no longer aborts the process.** A stray `}` or `]` where an internally tagged union (`nilo_json = .{ .tag = … }`) should start reached `unreachable` in `std.json`'s `skipValue`, which is undefined behaviour in ReleaseFast; it is a 400 now. Present in 0.7.0.
 - **A connection over TLS no longer waits on a socket that has nothing for a record it already holds.** The record layer takes whatever the socket has and decrypts one record a call, so a client that sent a second frame right behind its first (HTTP/2's `HEADERS` behind its `SETTINGS`, one connection in a thousand) left the server parked for bytes it had read; the wait now answers from the record layer first. A WebSocket over TLS parked in the same wait.
 
 ## Released
