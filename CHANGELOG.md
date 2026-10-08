@@ -27,6 +27,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 - **The idempotency and cache record encoders take the answer's trailers** beside its headers. A record written before reads the same.
 - **`c.connection()` is removed.** It named an HTTP/1.1 `Connection` line, which HTTP/2 does not have. `c.keepAlive()` says whether the connection will carry another request, and is the same on both.
 - **On HTTP/2, a request with a `content-type` that is not gRPC is served as HTTP**, where it was a 415. A build with `-Dhttp2` now answers every method but `CONNECT` (a 501) on a plain listener to a client that opens with the HTTP/2 preface.
+- **A `?T` field with no default is optional in a JSON body, as it already was in a query and a form**: leaving it out reads as null, nested objects and lists included, where it was a 400 `missing "x"`. The API document no longer lists such a field as required, and the sentence naming what an endpoint takes marks it `(optional)`. A body that must tell "not sent" from "sent as null" still uses `Patch(T)`; if you relied on the 400, give the field a type that is not optional ([ADR 011](docs/adr/011-the-query-string-is-a-struct-of-your-own.md)).
 
 ### Added
 

@@ -38,6 +38,8 @@ const Search = struct {
 fn search(db: *Db, params: Query(Search)) ![]const Item { ... }
 ```
 
+**The same rule holds for a form and for a JSON body, nested as deep as a body goes.** A field with a default may be absent and is its default. A `?T` may be absent and is null, with or without `= null`. Any other field is the client's to send, and leaving it out is a 400 naming it. `http/field.zig` holds this as one `FieldRule`, and every reader (`queryValue`, `Form(T)`, the JSON reader), every sentence that names a missing field or lists what an endpoint takes, and the API description ask it, so the next change reaches one place. `Patch(T)` is not an optional: it is absent by the `= .absent` its author writes, which is a default like any other (ADR 025).
+
 Field names are the query names, because Zig keeps field names and does not keep argument names — the same fact that forces path params to be positional makes query params nameable. Conversion and its error messages are shared with path params, so `?page=soon` and `:id` being wrong read the same way apart from the sigil.
 
 ## Why a wrapper rather than a marker on the struct
@@ -47,6 +49,10 @@ The obvious alternative was to leave it a plain struct and mark it, `pub const n
 It was rejected on two counts. A plain struct argument is already the request body, so with a marker the question "is this the body or the query?" moves out of the signature and into the struct's definition, possibly in another file. And the marker has to live in the caller's own type, which stops that type being an ordinary struct shared with code that has never heard of nilo.
 
 `Query(T)` costs one `.value` at each use and buys back a signature that can be read on its own. It also matches `Response(T)`, which already works this way, so there is one shape to learn rather than two.
+
+## What was rejected
+
+**`?T` with no default as required in a body.** That is what `std.json` does, so for a body it was the rule by accident and not by decision: a query and a form read the same field as null from the start, the API description said both followed one rule, and every example here writes `= null`, which is why nobody met the difference. The cost was a 400 for leaving out a field the same struct would have taken in a query, and a client writing `"nickname": null` for every field it had nothing to say about. A body that wants to tell "not sent" from "sent as null" asks for `Patch(T)`.
 
 ## What it rules out
 

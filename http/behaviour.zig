@@ -9291,6 +9291,178 @@ test "a box left blank is a field not given, where blank is not a value of its t
     try testing.expectEqual(@as(u16, 422), required.status);
 }
 
+// ---- `?T` with no default is optional in every slot (ADR 030, ADR 011) ----
+
+/// Whether an answer's failure sentence holds `wanted`, read off the JSON
+/// the client got back.
+fn answerSays(answer: nilo_testing.Answer, wanted: []const u8) !bool {
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, answer.body, .{});
+    defer parsed.deinit();
+    const message = (parsed.value.object.get("error") orelse return false).string;
+    return std.mem.indexOf(u8, message, wanted) != null;
+}
+
+const Contact = struct {
+    name: Str,
+    nickname: ?Str,
+    age: ?u32,
+};
+
+fn contactAnswer(arena: std.mem.Allocator, c: Contact) ![]const u8 {
+    const nickname = if (c.nickname) |n| n.view() else "(none)";
+    const age: i64 = if (c.age) |a| a else -1;
+    return std.fmt.allocPrint(arena, "name={s} nickname={s} age={d}", .{ c.name.view(), nickname, age });
+}
+
+fn contactFromQuery(arena: std.mem.Allocator, q: typed.Query(Contact)) ![]const u8 {
+    return contactAnswer(arena, q.value);
+}
+
+fn contactFromForm(arena: std.mem.Allocator, f: form_mod.Form(Contact)) ![]const u8 {
+    return contactAnswer(arena, f.value);
+}
+
+fn contactFromJson(arena: std.mem.Allocator, c: Contact) ![]const u8 {
+    return contactAnswer(arena, c);
+}
+
+fn contactFromBoundJson(arena: std.mem.Allocator, b: bound_mod.Bound(Contact)) ![]const u8 {
+    return contactAnswer(arena, b.value() orelse return b.fail());
+}
+
+test "a ?T with no default is null when absent in a query, a form and a JSON body alike" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/query", contactFromQuery);
+    try app.post("/form", contactFromForm);
+    try app.post("/json", contactFromJson);
+    try app.post("/bound", contactFromBoundJson);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const expected = "name=wati nickname=(none) age=-1";
+    const from_query = try client.get(&app, "/query?name=wati");
+    try testing.expectEqual(@as(u16, 200), from_query.status);
+    try testing.expectEqualStrings(expected, from_query.body);
+
+    const from_form = try client.postWith(&app, "/form", "application/x-www-form-urlencoded", "name=wati");
+    try testing.expectEqual(@as(u16, 200), from_form.status);
+    try testing.expectEqualStrings(expected, from_form.body);
+
+    for ([_][]const u8{ "/json", "/bound" }) |path| {
+        const from_json = try client.postWith(&app, path, "application/json", "{\"name\":\"wati\"}");
+        try testing.expectEqual(@as(u16, 200), from_json.status);
+        try testing.expectEqualStrings(expected, from_json.body);
+
+        // Sent as null is the same null, and sent with a value is that value.
+        const null_sent = try client.postWith(&app, path, "application/json", "{\"name\":\"wati\",\"age\":null}");
+        try testing.expectEqualStrings(expected, null_sent.body);
+        const given = try client.postWith(&app, path, "application/json", "{\"name\":\"wati\",\"age\":7}");
+        try testing.expectEqualStrings("name=wati nickname=(none) age=7", given.body);
+    }
+
+    // The field that has no `?` and no default is still the client's to send.
+    const unnamed = try client.postWith(&app, "/json", "application/json", "{\"age\":7}");
+    try testing.expectEqual(@as(u16, 400), unnamed.status);
+    try testing.expect(try answerSays(unnamed, "the request body is missing \"name\" (text)"));
+}
+
+const Dropoff = struct { street: Str, unit: ?Str };
+const Parcel = struct { to: Str, address: Dropoff, extras: []const Dropoff = &.{} };
+
+fn parcelAnswer(p: Parcel) !struct { to: []const u8, unit: ?[]const u8, extras: usize } {
+    return .{
+        .to = p.to.view(),
+        .unit = if (p.address.unit) |u| u.view() else null,
+        .extras = p.extras.len,
+    };
+}
+
+test "a ?T with no default is absent inside a nested object and a list of them" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/parcel", parcelAnswer);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const nested = try client.postWith(
+        &app,
+        "/parcel",
+        "application/json",
+        "{\"to\":\"wati\",\"address\":{\"street\":\"Jl. Braga\"},\"extras\":[{\"street\":\"a\"},{\"street\":\"b\",\"unit\":\"4\"}]}",
+    );
+    try testing.expectEqual(@as(u16, 200), nested.status);
+    try testing.expectEqualStrings("{\"to\":\"wati\",\"unit\":null,\"extras\":2}", nested.body);
+
+    // What the inside of an object lacks is still named, with its path.
+    const lacking = try client.postWith(&app, "/parcel", "application/json", "{\"to\":\"wati\",\"address\":{\"unit\":\"4\"}}");
+    try testing.expectEqual(@as(u16, 400), lacking.status);
+    try testing.expect(try answerSays(lacking, "the request body is missing \"address.street\" (text)"));
+}
+
+test "a body that is wrong somewhere else never calls an absent ?T missing" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/json", contactFromJson);
+    try app.post("/bound", contactFromBoundJson);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // The plain 400 names the field that is wrong, and the typo's sentence
+    // lists the ones that may be left out.
+    const wrong = try client.postWith(&app, "/json", "application/json", "{\"name\":\"wati\",\"age\":\"soon\"}");
+    try testing.expectEqual(@as(u16, 400), wrong.status);
+    try testing.expect(try answerSays(wrong, "\"age\" has to be a whole number"));
+    const typo = try client.postWith(&app, "/json", "application/json", "{\"nme\":\"wati\"}");
+    try testing.expect(try answerSays(typo, "It takes: name, nickname (optional), age (optional)"));
+
+    // A binding collects the fields that did not bind, and an absent ?T is
+    // not one of them.
+    const bound = try client.postWith(&app, "/bound", "application/json", "{\"age\":\"soon\"}");
+    try testing.expectEqual(@as(u16, 422), bound.status);
+    try testing.expect(try answerSays(bound, "2 fields did not fit"));
+    try testing.expect(try answerSays(bound, "the request body is missing \"name\" (text)"));
+    try testing.expect(try answerSays(bound, "\"age\" has to be a whole number"));
+    try testing.expect(std.mem.indexOf(u8, bound.body, "nickname") == null);
+
+    // The same, with the field that is wrong inside an object that lacks a ?T.
+    try app.post("/parcel", parcelAnswer);
+    const inside = try client.postWith(
+        &app,
+        "/parcel",
+        "application/json",
+        "{\"to\":\"wati\",\"address\":{\"street\":\"Jl. Braga\"},\"extras\":{}}",
+    );
+    try testing.expectEqual(@as(u16, 400), inside.status);
+    try testing.expect(try answerSays(inside, "\"extras\" has to be a list, not an object"));
+}
+
+test "the document says a ?T with no default may be left out of a query and a body alike" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.get("/query", contactFromQuery);
+    try app.post("/json", contactFromJson);
+
+    const json = try docsFor(&app);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+
+    const params = parsed.value.object.get("paths").?.object
+        .get("/query").?.object.get("get").?.object.get("parameters").?.array.items;
+    try testing.expect(params[0].object.get("required").?.bool);
+    try testing.expect(!params[1].object.get("required").?.bool);
+    try testing.expect(!params[2].object.get("required").?.bool);
+
+    const required = parsed.value.object.get("components").?.object.get("schemas").?.object
+        .get("Contact").?.object.get("required").?.array.items;
+    try testing.expectEqual(@as(usize, 1), required.len);
+    try testing.expectEqualStrings("name", required[0].string);
+}
+
 // ---- request ids ----
 
 const logger_mod = @import("logger.zig");

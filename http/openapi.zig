@@ -33,6 +33,7 @@ const str_mod = @import("nilo_core");
 const patch_mod = @import("patch.zig");
 const mark = @import("jsonmark.zig");
 const convert = @import("convert.zig");
+const field_mod = @import("field.zig");
 
 const Str = str_mod.Str;
 
@@ -493,7 +494,10 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                     fields = fields ++ [_]Field{.{
                         .name = mark.wire(f_name, said),
                         .schema = schemaWithin(f_type, depth + 1),
-                        .required = f_attrs.default_value_ptr == null,
+                        // The rule the readers apply (`field.zig`): a field the
+                        // client may leave out is not required, whether it has
+                        // a default or is a `?T`.
+                        .required = !field_mod.FieldRule(f_type, f_attrs).may_be_absent,
                     }};
                 }
                 break :blk held(.{ .object = .{
@@ -1743,6 +1747,18 @@ test "a struct where nothing is required says so by leaving the list out" {
     const AllOptional = struct { page: u32 = 1 };
     try expectSchema(AllOptional,
         \\{"type":"object","properties":{"page":{"type":"integer","minimum":0}}}
+    );
+}
+
+test "a ?T with no default is optional in a struct as a default is, because absent reads as null" {
+    const Contact = struct {
+        name: Str,
+        nickname: ?Str,
+        age: ?u32,
+        plan: u8 = 1,
+    };
+    try expectSchema(Contact,
+        \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"age":{"anyOf":[{"type":"integer","minimum":0},{"type":"null"}]},"plan":{"type":"integer","minimum":0}},"required":["name"]}
     );
 }
 

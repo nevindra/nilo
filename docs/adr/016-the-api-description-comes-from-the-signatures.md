@@ -79,7 +79,7 @@ A specification that lies is worse than none, so the places where a Zig signatur
 - **A self-referential type is followed eight deep and then stops** (`max_depth`), because the alternative is a compiler that does not finish.
 - **A `400` is listed only where nilo can actually produce one**: a route with a typed path param, a query struct, or a body.
 
-What it does claim, it claims because the type said so: `:id` on a handler taking `u32` is an integer, a query field with a default is not required, an enum is the list of its names, `?T` is `anyOf [T, null]`.
+What it does claim, it claims because the type said so: `:id` on a handler taking `u32` is an integer, a query or body field with a default, or a `?T`, is not required, an enum is the list of its names, `?T` is `anyOf [T, null]`.
 
 ### The one thing it gets wrong, and why it is left wrong
 

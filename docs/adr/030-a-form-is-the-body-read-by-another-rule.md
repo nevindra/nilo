@@ -11,7 +11,7 @@ The tempting version is to leave the signature alone and let a plain struct argu
 
 It makes the **API description lie**: the document would have to promise `application/json` or guess, and a generated client posting the wrong one gets a 400 from a server that could have said so up front. And it makes the endpoint's contract depend on what the caller happened to send, which is the opposite of every other thing nilo reads off a signature (ADR 016).
 
-So it is explicit, and it is spelled the way its neighbour is: `Query(T)` is the query string as a struct of yours, and `Form(T)` is the body as a struct of yours. Same rules in both — a field's type says what its text has to become, a default is what "not sent" means, `?T` may be absent — and the same conversions, which is why `convert.zig` now exists as one module instead of as two copies that could drift. `"age" has to be a whole number, not "soon"` is the same sentence a bad `?age=` has always produced.
+So it is explicit, and it is spelled the way its neighbour is: `Query(T)` is the query string as a struct of yours, and `Form(T)` is the body as a struct of yours. Same rules in both — a field's type says what its text has to become, a default is what "not sent" means, `?T` may be absent and is null (a JSON body follows that too, ADR 011) — and the same conversions, which is why `convert.zig` now exists as one module instead of as two copies that could drift. `"age" has to be a whole number, not "soon"` is the same sentence a bad `?age=` has always produced.
 
 ## The two encodings are one thing from here
 

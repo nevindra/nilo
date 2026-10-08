@@ -59,6 +59,6 @@ Being a union rather than an optional means the parts of nilo that walk a type h
 
 ## Consequences
 
-- New in the vocabulary and in `nilo.zig`. Nothing else changed shape, and nobody has to use it: `?T` in a body still means exactly what it meant.
+- New in the vocabulary and in `nilo.zig`. Nothing else changed shape, and nobody has to use it: `?T` in a body is absent as null, as it is in a query (ADR 011).
 - Writing `Patch(T)` as a handler argument is a compile error that says it belongs in a body struct and shows the two lines that put it there.
 - A `Patch(T)` in a *response* goes out as its value, or as null for both of the empty cases. That is the honest limit of the type in that direction — JSON has no way to leave a field out of a value that has it — and it is why this is documented as a type for reading a PATCH body rather than for describing a resource.

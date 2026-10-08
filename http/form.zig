@@ -34,6 +34,7 @@
 const std = @import("std");
 
 const convert = @import("convert.zig");
+const field_mod = @import("field.zig");
 const ctx_mod = @import("ctx.zig");
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
@@ -318,17 +319,6 @@ pub fn parse(arena: std.mem.Allocator, kind: Kind, body: []const u8) !Fields {
     };
 }
 
-/// Whether a field may be left out: it is optional, or it has a default.
-pub fn mayBeAbsent(comptime FieldType: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) bool {
-    return attrs.defaultValue(FieldType) != null or @typeInfo(FieldType) == .optional;
-}
-
-/// What a field left out is: its default, or null.
-pub fn absentValue(comptime FieldType: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) FieldType {
-    if (attrs.defaultValue(FieldType)) |default| return default;
-    return null;
-}
-
 /// Fill `T` from an already-parsed form.
 fn fill(comptime T: type, arena: std.mem.Allocator, fields: Fields, lifetime: *const str_mod.Lifetime) !T {
     const info = @typeInfo(T).@"struct";
@@ -336,10 +326,8 @@ fn fill(comptime T: type, arena: std.mem.Allocator, fields: Fields, lifetime: *c
     var out: T = undefined;
     inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
         const label = "\"" ++ f_name ++ "\"";
-        const Inner = switch (@typeInfo(f_type)) {
-            .optional => |o| o.child,
-            else => f_type,
-        };
+        const rule = field_mod.FieldRule(f_type, f_attrs);
+        const Inner = rule.Inner;
 
         if (comptime convert.listElement(f_type)) |Item| {
             // A list is never missing: a checkbox group with nothing ticked
@@ -352,24 +340,20 @@ fn fill(comptime T: type, arena: std.mem.Allocator, fields: Fields, lifetime: *c
                     .content_type = Str.fromRequest(part.content_type, lifetime),
                     .bytes = Str.fromRequest(part.bytes, lifetime),
                 };
-            } else if (f_attrs.defaultValue(f_type)) |default| {
-                @field(out, f_name) = default;
-            } else if (@typeInfo(f_type) == .optional) {
-                @field(out, f_name) = null;
+            } else if (comptime rule.may_be_absent) {
+                @field(out, f_name) = comptime rule.absent();
             } else {
                 return fail.badRequest("the form is missing the file " ++ label, .{});
             }
         } else if (fields.find(f_name)) |raw| {
             const arrived = Str.fromRequest(raw, lifetime);
-            if ((comptime mayBeAbsent(f_type, f_attrs)) and convert.emptyIsAbsent(Inner, .form, arrived)) {
-                @field(out, f_name) = comptime absentValue(f_type, f_attrs);
+            if ((comptime rule.may_be_absent) and convert.emptyIsAbsent(Inner, .form, arrived)) {
+                @field(out, f_name) = comptime rule.absent();
             } else {
                 @field(out, f_name) = try convert.convert(Inner, .form, arrived, label);
             }
-        } else if (f_attrs.defaultValue(f_type)) |default| {
-            @field(out, f_name) = default;
-        } else if (@typeInfo(f_type) == .optional) {
-            @field(out, f_name) = null;
+        } else if (comptime rule.may_be_absent) {
+            @field(out, f_name) = comptime rule.absent();
         } else {
             return fail.badRequest(
                 "the form is missing " ++ label ++ " ({s})",
@@ -399,10 +383,8 @@ fn fillCollecting(
     comptime @setEvalBranchQuota(convert.budget(info.field_names));
     var out: T = undefined;
     inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
-        const Inner = switch (@typeInfo(f_type)) {
-            .optional => |o| o.child,
-            else => f_type,
-        };
+        const rule = field_mod.FieldRule(f_type, f_attrs);
+        const Inner = rule.Inner;
         outcomes[i] = .{};
 
         if (comptime convert.listElement(f_type)) |Item| {
@@ -414,10 +396,8 @@ fn fillCollecting(
                     .content_type = Str.fromRequest(part.content_type, lifetime),
                     .bytes = Str.fromRequest(part.bytes, lifetime),
                 };
-            } else if (f_attrs.defaultValue(f_type)) |default| {
-                @field(out, f_name) = default;
-            } else if (@typeInfo(f_type) == .optional) {
-                @field(out, f_name) = null;
+            } else if (comptime rule.may_be_absent) {
+                @field(out, f_name) = comptime rule.absent();
             } else {
                 outcomes[i].reason = .missing;
             }
@@ -429,18 +409,16 @@ fn fillCollecting(
             outcomes[i].given = arrived;
 
             var converted: Inner = undefined;
-            if ((comptime mayBeAbsent(f_type, f_attrs)) and convert.emptyIsAbsent(Inner, .form, arrived)) {
-                @field(out, f_name) = comptime absentValue(f_type, f_attrs);
+            if ((comptime rule.may_be_absent) and convert.emptyIsAbsent(Inner, .form, arrived)) {
+                @field(out, f_name) = comptime rule.absent();
             } else if (convert.tryConvert(Inner, .form, arrived, &converted)) |reason| {
                 outcomes[i].reason = reason;
                 if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
             } else {
                 @field(out, f_name) = converted;
             }
-        } else if (f_attrs.defaultValue(f_type)) |default| {
-            @field(out, f_name) = default;
-        } else if (@typeInfo(f_type) == .optional) {
-            @field(out, f_name) = null;
+        } else if (comptime rule.may_be_absent) {
+            @field(out, f_name) = comptime rule.absent();
         } else {
             outcomes[i].reason = .missing;
         }

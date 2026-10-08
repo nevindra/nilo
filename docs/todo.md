@@ -71,13 +71,7 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
-**`?T` with no default means optional in a query and required in a body.** `Query(T)` reads an absent field as null and std.json refuses it, while `openapi.zig` says both follow the same rule. The guides always write `= null`, which is why nobody has met it.
-
-**Needs:** one rule, and the description following it.
-
-**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
-
-**The OpenAPI document is looser than the server.** An unsigned integer gets `minimum: 0` and no `maximum`, although a `u8` refuses 256 with a 400, and a field with a default is marked not required in a response schema, although the writer always sends it, so a generated client null-checks every one.
+**The OpenAPI document is looser than the server.** An unsigned integer gets `minimum: 0` and no `maximum`, although a `u8` refuses 256 with a 400, and a field with a default or a `?T` is marked not required in a response schema, although the writer always sends it, so a generated client null-checks every one.
 
 **Needs:** `maximum` taken from the type, and `required` in a response schema meaning "always written".
 
@@ -85,9 +79,9 @@ Nothing is open at this tier.
 
 **Needs:** the test reader given the server's read-buffer size, and the jar honouring a past `Expires` and the two prefixes.
 
-**One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is decided in six (`form.fill`, `form.fillCollecting`, `typed.queryValue`, `typed.queryValueCollecting`, `ctx.collectBadBody`, `ctx.describeObject`) and has drifted three times: `Patch` under `Bound`, `?T` in a query and a body, a number described in a query and not in JSON. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
+**One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is now one comptime rule (`http/field.zig`), and a number described in a query and not in JSON is still open. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
 
-**Needs:** the shape of each shared piece decided — a comptime `FieldRule` that the six callers ask, one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the field rule and the prefix matcher first.
+**Needs:** the shape of each shared piece decided — one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the prefix matcher next.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 

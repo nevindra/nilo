@@ -32,6 +32,7 @@ const std = @import("std");
 const Str = @import("nilo_core").Str;
 const mark = @import("jsonmark.zig");
 const convert = @import("convert.zig");
+const field_mod = @import("field.zig");
 const fail = @import("fail.zig");
 const patch_mod = @import("patch.zig");
 const jsonfloat = @import("jsonfloat.zig");
@@ -250,6 +251,26 @@ pub fn parseLeaky(
         return err;
     };
     return parsed.value;
+}
+
+/// A JSON value that was already parsed, read into a `T` the way `parseLeaky`
+/// reads text: the same walk, so a number is spelled as a query's is and a
+/// `?T` the object left out is null (`field.zig`).
+///
+/// **For the diagnosis, which has the body as a `std.json.Value` and no text.**
+/// `std.json.parseFromValueLeaky` walks a value with its own rules, which
+/// refuse an absent `?T` and read `"1_0"` as a number, so a field read through
+/// it disagreed with the same field read from the body. The value is written
+/// back out and read again, which costs one more pass over a body that was
+/// already going to be refused.
+pub fn parseValueLeaky(
+    comptime T: type,
+    gpa: std.mem.Allocator,
+    value: std.json.Value,
+    options: std.json.ParseOptions,
+) std.json.ParseError(std.json.Scanner)!T {
+    const text = try std.json.Stringify.valueAlloc(gpa, value, .{});
+    return parseLeaky(T, gpa, text, options);
 }
 
 /// Put a sentence about the key an object has twice on this request's Failure.
@@ -471,9 +492,12 @@ pub fn readFields(
             }
         }
     }
+    // A field the object left out is its default or null, or the client's
+    // mistake: the rule a query and a form follow (`field.zig`).
     inline for (s.field_names, s.field_types, s.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
         if (!seen[i]) {
-            if (f_attrs.defaultValue(f_type)) |default| @field(r, f_name) = default else return error.MissingField;
+            const rule = field_mod.FieldRule(f_type, f_attrs);
+            if (comptime rule.may_be_absent) @field(r, f_name) = rule.absent() else return error.MissingField;
         }
     }
     return r;

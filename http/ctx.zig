@@ -15,6 +15,7 @@ const compress_mod = @import("compress.zig");
 const convert = @import("convert.zig");
 const cookie_mod = @import("cookie.zig");
 const encoded = @import("encoded.zig");
+const field_mod = @import("field.zig");
 const framing_mod = @import("framing.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
@@ -3173,6 +3174,7 @@ fn collectBadBody(
 
     const info = @typeInfo(T).@"struct";
     inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
+        const rule = field_mod.FieldRule(f_type, f_attrs);
         outcomes[i] = .{};
 
         if (object.get(f_name)) |given| {
@@ -3212,9 +3214,9 @@ fn collectBadBody(
                 // asked of `fits` first, which reads it the way a query's is
                 // (ADR 084).
                 const read: anyerror!f_type = if (comptime numberOf(f_type) == null)
-                    std.json.parseFromValueLeaky(f_type, arena, given, .{})
+                    json_mod.parseValueLeaky(f_type, arena, given, .{})
                 else if (fits(f_type, given))
-                    std.json.parseFromValueLeaky(f_type, arena, given, .{})
+                    json_mod.parseValueLeaky(f_type, arena, given, .{})
                 else
                     error.InvalidNumber;
                 if (read) |value| {
@@ -3242,11 +3244,11 @@ fn collectBadBody(
                     return misfit(T, if (deeper) tooDeep() else err);
                 }
             }
-        } else if (f_attrs.default_value_ptr == null) {
+        } else if (comptime rule.may_be_absent) {
+            @field(out, f_name) = comptime rule.absent();
+        } else {
             outcomes[i].reason = .missing;
             any = true;
-        } else {
-            @field(out, f_name) = f_attrs.defaultValue(f_type).?;
         }
     }
 
@@ -3299,11 +3301,11 @@ fn describeObject(
     }
 
     // Something the endpoint needs that the body does not carry. A field
-    // with a default is what "absent" is allowed to mean, so it is exempt —
-    // the same rule a query struct follows.
+    // that may be absent, because it has a default or is a `?T`, is exempt:
+    // the rule a query struct and a form follow (`field.zig`).
     const info = @typeInfo(T).@"struct";
     inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
-        if (f_attrs.default_value_ptr == null and !object.contains(f_name)) return fail.badRequest(
+        if (!field_mod.FieldRule(f_type, f_attrs).may_be_absent and !object.contains(f_name)) return fail.badRequest(
             "the request body is missing \"{s}\" ({s})",
             .{ nameWithin(arena, where, f_name), comptime expectedOf(f_type) },
         );
@@ -3339,8 +3341,8 @@ fn takes(comptime T: type, comptime within: Within) []const u8 {
         const info = @typeInfo(T).@"struct";
         var entries: [info.field_names.len + 1][]const u8 = undefined;
         entries[0] = within.tag;
-        for (info.field_names, info.field_attrs, 1..) |f_name, f_attrs, i| {
-            entries[i] = f_name ++ (if (f_attrs.default_value_ptr != null) " (optional)" else "");
+        for (info.field_names, info.field_types, info.field_attrs, 1..) |f_name, f_type, f_attrs, i| {
+            entries[i] = f_name ++ (if (field_mod.FieldRule(f_type, f_attrs).may_be_absent) " (optional)" else "");
         }
         return nameList(&entries);
     }
@@ -3623,8 +3625,8 @@ fn fieldList(comptime T: type) []const u8 {
     comptime {
         const info = @typeInfo(T).@"struct";
         var entries: [info.field_names.len][]const u8 = undefined;
-        for (info.field_names, info.field_attrs, 0..) |f_name, f_attrs, i| {
-            entries[i] = f_name ++ (if (f_attrs.default_value_ptr != null) " (optional)" else "");
+        for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
+            entries[i] = f_name ++ (if (field_mod.FieldRule(f_type, f_attrs).may_be_absent) " (optional)" else "");
         }
         return nameList(&entries);
     }

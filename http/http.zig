@@ -973,6 +973,7 @@ test {
     // above it.
     _ = @import("names.zig");
     _ = @import("patch.zig");
+    _ = @import("field.zig");
     _ = @import("convert.zig");
     _ = @import("message.zig");
     _ = @import("code.zig");

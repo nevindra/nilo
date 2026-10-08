@@ -29,8 +29,8 @@ That gives you an OpenAPI 3.1 document at `/openapi.json`, and a page for readin
 | In the signature | In the document |
 |---|---|
 | a path param | a `path` parameter, typed, required |
-| `Query(T)` | one query parameter per field; a field with a default is not required |
-| a struct argument | the request body schema |
+| `Query(T)` | one query parameter per field; a field with a default, or a `?T`, is not required |
+| a struct argument | the request body schema; a field with a default, or a `?T`, is not required |
 | an enum | the list of its names |
 | an optional field | a nullable property |
 | `!T` | the 200 response schema |

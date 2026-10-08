@@ -45,6 +45,8 @@ The types are checked before your handler runs, so the answers to a client that 
 ?sort is not one of the known choices (newest, oldest): "sideways"
 ```
 
+A `?T` is optional with or without `= null`, and the rule is the same in a [form](./forms.md) and a [JSON body](#json-bodies): a field with a default or a `?` may be left out, and any other must be sent.
+
 Values arrive percent-decoded, with `+` counting as a space the way an HTML form sends one. `Query(Search)` is an ordinary struct, so a test builds one directly (`listUsers(&db, .{ .value = .{ .page = 2 } })`) and never touches a query string.
 
 For one-off reads, [`c.query("q")`](../reference/ctx.md#reading) on a `*Ctx` gives a `?Str` and converts nothing. [ADR 011](../adr/011-the-query-string-is-a-struct-of-your-own.md) explains why the struct is the default.
@@ -73,7 +75,7 @@ the request body is not valid JSON — it stops making sense at line 1, column 1
 the request body is empty. This endpoint expects a JSON object with: title, done (optional)
 ```
 
-A field with a default may be absent, exactly as in a query struct. Working out which message to send costs a second parse, and only a request that was already going to be refused pays it.
+A field with a default may be absent, and so may a `?T`, which is then null: exactly as in a query struct, whether or not it says `= null`. Working out which message to send costs a second parse, and only a request that was already going to be refused pays it.
 
 Nested objects and lists are named by where the problem is, not by the top-level field that contains it:
 

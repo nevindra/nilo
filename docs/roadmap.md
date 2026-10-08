@@ -22,7 +22,6 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · `?T` with no default means optional in a query and required in a body.
 - [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
 - [P2](./todo.md#p2-evidence-it-matters) · Every module · The public surface has not been read back against the reference.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · Several comments and pages describe code that is no longer there.

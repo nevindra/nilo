@@ -26,7 +26,7 @@ It works like [`Query(T)`](./requests.md#query-params), but reads the body inste
 | `email: Str` | required: absent is a 400 saying which field |
 | `page: u32` | converted, and `page=soon` is a 400 saying so |
 | `sort: enum { newest, oldest }` | one of those words, or a 400 listing them |
-| `nickname: ?Str = null` | optional: absent is null |
+| `nickname: ?Str = null` | optional: absent is null, with or without the `= null` |
 | `limit: u32 = 20` | absent means the default |
 | `remember: bool = false` | a checkbox, see below |
 | `tags: []const Str = &.{}` | a checkbox group or a `<select multiple>`, see below |

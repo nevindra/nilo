@@ -42,6 +42,7 @@ const headers_mod = @import("headers.zig");
 const convert_mod = @import("convert.zig");
 const ctx_mod = @import("ctx.zig");
 const form_mod = @import("form.zig");
+const field_mod = @import("field.zig");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
@@ -1274,13 +1275,11 @@ fn queryFields(comptime T: type) []const openapi.Field {
             out = out ++ [_]openapi.Field{.{
                 .name = f_name,
                 .schema = openapi.schemaOf(f_type),
-                // Absent is allowed when there is a default to fall back to,
-                // or when the field is optional and absent means null — the
-                // same two exemptions `queryValue` applies at runtime. A list
-                // is never required: nothing sent is the empty list, which is
-                // what `queryValue` does with one (ADR 132).
-                .required = !is_list and
-                    f_attrs.default_value_ptr == null and @typeInfo(f_type) != .optional,
+                // Absent is allowed by the rule `queryValue` applies at run
+                // time (`field.zig`). A list is never required: nothing sent
+                // is the empty list, which is what `queryValue` does with one
+                // (ADR 132).
+                .required = !is_list and !field_mod.FieldRule(f_type, f_attrs).may_be_absent,
                 .list = is_list,
             }};
         }
@@ -2190,44 +2189,33 @@ fn collectListCollecting(
 
 /// Read the query string into `T`. A field that is absent falls back to its
 /// default, or to null if it is optional; one with neither is required, and
-/// saying so is a 400 rather than a surprise zero.
+/// saying so is a 400 rather than a surprise zero (`field.zig`).
 fn queryValue(comptime T: type, c: *const Ctx) !T {
     const info = @typeInfo(T).@"struct";
     comptime @setEvalBranchQuota(convert_mod.budget(info.field_names));
     var out: T = undefined;
     inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
         const label = "?" ++ f_name;
+        const rule = field_mod.FieldRule(f_type, f_attrs);
         if (comptime queryList(f_type)) |Item| {
             // A list is never "absent": nothing sent is the empty list, which
             // is what every filter written against one already means. A
             // default is still honoured, for the field that wants one.
             const found = try collectList(Item, c, f_name, label);
             if (found.len == 0) {
-                if (f_attrs.defaultValue(f_type)) |default| {
-                    @field(out, f_name) = default;
-                } else if (@typeInfo(f_type) == .optional) {
-                    @field(out, f_name) = null;
-                } else {
-                    @field(out, f_name) = &.{};
-                }
+                @field(out, f_name) = if (comptime rule.may_be_absent) comptime rule.absent() else &.{};
             } else {
                 @field(out, f_name) = found;
             }
         } else if (c.query(f_name)) |s| {
-            const Inner = switch (@typeInfo(f_type)) {
-                .optional => |o| o.child,
-                else => f_type,
-            };
             // A GET form sends a blank box as `age=`, as a POST one does.
-            if ((comptime form_mod.mayBeAbsent(f_type, f_attrs)) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
-                @field(out, f_name) = comptime form_mod.absentValue(f_type, f_attrs);
+            if ((comptime rule.may_be_absent) and convert_mod.emptyIsAbsent(rule.Inner, .query, s)) {
+                @field(out, f_name) = comptime rule.absent();
             } else {
-                @field(out, f_name) = try convert(Inner, .query, s, label);
+                @field(out, f_name) = try convert(rule.Inner, .query, s, label);
             }
-        } else if (f_attrs.defaultValue(f_type)) |default| {
-            @field(out, f_name) = default;
-        } else if (@typeInfo(f_type) == .optional) {
-            @field(out, f_name) = null;
+        } else if (comptime rule.may_be_absent) {
+            @field(out, f_name) = comptime rule.absent();
         } else {
             return fail.badRequest("{s} is required", .{label});
         }
@@ -2252,10 +2240,8 @@ fn queryValueCollecting(
     var out: T = undefined;
     inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
         outcomes[i] = .{};
-        const Inner = switch (@typeInfo(f_type)) {
-            .optional => |o| o.child,
-            else => f_type,
-        };
+        const rule = field_mod.FieldRule(f_type, f_attrs);
+        const Inner = rule.Inner;
 
         if (comptime queryList(f_type)) |Item| {
             // The same reading as `queryValue`, with the one difference this
@@ -2263,31 +2249,23 @@ fn queryValueCollecting(
             // rather than answered (ADR 132, `bound.zig`).
             const found = collectListCollecting(Item, c, f_name, &outcomes[i]) catch &.{};
             if (found.len == 0) {
-                if (f_attrs.defaultValue(f_type)) |default| {
-                    @field(out, f_name) = default;
-                } else if (@typeInfo(f_type) == .optional) {
-                    @field(out, f_name) = null;
-                } else {
-                    @field(out, f_name) = &.{};
-                }
+                @field(out, f_name) = if (comptime rule.may_be_absent) comptime rule.absent() else &.{};
             } else {
                 @field(out, f_name) = found;
             }
         } else if (c.query(f_name)) |s| {
             outcomes[i].given = s;
             var converted: Inner = undefined;
-            if ((comptime form_mod.mayBeAbsent(f_type, f_attrs)) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
-                @field(out, f_name) = comptime form_mod.absentValue(f_type, f_attrs);
+            if ((comptime rule.may_be_absent) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
+                @field(out, f_name) = comptime rule.absent();
             } else if (convert_mod.tryConvert(Inner, .query, s, &converted)) |reason| {
                 outcomes[i].reason = reason;
                 if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
             } else {
                 @field(out, f_name) = converted;
             }
-        } else if (f_attrs.defaultValue(f_type)) |default| {
-            @field(out, f_name) = default;
-        } else if (@typeInfo(f_type) == .optional) {
-            @field(out, f_name) = null;
+        } else if (comptime rule.may_be_absent) {
+            @field(out, f_name) = comptime rule.absent();
         } else {
             outcomes[i].reason = .missing;
         }
