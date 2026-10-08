@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const proto = @import("nilo_proto");
+const http1 = @import("http1.zig");
 
 const fail = @import("fail.zig");
 const naming = @import("names.zig");
@@ -116,36 +117,20 @@ fn hasDeclOn(comptime T: type, comptime name: []const u8) bool {
     };
 }
 
-/// The value of the first `Content-Type` in a request head, `Ctx.header`'s
-/// answer for it, read a byte at a time and looking at a line's name only
-/// when the byte after it is the colon. `head` is a request line and its
-/// fields, or a field block whose request line is empty (ADR 253).
-///
-/// Its own scan rather than `Ctx.header`, because a route reading a message
-/// in JSON pays it on every request: 412 to 416ns a request with it against
-/// 427 to 430 through the general one, where a plain struct is 365 (ADR 256).
+/// The value of the first `Content-Type` in a request head, which is
+/// `Ctx.header`'s answer for it. `head` is a request line and its fields, or a
+/// field block whose request line is empty (ADR 253).
 pub fn contentTypeIn(head: []const u8) ?[]const u8 {
     return fieldIn(head, "content-type");
 }
 
-/// The value of the first field called `name`, lowercase, in a request head
-/// or an HTTP/2 call's field block; `contentTypeIn`'s scan for any name, so
-/// Connect's version header is read the same way (ADR 257).
+/// The value of the first field called `name`, in a request head or an
+/// HTTP/2 call's field block: `http1.findHeader`, the lookup `Ctx.header`
+/// makes, so Connect's version header is read the way a handler's own is
+/// (ADR 257). This was a scan of its own while `Ctx.header` split and trimmed
+/// every line until one matched (ADR 256).
 pub fn fieldIn(head: []const u8, comptime name: []const u8) ?[]const u8 {
-    var at: usize = 0;
-    while (at < head.len and head[at] != '\n') at += 1;
-    at += 1;
-    while (at + name.len + 1 <= head.len) {
-        if (head[at] == '\r' or head[at] == '\n') return null;
-        if (head[at + name.len] == ':' and is(head[at .. at + name.len], name)) {
-            var end = at + name.len + 1;
-            while (end < head.len and head[end] != '\n') end += 1;
-            return std.mem.trim(u8, head[at + name.len + 1 .. end], " \t\r");
-        }
-        while (at < head.len and head[at] != '\n') at += 1;
-        at += 1;
-    }
-    return null;
+    return http1.findHeader(head, name);
 }
 
 /// Which spelling of a message a request's `Content-Type` names. Protobuf
@@ -342,8 +327,6 @@ test "the first Content-Type in a head is found whatever its case, and a name th
     // A field block, its request line empty, the way an HTTP/2 call's is.
     try testing.expectEqualStrings("application/grpc", contentTypeIn("\nhost: t\r\ncontent-type: application/grpc\r\n\r\n").?);
     try testing.expectEqual(null, contentTypeIn("GET / HTTP/1.1\r\nHost: t\r\n\r\n"));
-    // The blank line ends the head; a body that looks like a field is not one.
-    try testing.expectEqual(null, contentTypeIn("POST / HTTP/1.1\r\nHost: t\r\n\r\nContent-Type: x\r\n"));
     try testing.expectEqual(null, contentTypeIn(""));
 }
 

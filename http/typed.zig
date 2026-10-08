@@ -2447,7 +2447,7 @@ fn protoAnswer(c: *Ctx, spelling: anytype, value: anytype) !?[]const u8 {
 /// request parsing, and a byte on the `Ctx` 81 bytes of `serveRequest`,
 /// each in every program, where ADR 017 has the request path's size stay
 /// absent for a feature. The parser's was the faster, a message read as
-/// JSON within 4% of a plain struct where this is 13%. Here it is code only
+/// JSON within 4% of a plain struct where this is 12%. Here it is code only
 /// in a handler with a message in its signature (ADR 256).
 fn codecOf(c: *Ctx, spelling: *message.Codec) message.Codec {
     if (spelling.* == .unread) spelling.* = message.codecOf(message.contentTypeIn(c._head));

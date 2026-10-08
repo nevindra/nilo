@@ -254,6 +254,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try routerScale(gpa);
     if (routes_file) |file| try routeTable(gpa, file, whole / rounds);
     try serviceScale(gpa);
+    headerLookups();
+    contentTypeLookups();
     try messageRoutes(gpa);
     // A call is answered through the framing only a `-Dhttp2` build has
     // (ADR 220), so without the flag there is no gRPC call to time.
@@ -267,6 +269,102 @@ pub fn main(init: std.process.Init.Minimal) !void {
     );
 
     if (sink == 0) unreachable; // keeps the work from being optimised away
+}
+
+// ---- one header read out of a head (`Ctx.header`, ADR 256) ----
+//
+// The read every handler with a message, a form or a `c.header` call makes:
+// the iterator that splits and trims each line until a name matches, which
+// is what `Ctx.header` was, beside `http1.findHeader`, which looks only at
+// the lines that start with the name's letter. Each is asked for a name on the
+// third line of a short head, the first, the last of a browser's fifteen,
+// and one that is not there.
+
+const message_head = "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n";
+
+fn headerByIterator(head: []const u8, name: []const u8) ?[]const u8 {
+    var it = http1.HeaderIterator.from(head);
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    }
+    return null;
+}
+
+fn headerLookups() void {
+    const Case = struct { []const u8, []const u8, []const u8 };
+    const cases = [_]Case{
+        .{ "Content-Type, 3rd line of 4", message_head, "Content-Type" },
+        .{ "Host, 1st line of 4", message_head, "Host" },
+        .{ "Cookie, last of a browser's 15", browser_head, "Cookie" },
+        .{ "Accept-Language, 14th of 15", browser_head, "Accept-Language" },
+        .{ "X-Request-Id, not there (browser)", browser_head, "X-Request-Id" },
+    };
+    const none: []const u8 = "";
+    std.debug.print("\nOne header read out of a head, in a loop of its own:\n\n", .{});
+    inline for (cases) |case| {
+        const head = unseen(case[1]);
+        var name: []const u8 = case[2];
+        std.mem.doNotOptimizeAway(&name);
+        var old_best: u64 = std.math.maxInt(u64);
+        var new_best: u64 = std.math.maxInt(u64);
+        for (0..reps + 1) |rep| {
+            var started = clock();
+            for (0..rounds) |_| sink += (headerByIterator(head, name) orelse none).len;
+            const old_took = clock() - started;
+            started = clock();
+            for (0..rounds) |_| sink += (http1.findHeader(head, name) orelse none).len;
+            const new_took = clock() - started;
+            if (rep > 0) {
+                old_best = @min(old_best, old_took);
+                new_best = @min(new_best, new_took);
+            }
+        }
+        std.debug.print("  {s:<36}iterator {d:>3}ns   findHeader {d:>3}ns\n", .{ case[0], old_best / rounds, new_best / rounds });
+    }
+}
+
+/// `message.fieldIn` as ADR 256 shipped it, a byte at a time with its name
+/// known while compiling, kept here to time the lookup that replaced it.
+fn shippedFieldIn(head: []const u8, comptime name: []const u8) ?[]const u8 {
+    var at: usize = 0;
+    while (at < head.len and head[at] != '\n') at += 1;
+    at += 1;
+    while (at + name.len + 1 <= head.len) {
+        if (head[at] == '\r' or head[at] == '\n') return null;
+        if (head[at + name.len] == ':' and std.ascii.eqlIgnoreCase(head[at .. at + name.len], name)) {
+            var end = at + name.len + 1;
+            while (end < head.len and head[end] != '\n') end += 1;
+            return std.mem.trim(u8, head[at + name.len + 1 .. end], " \t\r");
+        }
+        while (at < head.len and head[at] != '\n') at += 1;
+        at += 1;
+    }
+    return null;
+}
+
+fn contentTypeLookups() void {
+    const msg = @import("message.zig");
+    const head = unseen(message_head);
+    var old_best: u64 = std.math.maxInt(u64);
+    var new_best: u64 = std.math.maxInt(u64);
+    var cls_best: u64 = std.math.maxInt(u64);
+    for (0..reps + 1) |rep| {
+        var started = clock();
+        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(shippedFieldIn(head, "content-type")));
+        const old_took = clock() - started;
+        started = clock();
+        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(msg.contentTypeIn(head)));
+        const new_took = clock() - started;
+        started = clock();
+        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(head[40..56]));
+        const cls_took = clock() - started;
+        if (rep > 0) {
+            old_best = @min(old_best, old_took);
+            new_best = @min(new_best, new_took);
+            cls_best = @min(cls_best, cls_took);
+        }
+    }
+    std.debug.print("  {s:<36}shipped {d:>3}ns   findHeader {d:>3}ns   (codecOf alone {d}ns)\n", .{ "Content-Type to a codec, msg head", old_best / rounds, new_best / rounds, cls_best / rounds });
 }
 
 // ---- a message read in either spelling (ADR 256) ----
@@ -296,16 +394,22 @@ fn sumPlain(in: struct { a: i32 = 0, b: i32 = 0 }) struct { total: i32 } {
     return .{ .total = in.a + in.b };
 }
 
+fn sumForm(f: @import("form.zig").Form(struct { a: i32 = 0, b: i32 = 0 })) struct { total: i32 } {
+    return .{ .total = f.value.a + f.value.b };
+}
+
 fn messageRoutes(gpa: std.mem.Allocator) !void {
     var message_app = App.init(gpa);
     defer message_app.deinit();
     try message_app.post("/sum", sumMessage);
     try message_app.post("/plain", sumPlain);
+    try message_app.post("/form", sumForm);
     try message_app.resolveChains();
 
     const requests = [_]struct { []const u8, []const u8 }{
         .{ "a plain struct, as JSON (the control)", "POST /plain HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}" },
         .{ "a message, as JSON", "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}" },
+        .{ "a form, urlencoded", "POST /form HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 7\r\n\r\na=1&b=2" },
         .{ "a message, as protobuf", "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02" },
     };
     var message_arena = std.heap.ArenaAllocator.init(gpa);

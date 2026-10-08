@@ -12090,3 +12090,60 @@ test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 fr
     try testing.expect(per_request <= h1_allocs);
     try testing.expectEqual(@as(usize, 0), (totals[1] - totals[0]) % 10);
 }
+
+test "c.header finds a name whether the head is borrowed or was copied for a body, and a name that only starts like it is not it" {
+    const Read = struct {
+        fn run(c: *Ctx) anyerror!void {
+            const wanted = if (c.header("x-wanted")) |v| v.view() else "none";
+            const prefix = if (c.header("X-Want")) |v| v.view() else "none";
+            const longer = if (c.header("X-Wanted-Too")) |v| v.view() else "none";
+            const twice = if (c.header("X-Twice")) |v| v.view() else "none";
+            var buf: [96]u8 = undefined;
+            try c.sendText(200, try std.fmt.bufPrint(&buf, "{s}|{s}|{s}|{s}", .{ wanted, prefix, longer, twice }));
+        }
+    };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/read", Read.run);
+    try app.post("/read", Read.run);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const head = "/read HTTP/1.1\r\nHost: t\r\nX-Wanted-Too: b\r\nX-WANTED:  a \r\nX-Twice: 1\r\nX-Twice: 2\r\n";
+    // Borrowed from the read buffer: a GET reads nothing after its head.
+    const borrowed = h.send(&app, "GET " ++ head ++ "\r\n");
+    try testing.expect(std.mem.endsWith(u8, borrowed.response, "a|none|b|1"));
+    // Copied into the arena: a request with a body reads again.
+    const kept = h.send(&app, "POST " ++ head ++ "Content-Length: 2\r\n\r\nhi");
+    try testing.expect(std.mem.endsWith(u8, kept.response, "a|none|b|1"));
+}
+
+test "the head a Ctx holds ends at its blank line, over HTTP/1.1 and over HTTP/2, which is what findHeader relies on" {
+    const Tail = struct {
+        fn run(c: *Ctx) anyerror!void {
+            const head = c._head;
+            const closed = std.mem.endsWith(u8, head, "\r\n\r\n") or std.mem.endsWith(u8, head, "\n\n");
+            // Nothing past the first blank line: it is the one at the end.
+            const first = std.mem.indexOf(u8, head, "\r\n\r\n") orelse std.mem.indexOf(u8, head, "\n\n") orelse head.len;
+            const only = first + (if (std.mem.indexOf(u8, head, "\r\n\r\n") != null) @as(usize, 4) else 2) == head.len;
+            const value = if (c.header("x-wanted")) |v| v.view() else "none";
+            var buf: [64]u8 = undefined;
+            try c.sendText(200, try std.fmt.bufPrint(&buf, "tail {s} {s}", .{ if (closed and only) "ok" else "bad", value }));
+        }
+    };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/tail", Tail.run);
+    try app.post("/tail", Tail.run);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const got = h.send(&app, "GET /tail HTTP/1.1\r\nHost: t\r\nX-Wanted: a\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, got.response, "tail ok a"));
+    const posted = h.send(&app, "POST /tail HTTP/1.1\r\nHost: t\r\nX-Wanted: a\r\nContent-Length: 17\r\n\r\nX-Wanted: b\r\n\r\nzz");
+    try testing.expect(std.mem.endsWith(u8, posted.response, "tail ok a"));
+    // The same route over HTTP/2, in a build that has it.
+    if (comptime !framing_mod.http2_built) return;
+    try expectSameAnswer(&app, .{ .path = "/tail", .fields = &.{.{ .name = "x-wanted", .value = "a" }}, .status = 200, .says = "tail ok a" });
+}

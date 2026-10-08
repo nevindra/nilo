@@ -616,6 +616,112 @@ pub const HeaderIterator = struct {
     }
 };
 
+/// `a` against `b` ignoring case, byte by byte and stopping at the first
+/// difference, which for a line that merely shares a first letter is the
+/// second byte. The same answer as `std.ascii.eqlIgnoreCase`, which lower-cases
+/// both sides of every byte and, measured, was most of a lookup (ADR 256).
+inline fn sameName(a: []const u8, b: []const u8) bool {
+    for (a, b) |x, y| {
+        const d = x ^ y;
+        if (d != 0 and (d != 0x20 or !std.ascii.isAlphabetic(x))) return false;
+        if (y == ':') return false;
+    }
+    return true;
+}
+
+/// The value of the first header called `name` (compared without case), or
+/// null: what `HeaderIterator` finds by splitting every line and trimming it,
+/// found by looking at the bytes that can start the line.
+///
+/// A line starts after a `\n`, and the one asked for starts with the name's
+/// first letter in either case, so one block's `\n` mask and the same block
+/// shifted a byte for that letter are `and`ed and only a line that passes both
+/// is looked at. Of those, one whose `:` is not exactly `name.len` bytes in
+/// is not this name, which is a byte compared where the iterator found the
+/// colon and trimmed. Measured against the iterator in
+/// `bench/result/http.md#a-header-is-looked-for-by-the-lines-that-can-hold-it`.
+/// A head the parser accepted has no space before a colon
+/// and a token for a name, so the name is the bytes up to the first `:` and
+/// this answers what the iterator does (ADR 256, `Ctx.header`).
+///
+/// **Relies on the head ending at its blank line**, which the iterator did not
+/// need: a line start after the blank line would be found. Every head a `Ctx`
+/// holds ends there. `readHead` returns the bytes up to the end of the head
+/// and not past it, the copy made for a request that reads again is of those
+/// bytes, and `h2conn.fieldHead` writes the blank line last. It is also the
+/// head `parseHead` or `parseFields` accepted, so a name is a token and has no
+/// space before its colon. A name that holds a `:` is never found, because no
+/// header's name does.
+///
+/// **The value is read out of line** (`valueAfter`), because inlined into the
+/// loop it made the lookup of an absent name slower: the loop lost its
+/// registers to a path it takes once.
+pub fn findHeader(head: []const u8, name: []const u8) ?[]const u8 {
+    if (name.len == 0) return null;
+    const first = name[0] | 0x20;
+    var i: usize = 0;
+    while (i + 1 < head.len) : (i += 16) {
+        var starts = headerStarts(head, i, first);
+        while (starts != 0) : (starts &= starts - 1) {
+            const at = i + 1 + @ctz(starts);
+            const colon = at + name.len;
+            if (colon >= head.len or head[colon] != ':') continue;
+            if (!sameName(head[at..colon], name)) continue;
+            return valueAfter(head, colon);
+        }
+    }
+    return null;
+}
+
+/// The value of the line whose `:` is at `colon`: what follows it up to the
+/// line's end, without the CR and without the spaces and tabs at either end.
+/// Out of `findHeader` so its loop keeps its registers, which the lookup is
+/// measured to lose when this is inlined into it (see `findHeader`).
+noinline fn valueAfter(head: []const u8, colon: usize) []const u8 {
+    var start = colon + 1;
+    var end = lineEnd(head, start);
+    if (end > start and head[end - 1] == '\r') end -= 1;
+    while (start < end and (head[start] == ' ' or head[start] == '\t')) start += 1;
+    while (end > start and (head[end - 1] == ' ' or head[end - 1] == '\t')) end -= 1;
+    return head[start..end];
+}
+
+/// Where the line that has reached `from` ends: its `\n`, or the end of the
+/// head, found sixteen bytes a load.
+inline fn lineEnd(head: []const u8, from: usize) usize {
+    const V = @Vector(16, u8);
+    var at = from;
+    while (at + 16 <= head.len) : (at += 16) {
+        const block: V = head[at..][0..16].*;
+        const lines: u16 = @bitCast(block == @as(V, @splat('\n')));
+        if (lines != 0) return at + @ctz(lines);
+    }
+    while (at < head.len and head[at] != '\n') at += 1;
+    return at;
+}
+
+/// Bit *k* is set when `head[at + k]` is a `\n` and the byte after it, folded,
+/// is `first`: the lines that start with a name's letter, sixteen bytes at a
+/// time, which is one compare and one mask a half where 32 lanes on a target
+/// without AVX2 are two of each joined. A tail shorter than a block loads from
+/// `len - 17` and shifts off what was looked at, as `scan.positionsOf` does.
+inline fn headerStarts(head: []const u8, at: usize, first: u8) u16 {
+    const V = @Vector(16, u8);
+    if (head.len < 17) {
+        var bits: u16 = 0;
+        for (head[at..], 0..) |ch, k| {
+            if (ch == '\n' and at + k + 1 < head.len and head[at + k + 1] | 0x20 == first) bits |= @as(u16, 1) << @intCast(k);
+        }
+        return bits;
+    }
+    const base = @min(at, head.len - 17);
+    const here: V = head[base..][0..16].*;
+    const next: V = head[base + 1 ..][0..16].*;
+    const lines: u16 = @bitCast(here == @as(V, @splat('\n')));
+    const firsts: u16 = @bitCast((next | @as(V, @splat(0x20))) == @as(V, @splat(first)));
+    return (lines & firsts) >> @intCast(at - base);
+}
+
 /// Wait until one complete head (up to the blank line) is in the buffer,
 /// then return a slice of it without copying and without advancing the
 /// reader. The caller decides when to `in.toss(head.len)`.
@@ -3436,4 +3542,101 @@ test "a target that arrived without a request line is held to what one in a line
         .{ "GET", "http://example.com/" },
         .{ "CONNECT", "example.com:443" },
     }) |case| try testing.expectError(error.BadRequestLine, applyTarget(case[0], case[1], &r));
+}
+
+/// What `Ctx.header` did before `findHeader`: the first line the iterator
+/// yields whose name matches.
+fn headerByIterator(head: []const u8, name: []const u8) ?[]const u8 {
+    var it = HeaderIterator.from(head);
+    while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    return null;
+}
+
+test "a header is found by its name in any case, and its value is trimmed" {
+    const head = "GET / HTTP/1.1\r\nHost:   example.dev \t\r\nX-Token:abc\r\ncontent-TYPE: text/plain\r\nEmpty:\r\n\r\n";
+    try testing.expectEqualStrings("example.dev", findHeader(head, "host").?);
+    try testing.expectEqualStrings("example.dev", findHeader(head, "HOST").?);
+    try testing.expectEqualStrings("abc", findHeader(head, "x-token").?);
+    try testing.expectEqualStrings("text/plain", findHeader(head, "Content-Type").?);
+    try testing.expectEqualStrings("", findHeader(head, "empty").?);
+    try testing.expect(findHeader(head, "missing") == null);
+    try testing.expect(findHeader(head, "") == null);
+}
+
+test "a name that is a prefix of another, or has another as its prefix, is not the other" {
+    const head = "GET / HTTP/1.1\r\nHost-Extra: 1\r\nAccept-Encoding: gzip\r\nAccept: */*\r\nHo: 2\r\n\r\n";
+    try testing.expectEqualStrings("*/*", findHeader(head, "Accept").?);
+    try testing.expectEqualStrings("gzip", findHeader(head, "accept-encoding").?);
+    try testing.expectEqualStrings("2", findHeader(head, "Ho").?);
+    try testing.expect(findHeader(head, "Host") == null);
+    try testing.expect(findHeader(head, "Accept-Encodin") == null);
+    try testing.expect(findHeader(head, "Accept-Encodings") == null);
+    // Nor is a name found inside a value, or the request line.
+    try testing.expect(findHeader("GET /Host:x HTTP/1.1\r\nA: b\r\n\r\n", "Host") == null);
+    try testing.expect(findHeader("GET / HTTP/1.1\r\nA: b host: y\r\n\r\n", "host") == null);
+}
+
+test "a header sent twice answers the first, and a name with a colon in it is never found" {
+    const head = "GET / HTTP/1.1\r\nX-A: one\r\nX-A: two\r\nX: y\r\n\r\n";
+    try testing.expectEqualStrings("one", findHeader(head, "x-a").?);
+    try testing.expect(findHeader(head, "x-a:") == null);
+    try testing.expect(findHeader(head, "X:") == null);
+}
+
+test "a bare LF line end and an HTTP/2 call's empty request line are read alike" {
+    try testing.expectEqualStrings("b", findHeader("GET / HTTP/1.1\nA: b\n\n", "a").?);
+    try testing.expectEqualStrings("t", findHeader("\nhost: t\r\ncontent-length: 4\r\n\r\n", "host").?);
+    try testing.expectEqualStrings("4", findHeader("\nhost: t\r\ncontent-length: 4\r\n\r\n", "content-length").?);
+}
+
+test "findHeader reads every head the parser accepts as the iterator does, at every block boundary" {
+    var prng = std.Random.DefaultPrng.init(0x4ead);
+    const rng = prng.random();
+    const names = [_][]const u8{ "Host", "host-x", "Content-Type", "Content-Length", "Accept", "Accept-Encoding", "X-Request-Id", "Cookie", "Origin", "A", "a-b", "X-1", "Authorization" };
+    const probes = names ++ [_][]const u8{ "HOST", "content-type", "Hos", "Hostt", "Missing", "x", "content-typ", "a:", "A-B", "x-1", "" };
+    // Bytes a value may hold, among them the colon, the tab, and letters that
+    // start a probe's name, so a name inside a value is tried.
+    const value_bytes = "abc :;=xHhost\tAaCc";
+    var buf: [2048]u8 = undefined;
+    var checked: usize = 0;
+    for (0..6000) |_| {
+        var w = std.Io.Writer.fixed(&buf);
+        const with_line = rng.boolean();
+        const eol: []const u8 = if (rng.boolean()) "\n" else "\r\n";
+        if (with_line) {
+            w.writeAll("GET /a?b=c HTTP/1.1") catch unreachable;
+            w.writeAll(eol) catch unreachable;
+        } else w.writeAll("\n") catch unreachable;
+        w.print("Host: t{s}", .{eol}) catch unreachable;
+        for (0..rng.uintLessThan(usize, 14)) |_| {
+            const n = names[rng.uintLessThan(usize, names.len)];
+            for (n) |ch| {
+                const flip = rng.boolean() and std.ascii.isAlphabetic(ch);
+                w.writeByte(if (flip) ch ^ 0x20 else ch) catch unreachable;
+            }
+            w.writeAll(":") catch unreachable;
+            if (rng.boolean()) w.writeAll(" ") catch unreachable;
+            for (0..rng.uintLessThan(usize, 30)) |_| w.writeByte(value_bytes[rng.uintLessThan(usize, value_bytes.len)]) catch unreachable;
+            if (rng.boolean()) w.writeAll(" \t") catch unreachable;
+            w.writeAll(eol) catch unreachable;
+        }
+        w.writeAll(eol) catch unreachable;
+        const head = w.buffered();
+        var r = Request{};
+        if (with_line) parseHead(head, &r) catch continue else parseFields(head, &r) catch continue;
+        checked += 1;
+        for (probes) |p| {
+            // The probe in a random case, as a caller may spell it.
+            var spelled: [32]u8 = undefined;
+            for (p, 0..) |ch, k| spelled[k] = if (rng.boolean() and std.ascii.isAlphabetic(ch)) ch ^ 0x20 else ch;
+            const probe = spelled[0..p.len];
+            const fast = findHeader(head, probe);
+            const slow = headerByIterator(head, probe);
+            if (slow) |sv| {
+                try testing.expectEqualStrings(sv, fast.?);
+                try testing.expectEqual(sv.ptr, fast.?.ptr);
+            } else try testing.expect(fast == null);
+        }
+    }
+    try testing.expect(checked > 1000);
 }

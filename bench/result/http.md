@@ -3663,6 +3663,45 @@ The control was 359 to 377 ns across these runs. A read of the head through `Ctx
 
 **The decision it moved:** the codec follows the request's `Content-Type`, read only by a handler with a message in its signature, and the parser's faster place is in ADR 256's rejected list with its 1.6 KB. **Can it be pushed further:** the 52 to 58 ns are a read of the head that the parser has already done once; a cheaper `Ctx.header` takes it down for every caller of it at once, forms included, and is in [`todo.md`](../../docs/todo.md).
 
+## A header is looked for by the lines that can hold it
+
+The todo entry that [a body read as what its type says](#a-body-read-as-what-its-type-says) left: `Ctx.header` split the head into lines and trimmed each until a name matched, 27 ns for the third line of a short head in a loop of its own and about 40 inside a request, and every `c.header`, every form's `Content-Type` and a message read as JSON paid it. **The questions: how cheap can one lookup be with no allocation and no byte on the request path, and how much of a message row's gap to a plain struct was the lookup.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, `taskset -c 2` for the in-process rows and `0-3,8-11` for the loops, under the shared bench lock. Before is `04a2e10` with this entry's `http/profile.zig` (its new rows included) so both binaries time the same requests; after is `04a2e10` with this change applied, the commit that adds this entry. The two `nilo-profile` binaries were built one after the other and run in turn, four rounds each.
+
+**What was built.** `http1.findHeader(head, name)`: sixteen bytes at a time (one `pcmpeqb` and one `pmovmskb` a mask on the baseline target, where 32 lanes are two of each joined), the mask of `\n` and the mask of the name's first letter in either case, read one byte on, `and`ed, so only a line that starts with that letter is looked at; of those, one whose byte `name.len` in is not `:` is thrown out without a compare; the survivor is compared byte by byte, stopping at the first difference, and its value is read out of line by `valueAfter`. `Ctx.header` and `message.fieldIn` (so `contentTypeIn` and Connect's version header) call it. `message.fieldIn`'s own byte-at-a-time scan, `Ctx.header`'s iterator walk and its `eqlIgnoreCase` are gone from those two.
+
+**A lookup in a loop of its own** (`zig build profile`, "one header read out of a head", best of five, `unseen` heads):
+
+| name asked | head | iterator (was `Ctx.header`) | `findHeader` |
+|---|---|---|---|
+| `Content-Type`, 3rd of 4 lines | 90 bytes | 21 ns | 6 ns |
+| `Host`, 1st of 4 | 90 bytes | 8 ns | 4 ns |
+| `Cookie`, last of a browser's 15 | 682 bytes | 120 to 122 ns | 34 ns |
+| `Accept-Language`, 14th of 15 | 682 bytes | 116 to 118 ns | 36 ns |
+| `X-Request-Id`, not there | 682 bytes | 116 to 120 ns | 32 ns |
+
+`Content-Type` to a codec (`codecOf` on the value, as a message route does) is 15 ns with the scan ADR 256 shipped and 9 with this.
+
+**Variants that lost**, each measured the same way on the third line: `std.ascii.eqlIgnoreCase` for the compare, 15 ns against 9 for a byte loop that stops at the first difference; 32 lanes, 9 to 12 against 6 to 8 for 16; the value's end found by `indexOfScalarPos` (36 ns on `Cookie`) and by a byte loop (43 to 48), against a sixteen-byte mask loop (34); the value inlined into the loop, which took an absent name from 32 ns to 66 because the loop lost its registers to a path it takes once, and `noinline` on `valueAfter` gave 32 back. Reading the end of the line from the block's own `\n` mask, to save the second search, measured the same as the search.
+
+**In a request** (`zig build profile`, "one POST whose body is two numbers", `taskset -c 2`, four rounds interleaved, before then after):
+
+| row | before | after |
+|---|---|---|
+| a plain struct, as JSON (the control) | 366 to 371 ns | 364 to 367 ns |
+| a message, as JSON | 441 to 445 ns | 408 to 413 ns |
+| a form, urlencoded | 379 to 387 ns | 359 to 362 ns |
+| a message, as protobuf | 284 to 287 ns | 263 to 268 ns |
+
+**A message read as JSON is 72 to 77 ns above the control before and 41 to 47 after**, and a form went from 10 to 20 ns above it to 5 below. A message as protobuf is 21 ns faster. **The lookup is not all of the message's gap.** With `contentTypeIn` returning a string the compiler cannot see through and doing no scan, the message row is 26 to 30 ns above the control, so about 14 of the remaining 41 to 47 is the lookup and about 30 is the cost of choosing a spelling (`codecOf`, the `Codec` in the wrapper, `readBody` and `protoAnswer`'s branches). With the string a constant the compiler can see (the first thing tried) the gap was 9 ns, which is the compiler folding the choice away and not a figure for anything that ships.
+
+**Size**, stripped `ReleaseFast`, before then after: `example-hello` 1,013,328 to 1,013,808 (+480), `example-forms` 1,122,232 to 1,122,840 (+608), `example-rest` 1,221,240 to 1,221,704 (+464), `example-orders` 1,392,168 to 1,392,648 (+480), and with `-Dhttp2` `example-hello` 1,147,680 to 1,148,144 (+464). By symbol in `example-hello` it is `ctx.Ctx.header` 618 to 783 and the new `http1.valueAfter` 232. A program with a message route also loses the byte scan `message.fieldIn` had (the profile binary, which has one, is 7,952 bytes smaller). **Allocations:** none; `behaviour.zig`'s budget test holds. **Idle memory** (`bench/mem.py`, `example-hello`, `/`, server on cores 0 to 3, two rounds each): 5,247, 5,197 and 5,190 bytes a connection at 1,000, 5,000 and 10,000 before and the same three after.
+
+**Held by:** the h1 fuzzer in ReleaseSafe on a new seed (`zig build fuzz -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -- --iterations 1000000 --seed 0xb7e4a91d33c5`, every property held), and a test in `http1.zig` that builds 4,000 heads the parser accepts, with and without a request line and with CRLF or bare LF, and asks `findHeader` and the iterator for sixteen names, comparing the answer and the address.
+
+**The decision it moved:** `Ctx.header` stays a read of the head with no list built, and is that lookup; the todo entry became the 30 ns that is not the read. **Can it be pushed further:** a head of a browser's size is 34 ns, about 0.8 ns a sixteen-byte load, and a build for a target with AVX2 (`-Dcpu`) was not tried, where a load would be 32 bytes; the lookup for a short head is 6 ns and what is left in it was not taken apart. The next gain on the message row is in the spelling's own cost, in [`todo.md`](../../docs/todo.md).
+
 ## A Connect client told its failure
 
 The second piece of the framing's fourth stage ([ADR 257](../../docs/adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)): a request carrying `Connect-Protocol-Version: 1` that fails is answered in Connect's error shape, in a program with a message route. **The question: what every program pays for a choice on the failure path that only some programs use, and where to put it so that is least.**

@@ -541,13 +541,13 @@ pub const Ctx = struct {
     /// Read straight out of the head each time rather than from a list
     /// built in advance. A list would mean an allocation on every request
     /// including the many that never look at a header at all, to save a
-    /// scan of a few hundred bytes on the few that look twice.
+    /// scan of a few hundred bytes on the few that look twice. The scan looks
+    /// only at the lines that start with the name's letter, where splitting and
+    /// trimming each line was several times the work (`http1.findHeader`,
+    /// ADR 256, and `bench/result/http.md#a-header-is-looked-for-by-the-lines-that-can-hold-it`).
     pub fn header(self: *const Ctx, name: []const u8) ?Str {
-        var it = http1.HeaderIterator.from(self._head);
-        while (it.next()) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, name)) return Str.fromRequest(h.value, self._lifetime);
-        }
-        return null;
+        const value = http1.findHeader(self._head, name) orelse return null;
+        return Str.fromRequest(value, self._lifetime);
     }
 
     /// One request header, as `headers()` hands them out.
