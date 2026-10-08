@@ -96,6 +96,13 @@
 //! - `spawn`/`spawnLocal`: start a fiber the running server owns, dealt
 //!   to the next executor or kept on the caller's. An Engine with one
 //!   thread has one answer to both (ADR 028, ADR 220).
+//! - `spawnLocalExact`: `spawnLocal` that fails with `error.InvalidPlacement`
+//!   where the Engine cannot keep the work on the caller's executor, instead
+//!   of dealing it elsewhere: an HTTP/2 connection queues its next call
+//!   behind a fiber only where the two share a thread (ADR 260). An Engine
+//!   with one thread never fails it.
+//! - `yield`: let the other fibers of this thread run. It is a cancellation
+//!   point and fails with `error.Canceled`, the only report of that cancel.
 //! - `Monitor`/`Signal`: a call waiting on its connection, and the connection
 //!   telling it so. `Monitor` is the Engine's `Mutex`, taken where a refusal
 //!   has nowhere to go, and `Signal` is its `Condition` parked on that
@@ -1335,7 +1342,9 @@ pub const Signal = struct {
 
 /// Let the other fibers of this thread run, and come straight back where
 /// there are none: how a connection with a great deal to write gives the calls
-/// it is writing for their turn between rounds (ADR 260).
+/// it is writing for their turn between rounds (ADR 260). It fails with
+/// `error.Canceled` when the fiber is cancelled, which is the only report of
+/// that cancel there will be.
 pub const yield = engine.yield;
 
 /// Run the writes between these two without a cancel reaching them: a
@@ -1359,6 +1368,10 @@ pub const spawn = engine.spawn;
 /// `spawn`, kept on the calling fiber's thread: for work that answers the
 /// fiber that started it, a gRPC call answering its connection (ADR 220).
 pub const spawnLocal = engine.spawnLocal;
+
+/// `spawnLocal` that fails with `error.InvalidPlacement` rather than
+/// dealing the work to another executor (ADR 260).
+pub const spawnLocalExact = engine.spawnLocalExact;
 
 // ---- files (ADR 009) ----
 //

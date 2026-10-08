@@ -55,9 +55,14 @@
 //!
 //! **One fiber reads and writes the socket; each request runs on a fiber of
 //! its own.** The connection's fiber parses frames and hands each request, as
-//! soon as its headers are in, to `bulkhead.spawnLocal`, which keeps it on
-//! the connection's thread where the Engine can and deals it to another
-//! where it cannot. The request's fiber runs the route into memory and hands
+//! soon as its headers are in, to `bulkhead.spawnLocalExact`, which keeps it
+//! on the connection's thread (where it cannot, every request has a fiber
+//! of its own). A request whose headers arrive while a fiber spawned for the
+//! connection has not begun is queued for that fiber, which takes it when
+//! it finishes its own call instead of ending (`runner`,
+//! `Conn.rendezvous`, ADR 260): one spawn for a burst, no fiber parked for a
+//! stream that has not arrived, and a call that is behind one that parks is
+//! given a fiber. The request's fiber runs the route into memory and hands
 //! the answer back through a queue and a `Waker.post`, and the connection's
 //! fiber writes it, as far as the flow-control windows allow; what a fiber
 //! tells the other (window to give back, `100 Continue` to send, room in the
@@ -286,6 +291,14 @@ const Shared = struct {
     dead: bool = false,
     /// Bytes of file buffers the calls of this connection hold now.
     file_held: std.atomic.Value(usize) = .init(0),
+    /// Calls started and not yet taken by a fiber, oldest first, and the
+    /// fibers spawned that have not begun their first call (`fresh`). Guarded
+    /// by `lock`. A call is queued only behind a fiber that has not begun,
+    /// and a fiber that finishes a call takes the next one queued instead of
+    /// ending (ADR 260).
+    pending_head: ?*Stream = null,
+    pending_tail: ?*Stream = null,
+    fresh: u32 = 0,
 
     fn create(gpa: std.mem.Allocator, waker: bulkhead.Waker) !*Shared {
         const s = try gpa.create(Shared);
@@ -345,6 +358,56 @@ const Shared = struct {
         }
         _ = s.running.fetchSub(1, .release);
         s.drop();
+    }
+
+    /// Under the lock: the oldest queued call, handed to a fiber about to be
+    /// spawned for it, unless a fiber that has not begun is there to take it.
+    fn takeFirstIfNoneFresh(s: *Shared) ?*Stream {
+        if (s.fresh != 0) return null;
+        const head = s.pending_head orelse return null;
+        s.pending_head = head.next;
+        if (s.pending_head == null) s.pending_tail = null;
+        head.next = null;
+        s.fresh += 1;
+        return head;
+    }
+
+    /// The oldest queued call, taken for good: the caller owns it.
+    fn takeQueued(s: *Shared) ?*Stream {
+        s.acquire();
+        defer s.release();
+        const head = s.pending_head orelse return null;
+        s.pending_head = head.next;
+        if (s.pending_head == null) s.pending_tail = null;
+        head.next = null;
+        return head;
+    }
+
+    /// `finish`, and the call this fiber runs next: the oldest one queued, or
+    /// null when the fiber is to end. The queue is read in the same hold of
+    /// the lock a fiber's own end is decided in, so a call queued after it
+    /// finds a fiber that is gone and is given another.
+    fn finishNext(s: *Shared, stream: *Stream) ?*Stream {
+        s.acquire();
+        const next = s.pending_head;
+        if (next) |n| {
+            s.pending_head = n.next;
+            if (s.pending_head == null) s.pending_tail = null;
+            n.next = null;
+        }
+        if (s.closed) {
+            s.release();
+            stream.destroy();
+        } else {
+            stream.next = null;
+            if (s.tail) |t| t.next = stream else s.head = stream;
+            s.tail = stream;
+            s.waker.post();
+            s.release();
+        }
+        _ = s.running.fetchSub(1, .release);
+        s.drop();
+        return next;
     }
 
     fn takeAll(s: *Shared) ?*Stream {
@@ -650,6 +713,9 @@ const Conn = struct {
     /// and a quiet one nothing.
     spare: ?*Stream = null,
     spares: u32 = 0,
+    /// A fiber that finishes a call takes the next one queued (ADR 260).
+    /// Off for a server whose tasks are not tied to an executor.
+    reuse: bool = true,
 
     fn newStream(c: *Conn, id: u31) !*Stream {
         if (c.spare) |s| {
@@ -723,6 +789,14 @@ const Conn = struct {
         c.out.flush() catch return;
 
         while (true) {
+            // Calls queued behind a fiber, and this fiber about to wait.
+            if (@atomicLoad(?*Stream, &c.shared.pending_head, .monotonic) != null and !c.frameBuffered()) {
+                const yielded = c.rendezvous() catch {
+                    c.closedWake();
+                    break;
+                };
+                if (yielded) continue;
+            }
             // What the calls said first, so a `100 Continue` is written ahead
             // of the answer that follows it (§8.1).
             c.service() catch break;
@@ -754,7 +828,10 @@ const Conn = struct {
                     // a connection that is only writing still reads the
                     // WINDOW_UPDATEs that keep a client going, a RST_STREAM,
                     // a PING or a GOAWAY (ADR 260).
-                    bulkhead.yield();
+                    bulkhead.yield() catch {
+                        c.closedWake();
+                        break;
+                    };
                     switch (c.waker.poll()) {
                         .readable => {},
                         .posted => continue,
@@ -1049,6 +1126,9 @@ const Conn = struct {
                 break;
             };
             if (started != 0 or c.out_more) continue;
+            if (@atomicLoad(?*Stream, &c.shared.pending_head, .monotonic) != null) {
+                if (c.rendezvous() catch break) continue;
+            }
             // A piece waiting on a window that nothing is left to open is not
             // going to move, and the call that lent it is told so.
             c.failStuck();
@@ -1060,7 +1140,7 @@ const Conn = struct {
         }
         c.abortInbound(true);
         while (c.shared.running.load(.acquire) != 0) {
-            if (c.out_more) bulkhead.yield() else bulkhead.sleep(1) catch break;
+            if (c.out_more) (bulkhead.yield() catch break) else bulkhead.sleep(1) catch break;
             if (!c.peer_gone) c.flushReady() catch {
                 c.peer_gone = true;
             };
@@ -1947,18 +2027,102 @@ const Conn = struct {
         s.state = .running;
         _ = s.shared.running.fetchAdd(1, .acquire);
         s.shared.retain();
-        bulkhead.spawnLocal(runCall, .{ s, true }) catch |err| switch (err) {
+        // Behind a fiber that has not begun its first call, a call is queued
+        // for it to take when it finishes its own (ADR 260); any other call
+        // has a fiber of its own, and takes the place of the oldest queued.
+        if (c.reuse) {
+            const sh = s.shared;
+            sh.acquire();
+            s.next = null;
+            if (sh.pending_tail) |t| t.next = s else sh.pending_head = s;
+            sh.pending_tail = s;
+            const first = sh.takeFirstIfNoneFresh();
+            sh.release();
+            const head = first orelse return;
+            return c.spawnRunner(head);
+        }
+        return c.spawnRunner(s);
+    }
+
+    /// Give `s` a fiber: the one that runs it and whatever is queued behind it.
+    fn spawnRunner(c: *Conn, s: *Stream) ReadError!void {
+        const sh = s.shared;
+        const spawned = if (c.reuse) bulkhead.spawnLocalExact(runner, .{s}) else bulkhead.spawnLocal(runCall, .{ s, true });
+        spawned catch |err| switch (err) {
             // No server: a test driving the connection through buffers.
-            error.NoServer => return c.startWithoutEngine(s),
-            // The server is stopping, and has nowhere to put a fiber.
+            error.NoServer => {
+                c.unfresh();
+                return c.startWithoutEngine(s);
+            },
+            // The tasks of this server are not tied to an executor, so a
+            // fiber cannot be kept to take the connection's next call.
+            error.InvalidPlacement => {
+                c.unfresh();
+                c.reuse = false;
+                try c.spawnRunner(s);
+                while (sh.takeQueued()) |q| try c.spawnRunner(q);
+                return;
+            },
+            // The server is stopping, and has nowhere to put a fiber: this
+            // call and every one queued are answered, none is left behind.
             else => {
-                _ = s.shared.running.fetchSub(1, .release);
-                s.shared.drop();
-                s.state = .headers;
-                return c.answerNow(s, 14, "the server is stopping");
+                c.unfresh();
+                var next: ?*Stream = s;
+                while (next) |q| : (next = sh.takeQueued()) {
+                    _ = sh.running.fetchSub(1, .release);
+                    sh.drop();
+                    q.state = .headers;
+                    try c.answerNow(q, 14, "the server is stopping");
+                }
+                return;
             },
         };
         c.settle();
+    }
+
+    fn unfresh(c: *Conn) void {
+        if (!c.reuse) return;
+        c.shared.acquire();
+        c.shared.fresh -= 1;
+        c.shared.release();
+    }
+
+    /// Whether a whole frame is buffered, so reading the next needs no wait.
+    fn frameBuffered(c: *Conn) bool {
+        const b = c.in.buffered();
+        if (b.len < h2.header_len) return false;
+        const len = (@as(usize, b[0]) << 16) | (@as(usize, b[1]) << 8) | b[2];
+        return b.len >= h2.header_len + len;
+    }
+
+    /// Called before the connection waits for anything: a call queued behind
+    /// a fiber is given the chance that fiber is one that parks. The fiber is
+    /// let run first (a yield, which puts this one behind it on the executor);
+    /// if it parked in its call, the queue is waiting on a call that has not
+    /// finished and the next call gets a fiber of its own, as every call did
+    /// before. A call therefore waits for no more than the calls ahead of it
+    /// finishing or suspending, which is all a fiber of its own would have
+    /// waited for on a single executor. True when this fiber yielded.
+    fn rendezvous(c: *Conn) error{Canceled}!bool {
+        const sh = c.shared;
+        var yielded = false;
+        while (true) {
+            sh.acquire();
+            if (sh.pending_head == null) {
+                sh.release();
+                return yielded;
+            }
+            const head = sh.takeFirstIfNoneFresh();
+            sh.release();
+            if (head) |h| {
+                c.spawnRunner(h) catch return yielded;
+                yielded = false;
+                continue;
+            }
+            if (yielded) return true;
+            yielded = true;
+            try bulkhead.yield();
+        }
     }
 
     fn startWithoutEngine(c: *Conn, s: *Stream) ReadError!void {
@@ -2461,9 +2625,54 @@ fn callThread(s: *Stream) void {
 /// turned back into frames. On a fiber of its own; everything it touches is
 /// the stream's, until `finish` hands the stream back.
 fn runCall(s: *Stream, on_engine: bool) void {
-    const shared = s.shared;
-    defer shared.finish(s);
+    defer s.shared.finish(s);
+    _ = callBody(s, on_engine);
+}
 
+/// A fiber's life on the Engine: the call it was spawned for, then each call
+/// that was queued behind it while it ran, until none is (ADR 260). It never
+/// waits for a call that has not arrived, so an idle connection holds no
+/// fiber. Whether any call handed an event stream over is remembered, because
+/// the stack is given back once, when the fiber ends.
+fn runner(first: *Stream) void {
+    var s = first;
+    s.shared.acquire();
+    s.shared.fresh -= 1;
+    s.shared.release();
+    var events = false;
+    while (true) {
+        if (callBody(s, true)) events = true;
+        var next = s.shared.finishNext(s);
+        // A stop was asked for while this fiber ran: a call still queued is
+        // answered as one the stopping server turned away, and not run, since
+        // the cancel the stop sent has been spent on the call before it
+        // (ADR 260).
+        while (next) |q| {
+            if (!q.app.stop.isRequested()) break;
+            turnAway(q);
+            next = q.shared.finishNext(q);
+        }
+        s = next orelse break;
+    }
+    if (events) bulkhead.releaseEndingFiberStack();
+}
+
+/// The answer of a call that was queued and is not run: gRPC status 14, or a
+/// 500 for any other request, the answers a connection gives a call it cannot
+/// start (`Conn.spawnRunner`).
+fn turnAway(s: *Stream) void {
+    s.state = .running;
+    if (s.grpc) {
+        s.head_block = grpc.trailersOnly(s.arena.allocator(), 14, .{ .ours = "the server is stopping" }) catch "";
+    } else {
+        s.head_block = "\x8e";
+    }
+    s.trailers_only = true;
+}
+
+/// The call itself, not yet handed back. True when it handed an event stream
+/// to the connection.
+fn callBody(s: *Stream, on_engine: bool) bool {
     // The box a fail function writes into, bound to this fiber the way a
     // connection binds its own (ADR 006). With no Engine there is no fiber
     // to bind to, and the fallback slot is the one a test uses.
@@ -2479,7 +2688,7 @@ fn runCall(s: *Stream, on_engine: bool) void {
         // An answer whose head is out cannot be replaced by a 500: it is
         // reset where it stands, which `writeReturned` does for a pipe whose
         // body was never ended.
-        if (s.out != null) return;
+        if (s.out != null) return false;
         if (s.grpc) {
             s.head_block = grpc.trailersOnly(s.arena.allocator(), 13, .{ .ours = "the server could not build its answer" }) catch "";
         } else {
@@ -2488,10 +2697,7 @@ fn runCall(s: *Stream, on_engine: bool) void {
         }
         s.trailers_only = true;
     };
-    // An event stream was handed to the connection and this fiber is about
-    // to end: its stack goes to the pool, and what the route touched in it
-    // is of no use there.
-    if (on_engine and s.events != null) bulkhead.releaseEndingFiberStack();
+    return s.events != null;
 }
 
 fn answer(s: *Stream, in_flight: *fail.InFlight) !void {

@@ -150,7 +150,7 @@ fn readAnswers(a: std.mem.Allocator, r: *std.Io.Reader, w: *std.Io.Writer, calls
                 _ = try decoder.decode(payload, a, &fields, 1 << 16);
                 const call = &calls[(head.stream - 1) / 2];
                 for (fields.items) |f| if (std.mem.eql(u8, f.name, "grpc-status")) {
-                    call.status = f.value;
+                    call.status = try a.dupe(u8, f.value);
                 };
                 if (head.has(h2.Flags.end_stream)) {
                     call.finished_at = frames;
@@ -377,6 +377,124 @@ test "two calls on one connection run at once, and the quick one is not held beh
     try testing.expectEqualStrings("slow", calls[0].message.items[5..]);
     try testing.expectEqualStrings("quick", calls[1].message.items[5..]);
     try testing.expect(calls[1].finished_at < calls[0].finished_at);
+}
+
+test "calls queued behind a fiber are given their own once it parks, and a burst of quick ones all complete" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try SocketDir.init(gpa, "grpc-burst.sock");
+    defer where.deinit(gpa);
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.post("/test.Echo/Slow", slowEcho);
+    try app.post("/test.Echo/Say", echo);
+
+    var serving: Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    try serving.waitUntilUp(io);
+
+    var stream = try connect(io, where.path);
+    defer stream.close(io);
+    var out_buf: [1024]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    var in_buf: [32 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+
+    try writer.interface.writeAll(h2.preface);
+    try h2.writeSettings(&writer.interface, &.{});
+    // A quick call, a slow one and then a burst of quick ones, in one write.
+    // The calls behind the slow one queue for a fiber that is about to run
+    // the first, and must be given fibers of their own once the slow one
+    // parks, so none of them waits for it (ADR 260).
+    const burst = 24;
+    var id: u31 = 1;
+    try writeCall(&writer.interface, id, "/test.Echo/Say", "first");
+    id += 2;
+    try writeCall(&writer.interface, id, "/test.Echo/Slow", "slow");
+    id += 2;
+    for (0..burst) |_| {
+        try writeCall(&writer.interface, id, "/test.Echo/Say", "quick");
+        id += 2;
+    }
+    try writer.interface.flush();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var calls: [burst + 2]Call = @splat(.{});
+    try readAnswers(arena.allocator(), &reader.interface, &writer.interface, &calls);
+    for (calls) |call| try testing.expectEqualStrings("0", call.status.?);
+    try testing.expectEqualStrings("slow", calls[1].message.items[5..]);
+    for (calls[2..]) |call| {
+        try testing.expectEqualStrings("quick", call.message.items[5..]);
+        try testing.expect(call.finished_at < calls[1].finished_at);
+    }
+}
+
+/// A handler that waits far longer than a stop is allowed to take.
+fn hang(c: *nilo.Ctx) anyerror!void {
+    try nilo.sleep(4_000);
+    return echo(c);
+}
+
+test "a server stop that lands in a burst of calls ends the connection promptly, however many are queued or sleeping" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try SocketDir.init(gpa, "grpc-stop-burst.sock");
+    defer where.deinit(gpa);
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.post("/test.Echo/Hang", hang);
+    try app.post("/test.Echo/Say", echo);
+
+    var serving: Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    var joined = false;
+    defer if (!joined) {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    };
+    try serving.waitUntilUp(io);
+
+    var stream = try connect(io, where.path);
+    defer stream.close(io);
+    var out_buf: [1024]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+
+    try writer.interface.writeAll(h2.preface);
+    try h2.writeSettings(&writer.interface, &.{});
+    // Quick calls, then sleeping ones queued behind them, in one write: the
+    // stop lands while the connection yields to the fiber running the first.
+    var id: u31 = 1;
+    for (0..4) |_| {
+        try writeCall(&writer.interface, id, "/test.Echo/Say", "quick");
+        id += 2;
+    }
+    for (0..12) |_| {
+        try writeCall(&writer.interface, id, "/test.Echo/Hang", "sleepy");
+        id += 2;
+    }
+    try writer.interface.flush();
+
+    const started = std.Io.Clock.awake.now(io);
+    app.shutdown();
+    thread.join();
+    joined = true;
+    const took_ms = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+    try testing.expect(took_ms < 2_500);
 }
 
 /// How many handlers are running right now, and the most there have been.

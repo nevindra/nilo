@@ -91,9 +91,6 @@ Nothing is open at this tier.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
-**The worst gRPC call is 1.4 s at 256 connections and 3.8 s at 1,024, where tonic's is about 1.1 s on the same four cores** ([`http.md`](../bench/result/http.md#a-grpc-listener-built)). h2load gives mean and maximum and no percentiles, so where the tail comes from is not known.
-
-**What would settle it:** `ghz` or another client with a latency histogram against `spike/grpc/server`, before and after a spawn homed on the calling executor. An afternoon.
 
 ---
 
@@ -401,9 +398,17 @@ Nothing is open at this tier.
 
 **What would settle it:** a decision between a 415 for a present non-JSON type and an absent one allowed, or the gap written into the CSRF guide as the reason `nilo.csrf` exists.
 
-**Whether a connection should start on the executor whose acceptor took it is not measured.** `spawnInto(.local)`, which a gRPC call already does, bought 2.7x there ([`http.md`](../bench/result/http.md#what-placing-a-grpc-call-on-its-own-executor-buys)). Against round-robin it removes the last per-connection cross-thread hop, and it leaves the spread across threads to whichever acceptor the kernel wakes ([ADR 200](./adr/200-every-executor-accepts.md)).
+**A call that cannot wait could run on the connection's fiber, and a prototype doubled a gRPC server's calls a second at 256 connections and took its worst call from 0.9 to 1.1 s down to 0.12 to 0.15.** In a scratch build a call whose stream has ended (a gRPC call is deferred until its message has) ran at once on the connection's fiber, with a turn-stamp guard that sends the connection's later calls to fibers once one parked: `nilo-grpc` at 256 connections 2.43M and 2.49M requests a second against 1.23M and 1.30M with the fiber reuse, p99 13 ms against 46 to 50, worst call 28 to 34 ms against 177 to 214; at 1,024 connections 1.40M and 1.87M against 0.95M and 1.08M, p99 70 to 76 ms against 507 to 519; a routed `GET` at `-m 10` 5% less CPU than the reuse; `-m 1` unchanged ([`http.md`](../bench/result/http.md#what-running-a-call-on-the-connections-fiber-would-buy-on-http2-and-what-the-head-built-for-the-app-costs)). It is not shippable as built: a call that parks stops the connection reading for as long as it parks, which ADR 260 refuses, a connection holds 60 bytes more idle, and the prototype stopped the existing suite at a test that expects a call to be running while its message is incomplete. The same run shows that the tail of the entry above is the cost of running calls long after their frames were parsed, not only zio's queue.
 
-**What would settle it:** gcannon's short-lived and keep-alive shapes, `.local` against round-robin, interleaved, with the connections each executor ends up holding. An afternoon.
+**What would settle it:** a decision on how a route is known not to wait (a typed handler whose service arguments do not wait, declared by the types of `nilo_sql`, `nilo_fetch`, `nilo_s3` and `cache`, with the guard as the net and a flag on the route), the revision of ADR 260's refusal that follows, the 60 bytes given back by an idle release of the connection's stack, and the same runs against it. It touches `typed.zig`, so it waits for that file to be free.
+
+**A request on HTTP/2 could enter the App as its decoded fields, and the most that saves is about 90 ns of 820.** `fieldHead` is 15 to 21 ns a call (repeated 99 times in a scratch build) and the parse of the head it builds is 73 ns, so 11% of a request in process, 7% of a server's CPU at `-m 10` and 3.5% at `-m 1`; the cost is a second representation of the head in `Ctx`, `typed.zig` and `message.zig`, and ADR 253's refusals as one validation over a field list that HTTP/1.1's parser would also have to produce ([`http.md`](../bench/result/http.md#what-running-a-call-on-the-connections-fiber-would-buy-on-http2-and-what-the-head-built-for-the-app-costs)).
+
+**What would settle it:** a cheaper way to give `Ctx` its fields than a rewrite of the parser, or a profile in which the two together are more than the 11%.
+
+**A gRPC call's latency under load has a spread of 3 to 4 times its median, and one cause is in zio's run queue, which nilo does not own.** At 1,024 connections with 100 streams each the median is 71 ms (what Little's law gives for 102,400 in flight at 1.1M req/s) and p99 430 to 550 ms, with a worst call of 0.84 to 1.07 s against tonic's 1.07 s in the same harness; the 1.4 s and 3.8 s of the first record do not reproduce. zio's ring of 256 tasks moves its oldest half to an overflow queue refilled 64 a tick, so a task's wait follows where it landed and not its age; a ring of 16,384 made p50 110 and p99 115 ms, and cost 25 to 30% of throughput at 1,024 connections ([`http.md`](../bench/result/http.md#where-a-grpc-calls-worst-latency-comes-from)).
+
+**What would settle it:** zio offering a run queue with bounded unfairness (the ring size as an option would do), and a measurement of whether the throughput it costs is worth the tail on a workload with a latency target.
 
 **Whether one acceptor per executor is past the knee on a machine with many threads is not measured there** ([ADR 200](./adr/200-every-executor-accepts.md)). dusty measured 12 and 24 accept loops losing 20–40% on one request per connection against 5, on 24 threads; at 8 threads on the 9700X log2's 3 gained 2–4% there and lost 5–6% at ten requests per connection ([`http.md`](../bench/result/http.md#how-many-acceptors-eight-threads-want)).
 
@@ -452,10 +457,6 @@ Nothing is open at this tier.
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
 ---
-
-**What is left of the pipe's cost on HTTP/2 is a monitor at the end of a stream that something else reads, and a `Stream` of 616 bytes rebuilt at each recycle.** Of the three changes this entry named, a start that does not happen twice and a pipe that takes no lock where nothing else touches it are done (`Inbox.endUnshared` for a stream that opened with no body to read), and with the other costs found in the same pass a routed `GET` over HTTP/2 went from 994 to 1,026 ns to 816 to 870 in process and a unary gRPC call from 948 to 1,011 to 772 to 826 ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-once-its-clocks-copies-and-passes-are-counted)). An `Inbox` per connection was not tried: a `Stream` rebuilt at recycle is 616 bytes written, and the connection after one `GET` holds the same 9,513 to 9,521 bytes an idle connection did before.
-
-**What would settle it:** a `Stream` that is not rebuilt at recycle and an `Inbox` per connection measured on the message rows of `zig build profile -Dhttp2` and on `mem.py --h2 --get`, against this entry's figures.
 
 ## P3: no evidence yet
 
@@ -713,10 +714,6 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**Every request on HTTP/2 spawns a fiber, where HTTP/1.1 runs it on the connection's.** A unary gRPC call is 767 to 773 ns in process against a routed HTTP/1.1 `GET`'s 410, and a routed `GET` over HTTP/2 is 963 to 971 ns ([`bench/result/http.md`](../bench/result/http.md#what-any-request-on-http2-costs)); the Engine's spawn is not in the profile, and sampling a real server under `h2load -m 10` puts it at about 9.5% of the CPU, near 140 ns a request; running the request on the stream's own fiber in an experiment bought nothing measurable. Now every request can arrive on HTTP/2 ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)), a browser's small `GET`s pay it too. A finished call's fiber taking the connection's next stream, rather than ending, would pay the spawn once per burst.
-
-**What would settle it:** the same sampled row with a fiber kept for the next stream, and what it does to a connection whose first stream is slow, since a kept fiber answers streams in turn where a spawned one does not wait for its neighbour (ADR 260).
-
 **A file on HTTP/2 over plain TCP has no `sendfile`.** Its pieces are read into frames ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)); a frame header written and its payload sent from the file would take the copy out for h2c, which is a proxy's upstream and not where a browser meets a static-heavy site.
 
 **What would settle it:** a deployment that serves files to a proxy over h2c, and the cost on record: a 64 MiB file over h2c is 3.2 GB/s against HTTP/1.1 `sendfile`'s 6.7 to 7.3 on loopback, one stream, with the file read 64 KiB at a time ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-when-its-answer-is-a-pipe)).
@@ -733,9 +730,9 @@ Nothing is open at this tier.
 
 **What would settle it:** a caller whose Connect client is set to use GET, or a design for reading `message=` that does not put a branch on every GET.
 
-**A burst of handed-over event streams on HTTP/2 leaves the Engine's stack pool holding 8 KiB for every fiber that was alive at once, 10 to 15 KB a stream instead of the 4.8 KB a stream that stays costs.** [`http.md`](../bench/result/http.md#the-spread-of-a-handed-over-stream-is-the-engines-stack-pool) explained the spread of 6 to 12 KB: ten thousand streams opened in a burst keep four to six thousand handler fibers alive together, and zio's pool keeps their stacks for a minute and more. A stack now goes back with only its top two pages resident (-10 to -31%), but the burst is not cut, so the figure still depends on how fast the streams arrive. Two things are left: the arena and the `Stream` of a handed-over stream (at most 1.4 KB of the 4.8, held by the `Outbox`, `Http2Events` and `Replay` list that live in it), and the number of fibers a burst needs.
+**A burst of handed-over event streams on HTTP/2 holds 5.2 to 5.7 KB a stream, where one that stays holds 4.8, and the stack pool still keeps 8 KiB for every fiber that was alive at once.** [`http.md`](../bench/result/http.md#the-spread-of-a-handed-over-stream-is-the-engines-stack-pool) explained a spread of 6 to 12 KB: ten thousand streams opened in a burst kept four to six thousand handler fibers alive together, and zio's pool keeps their stacks for a minute and more. A fiber that finishes a call now takes the connection's next waiting one ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)), so a burst of handlers that return at once is one fiber's work: 100 streams a connection measured 7.9 KB at 1,000 and 8.1 at 10,000 before, 5.2 and 5.7 after ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting)). What is left is the arena and the `Stream` of a handed-over stream (at most 1.4 KB of the 4.8, held by the `Outbox`, `Http2Events` and `Replay` list that live in it), and a burst whose handlers park, which still needs a fiber each.
 
-**What would settle it:** the pool's retained stacks counted over time after the same burst at a `stack_pool.shrink_interval` of 5 s, which is zio's option and the Engine's to set; and the arena given back once `Stream` has stopped changing under the HTTP/2 request path.
+**What would settle it:** the arena given back once `Stream` has stopped changing under the HTTP/2 request path, and a burst of handlers that wait on a service, counted against the pool at a `stack_pool.shrink_interval` of 5 s, which is zio's option and the Engine's to set.
 
 ---
 

@@ -2681,10 +2681,12 @@ pub const blocking = zio.blockInPlace;
 pub const blockingReserved = zio.blockInPlaceReserved;
 
 /// Let the other fibers on this thread run before this one goes on, and
-/// return at once where there is nothing to switch to. A cancel is left for
-/// the next wait to report.
-pub fn yield() void {
-    zio.yield() catch {};
+/// return at once where there is nothing to switch to. **A yield is a
+/// cancellation point:** zio checks for a cancel when it switches and consumes
+/// it, so a caller that swallowed the error would lose the one cancel a stop
+/// sends it. Every caller passes `error.Canceled` on.
+pub fn yield() error{Canceled}!void {
+    try zio.yield();
 }
 
 /// Writes and waits made between `beginShield` and `endShield` are not
@@ -2889,6 +2891,15 @@ pub fn spawnLocal(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void 
         error.InvalidPlacement => group.spawn(func, args),
         else => err,
     };
+}
+
+/// `spawnLocal` that says so when the work could not be kept on the calling
+/// executor (`error.InvalidPlacement`, work stealing), instead of dealing it
+/// round-robin: for a caller whose reuse of a fiber depends on the next
+/// stream running on the same thread (ADR 260).
+pub fn spawnLocalExact(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+    const group = background.load(.acquire) orelse return error.NoServer;
+    return group.spawnInto(.local, func, args);
 }
 
 // ---- the per-request slot (see ADR 006) ----
