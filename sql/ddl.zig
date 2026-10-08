@@ -450,6 +450,26 @@ pub fn addColumn(comptime D: type, gpa: std.mem.Allocator, desc: Desc, c: Column
         }
         try w.writeAll("))");
     }
+    // **A key of one column goes on the column, as `CREATE TABLE` writes it.**
+    // The column is new, so every row holds NULL and the key cannot fail on
+    // the rows already there; SQLite has no other way to add one, and it asks
+    // for a column that defaults to NULL, which the diff checks. A key of
+    // several columns is a table constraint, which `addMissingColumns` and the
+    // diff each write their own way.
+    for (desc.references) |r| {
+        if (r.columns.len != 1 or !std.mem.eql(u8, r.columns[0], c.name)) continue;
+        try w.writeAll(" REFERENCES ");
+        if (r.schema) |s| {
+            try writeIdent(w, s);
+            try w.writeAll(".");
+        }
+        try writeIdent(w, r.table);
+        try w.writeAll(" (");
+        try writeIdent(w, r.targets[0]);
+        try w.writeAll(")");
+        try w.writeAll(r.on_delete.clause());
+        break;
+    }
     _ = D;
     return aw.toOwnedSlice();
 }

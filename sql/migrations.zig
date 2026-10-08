@@ -1329,6 +1329,42 @@ test "a second version follows the first, and the manifest names both" {
     try testing.expectEqual(@as(u32, 2), state.entries[1].number);
 }
 
+test "a new column with a foreign key is generated as a version, and the snapshot moves past it" {
+    const gpa = testing.allocator;
+    inline for (.{ Pg, Lite }) |D| {
+        var box = try Sandbox.init(gpa);
+        defer box.deinit(gpa);
+
+        const Before = struct {
+            pub const nilo_table = .{ .name = "posts", .key = .id };
+            id: i64,
+        };
+        const After = struct {
+            pub const nilo_table = .{
+                .name = "posts",
+                .key = .id,
+                .references = .{ .org_id = .{ Org, .id } },
+            };
+            id: i64,
+            org_id: ?i64,
+        };
+        _ = try generate(box.a(), box.io(), box.dir(), D, comptime migrate.desiredOf(D, .{ .tables = &.{ Org, Before } }), .{ .name = "initial" });
+
+        // Before the fix this was a Problem, `wasHeld`, and nothing written.
+        const desired = comptime migrate.desiredOf(D, .{ .tables = &.{ Org, After } });
+        const out = try generate(box.a(), box.io(), box.dir(), D, desired, .{ .name = "add_org" });
+        try testing.expect(!out.wasHeld());
+        try testing.expectEqual(@as(usize, 0), out.plan.problems.len);
+        try testing.expectEqualStrings("0002_add_org.zig", out.file.?);
+        const text = try box.slurp("0002_add_org.zig");
+        try testing.expect(std.mem.indexOf(u8, text, "REFERENCES \"orgs\" (\"id\")") != null);
+
+        // And a second run finds nothing to do, which is the snapshot moving.
+        const again = try generate(box.a(), box.io(), box.dir(), D, desired, .{ .name = "again" });
+        try testing.expect(again.file == null and again.plan.isEmpty());
+    }
+}
+
 test "a destructive step is not written until somebody asks for it by name" {
     const gpa = testing.allocator;
     var box = try Sandbox.init(gpa);

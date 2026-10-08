@@ -331,7 +331,7 @@ const change = try sql.migrate.plan(gpa, sql.Db.Dialect, desired, before);
 `change.steps` is what to run, each step with its `sql` and a one-line `why`. `change.problems` is what the diff will not write, and **all problems come back at once, not just the first**:
 
 - a column that changed in a way SQLite cannot follow: its type, nullability, default or an enum's values (SQLite has no `ALTER COLUMN` and no way to replace a constraint);
-- any foreign-key change on a table that already exists, because the one-statement form takes an `ACCESS EXCLUSIVE` lock and scans the table. The problem spells out the `ADD CONSTRAINT … NOT VALID` then `VALIDATE CONSTRAINT` pair to write instead.
+- any foreign-key change on a table that already exists, except a key of one column on a column the table did not have, which the diff writes with the column (`ADD COLUMN … REFERENCES …`; on SQLite only while the column defaults to NULL, so a `.default` beside it is a problem). For the rest the one-statement form takes an `ACCESS EXCLUSIVE` lock and scans the table. The problem spells out the `ADD CONSTRAINT … NOT VALID` then `VALIDATE CONSTRAINT` pair to write instead.
 
 A column that changed in three ways gets one problem naming all three, because what it needs is one rewrite.
 

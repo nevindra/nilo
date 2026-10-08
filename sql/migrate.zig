@@ -44,12 +44,15 @@
 //!   drops and renames a column and does nothing else, so the change is a
 //!   four-statement rebuild that has to preserve every index and every row.
 //!   The Problem spells the four out.
-//! - **A foreign key added to a table that already exists**, on either
+//! - **A foreign key added to a column that already exists**, on either
 //!   database. Postgres can write it in one statement, and that statement takes
 //!   an exclusive lock and scans the whole table. The safe form is two
 //!   statements — `ADD CONSTRAINT … NOT VALID`, then `VALIDATE CONSTRAINT` —
 //!   and which one somebody wants is an operational decision rather than
-//!   something to pick for them at three in the morning.
+//!   something to pick for them at three in the morning. **A key of one column
+//!   on a column the table did not have is not refused**: every row holds NULL,
+//!   so it cannot fail on the rows there, and it is written with the column, on
+//!   SQLite too, whose `ADD COLUMN … REFERENCES` is the only way it adds one.
 
 const std = @import("std");
 const core = @import("nilo_core");
@@ -1215,10 +1218,36 @@ fn diffTable(
                 });
                 continue;
             };
+            // **A key of one column on a new column is written with it.** The
+            // column is all NULL, so the key cannot fail on the rows already
+            // there. SQLite takes `ADD COLUMN … REFERENCES` only when the column
+            // defaults to NULL, because with foreign keys on it checks the
+            // default against the parent table and would refuse a row it cannot
+            // find; it is the one way SQLite adds a key to a table that exists.
+            if (comptime std.mem.eql(u8, D.name, "sqlite")) if (c.default) |text| if (newColumnKey(t.desc, c.name) != null and
+                !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, &std.ascii.whitespace), "NULL"))
+            {
+                try problems.append(gpa, .{
+                    .table = t.desc.table,
+                    .column = c.name,
+                    .text = try std.fmt.allocPrint(
+                        gpa,
+                        "{s}.{s} is added with a foreign key and the default `{s}`, and SQLite adds " ++
+                            "a column with a `REFERENCES` only when it defaults to NULL. Drop the " ++
+                            "`.default` and fill the column in a step, or rebuild the table. " ++
+                            sqlite_rebuild,
+                        .{ t.desc.table, c.name, text },
+                    ),
+                });
+                continue;
+            };
             try steps.append(gpa, .{
                 .kind = .add_column,
                 .sql = try ddl.addColumn(D, gpa, t.desc, c),
-                .why = try std.fmt.allocPrint(gpa, "add {s}.{s}", .{ t.desc.table, c.name }),
+                .why = if (comptime D.can_alter_constraint)
+                    try addedWhy(gpa, t.desc, c)
+                else
+                    try std.fmt.allocPrint(gpa, "add {s}.{s}", .{ t.desc.table, c.name }),
                 // A required column with a default fills the rows already
                 // there as it is added, which is the whole of what the flag
                 // was warning about ([ADR 181](../docs/adr/181-the-marker-has-two-kinds-of-word.md)).
@@ -1981,9 +2010,36 @@ fn findNamed(list: []const table_mod.NamedText, name: []const u8) ?table_mod.Nam
     return null;
 }
 
+/// What an added column says about itself. **A key on it is checked against
+/// every row on Postgres**, which are all NULL and still all read, under the lock
+/// the `ADD COLUMN` holds until the version ends (ADR 240). A table big enough
+/// for that to matter writes the column and the key as two versions, the key
+/// `NOT VALID` first.
+fn addedWhy(gpa: std.mem.Allocator, desc: Desc, c: Column) ![]const u8 {
+    if (newColumnKey(desc, c.name) == null)
+        return std.fmt.allocPrint(gpa, "add {s}.{s}", .{ desc.table, c.name });
+    return std.fmt.allocPrint(
+        gpa,
+        "add {s}.{s} with its foreign key" ++ reads_all ++ "{s} wait",
+        .{ desc.table, c.name, desc.table },
+    );
+}
+
+/// The key of one column that is over `column`, or null. The key of a column
+/// the table did not have is written with the column (`ddl.addColumn`), so the
+/// diff of the keys leaves it alone.
+fn newColumnKey(desc: Desc, column: []const u8) ?table_mod.Reference {
+    for (desc.references) |r| {
+        if (r.columns.len == 1 and std.mem.eql(u8, r.columns[0], column)) return r;
+    }
+    return null;
+}
+
 /// A foreign key that is not the one the snapshot recorded.
 ///
-/// **Refused on both databases, and the Postgres half is refused on purpose.**
+/// **Refused on both databases for a column the table already had, and the
+/// Postgres half is refused on purpose.** A key of one column on a new column
+/// is not here at all: `ddl.addColumn` wrote it with the column.
 /// It can write `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` in one statement,
 /// and that statement takes an ACCESS EXCLUSIVE lock and scans the whole table
 /// to check the rows already there. On a large table under load that is an
@@ -2007,6 +2063,8 @@ fn diffReferences(
     for (t.desc.references) |r| {
         const before = findReference(old.references, r.name);
         if (before != null and sameReferenceThrough(before.?, r, renames)) continue;
+        // The key of a new column went with the column, in `diffTable`.
+        if (before == null and r.columns.len == 1 and columnBefore(old, r.columns[0], renames) == null) continue;
         if (before == null) if (carriedReference(old, t.desc, r, renames)) |was| {
             if (comptime D.can_alter_constraint) try steps.append(gpa, .{
                 .kind = .rename_constraint,
@@ -2501,17 +2559,12 @@ pub fn addMissingColumns(db: anytype, scope: anytype, comptime schema: Schema) !
                 var fresh: std.ArrayList([]const u8) = .empty;
                 inline for (t.desc.columns) |c| {
                     if (!hasNamed(live, c.name)) {
-                        // **With its `REFERENCES`**, which `ddl.addColumn` leaves
-                        // off because the diff refuses a key on a table that
-                        // exists and names the safe statements instead. Here the
-                        // column is new and empty, so the key costs no scan and
-                        // cannot fail; without it an insert pointing at a parent
-                        // that is not there succeeded for ever, and the startup
-                        // check, which reads columns only, never said.
-                        const sql = try std.mem.concat(arena, u8, &.{
-                            try ddl.addColumn(D, arena, t.desc, c),
-                            comptime ddl.referenceClause(D, t.desc, c.name),
-                        });
+                        // **With its `REFERENCES`**, which `ddl.addColumn` writes
+                        // for a key of one column. The column is new and empty,
+                        // so the key cannot fail; without it an insert pointing
+                        // at a parent that is not there succeeded for ever, and
+                        // the startup check, which reads columns only, never said.
+                        const sql = try ddl.addColumn(D, arena, t.desc, c);
                         if (!c.nullable and c.default == null) {
                             // A warning rather than an error, for the reason
                             // `wireOf`'s is one: the call already fails on its
@@ -3924,6 +3977,77 @@ test "a foreign key on a table that exists is refused, with the two safe stateme
     try testing.expectEqual(@as(usize, 1), change.problems.len);
     try testing.expect(std.mem.indexOf(u8, change.problems[0].text, "NOT VALID") != null);
     try testing.expect(std.mem.indexOf(u8, change.problems[0].text, "VALIDATE CONSTRAINT") != null);
+}
+
+test "a new column with a foreign key is one ALTER on each database, the key written with the column" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Before = struct {
+        pub const nilo_table = .{ .name = "posts", .key = .id };
+        id: i64,
+    };
+    const After = struct {
+        pub const nilo_table = .{
+            .name = "posts",
+            .key = .id,
+            .references = .{ .org_id = .{ Org, .id, .cascade } },
+        };
+        id: i64,
+        org_id: ?i64,
+    };
+
+    inline for (.{ Pg, Lite }) |D| {
+        const before = try snapshotFrom(a, D, &.{ Org, Before });
+        const change = try plan(a, D, comptime desiredOf(D, .{ .tables = &.{ Org, After } }), before);
+
+        try testing.expectEqual(@as(usize, 0), change.problems.len);
+        try testing.expectEqual(@as(usize, 1), change.steps.len);
+        try testing.expectEqual(Kind.add_column, change.steps[0].kind);
+        try testing.expectEqualStrings(
+            "ALTER TABLE \"posts\" ADD COLUMN \"org_id\" " ++ (if (D == Pg) "int8" else "INTEGER") ++
+                " REFERENCES \"orgs\" (\"id\") ON DELETE CASCADE",
+            change.steps[0].sql,
+        );
+        // Said on Postgres, where the key reads every row under the lock.
+        try testing.expectEqual(D == Pg, std.mem.indexOf(u8, change.steps[0].why, "foreign key") != null);
+        // And the snapshot of these types leaves nothing to diff, which is
+        // what a generated version moves it to.
+        const moved = try plan(a, D, comptime desiredOf(D, .{ .tables = &.{ Org, After } }), try snapshotFrom(a, D, &.{ Org, After }));
+        try testing.expect(moved.isEmpty());
+    }
+}
+
+test "a new column with a foreign key and a default is a Problem on SQLite only, which takes REFERENCES with a NULL default" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const Before = struct {
+        pub const nilo_table = .{ .name = "posts", .key = .id };
+        id: i64,
+    };
+    const After = struct {
+        pub const nilo_table = .{
+            .name = "posts",
+            .key = .id,
+            .references = .{ .org_id = .{ Org, .id } },
+            .default = .{ .org_id = 1 },
+        };
+        id: i64,
+        org_id: i64,
+    };
+
+    const lite = try plan(a, Lite, comptime desiredOf(Lite, .{ .tables = &.{ Org, After } }), try snapshotFrom(a, Lite, &.{ Org, Before }));
+    try testing.expectEqual(@as(usize, 0), lite.steps.len);
+    try testing.expectEqual(@as(usize, 1), lite.problems.len);
+    try testing.expectEqualStrings("org_id", lite.problems[0].column);
+    try testing.expect(std.mem.indexOf(u8, lite.problems[0].text, "defaults to NULL") != null);
+
+    const pg = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{ Org, After } }), try snapshotFrom(a, Pg, &.{ Org, Before }));
+    try testing.expectEqual(@as(usize, 0), pg.problems.len);
+    try testing.expectEqual(@as(usize, 1), pg.steps.len);
 }
 
 test "a table no Row describes is dropped, and it is the last thing to happen" {

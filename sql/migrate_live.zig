@@ -1007,6 +1007,59 @@ test "an added column is one ALTER, planned with no database and applied to one"
     try testing.expectEqual(@as(?[]const u8, null), rows[0].note);
 }
 
+test "a new column with a foreign key is one ALTER the diff writes, and the table keeps its rows and enforces the key" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "keyed_alter");
+    defer fx.deinit(gpa);
+
+    const Before = struct {
+        pub const nilo_table = .{ .name = "downloads", .key = .id };
+        id: i64,
+        url: []const u8,
+    };
+    const After = struct {
+        pub const nilo_table = .{
+            .name = "downloads",
+            .key = .id,
+            .references = .{ .org_id = .{ Org, .id, .cascade } },
+        };
+        id: i64,
+        url: []const u8,
+        org_id: ?i64,
+    };
+
+    try migrate.ensureLedger(&fx.db, &fx.run);
+    try migrate.createMissing(&fx.db, &fx.run, .{ .tables = &.{ Org, Before } });
+    _ = try fx.db.insert(Before, &fx.run, .{ .url = "http://a/1" });
+
+    const a = fx.run.arena();
+    const before = try migrate.snapshotOf(a, Db.Dialect, 1, comptime migrate.desiredOf(Db.Dialect, .{ .tables = &.{ Org, Before } }));
+    const tables = comptime migrate.desiredOf(Db.Dialect, .{ .tables = &.{ Org, After } });
+    const change = try migrate.plan(a, Db.Dialect, tables, before);
+
+    // A step, not a Problem, and one the snapshot of the new types has no
+    // difference left to.
+    try testing.expectEqual(@as(usize, 0), change.problems.len);
+    try testing.expectEqual(@as(usize, 1), change.steps.len);
+    var d2: [64]u8 = undefined;
+    const keyed, const keyed_hash = lone(2, "add_org", change.steps, &d2);
+    try testing.expect(try migrate.apply(&fx.db, &fx.run, keyed, keyed_hash));
+    try testing.expect((try migrate.plan(a, Db.Dialect, tables, try migrate.snapshotOf(a, Db.Dialect, 2, tables))).isEmpty());
+
+    // The row that was there reads null, the key refuses a parent that is not
+    // there, and takes one that is.
+    const rows = try fx.db.select(After, &fx.run, .{});
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqual(@as(?i64, null), rows[0].org_id);
+    try testing.expectError(error.ForeignKeyViolated, fx.db.insert(After, &fx.run, .{
+        .url = "http://a/2",
+        .org_id = @as(?i64, 999),
+    }));
+    const org = try fx.db.insert(Org, &fx.run, .{ .name = "o" });
+    _ = try fx.db.insert(After, &fx.run, .{ .url = "http://a/3", .org_id = @as(?i64, org.id) });
+    try testing.expectEqual(@as(usize, 0), try fx.db.checkSchema(&.{ Org, After }));
+}
+
 test "addMissingColumns adds what the Row has and the table has not, typed as createMissing would" {
     const gpa = testing.allocator;
     var fx = try Fixture.init(gpa, "widened");

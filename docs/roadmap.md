@@ -84,7 +84,7 @@ Independent of the order: each touches files no stage of the direction above doe
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_sql` · An index on a big live Postgres table cannot be built without blocking its writes.
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_sql` · Adding a column with a foreign key to an existing table stops `db generate`, and the only way past it is editing `snapshot.zon` by hand.
+- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_sql` · A Problem from the diff has no way out but editing `snapshot.zon` by hand.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · Migration steps and their words disagree with what runs.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `reset` and `squash` are missing from the migrations, and they are the debt that forward-only creates.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.

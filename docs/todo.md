@@ -45,9 +45,9 @@ Nothing is open at this tier.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
-**Adding a column with a foreign key to an existing table stops `db generate`, and the only way past it is editing `snapshot.zon` by hand.** Both dialects refuse it as a Problem here, though `addMissingColumns` does it: a new column is all NULL, so `ADD COLUMN` then `ADD CONSTRAINT … NOT VALID` cannot fail on old rows. While a Problem stands, `generate` writes nothing, and the step it suggests does not move the snapshot, so the same Problem comes back (`migrations.zig:394`, `migrate.zig:1704`). The Problem's sentence that SQLite needs a rebuild is wrong for a new column, which `ADD COLUMN … REFERENCES` takes.
+**A Problem from the diff has no way out but editing `snapshot.zon` by hand.** While one stands, `generate` writes nothing, and the step it suggests does not move the snapshot, so the same Problem comes back (`migrations.zig:394`, `migrate.zig:1704`). The common case, a new column with a foreign key, is written by the diff now; what is left is a key added to a column the table had, a key of several columns on SQLite, a foreign key column with a default on SQLite, and every other Problem, where the user wrote the step by hand and the diff still refuses the types.
 
-**Needs:** the new column's key written by the diff, and a way for an accepted Problem to be recorded in the snapshot.
+**Needs:** a way for an accepted Problem to be recorded in the snapshot, so the step written by hand ends the Problem.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
