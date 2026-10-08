@@ -339,14 +339,6 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
-**A held 1 MiB file is served 35 to 40% slower over HTTP/2 than over HTTP/1.1 on a TLS listener.** 1.65 to 1.76 GB/s against 2.70 to 2.71 on one stream with AES instructions in the target, 553 to 589 µs a request against 359 ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)). Not traced: a `DATA` frame is a 9-byte head and its payload, and each may be sealed as a record of its own where HTTP/1.1's body is one write; the fiber a stream spawns is also in it.
-
-**What would settle it:** the records a frame becomes counted with `strace` or a hook in the writer, and the same file at a frame size that fills a record.
-
-**A spilled 64 MiB file is served 2.6 times slower over HTTP/1.1 than over HTTP/2 on a TLS listener.** 593 to 603 MB/s against 1.57 to 1.58 GB/s, the same file opened per request in the same build; with a held file the order is the other way. Something in the HTTP/1.1 body path of a spilled file over a record layer is small: likely the buffer a `filebody` reads into, which here is the connection's write buffer ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)).
-
-**What would settle it:** the same file over a plain listener and over TLS with `write_buffer` at 8 KiB and at 64 KiB.
-
 **A WebSocket over TLS has no test of its own for a second frame that arrived with the first.** `Wake.wait` answers `.readable` while the record layer holds ciphertext or decrypted bytes ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)), which a WebSocket's `park` waits in too, so the stall the HTTP/2 connection over TLS showed (one in a thousand) is closed for it by the same line. The test that holds it is HTTP/2's, `grpc_tls_live.zig`; `tls_live.zig` has no WebSocket test, so a change to how `park` waits could lose it unseen.
 
 **What would settle it:** a live test in `tls_live.zig` sending two WebSocket frames in one TLS write and timing the second.
@@ -751,9 +743,9 @@ Nothing is open at this tier.
 
 **What would settle it:** a caller whose Connect client is set to use GET, or a design for reading `message=` that does not put a branch on every GET.
 
-**A handed-over event stream on HTTP/2 weighs 6.2 KB or 12 KB at 10,000 streams, depending on how fast they were opened.** [`http.md`](../bench/result/http.md#what-an-event-stream-handed-to-the-http2-connection-costs) measured the same server, streams and client twice: opened 1,000 at a time, 6,190 to 6,253 bytes a stream; in one step from 1,000 to 10,000, 11,976 to 12,153. A parked stream and an HTTP/1.1 one do not move with it. What a stream holds that a test can count is about 3.4 KB (the `Stream` 680 bytes, its arena 1,428, the lists, the pipe and the state), and the arena and the `Stream` are 2.1 KB of it that the hand-over could give back.
+**A burst of handed-over event streams on HTTP/2 leaves the Engine's stack pool holding 8 KiB for every fiber that was alive at once, 10 to 15 KB a stream instead of the 4.8 KB a stream that stays costs.** [`http.md`](../bench/result/http.md#the-spread-of-a-handed-over-stream-is-the-engines-stack-pool) explained the spread of 6 to 12 KB: ten thousand streams opened in a burst keep four to six thousand handler fibers alive together, and zio's pool keeps their stacks for a minute and more. A stack now goes back with only its top two pages resident (-10 to -31%), but the burst is not cut, so the figure still depends on how fast the streams arrive. Two things are left: the arena and the `Stream` of a handed-over stream (at most 1.4 KB of the 4.8, held by the `Outbox`, `Http2Events` and `Replay` list that live in it), and the number of fibers a burst needs.
 
-**What would settle it:** the same 10,000 with the handler fibers on the connection's thread, and the allocator's own count at both readings.
+**What would settle it:** the pool's retained stacks counted over time after the same burst at a `stack_pool.shrink_interval` of 5 s, which is zio's option and the Engine's to set; and the arena given back once `Stream` has stopped changing under the HTTP/2 request path.
 
 ---
 

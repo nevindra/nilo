@@ -2488,6 +2488,10 @@ fn runCall(s: *Stream, on_engine: bool) void {
         }
         s.trailers_only = true;
     };
+    // An event stream was handed to the connection and this fiber is about
+    // to end: its stack goes to the pool, and what the route touched in it
+    // is of no use there.
+    if (on_engine and s.events != null) bulkhead.releaseEndingFiberStack();
 }
 
 fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
@@ -4760,6 +4764,104 @@ test "a GET is answered as HTTP: its status, type, length and date in one HEADER
     try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
     try testing.expectEqual(@as(usize, 1), Answer.of(.headers, &ex.answer, 1).len);
     try testing.expect(!Answer.of(.headers, &ex.answer, 1)[0].head.has(h2.Flags.end_stream));
+}
+
+// ---- who owns a body of 16 KiB or more that HTTP/2 writes after the route has returned ----
+
+const owned_len = 20_000;
+var owned_user: [owned_len]u8 = undefined;
+var owned_arena: [owned_len]u8 = undefined;
+
+const OwnedJson = struct { data: []const u8 };
+
+fn ownedSlice() []const u8 {
+    return &owned_user;
+}
+
+fn ownedJson() OwnedJson {
+    return .{ .data = &owned_arena };
+}
+
+fn fillOwned() void {
+    for (&owned_user, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    @memset(&owned_arena, 'j');
+}
+
+/// One GET over a client window of 1,000 bytes: the route has returned and
+/// the connection has written 1,000 bytes of the answer when `after_route`
+/// runs, and the rest follows a window update. The body that came.
+fn windowedBody(app: *App, path: []const u8, after_route: ?*const fn () void) ![]u8 {
+    var client = try TestClient.init();
+    defer client.deinit();
+    try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 1000 }});
+    try h2test.requestOn(&client, 1, .{ .path = path });
+    var later: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer later.deinit();
+    try h2.writeWindowUpdate(&later.writer, 1, 1 << 20);
+    try h2.writeWindowUpdate(&later.writer, 0, 1 << 20);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    {
+        var conn = try steppedConn(app, &in, &out.writer);
+        defer conn.deinit();
+        while (in.bufferedLen() > 0) try conn.readFrame();
+        try conn.writeReady();
+        if (after_route) |hook| hook();
+        var update: std.Io.Reader = .fixed(later.written());
+        try nextFrames(&conn, &update);
+        try conn.writeReady();
+    }
+    var got = try h2test.answerOf(out.written());
+    defer got.deinit();
+    return testing.allocator.dupe(u8, try dataOn(&got, 1));
+}
+
+fn scribbleOwned() void {
+    @memset(&owned_user, 'X');
+    @memset(&owned_arena, 'X');
+}
+
+test "a body of 20 KB reaches an HTTP/2 client whole when the bytes were the handler's or the framework's, and the handler's are copied" {
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var tree = nilo_testing.tmpDir();
+    defer tree.cleanup();
+    var file: [owned_len]u8 = undefined;
+    for (&file, 0..) |*b, i| b.* = @intCast('A' + i % 26);
+    try tree.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = &file });
+    var path_buf: [128]u8 = undefined;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/user", ownedSlice);
+    try app.get("/json", ownedJson);
+    try app.static("/files", try tree.path(&path_buf, ""));
+    try app.resolveChains();
+
+    // The handler's own slice, freed (here, overwritten) once the route has
+    // returned: the client still gets what the route returned.
+    fillOwned();
+    const user = try windowedBody(&app, "/user", scribbleOwned);
+    defer testing.allocator.free(user);
+    fillOwned();
+    try testing.expectEqual(@as(usize, owned_len), user.len);
+    try testing.expect(std.mem.eql(u8, &owned_user, user));
+
+    // The arena's own output, written from where it lies.
+    fillOwned();
+    const json = try windowedBody(&app, "/json", scribbleOwned);
+    defer testing.allocator.free(json);
+    try testing.expectEqual(@as(usize, owned_len + 11), json.len);
+    try testing.expectEqualStrings("{\"data\":\"", json[0..9]);
+    try testing.expect(std.mem.allEqual(u8, json[9 .. 9 + owned_len], 'j'));
+    try testing.expectEqualStrings("\"}", json[9 + owned_len ..]);
+
+    // A static file the App holds.
+    const held = try windowedBody(&app, "/files/f.bin", null);
+    defer testing.allocator.free(held);
+    try testing.expect(std.mem.eql(u8, &file, held));
 }
 
 test "a HEAD has the head a GET would, content-length included, and no DATA" {

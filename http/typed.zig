@@ -2381,19 +2381,20 @@ fn sendValue(c: *Ctx, spelling: anytype, status: u16, value: anytype) !void {
     // JSON. What it costs is what JSON costs: the same arena buffer, the
     // same `send`.
     //
-    // Every body below is `sendKept`: it is in the request arena, or it is
-    // what the handler returned, which outlived the handler's frame already,
-    // so a middleware holding the answer does not copy it (ADR 008).
+    // A body written into the arena is `sendOwned`; one the handler returned
+    // is `sendKept`, which outlived the handler's frame already, so a
+    // middleware holding the answer does not copy it (ADR 008), but is the
+    // user's to free, so HTTP/2 does copy it.
     if (comptime ownbody.writesItsOwnBody(T)) {
         var out: std.Io.Writer.Allocating = try .initCapacity(c._arena, ctx_mod.json_hint);
         try value.nilo_write(&out.writer);
-        return c.sendKept(status, T.nilo_content_type, out.written());
+        return ctx_mod.sendOwned(c, status, T.nilo_content_type, out.written());
     }
     // A message, in the spelling the request was sent in (ADR 256): JSON
     // below when that was JSON or nothing, protobuf here otherwise. Sized
     // first and written once, the one allocation a JSON answer makes.
     if (comptime message.isMessage(T)) if (try protoAnswer(c, spelling, value)) |bytes| {
-        return c.sendKept(status, message.answerType(spelling.*), bytes);
+        return ctx_mod.sendOwned(c, status, message.answerType(spelling.*), bytes);
     };
     if (T == Str) return c.sendKept(status, "text/plain", value.view());
     // The same question `contentTypeFor` asks, and it has to be the same

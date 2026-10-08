@@ -1498,6 +1498,22 @@ pub const File = struct {
 
 // ---- idle connections give their pages back ----
 
+/// Hand back the pages the running fiber's stack touched below its current
+/// frame, for a fiber that is about to end having done its work deep in the
+/// stack.
+///
+/// A fiber that ends puts its stack in the Engine's pool with every page it
+/// touched still resident, and the pool keeps what a burst needed for a
+/// minute and more. A handler of HTTP/2 that handed its event stream to the
+/// connection touched 15 KiB of it, and ten thousand of them opened in one
+/// step left four thousand of those stacks pooled, 6 KB for every stream
+/// (`bench/result/http.md`, "What an event stream handed to the HTTP/2
+/// connection costs"). The call is one `madvise`, which is why it is made for
+/// a stream that will live on and not for every request.
+pub fn releaseEndingFiberStack() void {
+    engine.releaseIdleStack();
+}
+
 /// Hand the physical pages behind a connection's buffers back to the kernel
 /// while it waits for the next request.
 ///

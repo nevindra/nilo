@@ -1216,7 +1216,7 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
         .whole => {},
         .part => |part| {
             try c.setHeader("Content-Range", range_mod.contentRange(&buf, part, total));
-            return c.sendKept(206, file.content_type, part.slice(sending.bytes));
+            return ctx_mod.sendOwned(c, 206, file.content_type, part.slice(sending.bytes));
         },
         .unsatisfiable => {
             // The one answer whose whole content is "you have the wrong idea
@@ -1229,7 +1229,7 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
 
     // The bytes are the App's, loaded at startup, so a middleware holding the
     // answer does not copy them (ADR 008).
-    try c.sendKept(200, file.content_type, sending.bytes);
+    try ctx_mod.sendOwned(c, 200, file.content_type, sending.bytes);
 }
 
 /// A request header as plain bytes. The `Str` a handler gets is the right

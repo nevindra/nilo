@@ -175,7 +175,7 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
                         if (n < tiny.len) break;
                     }
                     body = std.fmt.allocPrint(arena, "{d}", .{total}) catch "";
-                    to.whole(200, "text/plain", body, false, true, &.{}, .{}) catch {};
+                    to.whole(200, "text/plain", body, false, false, true, &.{}, .{}) catch {};
                     return;
                 }
                 body = pipe.whole(1024) catch "";
@@ -184,16 +184,16 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
                 't' => streamed(&to, arrived.method),
                 'v' => evented(&to, arena, arrived.method),
                 'd' => filed(&to, arrived.method),
-                'g' => to.whole(200, "text/plain", "hello", std.mem.eql(u8, arrived.method, "HEAD"), true, &.{
+                'g' => to.whole(200, "text/plain", "hello", false, std.mem.eql(u8, arrived.method, "HEAD"), true, &.{
                     .{ .name = "Connection", .value = "close" },
                     .{ .name = "X-Seen", .value = "yes" },
                 }, .{ .list = &.{.{ .name = "x-checked", .value = "yes" }} }) catch {},
-                'n' => to.whole(204, "", "", false, true, &.{}, .{}) catch {},
-                'f' => to.whole(404, "text/plain", "no such", false, true, &.{}, .{}) catch {},
-                'c' => to.whole(200, "application/grpc", body, false, true, &.{.{ .name = "X-Kind", .value = "own" }}, .{
+                'n' => to.whole(204, "", "", false, false, true, &.{}, .{}) catch {},
+                'f' => to.whole(404, "text/plain", "no such", false, false, true, &.{}, .{}) catch {},
+                'c' => to.whole(200, "application/grpc", body, false, false, true, &.{.{ .name = "X-Kind", .value = "own" }}, .{
                     .list = &.{.{ .name = "x-checked", .value = "yes" }},
                 }) catch {},
-                else => to.whole(200, "application/grpc", body, false, true, &.{}, .{}) catch {},
+                else => to.whole(200, "application/grpc", body, false, false, true, &.{}, .{}) catch {},
             }
         }
     };
@@ -236,7 +236,7 @@ var feed: ?*room_file.Room = null;
 /// a room (a replay that did not set one up) it is a short answer.
 fn evented(to: *framing.Framing, arena: std.mem.Allocator, method: []const u8) void {
     const room = feed orelse {
-        to.whole(200, "text/plain", "no room", false, true, &.{}, .{}) catch {};
+        to.whole(200, "text/plain", "no room", false, false, true, &.{}, .{}) catch {};
         return;
     };
     const link = to.eventLink() orelse return;
@@ -245,7 +245,7 @@ fn evented(to: *framing.Framing, arena: std.mem.Allocator, method: []const u8) v
     const head_only = std.mem.eql(u8, method, "HEAD");
     if (!head_only) {
         _ = room.sitAfter(&events.seated, events.bell(), true, "", &.{}) catch {
-            to.whole(503, "text/plain", "full", false, true, &.{}, .{}) catch {};
+            to.whole(503, "text/plain", "full", false, false, true, &.{}, .{}) catch {};
             return;
         };
     }

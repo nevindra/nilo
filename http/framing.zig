@@ -147,11 +147,16 @@ pub const Framing = union(enum) {
     /// A whole answer, written and settled. `head_only` is a HEAD: the head a
     /// GET would get, its `Content-Length` the length of `body`, and no body.
     /// `keep` is whether the connection carries another request after this.
+    /// `kept` says the body outlives the call already, in the request arena
+    /// or in memory the App holds: HTTP/1.1 writes it before the call returns
+    /// and is no different, and HTTP/2 keeps the answer for the connection's
+    /// fiber and does not copy a large one (`Collected.wholeKept`).
     pub fn whole(
         self: *Framing,
         status: u16,
         content_type: []const u8,
         body: []const u8,
+        kept: bool,
         head_only: bool,
         keep: bool,
         extra: []const Header,
@@ -159,7 +164,10 @@ pub const Framing = union(enum) {
     ) !void {
         switch (self.*) {
             .http1 => |*h| return h.whole(status, content_type, body, head_only, keep, extra, trailers),
-            .http2 => |c| if (comptime !http2_built) unreachable else return c.whole(status, content_type, body, head_only, extra, trailers.list),
+            .http2 => |c| if (comptime !http2_built) unreachable else if (kept)
+                return c.wholeKept(status, content_type, body, head_only, extra, trailers.list)
+            else
+                return c.whole(status, content_type, body, head_only, extra, trailers.list),
         }
     }
 
@@ -627,6 +635,28 @@ pub const Collected = struct {
         self.trailers = try self.fields(trailers);
     }
 
+    /// The smallest body `wholeKept` leaves where it is: under it the copy is
+    /// within what the arena keeps between requests and costs no fault.
+    pub const borrow_from = 16 * 1024;
+
+    /// `whole` for a body that is in the request arena or in memory the App
+    /// holds, so it is there when the connection's fiber writes it. A large
+    /// one is not copied: the copy was a megabyte of arena past what it
+    /// keeps, a page fault for each page of it and a `memcpy`, 110 µs on a
+    /// 1 MiB file that HTTP/1.1 writes from where it lies (`bench/result/http.md`).
+    /// A call (which has its envelope's room to leave in front of the body)
+    /// and a body under `borrow_from` go the way `whole` does.
+    noinline fn wholeKept(self: *Collected, status: u16, content_type: []const u8, body: []const u8, head_only: bool, extra: []const Header, trailers: []const Header) !void {
+        if (self.front != 0 or head_only or http1.bodyless(status) or body.len < borrow_from)
+            return self.whole(status, content_type, body, head_only, extra, trailers);
+        self.length = body.len;
+        self.status = status;
+        self.content_type = try self.arena.dupe(u8, content_type);
+        self.headers = try self.fields(extra);
+        self.body = body;
+        self.trailers = try self.fields(trailers);
+    }
+
     noinline fn head(self: *Collected, status: u16, content_type: []const u8, len: u64, extra: []const Header) !void {
         self.status = status;
         self.length = len;
@@ -818,7 +848,7 @@ test "a whole answer on HTTP/1.1 is the bytes http1 writes, and a closing one sa
     var out: std.Io.Writer = .fixed(&buf);
     var in: std.Io.Reader = .fixed("");
     var framing = wired(&out, &in, 1);
-    try framing.whole(200, "text/plain", "hi", false, false, &.{}, .{});
+    try framing.whole(200, "text/plain", "hi", false, false, false, &.{}, .{});
     const written = out.buffered();
     try testing.expect(std.mem.startsWith(u8, written, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(std.mem.indexOf(u8, written, "Connection: close\r\n") != null);
@@ -830,7 +860,7 @@ test "a HEAD on HTTP/1.1 carries the length of the body it does not send" {
     var out: std.Io.Writer = .fixed(&buf);
     var in: std.Io.Reader = .fixed("");
     var framing = wired(&out, &in, 1);
-    try framing.whole(200, "text/plain", "hello", true, true, &.{}, .{});
+    try framing.whole(200, "text/plain", "hello", false, true, true, &.{}, .{});
     const written = out.buffered();
     try testing.expect(std.mem.indexOf(u8, written, "Content-Length: 5\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, written, "\r\n\r\n"));
@@ -869,6 +899,45 @@ test "an HTTP/1.0 client is never sent a 100 Continue" {
     try testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out.buffered());
 }
 
+test "a large body that outlives the call is kept where it lies on HTTP/2, and a small one or a call's is copied" {
+    if (comptime !http2_built) return error.SkipZigTest;
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const big = try testing.allocator.alloc(u8, Collected.borrow_from);
+    defer testing.allocator.free(big);
+    @memset(big, 'b');
+
+    var kept: Collected = .{ .arena = arena_state.allocator() };
+    var framing: Framing = .{ .http2 = &kept };
+    try framing.whole(200, "text/plain", big, true, false, true, &.{}, .{});
+    try testing.expectEqual(big.ptr, kept.body.ptr);
+    try testing.expectEqual(@as(?u64, big.len), kept.length);
+    try testing.expectEqualStrings("text/plain", kept.content_type);
+
+    // Not said to be kept: copied, as it always was.
+    var copied: Collected = .{ .arena = arena_state.allocator() };
+    framing = .{ .http2 = &copied };
+    try framing.whole(200, "text/plain", big, false, false, true, &.{}, .{});
+    try testing.expect(big.ptr != copied.body.ptr);
+    try testing.expectEqualSlices(u8, big, copied.body);
+
+    // Under the size, and a call (which leaves room in front), and a HEAD.
+    var small: Collected = .{ .arena = arena_state.allocator() };
+    framing = .{ .http2 = &small };
+    try framing.whole(200, "text/plain", big[0..100], true, false, true, &.{}, .{});
+    try testing.expect(big.ptr != small.body.ptr);
+    var call: Collected = .{ .arena = arena_state.allocator(), .front = 5 };
+    framing = .{ .http2 = &call };
+    try framing.whole(200, "application/grpc", big, true, false, true, &.{}, .{});
+    try testing.expect(big.ptr != call.body.ptr);
+    try testing.expectEqualSlices(u8, big, call.body);
+    var head: Collected = .{ .arena = arena_state.allocator() };
+    framing = .{ .http2 = &head };
+    try framing.whole(200, "text/plain", big, true, true, true, &.{}, .{});
+    try testing.expectEqual(@as(usize, 0), head.body.len);
+    try testing.expectEqual(@as(?u64, big.len), head.length);
+}
+
 test "an answer collected for HTTP/2 outlives the buffers it was handed in" {
     if (comptime !http2_built) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -880,7 +949,7 @@ test "an answer collected for HTTP/2 outlives the buffers it was handed in" {
     var name = "X-Tenant".*;
     var value = "0".*;
     collected.front = 5;
-    try framing.whole(200, "application/grpc", &body, false, true, &.{.{ .name = &name, .value = &value }}, .{});
+    try framing.whole(200, "application/grpc", &body, false, false, true, &.{.{ .name = &name, .value = &value }}, .{});
     @memset(&body, 'x');
     @memset(&name, 'x');
     @memset(&value, 'x');
@@ -904,14 +973,14 @@ test "a whole answer with trailers is chunked for a client that reads them, and 
     var framing = wired(&out, &in, 1);
     const trailers: []const Header = &.{.{ .name = "Server-Timing", .value = "db;dur=12" }};
 
-    try framing.whole(200, "text/plain", "hi", false, true, &.{}, .{ .list = trailers, .asked = true, .writers = &writers });
+    try framing.whole(200, "text/plain", "hi", false, false, true, &.{}, .{ .list = trailers, .asked = true, .writers = &writers });
     const chunked = out.buffered();
     try testing.expect(std.mem.indexOf(u8, chunked, "Transfer-Encoding: chunked\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, chunked, "Content-Length") == null);
     try testing.expect(std.mem.endsWith(u8, chunked, "\r\n\r\n2\r\nhi\r\n0\r\nServer-Timing: db;dur=12\r\n\r\n"));
 
     out.end = 0;
-    try framing.whole(200, "text/plain", "hi", false, true, &.{}, .{ .list = trailers, .asked = false, .writers = &writers });
+    try framing.whole(200, "text/plain", "hi", false, false, true, &.{}, .{ .list = trailers, .asked = false, .writers = &writers });
     const plain = out.buffered();
     try testing.expect(std.mem.indexOf(u8, plain, "Content-Length: 2\r\n") != null);
     try testing.expect(std.mem.indexOf(u8, plain, "Server-Timing") == null);
@@ -923,11 +992,11 @@ test "an HTTP/1.0 client and a body-less status get no trailer section even when
     var in: std.Io.Reader = .fixed("");
     const trailers: []const Header = &.{.{ .name = "Server-Timing", .value = "x" }};
     var old = wired(&out, &in, 0);
-    try old.whole(200, "text/plain", "hi", false, false, &.{}, .{ .list = trailers, .asked = true, .writers = &writers });
+    try old.whole(200, "text/plain", "hi", false, false, false, &.{}, .{ .list = trailers, .asked = true, .writers = &writers });
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Server-Timing") == null);
     out.end = 0;
     var new = wired(&out, &in, 1);
-    try new.whole(204, "", "", false, true, &.{}, .{ .list = trailers, .asked = true, .writers = &writers });
+    try new.whole(204, "", "", false, false, true, &.{}, .{ .list = trailers, .asked = true, .writers = &writers });
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "Server-Timing") == null);
 }
 

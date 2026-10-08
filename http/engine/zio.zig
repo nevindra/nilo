@@ -1817,6 +1817,18 @@ pub fn serve(
         }
     }.f;
 
+    // How many records the ciphertext buffer of a TLS connection holds, so
+    // a drain seals up to this many before one write. Page-aligned and
+    // given back at every idle transition with the rest, so only the pages a
+    // large answer touches are resident, and only until the connection waits.
+    const cork_records = 2;
+    // A file shorter than this is read through the writer's buffer as ever.
+    const bulk_min = 16 * 1024;
+    // What a file is read through, and sealed from, at a time on TLS.
+    const bulk_file = 64 * 1024;
+    // The slices of a drain that can keep a byte back (a write is a few).
+    const held_slices = 8;
+
     // A connection's two halves, joined so that a read on one flushes the
     // other first ([ADR 201](../../docs/adr/201-a-response-is-flushed-before-the-connection-waits.md)).
     //
@@ -2005,7 +2017,7 @@ pub fn serve(
         ///
         /// What one of these holds while idle, measured at 10,000
         /// connections: 9,307 bytes, fourteen more than a plain connection
-        /// on the same build. The 33 KB of record buffers are page-aligned
+        /// on the same build. The 49 KB of record buffers are page-aligned
         /// and handed back with the cleartext pair at every idle transition,
         /// so they are not in that figure.
         ///
@@ -2040,13 +2052,15 @@ pub fn serve(
 
             // The record layer. A TLS record is at most 16,645 bytes on the
             // wire and has to be whole before it can be decrypted, so the
-            // input side cannot be smaller than one; the output side is the
-            // largest record this library writes. Page-aligned for the same
+            // input side cannot be smaller than one; the output side holds
+            // `cork_records` of the largest record this library writes, so a
+            // drain is sealed and sent in as few writes as that allows
+            // (ADR 212). Page-aligned for the same
             // reason the cleartext pair is: so every page of them belongs
             // to this connection alone and can be given back.
             const raw_in = alignedPages(conn_gpa, tls.input_buffer_len) catch return;
             defer conn_gpa.free(raw_in);
-            const raw_out = alignedPages(conn_gpa, tls.output_buffer_len) catch return;
+            const raw_out = alignedPages(conn_gpa, tls.output_buffer_len * cork_records) catch return;
             defer conn_gpa.free(raw_out);
             var link: Link = undefined;
             link.init(stream, raw_in, raw_out);
@@ -2101,7 +2115,126 @@ pub fn serve(
             defer conn_gpa.free(clear_in);
             const clear_out = alignedPages(conn_gpa, sizes.write_buffer) catch return;
             defer conn_gpa.free(clear_out);
-            var tw = conn.writer(clear_out);
+            const TlsWriter = @TypeOf(conn.writer(clear_out));
+            // The cleartext writer the handler sees. The library seals a
+            // record and writes it to the socket at once, so a frame's
+            // nine-byte head and its payload were two records and two
+            // writes, and a body of a megabyte was sixty-four. Sealer
+            // keeps the library's flush after each record for the length of
+            // one drain and sends what it sealed in as few writes as the
+            // record buffer holds (`cork_records` of them).
+            const Sealer = struct {
+                inner: TlsWriter,
+                link: *Link,
+                plain: *const std.Io.Writer.VTable,
+                corked: std.Io.Writer.VTable,
+                gpa: std.mem.Allocator,
+                interface: std.Io.Writer,
+
+                const vtable: std.Io.Writer.VTable = .{ .drain = sealDrain, .sendFile = sealFile };
+
+                fn of(w: *std.Io.Writer) *@This() {
+                    return @alignCast(@fieldParentPtr("interface", w));
+                }
+
+                fn cork(self: *@This()) void {
+                    self.link.writer.interface.vtable = &self.corked;
+                }
+
+                /// The library's flushes are over: the one write for what
+                /// it sealed in between.
+                fn uncork(self: *@This()) std.Io.Writer.Error!void {
+                    const out = &self.link.writer.interface;
+                    out.vtable = self.plain;
+                    try out.flush();
+                }
+
+                fn sealDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+                    const self = of(w);
+                    // A drain that carries data keeps the last byte of it in
+                    // the buffer: the records sealed so far wait in the
+                    // record buffer for the write that the flush (or the
+                    // next full buffer) makes, and a caller that flushes
+                    // only a writer with something in it still finds
+                    // something, as it would on a plain connection whose
+                    // buffer was not emptied. Without it a frame's head and
+                    // its payload were two writes.
+                    var total: usize = 0;
+                    if (splat == 1) for (data) |d| {
+                        total += d.len;
+                    };
+                    var view: [held_slices][]const u8 = undefined;
+                    var last: u8 = 0;
+                    const hold = total != 0 and data.len <= held_slices;
+                    if (hold) {
+                        @memcpy(view[0..data.len], data);
+                        var at = data.len;
+                        while (at > 0) {
+                            at -= 1;
+                            if (view[at].len == 0) continue;
+                            last = view[at][view[at].len - 1];
+                            view[at] = view[at][0 .. view[at].len - 1];
+                            break;
+                        }
+                    }
+                    self.inner.interface.end = w.end;
+                    self.cork();
+                    const n = self.inner.interface.vtable.drain(&self.inner.interface, if (hold) view[0..data.len] else data, splat) catch |err| {
+                        w.end = self.inner.interface.end;
+                        self.link.writer.interface.vtable = self.plain;
+                        return err;
+                    };
+                    w.end = self.inner.interface.end;
+                    if (hold) {
+                        self.link.writer.interface.vtable = self.plain;
+                        w.buffer[0] = last;
+                        w.end = 1;
+                        return n + 1;
+                    }
+                    try self.uncork();
+                    return n;
+                }
+
+                /// A file is read a buffer at a time and sealed as it goes.
+                /// The writer's own buffer is a connection's write buffer,
+                /// 4 KiB, which made every record 4 KiB and every record a
+                /// read and a write; the buffer here lives for the file
+                /// alone, so no connection holds it idle.
+                fn sealFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+                    const self = of(w);
+                    const left0: usize = @intFromEnum(limit);
+                    // `sendFileAll` asks again until its limit is met, and a
+                    // limit past the end of the file means a second call
+                    // that would take a buffer to learn there is nothing.
+                    if (file_reader.atEnd()) return error.EndOfStream;
+                    const left_in_file: u64 = if (file_reader.size) |size| size -| file_reader.logicalPos() else left0;
+                    const wanted: usize = @intCast(@min(left0, left_in_file));
+                    if (wanted < bulk_min) return error.Unimplemented;
+                    const buf = self.gpa.alloc(u8, @min(wanted, bulk_file)) catch return error.Unimplemented;
+                    defer self.gpa.free(buf);
+                    var total: usize = 0;
+                    while (total < wanted) {
+                        const want = @min(wanted - total, buf.len);
+                        const n = file_reader.interface.readSliceShort(buf[0..want]) catch return error.ReadFailed;
+                        if (n == 0) {
+                            if (total == 0) return error.EndOfStream;
+                            break;
+                        }
+                        try w.writeAll(buf[0..n]);
+                        total += n;
+                    }
+                    return total;
+                }
+            };
+            var tw: Sealer = .{
+                .inner = conn.writer(clear_out),
+                .link = &link,
+                .plain = link.writer.interface.vtable,
+                .corked = link.writer.interface.vtable.*,
+                .gpa = conn_gpa,
+                .interface = .{ .vtable = &Sealer.vtable, .buffer = clear_out },
+            };
+            tw.corked.flush = std.Io.Writer.noopFlush;
 
             // `Link` one layer up: before the cleartext reader asks the
             // library for a record, what the handler wrote into the cleartext

@@ -119,6 +119,10 @@ pub const Held = union(enum) {
         /// Whether `app.compress` may still gzip it, which it may for an
         /// answer `send` made and not for one App made itself.
         compress: bool,
+        /// The bytes are the framework's and outlive the stream (see
+        /// `sendOwned` in this file): the arena's, or the App's. What the handler
+        /// returned is not, and HTTP/2 copies it.
+        owned: bool = false,
     },
     file: sendfile_mod.Held,
 };
@@ -2038,7 +2042,7 @@ pub const Ctx = struct {
     /// throughput at 64 KiB in the run that settled it (ADR 008). An answer
     /// the typed layer sends from a returned value is not copied.
     pub fn send(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
-        return self.sendWhole(status, content_type, response_body, false);
+        return self.sendWhole(status, content_type, response_body, false, false);
     }
 
     /// `send`, for a body that outlives the middleware chain already: one in
@@ -2046,26 +2050,31 @@ pub const Ctx = struct {
     /// gone before it was sent whether or not anything holds. Not copied
     /// when a middleware holds the answer.
     pub fn sendKept(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
-        return self.sendWhole(status, content_type, response_body, true);
+        return self.sendWhole(status, content_type, response_body, true, false);
     }
 
-    fn sendWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool) !void {
+
+    fn sendWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool, owned: bool) !void {
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response
         try self.contentTypeOk(content_type);
         self.markAnswered(status);
-        if (self._hold) return self.holdWhole(status, content_type, response_body, kept, true);
-        return self.deliverWhole(status, content_type, response_body, true);
+        if (self._hold) return self.holdWhole(status, content_type, response_body, kept, owned, true);
+        return self.deliverWhole(status, content_type, response_body, true, owned);
     }
 
     /// A whole answer compressed where it qualifies, then put on the wire.
-    fn deliverWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, compress: bool) !void {
+    fn deliverWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, compress: bool, owned: bool) !void {
         // Gzipped, when the App asked for that and this body and this client
         // both qualify (ADR 211). Before the wait below rather than inside
         // it: compressing is the handler's work, and it borrows a compressor
         // nothing waiting on a client may hold.
         var outgoing = response_body;
+        var in_arena = owned;
         if (compress) if (self._compressors) |pool| {
-            if (try self.squeezed(pool, status, content_type, response_body)) |smaller| outgoing = smaller;
+            if (try self.squeezed(pool, status, content_type, response_body)) |smaller| {
+                outgoing = smaller;
+                in_arena = true;
+            }
         };
 
         // Putting the answer on the wire is nilo waiting on the client, not
@@ -2076,7 +2085,7 @@ pub const Ctx = struct {
         defer watchdog.waited(self._watch, w);
         self.armWriteLimit();
 
-        try self.putWhole(status, content_type, outgoing);
+        try self.putWhole(status, content_type, outgoing, in_arena);
     }
 
     /// A whole answer App makes itself (a 404, an empty 200, a failure),
@@ -2084,8 +2093,8 @@ pub const Ctx = struct {
     /// otherwise. `send` and these both end in `putWhole`, so there is one
     /// way out.
     pub fn writeWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
-        if (self._hold) return self.holdWhole(status, content_type, response_body, false, false);
-        return self.putWhole(status, content_type, response_body);
+        if (self._hold) return self.holdWhole(status, content_type, response_body, false, false, false);
+        return self.putWhole(status, content_type, response_body, false);
     }
 
     /// A whole answer handed to the framing, with the headers middleware and
@@ -2093,21 +2102,23 @@ pub const Ctx = struct {
     /// this is a HEAD: it assembles a response as usual, and what must not go
     /// out is filtered by the framing. The length is the one a GET would have
     /// carried.
-    fn putWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+    fn putWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool) !void {
         self._head_written = true;
         self._body_ended = true;
-        try self._framing.whole(status, content_type, response_body, self.method == .HEAD, self.keepAlive(), self.extraHeaders(), self.trailersOut());
+        try self._framing.whole(status, content_type, response_body, kept, self.method == .HEAD, self.keepAlive(), self.extraHeaders(), self.trailersOut());
     }
 
     /// Keep a whole answer for the chain's end, copied unless it outlives the
     /// chain already.
-    fn holdWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool, compress: bool) !void {
+    fn holdWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool, owned: bool, compress: bool) !void {
         const held = try self.heldSlot();
         held.* = .{ .whole = .{
             .status = status,
             .content_type = try self._arena.dupe(u8, content_type),
             .body = if (kept) response_body else try self._arena.dupe(u8, response_body),
             .compress = compress,
+            // A copy is in the arena, and so is what the caller said is.
+            .owned = owned or !kept,
         } };
     }
 
@@ -2127,7 +2138,7 @@ pub const Ctx = struct {
         const held = self._held orelse return;
         self._held = null;
         switch (held.*) {
-            .whole => |w| try self.deliverWhole(w.status, w.content_type, w.body, w.compress),
+            .whole => |w| try self.deliverWhole(w.status, w.content_type, w.body, w.compress, w.owned),
             .file => |f| try sendfile_mod.writeHeld(self, f),
         }
     }
@@ -2298,7 +2309,7 @@ pub const Ctx = struct {
     pub fn sendJson(self: *Ctx, status: u16, value: anytype) !void {
         var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
         try json_mod.write(&out.writer, value);
-        try self.sendKept(status, "application/json", out.written());
+        try sendOwned(self, status, "application/json", out.written());
     }
 
     /// Answer with an open file, without ever holding it in memory
@@ -2830,6 +2841,23 @@ pub const Ctx = struct {
         kept.* = .{ .room = in_room, .posts = into[0..n] };
     }
 };
+
+/// `Ctx.sendKept`, for bytes the framework owns and knows outlive the
+/// stream: the request arena's own output (a writer's, a message's, the JSON
+/// of a value) or memory the App holds for its whole life (a loaded static
+/// file). On HTTP/2 the connection's fiber writes the answer after the
+/// handler has returned, under flow control, and a body of 16 KiB or more is
+/// written from where it lies instead of being copied
+/// (`Collected.wholeKept`). **Never for a slice a handler returned or a
+/// service holds**: that is the user's to free, and it can be gone by then.
+/// HTTP/1.1 writes before the handler returns and is the same as `sendKept`.
+///
+/// A function of this file and not a method, so that only the framework can
+/// name it: `nilo.Ctx` is what a handler sees, and a lifetime promise the
+/// compiler cannot check is not one a handler gets to make (ADR 260).
+pub fn sendOwned(c: *Ctx, status: u16, content_type: []const u8, response_body: []const u8) !void {
+    return c.sendWhole(status, content_type, response_body, true, true);
+}
 
 /// The posts one room kept for a client coming back, each holding a
 /// reference until `eventsFrom` writes it (ADR 229).
