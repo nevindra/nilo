@@ -11092,6 +11092,30 @@ test "sql.violated says which unique a duplicate broke, in SQLite's spelling of 
     try testing.expect(!violated(&run, Member, .{.email}));
 }
 
+test "a value SQLite refuses before binding does not carry the last statement's constraint" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var run: nilo.Run = .init(testing.allocator);
+    defer run.deinit();
+    var db: SqliteDb = .init(testing.allocator, "file:violated_stale?mode=memory&cache=shared", .{ .size = 2, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .none);
+    try migrate.createMissing(&db, &run, .{ .tables = &.{Member} });
+
+    // A unique hit on the writer leaves its message in the connection.
+    _ = try db.insert(Member, &run, .{ .id = @as(i64, 1), .org = @as(i64, 1), .email = "ada@example.dev", .handle = "ada" });
+    try testing.expectError(error.AlreadyExists, db.insert(Member, &run, .{ .id = @as(i64, 2), .org = @as(i64, 1), .email = "ada@example.dev", .handle = "bob" }));
+    try testing.expect(violated(&run, Member, .{.email}));
+
+    // The next statement on that writer never reaches SQLite, so the Problem
+    // has no message of SQLite's to carry, and must not borrow the unique's.
+    try testing.expectError(
+        error.QueryFailed,
+        db.raw(i64, &run, "UPDATE members SET org = ?1 WHERE id = 99 RETURNING id", .{@as(u64, std.math.maxInt(u64))}),
+    );
+    try testing.expect(!violated(&run, Member, .{.email}));
+}
+
 test "a constraint's spellings are the Postgres name and SQLite's column list" {
     const both = comptime constraintSpellings(Member, .{ .handle, .org });
     try testing.expectEqualStrings("members_org_handle_key", both[0]);

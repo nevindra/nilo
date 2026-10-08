@@ -403,7 +403,7 @@ pub fn Wire(comptime opts_in: Options) type {
             ) wire.Error!Rows {
                 if (self.done) return error.QueryFailed;
                 try self.live();
-                try self.wire.checked(self.at, arena, values, problem);
+                try Self.checked(values, problem);
                 self.noteDrops(arena, sql);
                 const stmt, const kept = self.wire.stmtOn(self.at, sql, plan, values) catch |err| {
                     self.wire.said(self.at, err, arena, problem);
@@ -429,7 +429,7 @@ pub fn Wire(comptime opts_in: Options) type {
             ) wire.Error!usize {
                 if (self.done) return error.QueryFailed;
                 try self.live();
-                try self.wire.checked(self.at, arena, values, problem);
+                try Self.checked(values, problem);
                 self.noteDrops(arena, sql);
                 return self.wire.execOn(self.at, sql, plan, values) catch |err| {
                     self.wire.said(self.at, err, arena, problem);
@@ -1008,7 +1008,7 @@ pub fn Wire(comptime opts_in: Options) type {
         ) wire.Error!Rows {
             const at = if (wantsWriter(sql)) try self.takeWriter(sql) else try self.takeReader(sql);
             errdefer self.release(at);
-            try self.checked(at, arena, values, problem);
+            try checked(values, problem);
             const stmt, const kept = self.stmtOn(at, sql, plan, values) catch |err| {
                 self.said(at, err, arena, problem);
                 return err;
@@ -1026,7 +1026,7 @@ pub fn Wire(comptime opts_in: Options) type {
         ) wire.Error!usize {
             const at = try self.takeWriter(sql);
             defer self.release(at);
-            try self.checked(at, arena, values, problem);
+            try checked(values, problem);
             return self.execOn(at, sql, plan, values) catch |err| {
                 self.said(at, err, arena, problem);
                 return err;
@@ -1044,18 +1044,20 @@ pub fn Wire(comptime opts_in: Options) type {
         /// So this is called ahead of `stmtOn` by the four entry points and
         /// touches no flag.
         fn checked(
-            self: *Self,
-            at: usize,
-            arena: std.mem.Allocator,
             values: anytype,
             problem: ?*?wire.Problem,
         ) wire.Error!void {
+            // **Neither of these reached SQLite, so neither reads its `errmsg`**,
+            // which holds whatever the connection's last statement said: an
+            // INSERT refused on a unique, then a value past an `i64` on the
+            // same writer, would answer with the unique's constraint and make
+            // `sql.violated` true. The Zig error's name is all there is.
             intsFit(values) catch |err| {
-                self.said(at, err, arena, problem);
+                if (problem) |slot| slot.* = .{ .message = @errorName(err) };
                 return err;
             };
             floatsKept(values) catch |err| {
-                self.said(at, err, arena, problem);
+                if (problem) |slot| slot.* = .{ .message = @errorName(err) };
                 return err;
             };
         }

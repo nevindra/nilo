@@ -55,10 +55,6 @@ Nothing is open at this tier.
 
 **What would settle it:** a probe with two fibers on one executor, or `told` moved after the drain, which makes the question moot.
 
-**Whether SQLite's `Problem` can carry the previous statement's message, which would make `sql.violated` true for a constraint that was not hit.** `intsFit` and `floatsKept` fail before SQLite is called (`sqlite.zig:783`), and `said` then reads `lastError()` (`:909`), which after a reset holds the last statement's error. An INSERT refused on `users.email` followed on the writer by an oversized `u64` would make `sql.violated(c, User, .{.email})` true.
-
-**What would settle it:** a probe of that pair, or `said` reading `errmsg` only for an error that came from SQLite.
-
 ### `nilo_http`
 
 **`Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.** The store a route is given is a `cache.Space` in memory ([ADR 155](./adr/155-a-request-answered-once-is-answered-the-same-way-again.md)), and a payment retried during a rolling deploy is charged twice with nothing logged, which is the one thing the header exists to prevent. `Idempotent` asks its store for `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held` and nothing else (`http/idempotent.zig:268`), so a second store needs no change to it. A table in the database the program already has is the shape [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) chose for jobs, for the same reason.
