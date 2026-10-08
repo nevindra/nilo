@@ -77,6 +77,8 @@ zig build test-fetch-engine  # an outbound deadline firing against a real port; 
 zig build test-sql     # nilo_sql, with test-job-sql and refusals-sql; Postgres if DATABASE_URL reaches one,
                        #   and a failure without one where $CI is set (-Ddatabase-required=false)
 zig build layering     # no module imports upward or sideways
+zig build park-check   # a plain idle connection holds one page of stack (two on -Dtls), never a second or third; on test.
+                       #   Linux x86-64 host and target only: anywhere else the step is named "skipped" and succeeds (ADR 062)
 zig build two-modes    # configure a dependent asking for nilo in Debug and ReleaseSafe; on test
 zig build adr-check    # ADR files, their Topic lines, and every ADR cited exists; on test
 zig build docs-check   # every doc page's head, prose, links and anchors, the map, the reference's heading list,

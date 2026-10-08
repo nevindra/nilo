@@ -6397,6 +6397,53 @@ pub fn build(b: *std.Build) void {
     b.step("bench-body-server", "A server reading request bodies, for what one holds while it arrives")
         .dependOn(&b.addInstallArtifact(bench_body_server, .{}).step);
 
+    // Whether a plain idle connection holds one page of fiber stack, or two,
+    // which is the line between 4,669 bytes and 8,765 on every connection a
+    // server holds. Held by a step on `test` so a change to the connection
+    // loop cannot cross it unseen (ADR 062, ADR 212). Built `ReleaseFast` with
+    // the flags of this build, because Debug frames are not the frames being
+    // guarded and `-Dtls` moves the answer.
+    //
+    // **Linux on x86-64 only, host and target both.** The program reads
+    // `/proc/self/smaps` and the boundary is an x86-64 frame size. Anywhere
+    // else the step is still there, named "skipped", runs nothing and
+    // succeeds, so `zig build test` is green on macOS, Windows and a
+    // cross-compile without the check having said anything about them.
+    const park_check_step = b.step("park-check", "Fail if a plain idle connection holds a second page of stack it should not (Linux x86-64 only)");
+    const park_here = b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64 and
+        target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
+    if (park_here) {
+        const park_options = b.addOptions();
+        park_options.addOption(bool, "tls", want_tls);
+        park_options.addOption(bool, "http2", want_http2);
+        const park_check = b.addExecutable(.{
+            .name = "nilo-park-check",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/park_check.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .strip = stripMeasured(strip, .ReleaseFast),
+                .imports = &.{
+                    .{ .name = "nilo_http", .module = bench_http },
+                    .{ .name = "park_options", .module = park_options.createModule() },
+                },
+            }),
+        });
+        park_check_step.dependOn(&b.addRunArtifact(park_check).step);
+    } else {
+        const skipped = b.allocator.create(std.Build.Step) catch @panic("OOM");
+        skipped.* = std.Build.Step.init(.{
+            .id = .custom,
+            .name = "park-check skipped: it needs a Linux x86-64 host and target",
+            .owner = b,
+            .makeFn = struct {
+                fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {}
+            }.make,
+        });
+        park_check_step.dependOn(skipped);
+    }
+    test_step.dependOn(park_check_step);
+
     // The benchmark target over TLS, so the plain one has a control on the
     // axes ADR 212 spends: `bench/mem.py --tls` for the idle connection, and
     // `wrk` over `https://` for the request. Only under `-Dtls`, because a

@@ -13,25 +13,25 @@ A first attempt to fix that (release the stack pages once a connection goes idle
 
 ### A suspended fiber holds its stack at its high-water mark
 
-zio reserves 8 MiB of address space per fiber stack and commits pages as they are touched; nothing lowers the commit until the fiber exits. A connection blocked in `read` is a suspended fiber, so **every byte of stack a handler ever touches is resident for the rest of the connection's life, whether or not the request that touched it is still running.** Measured one for one: a WebSocket loop that `@memset`s 64 KiB (`/ws/deep` in `bench/ws_server.zig`) costs exactly 65,536 bytes more per idle socket than one that touches none, `5,183` against `70,719` ([`bench/result/http.md`](../../bench/result/http.md)).
+zio reserves 8 MiB of address space per fiber stack and commits pages as they are touched; nothing lowers the commit until the fiber exits or the fiber itself hands the pages back. A connection blocked in `read` inside a handler is a suspended fiber, so **every byte of stack a handler touches is resident for as long as that handler stays suspended, unless the wait is one that gives the pages below it back.** A handler that returns is another matter, and is the common one: the connection then waits in `waitForRequest`, the shallowest frame it has, and the pages below that frame are given back (the rest of this ADR). A route that touches 64 KiB of stack and returns costs 4,685 bytes an idle connection, the same as `/health` ([`bench/result/http.md`](../../bench/result/http.md)). What stays resident is the stack of a handler that does not return: a held event stream, a handler parked in a `Room`, or a WebSocket loop. Measured one for one: a WebSocket loop that `@memset`s 64 KiB (`/ws/deep` in `bench/ws_server.zig`) costs exactly 65,536 bytes more per idle socket than one that touches none, `5,183` against `70,719` ([`bench/result/http.md`](../../bench/result/http.md)).
 
-**It is touched bytes, not declared ones.** `bench/s3_server.zig` has a route that pulls a megabyte into the request arena and one that declares `[64 << 10]u8` and streams the same megabyte through it, touching none of it beyond the buffer. Out to 10,000 connections: `/health` 4,674, `/o/1k` (1 KB, arena) 6,731, `/o/1m` (1 MB, arena) 8,782, `/stream/1m` (1 MB through 64 KiB of stack) 12,876. **The route that never holds the whole megabyte costs 47% more at rest than the one that does**, because the arena is reset at the end of the request and the stack is reset by nothing. Rebuilding the streaming route with an 8 KiB buffer instead of 64 KiB moves the number by one byte: the depth is the call path's, not the buffer's declared size.
+**It is touched bytes, not declared ones.** `bench/s3_server.zig` has a route that pulls a megabyte into the request arena and one that declares `[64 << 10]u8` and streams the same megabyte through it, touching none of it beyond the buffer. Out to 10,000 connections: `/health` 4,674, `/o/1k` (1 KB, arena) 6,731, `/o/1m` (1 MB, arena) 8,782, `/stream/1m` 12,876. Rebuilding the streaming route with an 8 KiB buffer instead of 64 KiB moves the number by one byte. **The stack was not what that 12,876 measured**, and this ADR said it was until the reading was repeated on a route with no store behind it: a handler that touches 64 KiB of stack, with or without `c.bodyStream()`, and returns costs 4,685 at 10,000 connections, the floor; a handler that does only `c.stream()` and writes 16 KiB costs 12,876 (to the byte what `/stream/1m` read), and 4,715 with `.arena_keep = 0`. The extra is 8,191 bytes, 12,876 less the 4,685 of a returning handler read on the same server (`s3.md` subtracts its own `/health`, 4,674, and says 8,202; the 11 bytes are the two runs' floors). It is the stream's 4 KiB output buffer, which `c.stream()` takes from the request arena and `arena_keep` (16 KiB by default) then retains, touched, for the life of the connection ([ADR 075](./075-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)); with a 256-byte buffer it is 5,806, 1,121 over the floor. One buffer of 4,096 bytes is one page only if it starts on a page boundary, and an arena block does not: it covers two pages, and a 16 KiB response writes through both, which is the 8,192. That reading fits all three figures and I did not check the buffer's address.
 
-**So in this framework the arena is cheaper than the stack:**
+**So a stack buffer that is gone when the handler returns is free at rest, and the arena is not:**
 
 ```zig
-fn report(c: *nilo.Ctx) ![]const u8 {
-    var buf: [64 * 1024]u8 = undefined;      // ✗ 64 KiB × every connection, forever
+fn upload(c: *nilo.Ctx) !void {
+    var buf: [64 * 1024]u8 = undefined;      // ✓ 0 bytes at rest once the handler returns
     …
 }
 
-fn report(c: *nilo.Ctx) ![]const u8 {
-    const buf = try c.arena().alloc(u8, 64 * 1024);   // ✓ reset per request
-    …
+fn live(c: *nilo.Ctx) !void {
+    var buf: [64 * 1024]u8 = undefined;      // ✗ 64 KiB for as long as this handler stays suspended
+    …                                         //   below it: a WebSocket loop, a held stream
 }
 ```
 
-A big stack buffer is the idiomatic way to avoid an allocator, and here it is a **per-connection** cost that never comes back, while the arena is reset per request and capped at `arena_keep`. "The stack is free" is true per request and false per connection, and a server is measured per connection. The cost also tracks live connections rather than requests served: a route answered once and then left idle costs the same as one that has answered a thousand times, because what is resident is the high-water mark, not a running total.
+A big stack buffer is the idiomatic way to avoid an allocator, and for a handler that returns it costs nothing once the connection is idle, because the connection then waits in `waitForRequest` and gives the pages below that frame back (the rest of this ADR). It is a per-connection cost for exactly as long as the handler holds the frame, which is the whole of a WebSocket's or an event stream's life. The cost tracks live connections that are *inside* such a handler, not requests served. What a returning handler leaves behind is what it put in the arena and `arena_keep` kept: that, not the stack, is the number to read for a route that answers and goes quiet.
 
 ### Releasing the pages is not the fix; where the wait happens is
 
@@ -75,6 +75,14 @@ Two later cases showed the rule aimed one step short of where it needed to: a bl
 
 An enumeration of alternatives is the easiest version of this to fall for, because weighing two named mechanisms looks like diligence, and the question of whether the pair is exhaustive never gets asked.
 
+### What the engine allocates for a connection is part of the floor, and the page the park sits under is held by a build step
+
+**The floor moved 512 bytes between v0.2.0 and v0.3.0 and nothing in the framework's frames did it.** `serve` handed each connection's task a copy of `Options` (264 bytes) among its spawn arguments. zio's task is its own 192-byte header, 8 bytes for the group and the argument tuple; one that fits 384 bytes comes from a pool, and a larger one from the allocator, which rounds to a power of two. The copy took the task from the 512 class to the 1,024 class, and every connection kept the extra half kilobyte resident: 5,188 bytes at 10,000 connections against 4,678 after. The connection now reads its sizes through a pointer in the listener's state (a heap copy made once in `serve`, because taking the address of the parameter itself defeats scalar replacement and cost 20 KB of binary), and a `comptime` check in `http/engine/zio.zig` fails the build when an argument list would cross the class again. The same change reads the same on every listener kind (`-Dtls`, `-Dhttp2`, h2c), in [`bench/result/http.md`](../../bench/result/http.md).
+
+**Whether the plain park holds one page or two is a build step.** The stack of a plain idle connection stays at one page while its park depth is under the boundary and goes to two above it, found by adding ballast to the frame in steps of 16: 2,793 held one page and 2,825 held two in the `park-check` program (the benchmark server reads 2,809 and 2,841). Depth in the program, read with a store-only probe in `releaseIdleStack` that is not in the tree: 2,505 for the default build (288 under the boundary), 2,729 for `-Dhttp2` (64), 2,889 for `-Dtls` (96 over) and 2,937 for both (144 over). A figure of this kind moves by 16 or 32 bytes with anything that changes the layout, a print in the frame included, so read a depth as a place on the page and not as a constant.
+
+`zig build park-check`, run by `zig build test`, **fails on the crossing and on nothing else**: it opens 48 connections, leaves them quiet past `idle_peek_ms`, counts in `/proc/self/smaps` the 256 KiB stacks holding more than one page and more than two, and compares the count with the build's pin. A build under the boundary is pinned at one page and fails if any connection holds a second; a build already across (`-Dtls`) is pinned at two and fails if one takes a third. A few bytes of drift costs nothing and does not trip it. The program is built `ReleaseFast` with the build's own flags (a Debug frame is several times larger). It runs only when host and target are both Linux on x86-64; anywhere else the step is named "skipped" and succeeds. A `-Dtls` build is already across, which is the second page [ADR 212](./212-tls-is-an-option-a-build-asks-for.md) records; it is `Bridge.run` not being inlined, and forcing it inline did not give the page back.
+
 ## What was rejected
 
 **Guessing a floor for the stack release rather than reading `StackInfo`.** zio carves 64 stacks out of one slab mapping; an `madvise` that ran a page past `limit` would succeed and zero another connection's live stack, a corruption that is silent and lands in another module.
@@ -87,7 +95,7 @@ An enumeration of alternatives is the easiest version of this to fall for, becau
 
 **Keeping both upgrade shapes.** Two ways to open a WebSocket where one silently costs 4,096 bytes a connection more is the same "the option is a lie" problem ADR 021 refused a `max_message` over.
 
-**Reading the stack's cost as a leak, or as the arena's fault.** It scales with live connections, not with requests served, and sweeping `arena_keep` from 0 to 64 KiB changed nothing about it: the arena is reset per request regardless of size, and the resident bytes are the stack's, not the arena's.
+**Reading the stack's cost as a leak, or as the arena's fault.** For a suspended handler it scales with live connections, not with requests served, and sweeping `arena_keep` from 0 to 64 KiB changed nothing about it: the resident bytes are the stack's, not the arena's. That holds for the WebSocket loop it was measured on and not for a response stream, whose 12,876 was first read as the stack and is the arena's (above).
 
 ## What it costs
 
@@ -102,7 +110,7 @@ Against [ADR 017](./017-the-trade-budget-has-four-axes.md)'s four axes, before a
 | p99, the same | 59–82µs | 58–98µs, unchanged |
 | Binary size, stripped `ReleaseFast`, `examples/hello` | 886,680 B | **887,920 B**, +1,240 |
 
-**Both numbers stand as the floor, and both are still that: a floor, not a total.** A handler adds every byte of stack it touches on top of them, as measured above; `/ws/deep` holds 70,719. The +1,240 bytes are the cold paths becoming real functions instead of inlined copies, plus one trampoline per distinct socket loop in the program; `examples/hello` has no WebSocket route and still pays it, which is the disclosure [ADR 017](./017-the-trade-budget-has-four-axes.md) asks for rather than a defence of it.
+**Both numbers stand as the floor, and both are still that: a floor, not a total.** A handler that stays suspended adds every byte of stack it touches on top of them, as measured above; `/ws/deep` holds 70,719. A handler that returns adds none of its stack (the 64 KiB `bodyStream` route reads 4,685) and adds whatever it left in the arena, which `arena_keep` retains. The +1,240 bytes are the cold paths becoming real functions instead of inlined copies, plus one trampoline per distinct socket loop in the program; `examples/hello` has no WebSocket route and still pays it, which is the disclosure [ADR 017](./017-the-trade-budget-has-four-axes.md) asks for rather than a defence of it.
 
 An open WebSocket no longer counts as a request in flight, because the loop now runs from the connection loop's own frame rather than inside `serveRequest`, which brings the shutdown counter into line with its own stated rule: requests, not connections, because a connection parked in a read is holding no work.
 

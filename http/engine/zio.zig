@@ -337,6 +337,14 @@ const Accepting = struct {
     /// first, then each `also` entry in order (ADR 252). Copied into each
     /// connection's `Peer`, which is how a request learns it.
     index: u8 = 0,
+    /// The `Options` `serve` was given, a heap copy it keeps for as long as
+    /// any connection does. Type-erased because this struct is not generic over
+    /// the Bulkhead's `Options`, and read back by the two entries, which are:
+    /// a connection reads its sizes through here rather than being handed a copy,
+    /// because the copy was 264 bytes of the task zio allocates for it, which put
+    /// the task in the next size class of the allocator and made every idle
+    /// connection 512 bytes dearer (ADR 062).
+    sizes: *const anyopaque,
 
     fn fail(self: *Accepting, err: anyerror) void {
         self.all.fail(err);
@@ -956,6 +964,44 @@ pub const Wake = struct {
 /// under it is stack that has not been used yet and faults back in as zeroes,
 /// which is what a fresh frame wants anyway.
 const stack_margin = 512;
+
+/// The most a connection's argument list may weigh, so that its task stays in
+/// the 512-byte class of the allocator.
+///
+/// zio puts a task (`AnyTask`, then the result, then the context: 8 bytes for
+/// the group and the arguments) in a pool item when it fits
+/// `TaskPool.pool_item_size`, 384 bytes, and in `rt.allocator` when it does not.
+/// The allocator rounds to a power of two, so a task of 385 to 512 bytes costs
+/// 512 bytes resident per connection and one of 513 to 1,024 costs 1,024.
+/// Handing each connection the whole `Options` by value, 264 bytes, put the
+/// task in the 1,024 class: that is the 512 bytes an idle connection grew
+/// between v0.2.0 and v0.3.0 (ADR 017, ADR 062), and why a connection reads its
+/// sizes through `Accepting.sizes` instead.
+///
+/// **These are constants, not `@sizeOf`s, because zio does not export the types.**
+/// `zio.zig` re-exports neither `AnyTask` nor `TaskPool`, so nothing here can
+/// ask for their sizes. Read from the pinned zio 0.18.0: `src/task.zig:181`
+/// (`AnyTask`, 192 bytes on x86-64), `src/task.zig:785-786`
+/// (`pool_item_size = alignForward(@sizeOf(AnyTask) + 128, 128)`) and
+/// `src/task.zig:801-808` (`alloc` sends anything over that to the allocator).
+/// A zio bump re-reads those lines; `bench/mem.py` is what notices if nobody
+/// does, since an argument list that fits here and a task that no longer does
+/// reads as bytes on every idle connection.
+const zio_any_task_bytes = 192;
+const zio_context_header_bytes = 8;
+const allocator_class_bytes = 512;
+const connection_args_max = allocator_class_bytes - zio_any_task_bytes - zio_context_header_bytes;
+
+fn assertTaskClass(comptime F: type) void {
+    const size = @sizeOf(std.meta.ArgsTuple(F));
+    if (size > connection_args_max) @compileError(std.fmt.comptimePrint(
+        "nilo: a connection's argument list is {d} bytes and may be {d}: past that zio's task " ++
+            "for it falls into the next size class of the allocator and every idle connection " ++
+            "pays 512 bytes more. Hand the large part over by pointer to something `serve` " ++
+            "keeps for as long as its connections (ADR 062)",
+        .{ size, connection_args_max },
+    ));
+}
 
 /// Hand back the pages of the *running* fiber's stack that are below its
 /// current frame.
@@ -1743,6 +1789,16 @@ pub fn serve(
     const server = listeners[0].server;
     const unix_path = listeners[0].unix_path;
 
+    // What every connection reads its sizes from (`Accepting.sizes`). A copy
+    // of the `Options` in an allocation of its own, made before the group so
+    // that it is freed after the group has cut the last connection off, and
+    // **not a pointer to `options`**: taking the address of that parameter
+    // keeps it in memory, and the same program grew by 20,304 bytes
+    // (ADR 017, ADR 062).
+    const held = try gpa.create(Options);
+    defer gpa.destroy(held);
+    held.* = options;
+
     var group: zio.Group = .init;
     // Whatever is still running when the grace period is over is cut off
     // here. By then it has had its chance.
@@ -1914,7 +1970,6 @@ pub fn serve(
             st: State,
             stream: zio.net.Stream,
             conn_gpa: std.mem.Allocator,
-            sizes: Options,
             // The listener's own state rather than `&sh.all.capacity`, which is all this
             // entry reads of it: `runTls` below wants the rest, and the two
             // entries keep one argument list so the plain one's frame is
@@ -1925,6 +1980,7 @@ pub fn serve(
             sh: *Accepting,
         ) void {
             const capacity = &sh.all.capacity;
+            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
             // After the close, not before: the count is meant to answer
             // "how many sockets does this process hold", and the socket is
             // held until it is shut. Deferred first so it runs last.
@@ -2039,11 +2095,11 @@ pub fn serve(
             st: State,
             stream: zio.net.Stream,
             conn_gpa: std.mem.Allocator,
-            sizes: Options,
             sh: *Accepting,
         ) void {
             if (!nilo_build.tls) unreachable;
             const capacity = &sh.all.capacity;
+            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
             defer capacity.give();
             defer stream.close();
             // Always IP: a TLS listener on a unix socket is refused in
@@ -2318,6 +2374,7 @@ pub fn serve(
         .all = &shared,
         .secured = if (b.secured) |*sec| sec else null,
         .index = @intCast(i),
+        .sizes = held,
     };
 
     // One acceptor. There is one per executor ([ADR 200](../../docs/adr/200-every-executor-accepts.md)),
@@ -2328,7 +2385,7 @@ pub fn serve(
     // one does not matter, because the connection is then dealt to an
     // executor round-robin by `spawn`, the same as before.
     const Acceptor = struct {
-        fn run(sh: *Accepting, server_: zio.net.Server, st: State, conn_gpa: std.mem.Allocator, sizes: Options, connections: *zio.Group) void {
+        fn run(sh: *Accepting, server_: zio.net.Server, st: State, conn_gpa: std.mem.Allocator, connections: *zio.Group) void {
             // Grows while accepting keeps failing for want of a descriptor,
             // and is reset by the first connection that gets through. Per
             // acceptor, because each one waits on its own; the log line is
@@ -2440,10 +2497,12 @@ pub fn serve(
                 // Two entries and one argument list, for the reason on
                 // `Conn.runTls`. `nilo_build.tls` first so that a build
                 // without TLS has no reference to `runTls` to analyse.
+                comptime assertTaskClass(@TypeOf(Conn.run));
+                if (nilo_build.tls) comptime assertTaskClass(@TypeOf(Conn.runTls));
                 const spawned = if (nilo_build.tls and sh.secured != null)
-                    connections.spawn(Conn.runTls, .{ st, stream, conn_gpa, sizes, sh })
+                    connections.spawn(Conn.runTls, .{ st, stream, conn_gpa, sh })
                 else
-                    connections.spawn(Conn.run, .{ st, stream, conn_gpa, sizes, sh });
+                    connections.spawn(Conn.run, .{ st, stream, conn_gpa, sh });
                 spawned catch |err| {
                     sh.all.capacity.give();
                     stream.close();
@@ -2471,7 +2530,7 @@ pub fn serve(
     defer acceptors.cancel();
     for (listeners) |*b| {
         for (0..threads) |_| {
-            try acceptors.spawn(Acceptor.run, .{ &b.accepting, b.server, state, gpa, options, &group });
+            try acceptors.spawn(Acceptor.run, .{ &b.accepting, b.server, state, gpa, &group });
         }
     }
 

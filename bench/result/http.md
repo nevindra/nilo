@@ -4250,3 +4250,47 @@ GB/s, one round each, so read to a tenth. What the code showed. **The library wr
 **The final flush of a connection is not shielded.** It could be cut by the cancellation a stop sends, and then the last record would not leave, but so can every write of a response in flight at a stop (the flush at the end of each drain is the same write), and a shield on a write with no deadline armed would let a stalled peer hold the stop. Left as it was.
 
 **The decision it moved:** ADR 212 gained the paragraph on the record buffer and the cleartext writer. **Can it be pushed further:** HTTP/2 is 4% behind on the held file and 5% behind on the spilled one, which is the frame head and a second record per frame; batching the frames of one turn into one write would need the connection to say where a turn ends, which is `http/h2conn.zig`'s.
+
+## What a connection's task costs, how a stack buffer costs at idle, and how close the park sits to a page
+
+Run on 2026-10-08 at `514e8c1` plus the working tree, on the machine above, kernel 7.2.5. `bench/mem.py` in a private network namespace, `nilo-hello` built `ReleaseFast` with `-Dtarget=x86_64-linux-gnu -Dcpu=x86_64_v3`, server on cores 4 to 7, 1,000, 5,000 and 10,000 connections, each build twice. The before was built from the same commit in a scratch directory, same flags, same afternoon. Marginal (5,000 to 10,000) agrees with the average at 10,000 to within 10 bytes.
+
+**The 512 bytes.** [`releases.md`](./releases.md) read 4,674 at v0.2.0 and 5,186 at v0.3.0. The bisect found no frame that grew: `serve` handed every connection's task a copy of `Options` (264 bytes) among its spawn arguments, which took zio's task from its 384-byte pool to the allocator's 1,024 class, where a 512 B one had been. The arguments are now `.{ st, stream, conn_gpa, sh }` and the sizes are read through `sh.sizes`, a pointer to a heap copy `serve` makes once. Commands: each server binary run in a private network namespace (`unshare -rn`, loopback up) on cores 4 to 7, then `python3 bench/mem.py --port 8787 --steps 1000,5000,10000` (default `--settle 2`) against `nilo-hello`, the same with `--tls` against `nilo-bench-tls-server`, and `--h2 --get` (with `--tls` for the TLS rows) for the h2 rows; each build twice, the second run in the table. Bytes per idle connection at 10,000:
+
+| listener | before | after |
+|---|---|---|
+| plain | 5,188 | **4,678** |
+| plain listener of a `-Dtls` build | 9,300 | 8,787 |
+| TLS | 9,350 | 8,847 |
+| `-Dhttp2`, an HTTP/1.1 connection | 5,204 | 4,691 |
+| `-Dhttp2`, h2c after one GET | 9,677 | 9,506 |
+| `-Dtls -Dhttp2`, TLS HTTP/1.1 | 9,327 | 8,853 |
+| `-Dtls -Dhttp2`, TLS h2 after one GET | 10,259 | 10,267 |
+
+The two h2 rows move by far less than 512: the stream state those connections hold sits in the same size class either way. A variant that shrank the arguments under 384 bytes to use zio's pool saved a further 115 bytes on HTTP/1.1 and made h2c about 390 bytes worse, and was dropped. Stripped `ReleaseFast` binaries: unchanged to within 200 bytes (994.9 KB and 994.7 KB for `nilo-hello`). Taking the address of the `options` parameter instead of a heap copy added 20,304 bytes, which is why the copy is on the heap.
+
+**Throughput did not move.** `nilo-hello` `GET /`, wrk 4 threads 64 connections 10 s, server on cores 0 to 3, three interleaved rounds under the lock: 1,335,138 to 1,351,852 req/s before, 1,337,370 to 1,346,149 after, p50 latency 42 µs both.
+
+**A stack buffer is free at rest.** A body-stream route with `var buf: [64 * 1024]u8` that returns costs 4,685 bytes an idle connection, 7 more than `/health`. A route using `c.stream()` costs 12,876: the stream's own 4 KiB buffer comes from the request arena and `arena_keep` (16 KiB) retains it. With `.arena_keep = 0` it reads 4,715, with a 256 B buffer 5,806. [ADR 062](../../docs/adr/062-where-a-connection-waits-is-what-it-costs.md) and [`s3.md`](./s3.md) had read the arena's bytes as the stack's.
+
+**The park.** The plain stack flips from one resident page to two between 2,809 and 2,841 bytes of depth on the benchmark server (2,793 and 2,825 in the `park-check` program), found with ballast in steps of 16. Depth in the `park-check` program on `ReleaseFast`, read with a store-only probe in `releaseIdleStack` that is not in the tree: 2,505 default (288 under the boundary), 2,729 with `-Dhttp2` (64), 2,889 with `-Dtls` and 2,937 with both (across by 96 and 144). The depth moves by 16 to 32 bytes with a change of layout: a `std.debug.print` in the same frame read 2,537, 2,761, 2,921 and 2,969, and an earlier tree read 2,713 for `-Dhttp2`, so none of these is a constant. The `-Dtls` page is the inliner's: `Bridge.run` is a real call in the plain entry of that build, and two `always_inline` variants either did not compile away the frame or moved the depth the wrong way. `zig build park-check` counts pages and not bytes (a build under the boundary may hold one, `-Dtls` two), fails on a crossing, and runs only on a Linux x86-64 host and target.
+
+**The decision it moved:** ADR 062 gained the sections on the task size class and the park check, and was corrected on the stack buffer; ADR 212 gained the measured margin. **Can it be pushed further:** the `-Dtls` plain listener's page (4,109 bytes) is the one open item, and the pooled-argument variant would take another 115 bytes off HTTP/1.1 if the h2c cost it caused were understood.
+
+### A prototype: an idle HTTP/1.1 connection with no fiber
+
+Run on 2026-10-08, same machine, commit and flags as above, in the patch under [`spike/fiberless-idle/`](../../spike/fiberless-idle/README.md), which says the base commit and how to apply and run it, and which is not merged. The prototype is a plain listener of a default build only (no `-Dtls`, no `-Dhttp2`). At the idle peek (`waitForRequest`, after the pages are released) the connection loop returns instead of waiting, the fiber ends, and the connection is a 512-byte heap record (`Rec`: the stream, the reader and writer, the peer, the listener's state and a `NetPoll` completion) submitted to one `CompletionQueue`. One reactor fiber waits on that queue and, when a socket is readable, spawns a connection fiber on the same record. The patch is about 215 lines over `bulkhead.zig` (a `park` entry in the Waker's table), `serve.zig` and `http/engine/zio.zig`. The memory rows below were read with the first version of the patch and one row (1,000 and 10,000 connections, 1,483 and 967 bytes) again after it was rebased onto the final tree.
+
+Bytes per idle connection, `bench/mem.py` with `--settle 15`, two runs each:
+
+| build | 1,000 | 5,000 | 10,000 | marginal 5,000 to 10,000 |
+|---|---|---|---|---|
+| fibers, as now | 4,735 | 4,685 | 4,678 | 4,671 |
+| no fiber, stack pool shrinking every 1 s | 1,479 | 1,013 | 892 and 843 | 771 and 672 |
+| no fiber, zio's default 60 s shrink | 9,351 | 7,542 | 4,919 | 2,296 |
+
+The last row is the cost the prototype cannot hide: a fiber that ends hands its stack back to zio's pool, the pool keeps the stacks it recently needed (a half-life of one `shrink_interval`), and every one of them still holds the page its base frames touched. A burst of 10,000 connections that all idle at once leaves 10,000 stacks in the pool for minutes at the default. The first two rows set `stack_pool.shrink_interval` to one second in `Runtime.init`, which is an option and not a change to zio.
+
+Does it cost anything when busy or when waking? `nilo-hello` `GET /`, wrk 4 threads 64 connections 10 s, server on cores 0 to 3, three interleaved rounds under the lock: 1,340,208 to 1,326,652 req/s with fibers, 1,337,148 to 1,337,977 without, p50 42 µs both (no connection ever parks under load, so this is the control). With 1,000 connections and 300 ms of think time before every request (a wrk `delay()`), every request wakes a parked connection: 3,225 to 3,230 req/s both, p50 0.78 to 0.90 ms with fibers and 0.70 to 0.80 without, p99 1.4 to 2.0 ms and 1.6 to 2.0, server CPU 61 to 64 ticks over 12 s with fibers and 57 to 58 without (a parked wake skips the `madvise` and the fault of the stack's pages). A single client that waits past the peek and then sends one request (`wakelat.py`, 50 connections, 1,000 samples, two runs): p50 29.8 and 29.6 µs with fibers, 34.7 and 42.6 without, p99 133 and 144 µs and 193 and 224. So the first request after a quiet spell is 5 to 13 µs slower at the median and 60 to 80 µs slower at p99 when nothing else is running, which is the price of a fiber spawn and a stack acquire on a wake that an already-suspended fiber does not pay. Stripped `ReleaseFast` binary: 1,020,504 bytes against 1,018,616 (+1.9 KB).
+
+What the prototype leaves out, so the 700 to 770 bytes is a floor: an idle deadline for a parked connection (a timer or a sweep, 8 to 24 bytes), closing the parked ones at shutdown (a list and a lock, 16 bytes), a reactor per executor (one fiber behind one mutex is the wake rate's ceiling), and TLS and HTTP/2, whose connection state lives in the fiber's frame today. `zig build test` on the prototype passed 2,781 of 2,811 tests (30 skipped) with one failing step, `park-check`, which measures the park depth of a stack the parked connection no longer has; `test-all`, the fuzzers and the Debug `Str` trap across a park were not run.

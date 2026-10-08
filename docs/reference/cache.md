@@ -67,7 +67,7 @@ fn render(pages: *Pages, path: []const u8) ![]const u8 {
 }
 ```
 
-**`Held` lives on your stack, and a connection keeps its stack for as long as it is open** ([ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md)). A handler that declares a 4 KiB `Held` adds 4 KiB to every connection that reaches it. It is an array you declare, not a buffer hidden inside the cache, because that is the only way you get to see the number.
+**`Held` lives on your stack, and a fiber keeps its stack for as long as it stays suspended** ([ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md)). A handler that declares a 4 KiB `Held` and returns adds nothing to an idle connection; one that holds it across a wait (a WebSocket loop, a held stream) adds 4 KiB to every connection in that state. It is an array you declare, not a buffer hidden inside the cache, because that is the only way you get to see the number.
 
 ### Values with pointers
 

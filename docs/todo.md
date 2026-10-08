@@ -91,18 +91,6 @@ Nothing is open at this tier.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
-**An idle connection grew 512 bytes between v0.2.0 and v0.3.0, and no ADR states it.** 4,674 to 5,186 on the benchmark server, unchanged since, while ADR 017 and the principles page still quote 4,669 ([`releases.md`](../bench/result/releases.md)). A hard axis moved, so either a feature owes its line in ADR 017 or the bytes are a leak of frame depth ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)).
-
-**What would settle it:** `bench/release.py --only http` bisecting the commits between the two tags, then the park depth on either side of the step. An afternoon.
-
-**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
-
-**Either every `bodyStream` example costs 64 KiB on every idle connection, or ADR 062 is wrong about it.** [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md) marks `var buf: [64 * 1024]u8` as 64 KiB on every connection for ever, and [the memory page](./design/memory.md) says the pages below `waitForRequest` are given back at idle, which would make that true only of a WebSocket. Every `bodyStream` example (`body.zig`, `ctx.zig`, `guide/requests.md`, `examples/stream`) teaches the stack buffer.
-
-**What would settle it:** `bench/mem.py --hold` against a route that streams its body through a 64 KiB stack buffer, read while the connection is idle. An afternoon.
-
-**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
-
 **The worst gRPC call is 1.4 s at 256 connections and 3.8 s at 1,024, where tonic's is about 1.1 s on the same four cores** ([`http.md`](../bench/result/http.md#a-grpc-listener-built)). h2load gives mean and maximum and no percentiles, so where the tail comes from is not known.
 
 **What would settle it:** `ghz` or another client with a latency histogram against `spike/grpc/server`, before and after a spawn homed on the calling executor. An afternoon.
@@ -431,9 +419,15 @@ Nothing is open at this tier.
 
 **Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
 
-**How far under a page boundary a plain connection parks is not known, so every change to the connection loop is one page per idle connection away from going unnoticed.** 2,618 bytes live on the plain build and 2,890 on the `-Dtls` build, one page against two, with the difference being the inliner's and not TLS's ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md), the section on the page).
+**A `-Dtls` build parks 96 bytes past a page boundary, which costs 4,109 bytes on every idle connection of its plain listener, and a `-Dhttp2` build sits 64 bytes under it.** In the `park-check` program, read with a store-only probe that is not in the tree, the plain park is at 2,505 (288 under the 2,793 where a second page starts), 2,729 with `-Dhttp2`, 2,889 with `-Dtls` and 2,937 with both ([`http.md`](../bench/result/http.md#what-a-connections-task-costs-how-a-stack-buffer-costs-at-idle-and-how-close-the-park-sits-to-a-page), [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)). The `-Dtls` page is the inliner's, not TLS's: `Bridge.run` is a real call in the plain entry, and `always_inline` on it did not give the page back. The same pooling question is open beside it: arguments under zio's 384-byte pool size would take 115 bytes more off an HTTP/1.1 connection and cost an h2c one about 390, and why is not known.
 
-**What would settle it:** the park-depth instrumentation ADR 212 describes (the live stack at `releaseIdleStack`, printed once per connection), run on `main` and after each candidate: `noinline` on `waitForRequest`'s wait, a smaller `Peer` on the frame, the handler's frame measured on its own. An afternoon with the instrumentation, which is four lines.
+**What would settle it:** the stack at the release printed with and without `Bridge.run` called through a function pointer or split in two, on `-Dtls`; and `gdb` on an h2c connection's task allocation under the pooled arguments. A day.
+
+**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
+
+**An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.** A connection past the idle peek ends its fiber and is a 512-byte record behind a poll; a reader fiber spawns it a fiber again when its socket is readable. 1,000 connections read 1,479 bytes, 10,000 read 892 and 843, and a busy connection and a wake after 300 ms of think time both measure level with the fiber build ([`http.md`](../bench/result/http.md#a-prototype-an-idle-http11-connection-with-no-fiber)); the first request after a quiet spell is 5 to 13 µs slower at the median. It reads that low only because the prototype sets zio's stack pool to shrink every second (at the default 60 s it reads 4,919 once the pool has decayed, 9,351 before), leaves out TLS, HTTP/2, the idle deadline and the shutdown of parked connections, and changes the Waker's table ([ADR 001](./adr/001-zio-as-the-engine-behind-the-bulkhead.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md), [ADR 017](./adr/017-the-trade-budget-has-four-axes.md)). It would close the `-Dtls` page above for a plain request/response connection and leave a WebSocket and a held stream exactly as ADR 062 describes them.
+
+**What would settle it:** the user's decision on the design note in the session that wrote it; then a prototype with the idle deadline, the shutdown list, a reactor per executor and a TLS connection whose state is on the heap, read with `bench/mem.py --tls` and `bench/release.py`, and `zig build test-all` passing on it.
 
 **Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
 

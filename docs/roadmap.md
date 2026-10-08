@@ -35,20 +35,19 @@ Independent of the order: each touches files no stage of the direction above doe
 
 ### Every byte an idle connection holds is on the record
 
-**The idle figure is the number nilo sells, and it has stopped being one anybody can account for byte by byte.** An idle connection grew 512 bytes between v0.2.0 and v0.3.0 with no ADR stating it; the documents teach a 64 KiB stack buffer in a body stream that one page says costs every idle connection and another says costs none; and how close a plain connection parks to a page boundary is not known, so the next change to the connection loop could cost a page per connection and be noticed only by whoever next runs `bench/mem.py`. This direction puts each of those back on the record, with the outbound side's figures beside them ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)).
+**The idle figure is the number nilo sells, and what it is made of is not yet all on the record.** What is open is the `-Dtls` build's second page, whether an idle HTTP/1.1 connection needs a fiber at all, `nilo_fetch`'s per-call figures and what a connection inside a request holds, and this direction puts each on the record ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)).
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · An idle connection grew 512 bytes between v0.2.0 and v0.3.0, and no ADR states it.
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_http` · Either every `bodyStream` example costs 64 KiB on every idle connection, or ADR 062 is wrong about it.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_fetch` · A plain call costs 4,139 bytes on every idle connection
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_fetch` · What an outbound call costs through TLS is read off buffer sizes, not measured.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · What a connection inside a request holds now that `read_buffer` is 16 KiB is arithmetic, not a reading.
-- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · How far under a page boundary a plain connection parks is not known, so every change to the connection loop is one page per idle connection away from going unnoticed.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A `-Dtls` build parks 96 bytes past a page boundary, which costs 4,109 bytes on every idle connection of its plain listener, and a `-Dhttp2` build sits 64 bytes under it.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.
 
 <!-- /gathered -->
 
-**What would settle it:** ADR 017's figure matching what `bench/release.py` reads on the benchmark server, every byte of the difference from 4,669 owned by an ADR, and the park depth printed by a run a change to the connection loop can be checked against.
+**What would settle it:** the `-Dtls` page given back or recorded as the cost of that build in ADR 017, and the outbound figures read instead of derived.
 
 ## Next
 

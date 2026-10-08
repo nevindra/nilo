@@ -1,0 +1,217 @@
+--- a/http/engine/zio.zig	2026-10-08 12:07:28.056539955 +0700
++++ b/http/engine/zio.zig	2026-10-08 12:15:15.552501646 +0700
+@@ -686,6 +686,8 @@
+     /// different moments, and a completion that is still pending must not be
+     /// handed to `submit` a second time: the queue would link it twice.
+     poll_armed: bool = false,
++    parkable: bool = false,
++    park_requested: bool = false,
+     /// A `wait` or `lookNow` was answered from bytes the record layer already
+     /// held, so the readable poll may since have fired for bytes that were
+     /// read in the meantime. Looked at once, by `believe`.
+@@ -1597,7 +1599,7 @@
+     // request at 500 req/s against 70 without it, 44 against 34 at 8,000,
+     // and +3% at saturation, four pairs of four;
+     // [ADR 199](../../docs/adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md)).
+-    const rt = try zio.Runtime.init(gpa, .{ .executors = .exact(threads), .thread_pool = blocking_pool });
++    const rt = try zio.Runtime.init(gpa, .{ .executors = .exact(threads), .thread_pool = blocking_pool, .stack_pool = .{ .maximum_size = 8 * 1024 * 1024, .committed_size = 256 * 1024, .shrink_interval = .fromSeconds(1) } });
+     defer rt.deinit();
+ 
+     // **Registered second, so it runs second to last** — after the group
+@@ -1962,10 +1964,109 @@
+         /// in any other build it is `handler` and this is the function it
+         /// was to the byte. A comptime parameter rather than a branch, so a
+         /// build without the flag analyses none of the choosing.
+-        const run = if (nilo_build.http2) Entry(plain_handler, hand_on).run else Entry(handler, null).run;
++        const entry = if (nilo_build.http2) Entry(plain_handler, hand_on) else Entry(handler, null);
++        const run = entry.run;
+ 
+         fn Entry(comptime connection: anytype, comptime hand_on_to: anytype) type {
+             return struct {
++        // PROTOTYPE: a fiberless idle HTTP/1.1 connection. Plain listener,
++        // no -Dhttp2, no -Dtls.
++        const park_mode = !nilo_build.http2 and !nilo_build.tls;
++
++        /// Everything a connection keeps while no fiber is serving it.
++        const Rec = struct {
++            st: State,
++            sh: *Accepting,
++            gpa: std.mem.Allocator,
++            stream: zio.net.Stream,
++            read_buf: []u8,
++            write_buf: []u8,
++            link: Link,
++            peer: Peer,
++            poll: zio.ev.NetPoll,
++        };
++
++        var park_cq: zio.CompletionQueue = zio.CompletionQueue.init();
++
++        fn finish(rec: *Rec) void {
++            const al = rec.gpa;
++            rec.stream.close();
++            al.free(rec.write_buf);
++            al.free(rec.read_buf);
++            rec.sh.all.capacity.give();
++            al.destroy(rec);
++        }
++
++        fn runNew(st: State, stream: zio.net.Stream, conn_gpa: std.mem.Allocator, sh: *Accepting) void {
++            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
++            const over_ip = stream.socket.address.getType() == .ip;
++            if (over_ip) stream.socket.setNoDelay(true) catch {};
++            const rec = conn_gpa.create(Rec) catch {
++                stream.close();
++                sh.all.capacity.give();
++                return;
++            };
++            const read_buf = alignedPages(conn_gpa, sizes.read_buffer) catch {
++                conn_gpa.destroy(rec);
++                stream.close();
++                sh.all.capacity.give();
++                return;
++            };
++            const write_buf = alignedPages(conn_gpa, sizes.write_buffer) catch {
++                conn_gpa.free(read_buf);
++                conn_gpa.destroy(rec);
++                stream.close();
++                sh.all.capacity.give();
++                return;
++            };
++            var peer: Peer = .{
++                .port = portOf(stream.socket.address),
++                .local = !over_ip,
++                .listener = sh.index,
++            };
++            peer._len = writePeer(&peer._text, stream.socket.address);
++            rec.* = .{
++                .st = st,
++                .sh = sh,
++                .gpa = conn_gpa,
++                .stream = stream,
++                .read_buf = read_buf,
++                .write_buf = write_buf,
++                .link = undefined,
++                .peer = peer,
++                .poll = zio.ev.NetPoll.init(stream.socket.handle, .recv),
++            };
++            rec.link.init(stream, read_buf, write_buf);
++            serveRec(rec);
++        }
++
++        fn resumeRun(rec: *Rec) void {
++            serveRec(rec);
++        }
++
++        fn serveRec(rec: *Rec) void {
++            var clocks = Clocks{ .reader = &rec.link.reader, .writer = &rec.link.writer };
++            var wake = Wake.init(rec.stream.socket.handle);
++            wake.parkable = true;
++            defer wake.deinit();
++            connection(rec.st, &rec.link.reader.interface, &rec.link.writer.interface, &clocks, &wake, rec.peer);
++            if (wake.park_requested) {
++                park_cq.submit(&rec.poll.c) catch finish(rec);
++                return;
++            }
++            finish(rec);
++        }
++
++        /// One fiber that turns a readable parked socket back into a connection fiber.
++        pub fn reactor(connections: *zio.Group) void {
++            while (true) {
++                const done = park_cq.wait() catch return;
++                const poll: *zio.ev.NetPoll = @alignCast(@fieldParentPtr("c", done));
++                const rec: *Rec = @alignCast(@fieldParentPtr("poll", poll));
++                connections.spawn(resumeRun, .{rec}) catch finish(rec);
++            }
++        }
++
+         fn run(
+             st: State,
+             stream: zio.net.Stream,
+@@ -1979,6 +2080,7 @@
+             // anything added above it is a whole page (ADR 212).
+             sh: *Accepting,
+         ) void {
++            if (comptime park_mode) return runNew(st, stream, conn_gpa, sh);
+             const capacity = &sh.all.capacity;
+             const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
+             // After the close, not before: the count is meant to answer
+@@ -2528,6 +2630,7 @@
+     // threads the first did rather than the leftovers.
+     var acceptors: zio.Group = .init;
+     defer acceptors.cancel();
++    if (comptime Conn.entry.park_mode) try acceptors.spawn(Conn.entry.reactor, .{&group});
+     for (listeners) |*b| {
+         for (0..threads) |_| {
+             try acceptors.spawn(Acceptor.run, .{ &b.accepting, b.server, state, gpa, &group });
+--- a/http/bulkhead.zig	2026-10-08 12:07:24.089133369 +0700
++++ b/http/bulkhead.zig	2026-10-08 12:15:15.553646290 +0700
+@@ -934,6 +934,13 @@
+             wake.halfClose();
+         }
+     }.f,
++    .park = struct {
++        fn f(target: ?*anyopaque) bool {
++            const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
++            wake.park_requested = wake.parkable;
++            return wake.parkable;
++        }
++    }.f,
+     .poll = if (!looks_ahead) {} else struct {
+         fn f(target: ?*anyopaque) Woken {
+             const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
+@@ -1646,6 +1653,8 @@
+         /// Shut the send side of this connection's socket, and nothing else.
+         /// See `halfClose`.
+         half_close: *const fn (target: ?*anyopaque) void,
++        /// PROTOTYPE: ask the engine to take this connection off its fiber.
++        park: *const fn (target: ?*anyopaque) bool = &neverParks,
+         /// `wait` without waiting: what has happened already, or `.timed_out`.
+         /// See `poll`.
+         /// Only a `-Dhttp2` build has the field: a default build's Waker is
+@@ -1653,6 +1662,10 @@
+         poll: if (looks_ahead) *const fn (target: ?*anyopaque) Woken else void = if (looks_ahead) &nothingYet else {},
+     };
+ 
++    fn neverParks(_: ?*anyopaque) bool {
++        return false;
++    }
++
+     fn nothingYet(_: ?*anyopaque) Woken {
+         return .timed_out;
+     }
+@@ -1676,6 +1689,11 @@
+         .half_close = struct {
+             fn f(_: ?*anyopaque) void {}
+         }.f,
++        .park = struct {
++            fn f(_: ?*anyopaque) bool {
++                return false;
++            }
++        }.f,
+     };
+ 
+     /// Park until the socket has something to read, somebody posts, or
+@@ -1710,6 +1728,10 @@
+     /// waiting: the pages fault back in as zeroes, so this pays for itself
+     /// once and costs again on every return trip. `Socket.park` calls it
+     /// behind the same 200ms peek that gates the buffers.
++    pub fn parked(self: Waker) bool {
++        return self.vtable.park(self.target);
++    }
++
+     pub fn releaseStack(self: Waker) void {
+         self.vtable.release_stack(self.target);
+     }
+--- a/http/serve.zig	2026-10-08 11:20:55.870376185 +0700
++++ b/http/serve.zig	2026-10-08 12:15:15.553036026 +0700
+@@ -210,6 +210,8 @@
+     in.fillMore() catch |err| {
+         if (err != error.ReadFailed or !deadlines.timedOut()) return false;
+         bulkhead.releaseIdlePages(in, out);
++        // PROTOTYPE (fiberless idle): the engine takes the connection off its fiber.
++        if (waker.parked()) return false;
+         waker.releaseStack();
+     };
+ 
