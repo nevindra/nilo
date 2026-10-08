@@ -346,7 +346,7 @@ const Role = union(enum) {
 /// path param count can be checked and error messages can name the route.
 pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler {
     const Fn = comptime fnTypeOf(pattern, @TypeOf(f));
-    const params = @typeInfo(Fn).@"fn".params;
+    const params = @typeInfo(Fn).@"fn".param_types;
     const roles = comptime rolesOf(pattern, params);
     const param_names = comptime patternParamNames(pattern);
     comptime if (idempotentAt(roles) != null) checkKeepable(pattern, Fn, "an `Idempotent(…)`");
@@ -364,7 +364,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
             // else: the kept answer goes out and the handler never runs
             // (ADR 155). `null` here means there is no such argument.
             const replaying: ?Begun = if (comptime idempotentAt(roles)) |at|
-                switch (try idempotentBegin(params[at].type.?, c)) {
+                switch (try idempotentBegin(params[at].?, c)) {
                     .replayed => return,
                     .fresh => |begun| begun,
                 }
@@ -373,7 +373,7 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
             // The same, keyed on the request line (ADR 188). Never both:
             // `rolesOf` refuses a handler that asks for the two.
             const caching: ?cached_mod.Begun = if (comptime cachedAt(roles)) |at|
-                switch (try cachedBegin(params[at].type.?, c)) {
+                switch (try cachedBegin(params[at].?, c)) {
                     .replayed => return,
                     .fresh => |begun| begun,
                 }
@@ -391,11 +391,11 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
             // `cachedFinish` release.
             {
                 errdefer {
-                    if (comptime idempotentAt(roles)) |at| idempotentRelease(params[at].type.?, c, replaying.?);
-                    if (comptime cachedAt(roles)) |at| cachedRelease(params[at].type.?, c, caching.?);
+                    if (comptime idempotentAt(roles)) |at| idempotentRelease(params[at].?, c, replaying.?);
+                    if (comptime cachedAt(roles)) |at| cachedRelease(params[at].?, c, caching.?);
                 }
                 inline for (params, 0..) |p, i| {
-                    const P = p.type.?;
+                    const P = p.?;
                     switch (comptime roles[i]) {
                         .ctx => args[i] = c,
                         // **Logged as well as answered** (ADR 180). `listen()`
@@ -458,10 +458,10 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                 }
             }
             if (comptime idempotentAt(roles)) |at| {
-                return idempotentFinish(params[at].type.?, c, replaying.?, &spelling, @call(.auto, f, args));
+                return idempotentFinish(params[at].?, c, replaying.?, &spelling, @call(.auto, f, args));
             }
             if (comptime cachedAt(roles)) |at| {
-                return cachedFinish(params[at].type.?, c, caching.?, &spelling, @call(.auto, f, args));
+                return cachedFinish(params[at].?, c, caching.?, &spelling, @call(.auto, f, args));
             }
             return sendResult(c, &spelling, @call(.auto, f, args));
         }
@@ -518,7 +518,7 @@ fn cachedAt(comptime roles: []const Role) ?usize {
 /// `App.post` refuses it (ADR 188).
 pub fn isCached(comptime pattern: []const u8, comptime handler: anytype) bool {
     const Fn = comptime fnTypeOf(pattern, @TypeOf(handler));
-    return comptime cachedAt(rolesOf(pattern, @typeInfo(Fn).@"fn".params)) != null;
+    return comptime cachedAt(rolesOf(pattern, @typeInfo(Fn).@"fn".param_types)) != null;
 }
 
 /// A `Cached(…)` on a verb that writes, refused at the call that named the
@@ -1058,33 +1058,33 @@ fn sendRendered(c: *Ctx, answer: Rendered) !void {
 pub fn requirements(comptime pattern: []const u8, comptime f: anytype) []const service_mod.Requirement {
     comptime {
         const Fn = fnTypeOf(pattern, @TypeOf(f));
-        const params = @typeInfo(Fn).@"fn".params;
+        const params = @typeInfo(Fn).@"fn".param_types;
         const roles = rolesOf(pattern, params);
 
         var list: []const service_mod.Requirement = &.{};
         for (params, 0..) |p, i| {
             switch (roles[i]) {
                 .service => list = list ++
-                    [_]service_mod.Requirement{service_mod.requirementFor(p.type.?, pattern)},
+                    [_]service_mod.Requirement{service_mod.requirementFor(p.?, pattern)},
                 // A service used by nothing but a resolver still has to be
                 // caught by `listen()`, or the first request to an
                 // authenticated route finds it instead (ADR 015).
-                .resolved => list = list ++ resolve.requirements(p.type.?, pattern),
+                .resolved => list = list ++ resolve.requirements(p.?, pattern),
                 // The Space a cached route keeps its answers in is a service
                 // the route needs, so `listen()` names it when it is missing
                 // rather than the first request finding out (ADR 188).
                 .cached => list = list ++
-                    [_]service_mod.Requirement{service_mod.requirementFor(*p.type.?.nilo_cached.pages, pattern)},
+                    [_]service_mod.Requirement{service_mod.requirementFor(*p.?.nilo_cached.pages, pattern)},
                 // The Verifier a verified argument reads through, for the
                 // same reason (ADR 191).
                 .verified => list = list ++
-                    [_]service_mod.Requirement{service_mod.requirementFor(*p.type.?.nilo_verified, pattern)},
+                    [_]service_mod.Requirement{service_mod.requirementFor(*p.?.nilo_verified, pattern)},
                 // The Space the kept answers live in, read through the same
                 // type `idempotentBegin` asks the registry for at run time:
                 // without this a route with no Space started, and every
                 // request to it answered 500 (ADR 005, ADR 155).
                 .idempotent => list = list ++
-                    [_]service_mod.Requirement{service_mod.requirementFor(*p.type.?.nilo_idempotent.replays, pattern)},
+                    [_]service_mod.Requirement{service_mod.requirementFor(*p.?.nilo_idempotent.replays, pattern)},
                 else => {},
             }
         }
@@ -1112,7 +1112,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         @setEvalBranchQuota(20_000);
 
         const Fn = fnTypeOf(pattern, @TypeOf(f));
-        const params = @typeInfo(Fn).@"fn".params;
+        const params = @typeInfo(Fn).@"fn".param_types;
         const roles = rolesOf(pattern, params);
 
         // Named by the pattern and typed by whichever argument claimed
@@ -1123,7 +1123,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             var schema = openapi.schemaOf(Str);
             for (params, 0..) |p, i| switch (roles[i]) {
                 .param => |claimed| if (claimed == nth) {
-                    schema = openapi.schemaOf(p.type.?);
+                    schema = openapi.schemaOf(p.?);
                 },
                 else => {},
             };
@@ -1150,9 +1150,9 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
 
         for (params, 0..) |p, i| switch (roles[i]) {
             .ctx => wants_ctx = true,
-            .param => can_reject = can_reject or p.type.? != Str,
+            .param => can_reject = can_reject or p.? != Str,
             .query => {
-                query = queryFields(p.type.?.nilo_query);
+                query = queryFields(p.?.nilo_query);
                 can_reject = true;
             },
             // A header the signature asks for is a header the document can
@@ -1161,7 +1161,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             // endpoint needed it. `required` follows the optional, the way a
             // query field's does.
             .header => {
-                const asked = p.type.?.nilo_header;
+                const asked = p.?.nilo_header;
                 headers = headers ++ [_]openapi.Field{.{
                     .name = asked.name,
                     .schema = openapi.schemaOf(asked.value),
@@ -1170,19 +1170,19 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
                 can_reject = true;
             },
             .body => {
-                body = openapi.schemaOf(p.type.?);
+                body = openapi.schemaOf(p.?);
                 // What the body is filed under: a message in both its
                 // spellings, a type that reads its own bytes under its label
                 // (ADR 256), and JSON for everything else.
-                if (message.isMessage(p.type.?)) body_kind = .message;
-                if (message.decodesItsOwnBody(p.type.?)) {
+                if (message.isMessage(p.?)) body_kind = .message;
+                if (message.decodesItsOwnBody(p.?)) {
                     body_kind = .own;
-                    body_type = p.type.?.nilo_content_type;
+                    body_type = p.?.nilo_content_type;
                 }
                 can_reject = true;
                 // A body type that answers its wrong shape with a 422 says
                 // so, and the document says it with it (ADR 251).
-                misfit = mark.misfitStatus(p.type.?) != null;
+                misfit = mark.misfitStatus(p.?) != null;
             },
             // The same slot as a body and described the same way, with one
             // difference the document has to carry: which encoding the
@@ -1190,7 +1190,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             // be multipart, and saying otherwise would send somebody's
             // generated client to a 400.
             .form => {
-                const Fields = p.type.?.nilo_form;
+                const Fields = p.?.nilo_form;
                 body = openapi.schemaOf(Fields);
                 body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
                 can_reject = true;
@@ -1199,7 +1199,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             // generated client reads to know it has to sign in — and a 401
             // in the responses, since nilo writes one before the handler
             // runs (ADR 153).
-            .authorization => security = switch (p.type.?.nilo_authorization) {
+            .authorization => security = switch (p.?.nilo_authorization) {
                 .bearer => .bearer,
                 .basic => .basic,
             },
@@ -1223,13 +1223,13 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             // request before the handler runs; what the handler answers
             // instead is a line in a function body, and the document promises
             // what the signature settles and nothing else (ADR 023).
-            .bound_body => body = openapi.schemaOf(readInto(roles[i], p.type.?)),
+            .bound_body => body = openapi.schemaOf(readInto(roles[i], p.?)),
             .bound_form => {
-                const Fields = readInto(roles[i], p.type.?);
+                const Fields = readInto(roles[i], p.?);
                 body = openapi.schemaOf(Fields);
                 body_kind = if (form_mod.holdsAFile(Fields)) .multipart else .urlencoded;
             },
-            .bound_query => query = queryFields(readInto(roles[i], p.type.?)),
+            .bound_query => query = queryFields(readInto(roles[i], p.?)),
             else => {},
         };
 
@@ -1268,18 +1268,19 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
 fn queryFields(comptime T: type) []const openapi.Field {
     comptime {
         var out: []const openapi.Field = &.{};
-        for (@typeInfo(T).@"struct".fields) |f| {
-            const is_list = queryList(f.type) != null;
+        const info = @typeInfo(T).@"struct";
+        for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+            const is_list = queryList(f_type) != null;
             out = out ++ [_]openapi.Field{.{
-                .name = f.name,
-                .schema = openapi.schemaOf(f.type),
+                .name = f_name,
+                .schema = openapi.schemaOf(f_type),
                 // Absent is allowed when there is a default to fall back to,
                 // or when the field is optional and absent means null — the
                 // same two exemptions `queryValue` applies at runtime. A list
                 // is never required: nothing sent is the empty list, which is
                 // what `queryValue` does with one (ADR 132).
                 .required = !is_list and
-                    f.default_value_ptr == null and @typeInfo(f.type) != .optional,
+                    f_attrs.default_value_ptr == null and @typeInfo(f_type) != .optional,
                 .list = is_list,
             }};
         }
@@ -1401,7 +1402,7 @@ pub fn check(comptime pattern: []const u8, comptime handler: anytype) void {
     comptime {
         router.validatePattern(pattern);
         const Fn = fnTypeOf(pattern, @TypeOf(handler));
-        _ = rolesOf(pattern, @typeInfo(Fn).@"fn".params);
+        _ = rolesOf(pattern, @typeInfo(Fn).@"fn".param_types);
         checkAnswer(pattern, Fn);
     }
 }
@@ -1425,8 +1426,8 @@ fn checkAnswer(comptime pattern: []const u8, comptime Fn: type) void {
         versioned_mod.check(pattern, V);
         if (hasNamedDecl(V, "nilo_response")) V = V.nilo_response;
         if (versioned_mod.isVersioned(V)) {
-            for (@typeInfo(Fn).@"fn".params) |p| {
-                const P = p.type orelse continue;
+            for (@typeInfo(Fn).@"fn".param_types) |p| {
+                const P = p orelse continue;
                 if (hasNamedDecl(P, "nilo_cached")) versioned_mod.checkNotKept(pattern, V, "nilo.Cached");
                 if (hasNamedDecl(P, "nilo_idempotent")) versioned_mod.checkNotKept(pattern, V, "nilo.Idempotent");
             }
@@ -1435,8 +1436,8 @@ fn checkAnswer(comptime pattern: []const u8, comptime Fn: type) void {
         if (@typeInfo(V) == .optional) V = @typeInfo(V).optional.child;
         // Before the `void` return below: a route that reads a message and
         // answers nothing is allowed, and the check says so itself.
-        for (@typeInfo(Fn).@"fn".params) |p| {
-            const P = p.type orelse continue;
+        for (@typeInfo(Fn).@"fn".param_types) |p| {
+            const P = p orelse continue;
             if (message.isMessage(P)) message.checkAnswer(pattern, P, V);
         }
         if (V == void) return;
@@ -1502,7 +1503,7 @@ fn fnTypeOf(comptime pattern: []const u8, comptime F: type) type {
             "`anytype` or `comptime` argument).\n" ++
             "  nilo has to know the type of every argument to match it. Write the types out.",
     );
-    if (@typeInfo(Fn).@"fn".is_var_args) @compileError(
+    if (@typeInfo(Fn).@"fn".attrs.varargs) @compileError(
         "nilo: the handler for route \"" ++ pattern ++ "\" uses C varargs, which cannot be matched.",
     );
     return Fn;
@@ -1518,7 +1519,7 @@ fn notAFunction(comptime pattern: []const u8, comptime F: type) noreturn {
 
 fn rolesOf(
     comptime pattern: []const u8,
-    comptime params: []const std.builtin.Type.Fn.Param,
+    comptime params: []const ?type,
 ) []const Role {
     comptime {
         const param_names = patternParamNames(pattern);
@@ -1532,7 +1533,7 @@ fn rolesOf(
         var wants_ctx = false;
 
         for (params, 0..) |p, i| {
-            const P = p.type orelse @compileError(
+            const P = p orelse @compileError(
                 "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                     "\" has no type.",
             );
@@ -1552,11 +1553,11 @@ fn rolesOf(
                     if (body_at) |first| @compileError(
                         "nilo: the handler for route \"" ++ pattern ++ "\" takes two structs by " ++
                             "value — argument " ++ num(first + 1) ++ " is a " ++
-                            naming.of(params[first].type.?) ++ " and argument " ++ num(i + 1) ++
+                            naming.of(params[first].?) ++ " and argument " ++ num(i + 1) ++
                             " is a " ++ naming.of(P) ++ " — and a request only has one body.\n" ++
                             "  A value is request data and a pointer is a service, so whichever of " ++
                             "the two is not read from the body is asked for as a pointer: `*" ++
-                            naming.of(params[first].type.?) ++ "`." ++
+                            naming.of(params[first].?) ++ "`." ++
                             orMeantAsAParam(param_names, used),
                     );
                     body_at = i;
@@ -1649,10 +1650,10 @@ fn rolesOf(
         // request line, so an answer made from who the first caller was is
         // served to every caller after them, with any cookie it set.
         if (cached_at) |at| for (params, 0..) |p, i| {
-            if (!cached_mod.readsTheCaller(p.type.?, roles[i] == .authorization, roles[i] == .verified)) continue;
+            if (!cached_mod.readsTheCaller(p.?, roles[i] == .authorization, roles[i] == .verified)) continue;
             @compileError(
                 "nilo: the handler for route \"" ++ pattern ++ "\" takes a `Cached(…)` (argument " ++
-                    num(at + 1) ++ ") and a " ++ naming.of(p.type.?) ++ " (argument " ++ num(i + 1) ++
+                    num(at + 1) ++ ") and a " ++ naming.of(p.?) ++ " (argument " ++ num(i + 1) ++
                     "), which says who the caller is.\n" ++
                     "  A kept answer is served to whoever asks next, so the first caller's answer would " ++
                     "go to every caller after them. Answer per caller without the cache, or keep what is " ++
@@ -1662,7 +1663,7 @@ fn rolesOf(
 
         if (body_at != null and form_at != null) @compileError(
             "nilo: the handler for route \"" ++ pattern ++ "\" asks for both a request body " ++
-                "(argument " ++ num(body_at.? + 1) ++ ", a " ++ naming.of(params[body_at.?].type.?) ++
+                "(argument " ++ num(body_at.? + 1) ++ ", a " ++ naming.of(params[body_at.?].?) ++
                 ") and a form (argument " ++ num(form_at.? + 1) ++ ") — and a request only has " ++
                 "one body.\n" ++
                 "  A form *is* the body, read as `application/x-www-form-urlencoded` or " ++
@@ -1967,23 +1968,23 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
             ),
         };
 
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: the `Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                 "\" has no fields, so it would read nothing.\n" ++
                 "  Add one field per query param you want: `page: u32 = 1`.",
         );
 
-        for (info.fields) |f| {
-            if (convert_mod.convertible(f.type)) continue;
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            if (convert_mod.convertible(f_type)) continue;
             // A list of them, which is `?tag=a,b` and `?tag=a&tag=b`
             // ([ADR 132](../docs/adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)).
             // Checked here rather than in `convertible`, because the answer is
             // different one slot over: a `Form(T)` reads a body this file does
             // not, and promising a list there would compile and fill nothing.
-            if (queryList(f.type)) |Item| {
+            if (queryList(f_type)) |Item| {
                 if (convert_mod.convertible(Item)) continue;
                 @compileError(
-                    "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
+                    "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of the " ++
                         "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                         "\" is a list of " ++ naming.of(Item) ++ ", which a query value " ++
                         "cannot become.\n" ++
@@ -1993,7 +1994,7 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
                 );
             }
             @compileError(
-                "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of the " ++
+                "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of the " ++
                     "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
                     "\" is not something a query value can become.\n" ++
                     "  A query param arrives as text, so a field is a `nilo.Str`, a number, " ++
@@ -2191,41 +2192,42 @@ fn collectListCollecting(
 /// default, or to null if it is optional; one with neither is required, and
 /// saying so is a 400 rather than a surprise zero.
 fn queryValue(comptime T: type, c: *const Ctx) !T {
-    comptime @setEvalBranchQuota(convert_mod.budget(@typeInfo(T).@"struct".fields));
+    const info = @typeInfo(T).@"struct";
+    comptime @setEvalBranchQuota(convert_mod.budget(info.field_names));
     var out: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        const label = "?" ++ f.name;
-        if (comptime queryList(f.type)) |Item| {
+    inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+        const label = "?" ++ f_name;
+        if (comptime queryList(f_type)) |Item| {
             // A list is never "absent": nothing sent is the empty list, which
             // is what every filter written against one already means. A
             // default is still honoured, for the field that wants one.
-            const found = try collectList(Item, c, f.name, label);
+            const found = try collectList(Item, c, f_name, label);
             if (found.len == 0) {
-                if (f.defaultValue()) |default| {
-                    @field(out, f.name) = default;
-                } else if (@typeInfo(f.type) == .optional) {
-                    @field(out, f.name) = null;
+                if (f_attrs.defaultValue(f_type)) |default| {
+                    @field(out, f_name) = default;
+                } else if (@typeInfo(f_type) == .optional) {
+                    @field(out, f_name) = null;
                 } else {
-                    @field(out, f.name) = &.{};
+                    @field(out, f_name) = &.{};
                 }
             } else {
-                @field(out, f.name) = found;
+                @field(out, f_name) = found;
             }
-        } else if (c.query(f.name)) |s| {
-            const Inner = switch (@typeInfo(f.type)) {
+        } else if (c.query(f_name)) |s| {
+            const Inner = switch (@typeInfo(f_type)) {
                 .optional => |o| o.child,
-                else => f.type,
+                else => f_type,
             };
             // A GET form sends a blank box as `age=`, as a POST one does.
-            if ((comptime form_mod.mayBeAbsent(f)) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
-                @field(out, f.name) = comptime form_mod.absentValue(f);
+            if ((comptime form_mod.mayBeAbsent(f_type, f_attrs)) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
+                @field(out, f_name) = comptime form_mod.absentValue(f_type, f_attrs);
             } else {
-                @field(out, f.name) = try convert(Inner, .query, s, label);
+                @field(out, f_name) = try convert(Inner, .query, s, label);
             }
-        } else if (f.defaultValue()) |default| {
-            @field(out, f.name) = default;
-        } else if (@typeInfo(f.type) == .optional) {
-            @field(out, f.name) = null;
+        } else if (f_attrs.defaultValue(f_type)) |default| {
+            @field(out, f_name) = default;
+        } else if (@typeInfo(f_type) == .optional) {
+            @field(out, f_name) = null;
         } else {
             return fail.badRequest("{s} is required", .{label});
         }
@@ -2243,48 +2245,49 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
 fn queryValueCollecting(
     comptime T: type,
     c: *const Ctx,
-    outcomes: *[@typeInfo(T).@"struct".fields.len]convert_mod.Outcome,
+    outcomes: *[@typeInfo(T).@"struct".field_names.len]convert_mod.Outcome,
 ) T {
-    comptime @setEvalBranchQuota(convert_mod.budget(@typeInfo(T).@"struct".fields));
+    const info = @typeInfo(T).@"struct";
+    comptime @setEvalBranchQuota(convert_mod.budget(info.field_names));
     var out: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
         outcomes[i] = .{};
-        const Inner = switch (@typeInfo(f.type)) {
+        const Inner = switch (@typeInfo(f_type)) {
             .optional => |o| o.child,
-            else => f.type,
+            else => f_type,
         };
 
-        if (comptime queryList(f.type)) |Item| {
+        if (comptime queryList(f_type)) |Item| {
             // The same reading as `queryValue`, with the one difference this
             // whole function is: a value that will not convert is recorded
             // rather than answered (ADR 132, `bound.zig`).
-            const found = collectListCollecting(Item, c, f.name, &outcomes[i]) catch &.{};
+            const found = collectListCollecting(Item, c, f_name, &outcomes[i]) catch &.{};
             if (found.len == 0) {
-                if (f.defaultValue()) |default| {
-                    @field(out, f.name) = default;
-                } else if (@typeInfo(f.type) == .optional) {
-                    @field(out, f.name) = null;
+                if (f_attrs.defaultValue(f_type)) |default| {
+                    @field(out, f_name) = default;
+                } else if (@typeInfo(f_type) == .optional) {
+                    @field(out, f_name) = null;
                 } else {
-                    @field(out, f.name) = &.{};
+                    @field(out, f_name) = &.{};
                 }
             } else {
-                @field(out, f.name) = found;
+                @field(out, f_name) = found;
             }
-        } else if (c.query(f.name)) |s| {
+        } else if (c.query(f_name)) |s| {
             outcomes[i].given = s;
             var converted: Inner = undefined;
-            if ((comptime form_mod.mayBeAbsent(f)) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
-                @field(out, f.name) = comptime form_mod.absentValue(f);
+            if ((comptime form_mod.mayBeAbsent(f_type, f_attrs)) and convert_mod.emptyIsAbsent(Inner, .query, s)) {
+                @field(out, f_name) = comptime form_mod.absentValue(f_type, f_attrs);
             } else if (convert_mod.tryConvert(Inner, .query, s, &converted)) |reason| {
                 outcomes[i].reason = reason;
-                if (f.defaultValue()) |default| @field(out, f.name) = default;
+                if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
             } else {
-                @field(out, f.name) = converted;
+                @field(out, f_name) = converted;
             }
-        } else if (f.defaultValue()) |default| {
-            @field(out, f.name) = default;
-        } else if (@typeInfo(f.type) == .optional) {
-            @field(out, f.name) = null;
+        } else if (f_attrs.defaultValue(f_type)) |default| {
+            @field(out, f_name) = default;
+        } else if (@typeInfo(f_type) == .optional) {
+            @field(out, f_name) = null;
         } else {
             outcomes[i].reason = .missing;
         }
@@ -2539,7 +2542,7 @@ test "a type that says it can parse itself is a path param, not the request body
     // The whole of the bug ADR 113 closes: a struct by value used to be the
     // request body whatever it said about itself, so a route could not take
     // one as its `:id` at all.
-    const roles = comptime rolesOf("/tickets/:id", @typeInfo(@TypeOf(showTicket)).@"fn".params);
+    const roles = comptime rolesOf("/tickets/:id", @typeInfo(@TypeOf(showTicket)).@"fn".param_types);
     try testing.expect(roles[0] == .param);
     try testing.expectEqual(@as(usize, 0), roles[0].param);
 }

@@ -51,8 +51,8 @@ pub const TmpDir = struct {
     /// the working directory, as std's directory is; a test that changes the
     /// working directory has to resolve it first.
     pub fn path(self: *const TmpDir, buf: []u8, name: []const u8) error{NoSpaceLeft}![:0]u8 {
-        if (name.len == 0) return std.fmt.bufPrintZ(buf, parent ++ "{s}", .{&self.held.sub_path});
-        return std.fmt.bufPrintZ(buf, parent ++ "{s}/{s}", .{ &self.held.sub_path, name });
+        if (name.len == 0) return std.mem.printSentinel(buf, parent ++ "{s}", .{&self.held.sub_path}, 0);
+        return std.mem.printSentinel(buf, parent ++ "{s}/{s}", .{ &self.held.sub_path, name }, 0);
     }
 
     /// `path`, into memory `gpa` owns and the caller frees.

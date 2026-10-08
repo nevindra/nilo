@@ -301,8 +301,8 @@ test "queryMax is a ceiling rather than an estimate" {
     const buf = try testing.allocator.alloc(u8, room);
     defer testing.allocator.free(buf);
     // Every character encodes to three bytes, at the longest each may be.
-    const worst_prefix = "\x01" ** key_max;
-    const worst_cursor = "\x01" ** cursor_max;
+    const worst_prefix = &@as([key_max]u8, @splat('\x01'));
+    const worst_cursor = &@as([cursor_max]u8, @splat('\x01'));
     const q = query(buf, .{ .prefix = worst_prefix, .cursor = worst_cursor, .max_keys = 1000 });
     try testing.expectEqual(room, q.len);
 }
@@ -359,10 +359,10 @@ test "a truncated page without a usable token is a failure, and the key coding i
     try testing.expectError(error.Failed, nextCursor(open ++ "</ListBucketResult>"));
     try testing.expectError(error.Failed, nextCursor(open ++ "<NextContinuationToken></NextContinuationToken>"));
     try testing.expectError(error.Failed, nextCursor(
-        open ++ "<NextContinuationToken>" ++ "c" ** (cursor_max + 1) ++ "</NextContinuationToken>",
+        open ++ "<NextContinuationToken>" ++ &@as([(cursor_max + 1)]u8, @splat('c')) ++ "</NextContinuationToken>",
     ));
-    try testing.expectEqualStrings("c" ** cursor_max, (try nextCursor(
-        open ++ "<NextContinuationToken>" ++ "c" ** cursor_max ++ "</NextContinuationToken>",
+    try testing.expectEqualStrings(&@as([cursor_max]u8, @splat('c')), (try nextCursor(
+        open ++ "<NextContinuationToken>" ++ &@as([cursor_max]u8, @splat('c')) ++ "</NextContinuationToken>",
     )).?);
     try testing.expect(keysEncoded(two_objects));
     try testing.expect(!keysEncoded("<ListBucketResult><Key>%41</Key></ListBucketResult>"));

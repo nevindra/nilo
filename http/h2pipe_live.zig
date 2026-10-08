@@ -133,19 +133,19 @@ const Wire = struct {
     /// Give the server back every DATA byte it sends as it arrives, as a
     /// client that reads an answer does, so its windows never close.
     owed_conn: usize = 0,
-    owed_stream: [8]usize = [_]usize{0} ** 8,
+    owed_stream: [8]usize = @as([8]usize, @splat(0)),
     autowindow: bool = false,
     /// Keep the bytes of every DATA frame in `body`. A test that counts them
     /// by stream does not need them.
     keep_body: bool = true,
     /// Per stream, for a client with several: what came back for each, and
     /// in which order the streams ended.
-    seen: [8]Seen = [_]Seen{.{}} ** 8,
+    seen: [8]Seen = @as([8]Seen, @splat(.{})),
     order: u32 = 0,
     /// The first of streams 1, 3 and 5 to end, and what every stream had
     /// delivered at that moment.
     first_end: u31 = 0,
-    first_end_bytes: [8]usize = [_]usize{0} ** 8,
+    first_end_bytes: [8]usize = @as([8]usize, @splat(0)),
     /// The error code of the GOAWAY that ended a `pump`.
     goaway_code: ?u32 = null,
     /// A client that reads slowly: this long after each DATA frame.
@@ -271,7 +271,7 @@ const Wire = struct {
                 },
                 .goaway => {
                     self.goaway_code = std.mem.readInt(u32, payload[4..8], .big);
-                                    return error.SentAway;
+                    return error.SentAway;
                 },
                 else => {},
             }
@@ -294,7 +294,7 @@ fn writeOpenRequest(w: *std.Io.Writer, stream: u31, path: []const u8) !void {
 
 /// One DATA frame of `n` bytes of `fill`, `end` ending the stream.
 fn writeData(w: *std.Io.Writer, stream: u31, n: usize, end: bool) !void {
-    const chunk = [_]u8{'u'} ** 16_000;
+    const chunk = @as([16_000]u8, @splat('u'));
     try h2.writeHeader(w, n, .data, if (end) h2.Flags.end_stream else 0, stream);
     try w.writeAll(chunk[0..n]);
 }
@@ -972,7 +972,7 @@ test "a client with a window of one byte that answers each byte with two updates
         if (given > 2500) break;
     }
     try testing.expect(away);
-    try testing.expectEqual(@as(?u32, @intFromEnum(h2.ErrorCode.enhance_your_calm)), wire.goaway_code);
+    try testing.expectEqual(@as(?u32, @backingInt(h2.ErrorCode.enhance_your_calm)), wire.goaway_code);
     try testing.expect(wire.seen[1].bytes < 1500);
 }
 
@@ -1194,6 +1194,6 @@ test "an event stream handed to an HTTP/2 connection is sent comments while it i
         }
     }
     try testing.expect(ended);
-    try testing.expectEqual(@as(?u32, @intFromEnum(h2.ErrorCode.no_error)), wire.goaway_code);
+    try testing.expectEqual(@as(?u32, @backingInt(h2.ErrorCode.no_error)), wire.goaway_code);
     try waitSeats(io, &room, 0);
 }

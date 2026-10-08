@@ -71,6 +71,5 @@ Related topics: `adr-check`, `docs-check` and `zig build snippets` all follow th
 
 ## Open questions
 
-- **`-fincremental` as the default for `nilo-dev`.** Rejected because on Zig 0.16 it produces a binary that fails to run when libc is linked. It stays in [the todo list](../todo.md) as an entry waiting on zig, as the speed the dev loop wants.
 - **Checking snippets in `///` doc comments.** `http/ctx.zig` had one of the three broken lines ADR 068 found. That line is fixed, but a doc comment has no fence and would need its own extractor. Left open in [ADR 068](../adr/068-the-guide-is-the-source-of-its-own-snippets.md).
 - **Waiting for Zig's aarch64 self-hosted backend to become the default.** `testBackend` will pick it up with no change here once it does. Until then aarch64 runs both test modes through LLVM, as recorded in [ADR 138](../adr/138-a-test-does-not-need-the-optimiser.md).

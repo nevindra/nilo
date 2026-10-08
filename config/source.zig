@@ -176,15 +176,15 @@ fn checkLayers(comptime Sources: type) void {
                 " in the order they win.",
         );
 
-        const layers = info.@"struct".fields;
+        const layers = info.@"struct".field_types;
         if (layers.len == 0) @compileError(
             "nilo: a layered source with no layers would read nothing.",
         );
 
-        for (layers, 0..) |layer, i| {
-            if (!isSource(layer.type)) @compileError(
+        for (layers, 0..) |Layer, i| {
+            if (!isSource(Layer)) @compileError(
                 "nilo: layer " ++ std.fmt.comptimePrint("{d}", .{i + 1}) ++
-                    " of a layered source is " ++ @typeName(layer.type) ++
+                    " of a layered source is " ++ @typeName(Layer) ++
                     ", and that cannot be a source." ++ advice,
             );
         }

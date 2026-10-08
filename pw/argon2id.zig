@@ -89,8 +89,8 @@ pub const max_text = phc.calcSize(Encoded{
     .m = std.math.maxInt(u32),
     .t = std.math.maxInt(u32),
     .p = std.math.maxInt(u24),
-    .salt = phc.BinValue(64).fromSlice(&([_]u8{0} ** salt_len)) catch unreachable,
-    .hash = phc.BinValue(64).fromSlice(&([_]u8{0} ** hash_len)) catch unreachable,
+    .salt = phc.BinValue(64).fromSlice(&(@as([salt_len]u8, @splat(0)))) catch unreachable,
+    .hash = phc.BinValue(64).fromSlice(&(@as([hash_len]u8, @splat(0)))) catch unreachable,
 });
 
 /// A stored password hash: the PHC string, held inline.

@@ -502,7 +502,7 @@ fn inflated(gpa: std.mem.Allocator, gzipped: []const u8) ![]u8 {
 
 /// A JSON body comfortably over the default threshold, and repetitive enough
 /// that gzip halves it several times over.
-const long_json = "{\"items\":[" ++ ("{\"id\":1,\"name\":\"Alpha Widget\",\"category\":\"electronics\",\"price\":328,\"quantity\":15,\"active\":true}," ** 40) ++ "{}],\"count\":40}";
+const long_json = "{\"items\":[" ++ (repeat("{\"id\":1,\"name\":\"Alpha Widget\",\"category\":\"electronics\",\"price\":328,\"quantity\":15,\"active\":true},", 40)) ++ "{}],\"count\":40}";
 
 /// Every backend this test build has: both in this repository's own suite,
 /// whose http test root links libdeflate whatever the flag says (ADR 248).
@@ -1076,4 +1076,19 @@ test "a max_bytes of zero puts no upper limit on what is compressed" {
 
     const answer = try client.get(&app, "/over");
     try testing.expectEqualStrings("gzip", answer.header("Content-Encoding").?);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

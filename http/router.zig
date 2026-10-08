@@ -198,7 +198,7 @@ pub const Router = struct {
     nodes: std.ArrayList(Node) = .empty,
 
     const none = std.math.maxInt(u32);
-    const methods = @typeInfo(http1.Method).@"enum".fields.len;
+    const methods = @typeInfo(http1.Method).@"enum".field_names.len;
 
     /// One place in the tree: the path matched so far, and where it can go.
     const Node = struct {
@@ -219,7 +219,7 @@ pub const Router = struct {
         rest: [methods]u32 = @splat(none),
         /// Every method some route at or below this node answers, so the
         /// search does not walk a branch for a `POST` that holds only `GET`s.
-        reach: MethodSet = .initEmpty(),
+        reach: MethodSet = .empty,
 
         fn literal(self: *const Node, text: []const u8) ?u32 {
             const key = Route.firstKey(text);
@@ -321,7 +321,7 @@ pub const Router = struct {
     /// Put route `index` into the tree along its segments. A failure part
     /// way leaves nodes nothing ends at, which the search walks past.
     fn plant(self: *Router, method: http1.Method, segments: []const Segment, index: u32) !void {
-        const m = @intFromEnum(method);
+        const m = @backingInt(method);
         if (self.nodes.items.len == 0) try self.nodes.append(self.gpa, .{});
         var at: u32 = 0;
         self.nodes.items[at].reach.insert(method);
@@ -441,7 +441,7 @@ pub const Router = struct {
     /// 405 nor puts its verb in an `Allow` header (ADR 252). Null is every
     /// listener.
     pub fn allowedForOn(self: *const Router, path: []const u8, listener: ?u8) MethodSet {
-        var allowed: MethodSet = .initEmpty();
+        var allowed: MethodSet = .empty;
 
         var buf: [max_segments][]const u8 = undefined;
         const split_path = splitPath(trimSlashes(path), &buf);
@@ -509,7 +509,7 @@ pub const Router = struct {
     fn find(self: *const Router, method: http1.Method, parts: []const []const u8, deep: bool) ?u32 {
         const nodes = self.nodes.items;
         if (nodes.len == 0) return null;
-        const m = @intFromEnum(method);
+        const m = @backingInt(method);
 
         var at: [max_segments + 1]u32 = undefined;
         // Which way on this level tries next: 0 the literal, 1 the param,

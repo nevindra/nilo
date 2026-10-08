@@ -423,7 +423,7 @@ pub const Client = struct {
             if (begun) |b| endTrace(c, b, method, url, 0, @errorName(err));
             return err;
         };
-        if (begun) |b| endTrace(c, b, method, url, @intFromEnum(res.status), null);
+        if (begun) |b| endTrace(c, b, method, url, @backingInt(res.status), null);
         return res;
     }
 
@@ -844,7 +844,7 @@ pub const Exchange = struct {
         }
 
         pub fn ok(self: Head) bool {
-            return @intFromEnum(self.status) >= 200 and @intFromEnum(self.status) < 300;
+            return @backingInt(self.status) >= 200 and @backingInt(self.status) < 300;
         }
 
         /// The same head, copied into the Scope, so it reads the same after
@@ -1167,7 +1167,7 @@ pub const Exchange = struct {
         // caller who asked for gzip gets the clean error rather than the
         // bytes.
         self.req.accept_encoding = @splat(false);
-        self.req.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
+        self.req.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
 
         // **The body decides, not the method**
         // ([ADR 174](../docs/adr/174-the-body-decides-not-the-method.md)).
@@ -1746,7 +1746,7 @@ pub const Response = struct {
     /// 2xx. Written out because `status.class()` reads worse at a call site
     /// and because everybody writes this line anyway.
     pub fn ok(self: Response) bool {
-        return @intFromEnum(self.status) >= 200 and @intFromEnum(self.status) < 300;
+        return @backingInt(self.status) >= 200 and @backingInt(self.status) < 300;
     }
 
     /// A header by name, case-insensitively, or null when the answer did not
@@ -1823,20 +1823,20 @@ pub fn checkQuery(comptime P: type, comptime called: []const u8, comptime skip: 
     // a line in this file, and a person reads that as a fault in the 400th
     // ([ADR 126](../docs/adr/126-a-check-pays-for-its-own-branches.md)).
     const width = switch (info) {
-        .@"struct" => |st| st.fields.len,
+        .@"struct" => |st| st.field_names.len,
         else => 0,
     };
     @setEvalBranchQuota(1_000 + 20 * @as(u32, @intCast(width * (skip.len + 1))));
     // `.{}` is the empty tuple to Zig and "no params" to a caller, so it
     // passes; a tuple with something in it has no names to be params.
     const named = switch (info) {
-        .@"struct" => |st| !st.is_tuple or st.fields.len == 0,
+        .@"struct" => |st| !st.is_tuple or st.field_names.len == 0,
         else => false,
     };
     if (!named) @compileError("nilo: " ++ called ++ " was handed a " ++ @typeName(P) ++
         " for its params, and a query is a struct with one field per param.");
-    inline for (info.@"struct".fields) |f| {
-        if (comptime !among(skip, f.name)) comptime checkQueryField(f.name, f.type);
+    inline for (info.@"struct".field_names, info.@"struct".field_types) |name, FT| {
+        if (comptime !among(skip, name)) comptime checkQueryField(name, FT);
     }
 }
 
@@ -1856,11 +1856,11 @@ pub fn querySeparator(base: []const u8) ?u8 {
 pub fn queryLen(params: anytype, first: ?u8, comptime skip: []const []const u8) usize {
     var len: usize = 0;
     var written: usize = 0;
-    inline for (@typeInfo(@TypeOf(params)).@"struct".fields) |f| {
-        if (comptime among(skip, f.name)) continue;
-        if (queryValue(@field(params, f.name))) |v| {
+    inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |name| {
+        if (comptime among(skip, name)) continue;
+        if (queryValue(@field(params, name))) |v| {
             if (written > 0 or first != null) len += 1;
-            len += core.percent.encodedLen(f.name, .unreserved) + 1 + v.encodedLen();
+            len += core.percent.encodedLen(name, .unreserved) + 1 + v.encodedLen();
             written += 1;
         }
     }
@@ -1870,12 +1870,12 @@ pub fn queryLen(params: anytype, first: ?u8, comptime skip: []const []const u8) 
 /// The writing half of `queryLen`, into a writer already sized by it.
 pub fn queryWrite(w: *std.Io.Writer, params: anytype, first: ?u8, comptime skip: []const []const u8) void {
     var sep = first;
-    inline for (@typeInfo(@TypeOf(params)).@"struct".fields) |f| {
-        if (comptime among(skip, f.name)) continue;
-        if (queryValue(@field(params, f.name))) |v| {
+    inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |name| {
+        if (comptime among(skip, name)) continue;
+        if (queryValue(@field(params, name))) |v| {
             if (sep) |ch| w.writeByte(ch) catch unreachable;
             sep = '&';
-            core.percent.encodeWrite(w, f.name, .unreserved) catch unreachable;
+            core.percent.encodeWrite(w, name, .unreserved) catch unreachable;
             w.writeByte('=') catch unreachable;
             v.write(w) catch unreachable;
         }
@@ -2008,8 +2008,8 @@ test "a response says whether it is one to read" {
     try std.testing.expect(!(Response{ .status = .internal_server_error, .body = body }).ok());
     // The edges of the class, because 299 and 300 are one apart and one of
     // them is a redirect.
-    try std.testing.expect((Response{ .status = @enumFromInt(299), .body = body }).ok());
-    try std.testing.expect(!(Response{ .status = @enumFromInt(300), .body = body }).ok());
+    try std.testing.expect((Response{ .status = @fromBackingInt(@intCast(299)), .body = body }).ok());
+    try std.testing.expect(!(Response{ .status = @fromBackingInt(@intCast(300)), .body = body }).ok());
 }
 
 /// A `Limits` that always says its deadline is what fired, so the decision

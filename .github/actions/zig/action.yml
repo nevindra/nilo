@@ -16,14 +16,14 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        version=0.16.0
+        version=0.17.0
         case "$RUNNER_OS-$RUNNER_ARCH" in
           Linux-X64)
             name=zig-x86_64-linux-$version
-            sum=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;;
+            sum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
           macOS-ARM64)
             name=zig-aarch64-macos-$version
-            sum=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489 ;;
+            sum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a ;;
           *)
             echo "no Zig is pinned for $RUNNER_OS-$RUNNER_ARCH" >&2
             exit 1 ;;

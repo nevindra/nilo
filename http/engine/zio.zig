@@ -300,7 +300,7 @@ const Serving = struct {
     /// The first listener failure as `@intFromError`, or 0 for none.
     failure: std.atomic.Value(ErrorInt) = .init(0),
 
-    const ErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+    const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
 
     /// Keep the first failure; a second acceptor failing after it changes
     /// nothing about what `serve` should say.
@@ -416,7 +416,7 @@ var signal_target: std.atomic.Value(?*Stop) = .init(null);
 /// spelled out, so it stays right wherever this is built.
 const SigNum = @typeInfo(@typeInfo(@typeInfo(
     @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler"),
-).optional.child).pointer.child).@"fn".params[0].type.?;
+).optional.child).pointer.child).@"fn".param_types[0].?;
 
 /// Whether this signal is the first, which asks for a graceful stop, or a
 /// later one, which gives up on it.
@@ -1974,93 +1974,93 @@ pub fn serve(
 
         fn Entry(comptime connection: anytype, comptime hand_on_to: anytype) type {
             return struct {
-        fn run(
-            st: State,
-            stream: zio.net.Stream,
-            conn_gpa: std.mem.Allocator,
-            // The listener's own state rather than `&sh.all.capacity`, which is all this
-            // entry reads of it: `runTls` below wants the rest, and the two
-            // entries keep one argument list so the plain one's frame is
-            // what it was. Two more arguments kept live across the handler
-            // measured one page more per *plain* idle connection: the plain
-            // park sits under 300 bytes short of a page boundary, and
-            // anything added above it is a whole page (ADR 212).
-            sh: *Accepting,
-        ) void {
-            const capacity = &sh.all.capacity;
-            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
-            // After the close, not before: the count is meant to answer
-            // "how many sockets does this process hold", and the socket is
-            // held until it is shut. Deferred first so it runs last.
-            defer capacity.give();
-            defer stream.close();
+                fn run(
+                    st: State,
+                    stream: zio.net.Stream,
+                    conn_gpa: std.mem.Allocator,
+                    // The listener's own state rather than `&sh.all.capacity`, which is all this
+                    // entry reads of it: `runTls` below wants the rest, and the two
+                    // entries keep one argument list so the plain one's frame is
+                    // what it was. Two more arguments kept live across the handler
+                    // measured one page more per *plain* idle connection: the plain
+                    // park sits under 300 bytes short of a page boundary, and
+                    // anything added above it is a whole page (ADR 212).
+                    sh: *Accepting,
+                ) void {
+                    const capacity = &sh.all.capacity;
+                    const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
+                    // After the close, not before: the count is meant to answer
+                    // "how many sockets does this process hold", and the socket is
+                    // held until it is shut. Deferred first so it runs last.
+                    defer capacity.give();
+                    defer stream.close();
 
-            // A unix socket has no address, and nothing remote could have
-            // opened it. Both of those matter below.
-            const over_ip = stream.socket.address.getType() == .ip;
+                    // A unix socket has no address, and nothing remote could have
+                    // opened it. Both of those matter below.
+                    const over_ip = stream.socket.address.getType() == .ip;
 
-            // A response goes out the moment nothing is queued behind it, and
-            // the next one may be microseconds later; Nagle would hold the
-            // second for the first's ack and save nothing, so it is turned
-            // off.
-            //
-            // TCP only. On a unix socket the option is `EOPNOTSUPP`, and zio
-            // answers an errno it does not recognise with a stack trace and an
-            // invitation to file a bug — which `catch {}` does not swallow,
-            // because it is printed before the error is returned. Once per
-            // connection (ADR 103).
-            if (over_ip) stream.socket.setNoDelay(true) catch {};
+                    // A response goes out the moment nothing is queued behind it, and
+                    // the next one may be microseconds later; Nagle would hold the
+                    // second for the first's ack and save nothing, so it is turned
+                    // off.
+                    //
+                    // TCP only. On a unix socket the option is `EOPNOTSUPP`, and zio
+                    // answers an errno it does not recognise with a stack trace and an
+                    // invitation to file a bug — which `catch {}` does not swallow,
+                    // because it is printed before the error is returned. Once per
+                    // connection (ADR 103).
+                    if (over_ip) stream.socket.setNoDelay(true) catch {};
 
-            // Allocated rather than put on the fiber stack, so the sizes can
-            // be an option instead of a constant. Twice per connection, not
-            // per request — next to a connection's lifetime it is nothing.
-            //
-            // Page-aligned, and rounded up to whole pages, so that
-            // `bulkhead.releaseIdlePages` can hand every page back while the
-            // connection sits idle. Unaligned, the first and last page of each
-            // buffer might be shared with another allocation and would have to
-            // be left alone — on an 8 KB buffer that is most of the saving. The
-            // rounding costs at most a page per buffer of address space, and
-            // the page it rounds up to is never touched.
-            const read_buf = alignedPages(conn_gpa, sizes.read_buffer) catch return;
-            defer conn_gpa.free(read_buf);
-            const write_buf = alignedPages(conn_gpa, sizes.write_buffer) catch return;
-            defer conn_gpa.free(write_buf);
+                    // Allocated rather than put on the fiber stack, so the sizes can
+                    // be an option instead of a constant. Twice per connection, not
+                    // per request — next to a connection's lifetime it is nothing.
+                    //
+                    // Page-aligned, and rounded up to whole pages, so that
+                    // `bulkhead.releaseIdlePages` can hand every page back while the
+                    // connection sits idle. Unaligned, the first and last page of each
+                    // buffer might be shared with another allocation and would have to
+                    // be left alone — on an 8 KB buffer that is most of the saving. The
+                    // rounding costs at most a page per buffer of address space, and
+                    // the page it rounds up to is never touched.
+                    const read_buf = alignedPages(conn_gpa, sizes.read_buffer) catch return;
+                    defer conn_gpa.free(read_buf);
+                    const write_buf = alignedPages(conn_gpa, sizes.write_buffer) catch return;
+                    defer conn_gpa.free(write_buf);
 
-            var link: Link = undefined;
-            link.init(stream, read_buf, write_buf);
-            var clocks = Clocks{ .reader = &link.reader, .writer = &link.writer };
+                    var link: Link = undefined;
+                    link.init(stream, read_buf, write_buf);
+                    var clocks = Clocks{ .reader = &link.reader, .writer = &link.writer };
 
-            // In the fiber's own frame, so it costs pages that are already
-            // mapped rather than an allocation of its own — see `Wake`. An
-            // ordinary request never touches it; it is armed on the first
-            // `wait`, which only a WebSocket reaches.
-            var wake = Wake.init(stream.socket.handle);
-            // Registered after the two buffers and after `stream.close`, so
-            // it unwinds before all three: the loop has to be done with the
-            // completions before the frame holding them goes, and the poll
-            // is on this socket's handle, so it has to be given back before
-            // the handle is closed.
-            defer wake.deinit();
+                    // In the fiber's own frame, so it costs pages that are already
+                    // mapped rather than an allocation of its own — see `Wake`. An
+                    // ordinary request never touches it; it is armed on the first
+                    // `wait`, which only a WebSocket reaches.
+                    var wake = Wake.init(stream.socket.handle);
+                    // Registered after the two buffers and after `stream.close`, so
+                    // it unwinds before all three: the loop has to be done with the
+                    // completions before the frame holding them goes, and the poll
+                    // is on this socket's handle, so it has to be given back before
+                    // the handle is closed.
+                    defer wake.deinit();
 
-            // `accept` already returned who this is, so this costs no
-            // syscall — only the formatting, once per connection.
-            var peer: Peer = .{
-                .port = portOf(stream.socket.address),
-                .local = !over_ip,
-                .listener = sh.index,
-            };
-            peer._len = writePeer(&peer._text, stream.socket.address);
+                    // `accept` already returned who this is, so this costs no
+                    // syscall — only the formatting, once per connection.
+                    var peer: Peer = .{
+                        .port = portOf(stream.socket.address),
+                        .local = !over_ip,
+                        .listener = sh.index,
+                    };
+                    peer._len = writePeer(&peer._text, stream.socket.address);
 
-            const handed = connection(st, &link.reader.interface, &link.writer.interface, &clocks, &wake, peer);
-            // A plain listener of a `-Dhttp2` build answers which framing it
-            // read, and HTTP/2 is run from here, with the choosing returned
-            // from, rather than from inside it (ADR 259). Nothing here in a
-            // build without the flag: `connection` returns `void`.
-            if (comptime @TypeOf(handed) != void) {
-                if (handed == .http2) hand_on_to(&st, &link.reader.interface, &link.writer.interface, &clocks, &wake, &peer);
-            }
-        }
+                    const handed = connection(st, &link.reader.interface, &link.writer.interface, &clocks, &wake, peer);
+                    // A plain listener of a `-Dhttp2` build answers which framing it
+                    // read, and HTTP/2 is run from here, with the choosing returned
+                    // from, rather than from inside it (ADR 259). Nothing here in a
+                    // build without the flag: `connection` returns `void`.
+                    if (comptime @TypeOf(handed) != void) {
+                        if (handed == .http2) hand_on_to(&st, &link.reader.interface, &link.writer.interface, &clocks, &wake, &peer);
+                    }
+                }
             };
         }
 
@@ -2099,268 +2099,268 @@ pub fn serve(
         fn TlsEntry(comptime connection: anytype, comptime hand_on_to: anytype) type {
             const alpn: []const []const u8 = if (nilo_build.http2) &.{ "h2", "http/1.1" } else &.{"http/1.1"};
             return struct {
-        fn run(
-            st: State,
-            stream: zio.net.Stream,
-            conn_gpa: std.mem.Allocator,
-            sh: *Accepting,
-        ) void {
-            if (!nilo_build.tls) unreachable;
-            const capacity = &sh.all.capacity;
-            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
-            defer capacity.give();
-            defer stream.close();
-            // Always IP: a TLS listener on a unix socket is refused in
-            // `serve` before the port is taken.
-            stream.socket.setNoDelay(true) catch {};
+                fn run(
+                    st: State,
+                    stream: zio.net.Stream,
+                    conn_gpa: std.mem.Allocator,
+                    sh: *Accepting,
+                ) void {
+                    if (!nilo_build.tls) unreachable;
+                    const capacity = &sh.all.capacity;
+                    const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
+                    defer capacity.give();
+                    defer stream.close();
+                    // Always IP: a TLS listener on a unix socket is refused in
+                    // `serve` before the port is taken.
+                    stream.socket.setNoDelay(true) catch {};
 
-            // The record layer. A TLS record is at most 16,645 bytes on the
-            // wire and has to be whole before it can be decrypted, so the
-            // input side cannot be smaller than one; the output side holds
-            // `cork_records` of the largest record this library writes, so a
-            // drain is sealed and sent in as few writes as that allows
-            // (ADR 212). Page-aligned for the same
-            // reason the cleartext pair is: so every page of them belongs
-            // to this connection alone and can be given back.
-            const raw_in = alignedPages(conn_gpa, tls.input_buffer_len) catch return;
-            defer conn_gpa.free(raw_in);
-            const raw_out = alignedPages(conn_gpa, tls.output_buffer_len * cork_records) catch return;
-            defer conn_gpa.free(raw_out);
-            var link: Link = undefined;
-            link.init(stream, raw_in, raw_out);
-            var clocks = Clocks{ .reader = &link.reader, .writer = &link.writer };
-            var wake = Wake.init(stream.socket.handle);
-            defer wake.deinit();
-            var peer: Peer = .{
-                .port = portOf(stream.socket.address),
-                .local = false,
-                .tls = true,
-                .listener = sh.index,
-            };
-            peer._len = writePeer(&peer._text, stream.socket.address);
-
-            // The handshake is bounded by the same limits the first request
-            // head would be, because until it is done that is what this is:
-            // a client that has connected and not yet said anything nilo
-            // can act on. Without this a client that connects and goes quiet,
-            // or speaks plain HTTP to a TLS port, holds the fiber and its
-            // 33 KB for ever. The Bulkhead arms its own limits once the
-            // handler starts, the way it does on a plain connection.
-            if (sizes.header_timeout_ms != 0)
-                clocks.readByNanos(monotonicNanos() + @as(u64, sizes.header_timeout_ms) * std.time.ns_per_ms);
-            if (sizes.write_timeout_ms != 0) clocks.writeWithinMs(sizes.write_timeout_ms);
-
-            // Never inlined: the handshake's frames, a 16 KB cleartext
-            // buffer among them, must be *below* this frame, in the region
-            // the idle release hands back, and not folded into the frame
-            // that lives as long as the connection (ADR 062). Measured as
-            // one page per idle connection: 13,360 bytes inlined against
-            // 9,302 not.
-            const sec = sh.secured.?;
-            var rng_source: std.Random.IoSource = .{ .io = sec.io };
-            var conn = @call(.never_inline, tls.server, .{ &link.reader.interface, &link.writer.interface, tls.config.Server{
-                .auth = &sec.auth,
-                .now = std.Io.Clock.real.now(sec.io),
-                .rng = rng_source.interface(),
-                .alpn_protocols = alpn,
-                .offload = sign_elsewhere,
-            } }) catch |err| {
-                // Debug rather than warn: a port on the internet is
-                // handshaken at by scanners all day, and every one of those
-                // is this line.
-                std.log.debug("tls handshake with {s} failed: {s}", .{ peer.address(), @errorName(err) });
-                return;
-            };
-
-            // Cleartext: the buffers the handler sees, the size a plain
-            // connection's are, and released the same way. The record layer
-            // goes back with them through `wake.raw`.
-            const clear_in = alignedPages(conn_gpa, sizes.read_buffer) catch return;
-            defer conn_gpa.free(clear_in);
-            const clear_out = alignedPages(conn_gpa, sizes.write_buffer) catch return;
-            defer conn_gpa.free(clear_out);
-            const TlsWriter = @TypeOf(conn.writer(clear_out));
-            // The cleartext writer the handler sees. The library seals a
-            // record and writes it to the socket at once, so a frame's
-            // nine-byte head and its payload were two records and two
-            // writes, and a body of a megabyte was sixty-four. Sealer
-            // keeps the library's flush after each record for the length of
-            // one drain and sends what it sealed in as few writes as the
-            // record buffer holds (`cork_records` of them).
-            const Sealer = struct {
-                inner: TlsWriter,
-                link: *Link,
-                plain: *const std.Io.Writer.VTable,
-                corked: std.Io.Writer.VTable,
-                gpa: std.mem.Allocator,
-                interface: std.Io.Writer,
-
-                const vtable: std.Io.Writer.VTable = .{ .drain = sealDrain, .sendFile = sealFile };
-
-                fn of(w: *std.Io.Writer) *@This() {
-                    return @alignCast(@fieldParentPtr("interface", w));
-                }
-
-                fn cork(self: *@This()) void {
-                    self.link.writer.interface.vtable = &self.corked;
-                }
-
-                /// The library's flushes are over: the one write for what
-                /// it sealed in between.
-                fn uncork(self: *@This()) std.Io.Writer.Error!void {
-                    const out = &self.link.writer.interface;
-                    out.vtable = self.plain;
-                    try out.flush();
-                }
-
-                fn sealDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-                    const self = of(w);
-                    // A drain that carries data keeps the last byte of it in
-                    // the buffer: the records sealed so far wait in the
-                    // record buffer for the write that the flush (or the
-                    // next full buffer) makes, and a caller that flushes
-                    // only a writer with something in it still finds
-                    // something, as it would on a plain connection whose
-                    // buffer was not emptied. Without it a frame's head and
-                    // its payload were two writes.
-                    var total: usize = 0;
-                    if (splat == 1) for (data) |d| {
-                        total += d.len;
+                    // The record layer. A TLS record is at most 16,645 bytes on the
+                    // wire and has to be whole before it can be decrypted, so the
+                    // input side cannot be smaller than one; the output side holds
+                    // `cork_records` of the largest record this library writes, so a
+                    // drain is sealed and sent in as few writes as that allows
+                    // (ADR 212). Page-aligned for the same
+                    // reason the cleartext pair is: so every page of them belongs
+                    // to this connection alone and can be given back.
+                    const raw_in = alignedPages(conn_gpa, tls.input_buffer_len) catch return;
+                    defer conn_gpa.free(raw_in);
+                    const raw_out = alignedPages(conn_gpa, tls.output_buffer_len * cork_records) catch return;
+                    defer conn_gpa.free(raw_out);
+                    var link: Link = undefined;
+                    link.init(stream, raw_in, raw_out);
+                    var clocks = Clocks{ .reader = &link.reader, .writer = &link.writer };
+                    var wake = Wake.init(stream.socket.handle);
+                    defer wake.deinit();
+                    var peer: Peer = .{
+                        .port = portOf(stream.socket.address),
+                        .local = false,
+                        .tls = true,
+                        .listener = sh.index,
                     };
-                    var view: [held_slices][]const u8 = undefined;
-                    var last: u8 = 0;
-                    const hold = total != 0 and data.len <= held_slices;
-                    if (hold) {
-                        @memcpy(view[0..data.len], data);
-                        var at = data.len;
-                        while (at > 0) {
-                            at -= 1;
-                            if (view[at].len == 0) continue;
-                            last = view[at][view[at].len - 1];
-                            view[at] = view[at][0 .. view[at].len - 1];
-                            break;
-                        }
-                    }
-                    self.inner.interface.end = w.end;
-                    self.cork();
-                    const n = self.inner.interface.vtable.drain(&self.inner.interface, if (hold) view[0..data.len] else data, splat) catch |err| {
-                        w.end = self.inner.interface.end;
-                        self.link.writer.interface.vtable = self.plain;
-                        return err;
+                    peer._len = writePeer(&peer._text, stream.socket.address);
+
+                    // The handshake is bounded by the same limits the first request
+                    // head would be, because until it is done that is what this is:
+                    // a client that has connected and not yet said anything nilo
+                    // can act on. Without this a client that connects and goes quiet,
+                    // or speaks plain HTTP to a TLS port, holds the fiber and its
+                    // 33 KB for ever. The Bulkhead arms its own limits once the
+                    // handler starts, the way it does on a plain connection.
+                    if (sizes.header_timeout_ms != 0)
+                        clocks.readByNanos(monotonicNanos() + @as(u64, sizes.header_timeout_ms) * std.time.ns_per_ms);
+                    if (sizes.write_timeout_ms != 0) clocks.writeWithinMs(sizes.write_timeout_ms);
+
+                    // Never inlined: the handshake's frames, a 16 KB cleartext
+                    // buffer among them, must be *below* this frame, in the region
+                    // the idle release hands back, and not folded into the frame
+                    // that lives as long as the connection (ADR 062). Measured as
+                    // one page per idle connection: 13,360 bytes inlined against
+                    // 9,302 not.
+                    const sec = sh.secured.?;
+                    var rng_source: std.Random.IoSource = .{ .io = sec.io };
+                    var conn = @call(.never_inline, tls.server, .{ &link.reader.interface, &link.writer.interface, tls.config.Server{
+                        .auth = &sec.auth,
+                        .now = std.Io.Clock.real.now(sec.io),
+                        .rng = rng_source.interface(),
+                        .alpn_protocols = alpn,
+                        .offload = sign_elsewhere,
+                    } }) catch |err| {
+                        // Debug rather than warn: a port on the internet is
+                        // handshaken at by scanners all day, and every one of those
+                        // is this line.
+                        std.log.debug("tls handshake with {s} failed: {s}", .{ peer.address(), @errorName(err) });
+                        return;
                     };
-                    w.end = self.inner.interface.end;
-                    if (hold) {
-                        self.link.writer.interface.vtable = self.plain;
-                        w.buffer[0] = last;
-                        w.end = 1;
-                        return n + 1;
-                    }
-                    try self.uncork();
-                    return n;
-                }
 
-                /// A file is read a buffer at a time and sealed as it goes.
-                /// The writer's own buffer is a connection's write buffer,
-                /// 4 KiB, which made every record 4 KiB and every record a
-                /// read and a write; the buffer here lives for the file
-                /// alone, so no connection holds it idle.
-                fn sealFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
-                    const self = of(w);
-                    const left0: usize = @intFromEnum(limit);
-                    // `sendFileAll` asks again until its limit is met, and a
-                    // limit past the end of the file means a second call
-                    // that would take a buffer to learn there is nothing.
-                    if (file_reader.atEnd()) return error.EndOfStream;
-                    const left_in_file: u64 = if (file_reader.size) |size| size -| file_reader.logicalPos() else left0;
-                    const wanted: usize = @intCast(@min(left0, left_in_file));
-                    if (wanted < bulk_min) return error.Unimplemented;
-                    const buf = self.gpa.alloc(u8, @min(wanted, bulk_file)) catch return error.Unimplemented;
-                    defer self.gpa.free(buf);
-                    var total: usize = 0;
-                    while (total < wanted) {
-                        const want = @min(wanted - total, buf.len);
-                        const n = file_reader.interface.readSliceShort(buf[0..want]) catch return error.ReadFailed;
-                        if (n == 0) {
-                            if (total == 0) return error.EndOfStream;
-                            break;
+                    // Cleartext: the buffers the handler sees, the size a plain
+                    // connection's are, and released the same way. The record layer
+                    // goes back with them through `wake.raw`.
+                    const clear_in = alignedPages(conn_gpa, sizes.read_buffer) catch return;
+                    defer conn_gpa.free(clear_in);
+                    const clear_out = alignedPages(conn_gpa, sizes.write_buffer) catch return;
+                    defer conn_gpa.free(clear_out);
+                    const TlsWriter = @TypeOf(conn.writer(clear_out));
+                    // The cleartext writer the handler sees. The library seals a
+                    // record and writes it to the socket at once, so a frame's
+                    // nine-byte head and its payload were two records and two
+                    // writes, and a body of a megabyte was sixty-four. Sealer
+                    // keeps the library's flush after each record for the length of
+                    // one drain and sends what it sealed in as few writes as the
+                    // record buffer holds (`cork_records` of them).
+                    const Sealer = struct {
+                        inner: TlsWriter,
+                        link: *Link,
+                        plain: *const std.Io.Writer.VTable,
+                        corked: std.Io.Writer.VTable,
+                        gpa: std.mem.Allocator,
+                        interface: std.Io.Writer,
+
+                        const vtable: std.Io.Writer.VTable = .{ .drain = sealDrain, .sendFile = sealFile };
+
+                        fn of(w: *std.Io.Writer) *@This() {
+                            return @alignCast(@fieldParentPtr("interface", w));
                         }
-                        try w.writeAll(buf[0..n]);
-                        total += n;
-                    }
-                    return total;
+
+                        fn cork(self: *@This()) void {
+                            self.link.writer.interface.vtable = &self.corked;
+                        }
+
+                        /// The library's flushes are over: the one write for what
+                        /// it sealed in between.
+                        fn uncork(self: *@This()) std.Io.Writer.Error!void {
+                            const out = &self.link.writer.interface;
+                            out.vtable = self.plain;
+                            try out.flush();
+                        }
+
+                        fn sealDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+                            const self = of(w);
+                            // A drain that carries data keeps the last byte of it in
+                            // the buffer: the records sealed so far wait in the
+                            // record buffer for the write that the flush (or the
+                            // next full buffer) makes, and a caller that flushes
+                            // only a writer with something in it still finds
+                            // something, as it would on a plain connection whose
+                            // buffer was not emptied. Without it a frame's head and
+                            // its payload were two writes.
+                            var total: usize = 0;
+                            if (splat == 1) for (data) |d| {
+                                total += d.len;
+                            };
+                            var view: [held_slices][]const u8 = undefined;
+                            var last: u8 = 0;
+                            const hold = total != 0 and data.len <= held_slices;
+                            if (hold) {
+                                @memcpy(view[0..data.len], data);
+                                var at = data.len;
+                                while (at > 0) {
+                                    at -= 1;
+                                    if (view[at].len == 0) continue;
+                                    last = view[at][view[at].len - 1];
+                                    view[at] = view[at][0 .. view[at].len - 1];
+                                    break;
+                                }
+                            }
+                            self.inner.interface.end = w.end;
+                            self.cork();
+                            const n = self.inner.interface.vtable.drain(&self.inner.interface, if (hold) view[0..data.len] else data, splat) catch |err| {
+                                w.end = self.inner.interface.end;
+                                self.link.writer.interface.vtable = self.plain;
+                                return err;
+                            };
+                            w.end = self.inner.interface.end;
+                            if (hold) {
+                                self.link.writer.interface.vtable = self.plain;
+                                w.buffer[0] = last;
+                                w.end = 1;
+                                return n + 1;
+                            }
+                            try self.uncork();
+                            return n;
+                        }
+
+                        /// A file is read a buffer at a time and sealed as it goes.
+                        /// The writer's own buffer is a connection's write buffer,
+                        /// 4 KiB, which made every record 4 KiB and every record a
+                        /// read and a write; the buffer here lives for the file
+                        /// alone, so no connection holds it idle.
+                        fn sealFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+                            const self = of(w);
+                            const left0: usize = @backingInt(limit);
+                            // `sendFileAll` asks again until its limit is met, and a
+                            // limit past the end of the file means a second call
+                            // that would take a buffer to learn there is nothing.
+                            if (file_reader.atEnd()) return error.EndOfStream;
+                            const left_in_file: u64 = if (file_reader.size) |size| size -| file_reader.logicalPos() else left0;
+                            const wanted: usize = @intCast(@min(left0, left_in_file));
+                            if (wanted < bulk_min) return error.Unimplemented;
+                            const buf = self.gpa.alloc(u8, @min(wanted, bulk_file)) catch return error.Unimplemented;
+                            defer self.gpa.free(buf);
+                            var total: usize = 0;
+                            while (total < wanted) {
+                                const want = @min(wanted - total, buf.len);
+                                const n = file_reader.interface.readSliceShort(buf[0..want]) catch return error.ReadFailed;
+                                if (n == 0) {
+                                    if (total == 0) return error.EndOfStream;
+                                    break;
+                                }
+                                try w.writeAll(buf[0..n]);
+                                total += n;
+                            }
+                            return total;
+                        }
+                    };
+                    var tw: Sealer = .{
+                        .inner = conn.writer(clear_out),
+                        .link = &link,
+                        .plain = link.writer.interface.vtable,
+                        .corked = link.writer.interface.vtable.*,
+                        .gpa = conn_gpa,
+                        .interface = .{ .vtable = &Sealer.vtable, .buffer = clear_out },
+                    };
+                    tw.corked.flush = std.Io.Writer.noopFlush;
+
+                    // `Link` one layer up: before the cleartext reader asks the
+                    // library for a record, what the handler wrote into the cleartext
+                    // writer is sealed and sent. `Link` flushes only the record writer
+                    // under it, so an answer written while the read buffer still held
+                    // bytes (an unread body, the rest of a WebSocket frame) sat in the
+                    // cleartext buffer while the connection waited for the client,
+                    // which a keep-alive POST measured as the whole idle limit
+                    // (ADR 201). tls.zig's reader has only `stream`, so that is the
+                    // one wrapped; the defaults it leaves call it.
+                    const TlsReader = @TypeOf(conn.reader(clear_in));
+                    const ClearLink = struct {
+                        reader: TlsReader,
+                        writer: *std.Io.Writer,
+                        inner: *const std.Io.Reader.VTable,
+                        /// The record layer, whose writer says why a flush failed.
+                        link: *Link,
+
+                        const vtable: std.Io.Reader.VTable = .{ .stream = streamSettled };
+
+                        fn streamSettled(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+                            const r: *TlsReader = @alignCast(@fieldParentPtr("interface", io_r));
+                            const self: *@This() = @alignCast(@fieldParentPtr("reader", r));
+                            // A failed flush is left for the next write to report,
+                            // and a cancelled one fails the read, as `Link.settle`
+                            // does and for its reason.
+                            if (self.writer.end != 0) self.writer.flush() catch
+                                if (self.link.writer.err) |err| if (err == error.Canceled) {
+                                    self.link.reader.err = error.Canceled;
+                                    return error.ReadFailed;
+                                };
+                            return self.inner.stream(io_r, io_w, limit);
+                        }
+                    };
+                    var clear: ClearLink = .{ .reader = conn.reader(clear_in), .writer = &tw.interface, .inner = undefined, .link = &link };
+                    clear.inner = clear.reader.interface.vtable;
+                    clear.reader.interface.vtable = &ClearLink.vtable;
+                    const tr = &clear.reader;
+                    const raw: Wake.RawLayer = .{
+                        .in = &link.reader.interface,
+                        .out = &link.writer.interface,
+                        .leftover = &conn.cleartext_buf,
+                    };
+                    wake.raw = &raw;
+                    // What the handshake settled on is read here and the HTTP/2
+                    // connection is run through one call that is never inlined, so
+                    // none of its frame is the one an HTTP/1.1 connection parks
+                    // under (ADR 062, ADR 259). A build without the flag has neither
+                    // the test nor the call.
+                    if (comptime nilo_build.http2) {
+                        const h2 = if (conn.alpn_protocol) |chosen| std.mem.eql(u8, chosen, "h2") else false;
+                        if (h2)
+                            hand_on_to(&st, &tr.interface, &tw.interface, &clocks, &wake, &peer)
+                        else
+                            connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
+                    } else connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
+                    // The handler is done with the connection: what it wrote goes
+                    // out as records, then close_notify, so the peer sees an end
+                    // rather than a reset. A failure here is a peer already gone.
+                    tw.interface.flush() catch {};
+                    conn.close() catch {};
                 }
-            };
-            var tw: Sealer = .{
-                .inner = conn.writer(clear_out),
-                .link = &link,
-                .plain = link.writer.interface.vtable,
-                .corked = link.writer.interface.vtable.*,
-                .gpa = conn_gpa,
-                .interface = .{ .vtable = &Sealer.vtable, .buffer = clear_out },
-            };
-            tw.corked.flush = std.Io.Writer.noopFlush;
-
-            // `Link` one layer up: before the cleartext reader asks the
-            // library for a record, what the handler wrote into the cleartext
-            // writer is sealed and sent. `Link` flushes only the record writer
-            // under it, so an answer written while the read buffer still held
-            // bytes (an unread body, the rest of a WebSocket frame) sat in the
-            // cleartext buffer while the connection waited for the client,
-            // which a keep-alive POST measured as the whole idle limit
-            // (ADR 201). tls.zig's reader has only `stream`, so that is the
-            // one wrapped; the defaults it leaves call it.
-            const TlsReader = @TypeOf(conn.reader(clear_in));
-            const ClearLink = struct {
-                reader: TlsReader,
-                writer: *std.Io.Writer,
-                inner: *const std.Io.Reader.VTable,
-                /// The record layer, whose writer says why a flush failed.
-                link: *Link,
-
-                const vtable: std.Io.Reader.VTable = .{ .stream = streamSettled };
-
-                fn streamSettled(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-                    const r: *TlsReader = @alignCast(@fieldParentPtr("interface", io_r));
-                    const self: *@This() = @alignCast(@fieldParentPtr("reader", r));
-                    // A failed flush is left for the next write to report,
-                    // and a cancelled one fails the read, as `Link.settle`
-                    // does and for its reason.
-                    if (self.writer.end != 0) self.writer.flush() catch
-                        if (self.link.writer.err) |err| if (err == error.Canceled) {
-                            self.link.reader.err = error.Canceled;
-                            return error.ReadFailed;
-                        };
-                    return self.inner.stream(io_r, io_w, limit);
-                }
-            };
-            var clear: ClearLink = .{ .reader = conn.reader(clear_in), .writer = &tw.interface, .inner = undefined, .link = &link };
-            clear.inner = clear.reader.interface.vtable;
-            clear.reader.interface.vtable = &ClearLink.vtable;
-            const tr = &clear.reader;
-            const raw: Wake.RawLayer = .{
-                .in = &link.reader.interface,
-                .out = &link.writer.interface,
-                .leftover = &conn.cleartext_buf,
-            };
-            wake.raw = &raw;
-            // What the handshake settled on is read here and the HTTP/2
-            // connection is run through one call that is never inlined, so
-            // none of its frame is the one an HTTP/1.1 connection parks
-            // under (ADR 062, ADR 259). A build without the flag has neither
-            // the test nor the call.
-            if (comptime nilo_build.http2) {
-                const h2 = if (conn.alpn_protocol) |chosen| std.mem.eql(u8, chosen, "h2") else false;
-                if (h2)
-                    hand_on_to(&st, &tr.interface, &tw.interface, &clocks, &wake, &peer)
-                else
-                    connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
-            } else connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
-            // The handler is done with the connection: what it wrote goes
-            // out as records, then close_notify, so the peer sees an end
-            // rather than a reset. A failure here is a peer already gone.
-            tw.interface.flush() catch {};
-            conn.close() catch {};
-        }
             };
         }
     };
@@ -3323,7 +3323,7 @@ test "a Peer given as text keeps it, and refuses what cannot be an address" {
     const nowhere: Peer = .{};
     try testing.expectEqualStrings("", nowhere.address());
 
-    const too_long = "a" ** (Peer.max_text + 1);
+    const too_long = &@as([(Peer.max_text + 1)]u8, @splat('a'));
     try testing.expectError(error.AddressTooLong, Peer.from(too_long));
 }
 

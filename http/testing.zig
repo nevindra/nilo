@@ -854,7 +854,7 @@ fn parse(raw: []const u8, keep_alive: bool) !Answer {
         .interim = interim,
     };
     if (answer.header("Transfer-Encoding")) |te| {
-        answer.chunked = std.ascii.indexOfIgnoreCase(te, "chunked") != null;
+        answer.chunked = std.ascii.findIgnoreCase(te, "chunked") != null;
     }
     return answer;
 }

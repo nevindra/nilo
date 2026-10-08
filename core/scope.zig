@@ -653,7 +653,6 @@ test "text stamped by a Run is stale for good once the Run is over" {
     try testing.expect(!text.alive());
 }
 
-
 test "a value given to a Run reaches whatever asks for it" {
     const Actor = struct { agent: []const u8 };
 

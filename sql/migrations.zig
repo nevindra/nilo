@@ -648,9 +648,9 @@ pub fn renderSql(
 
     const ledger = comptime D.qualify(null, @import("row.zig").tableOf(migrate.Applied));
     try w.print("INSERT INTO {s} (", .{ledger});
-    inline for (@typeInfo(migrate.Applied).@"struct".fields, 0..) |f, i| {
+    inline for (@typeInfo(migrate.Applied).@"struct".field_names, 0..) |f_name, i| {
         if (i > 0) try w.writeAll(", ");
-        try w.writeAll(comptime D.quote(f.name));
+        try w.writeAll(comptime D.quote(f_name));
     }
     try w.print(")\nVALUES ({d}, '", .{version.number});
     try writeSqlLiteral(w, name);

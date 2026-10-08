@@ -49,7 +49,7 @@ pub fn verify(signed: []const u8, sig: []const u8, e: []const u8, n: []const u8)
             if (n.len < len) return error.KeyNotUsable;
             return rsa.PKCS1v1_5Signature.verify(
                 len,
-                sig[0..len].*,
+                sig[0..len],
                 signed,
                 key,
                 Sha256,
@@ -67,22 +67,22 @@ pub fn verify(signed: []const u8, sig: []const u8, e: []const u8, n: []const u8)
 }
 
 test "a key size with no branch is refused rather than guessed" {
-    const n = [_]u8{0xff} ** 128; // 1024 bits
+    const n = @as([128]u8, @splat(0xff)); // 1024 bits
     const e = [_]u8{ 0x01, 0x00, 0x01 };
-    const sig = [_]u8{0} ** 128;
+    const sig = @as([128]u8, @splat(0));
     try std.testing.expectError(error.KeySizeNotSupported, verify("a.b", &sig, &e, &n));
 }
 
 test "a signature that is not as long as its key is refused" {
-    const n = [_]u8{0xff} ** 256;
+    const n = @as([256]u8, @splat(0xff));
     const e = [_]u8{ 0x01, 0x00, 0x01 };
-    const sig = [_]u8{0} ** 200;
+    const sig = @as([200]u8, @splat(0));
     try std.testing.expectError(error.SignatureWrongLength, verify("a.b", &sig, &e, &n));
 }
 
 test "an even exponent is not a key" {
-    const n = [_]u8{0xff} ** 256;
+    const n = @as([256]u8, @splat(0xff));
     const e = [_]u8{ 0x01, 0x00, 0x02 };
-    const sig = [_]u8{0} ** 256;
+    const sig = @as([256]u8, @splat(0));
     try std.testing.expectError(error.KeyNotUsable, verify("a.b", &sig, &e, &n));
 }

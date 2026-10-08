@@ -77,7 +77,7 @@ pub fn errorFor(status: std.http.Status, code: []const u8) Error {
     if (std.mem.eql(u8, code, "NoSuchKey")) return error.NotFound;
     if (std.mem.eql(u8, code, "NoSuchBucket")) return error.NotFound;
 
-    return switch (@intFromEnum(status)) {
+    return switch (@backingInt(status)) {
         404 => error.NotFound,
         403, 400, 401, 405, 409, 411, 412, 416 => error.Rejected,
         429 => error.Throttled,
@@ -142,7 +142,7 @@ test "a status becomes the error a handler would act on" {
     try testing.expectEqual(Error.Throttled, errorFor(.service_unavailable, ""));
     try testing.expectEqual(Error.Unavailable, errorFor(.internal_server_error, ""));
     try testing.expectEqual(Error.Unavailable, errorFor(.bad_gateway, ""));
-    try testing.expectEqual(Error.Failed, errorFor(@enumFromInt(299), ""));
+    try testing.expectEqual(Error.Failed, errorFor(@fromBackingInt(@intCast(299)), ""));
 }
 
 test "a code refines the status rather than the other way round" {

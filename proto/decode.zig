@@ -182,7 +182,7 @@ fn countPass(comptime T: type, buf: []const u8, depth_left: u32, counts: []usize
             if (kb < 8) return error.InvalidKey;
             pos += 1;
             number = kb >> 3;
-            kind = @enumFromInt(kb & 7);
+            kind = @fromBackingInt(@intCast(kb & 7));
             c = F.counts[kb];
         } else {
             const out = try wire.varintSlow(buf, pos);
@@ -444,7 +444,7 @@ inline fn readScalar(comptime sc: schema.Scalar, comptime Z: type, r: *Reader) E
         .sfixed64 => @bitCast(try r.fixed64()),
         .float => @bitCast(try r.fixed32()),
         .double => @bitCast(try r.fixed64()),
-        .enumeration => @enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(try r.varint()))))),
+        .enumeration => @fromBackingInt(@intCast(@as(i32, @bitCast(@as(u32, @truncate(try r.varint())))))),
         .string => blk: {
             const b = try r.bytes();
             if (!wire.validUtf8(b)) return error.InvalidUtf8;

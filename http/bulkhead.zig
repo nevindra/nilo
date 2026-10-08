@@ -2031,7 +2031,7 @@ threadlocal var fallback_slot: ?*anyopaque = null;
 /// cannot see is a spawned fiber, which has no slot, setting it; nothing on
 /// the server does.
 pub fn setFallbackSlot(p: ?*anyopaque) ?*anyopaque {
-    if (builtin.mode == .Debug and p != null) std.debug.assert(engine.slot() == null);
+    if (builtin.mode == .debug and p != null) std.debug.assert(engine.slot() == null);
     const previous = fallback_slot;
     fallback_slot = p;
     return previous;

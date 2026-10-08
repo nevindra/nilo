@@ -12,8 +12,10 @@
 //! fn charge(c: *nilo.Ctx, stripe: *Stripe) !Receipt {
 //!     var span = c.span("charge card");      // a child of the request's span
 //!     defer span.end();
-//!     errdefer |err| span.fail(err);
-//!     return stripe.postJson(c, "/v1/charges", …);   // a client span, and `traceparent`
+//!     return stripe.postJson(c, "/v1/charges", …) catch |err| {   // a client span, and `traceparent`
+//!         span.fail(err);
+//!         return err;
+//!     };
 //! }
 //! ```
 //!
@@ -324,7 +326,7 @@ pub const Tracer = struct {
         var active: Active = .{
             .context = undefined,
             .server = undefined,
-            .parent = .{0} ** 8,
+            .parent = @splat(0),
             .started_us = core.nowMicros(),
             .started_mono_us = core.monotonicMicros(),
             .state = "",
@@ -489,7 +491,7 @@ pub const Span = struct {
         return span;
     }
 
-    /// Mark the span failed, naming the error. `errdefer |err| span.fail(err)`.
+    /// Mark the span failed, naming the error: `call() catch |err| { span.fail(err); return err; }`.
     pub fn fail(self: *Span, err: anyerror) void {
         self.failure = @errorName(err);
     }
@@ -638,7 +640,7 @@ test "a long path is cut to what a record holds" {
     var t = try testTracer(.{ .service = "orders" });
     defer t.deinit();
     const active = t.begin(null, null);
-    t.finish(&active, "GET", "/files/*", "/files/" ++ "a" ** 200, 200);
+    t.finish(&active, "GET", "/files/*", "/files/" ++ &@as([200]u8, @splat('a')), 200);
     var out: [1]Record = undefined;
     _ = t.drain(&out);
     try testing.expectEqual(@as(usize, text_cap), out[0].textOf().len);

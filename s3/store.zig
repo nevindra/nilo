@@ -827,7 +827,7 @@ test "a store keeps its own copy of the strings it was opened with" {
 }
 
 test "a region that cannot fit a credential scope is refused at open" {
-    const long = "x" ** 65;
+    const long = &@as([65]u8, @splat('x'));
     try testing.expectError(error.BadRegion, Store.open(testing.allocator, .{
         .endpoint = "https://s3.example.com",
         .region = long,
@@ -1111,8 +1111,8 @@ test "static credentials that can never sign are refused at open, by name" {
     try testing.expectError(error.BadCredentials, staticOpen(.{ .secret = "" }));
     // Already over: every request would take the write lock and get a 403.
     try testing.expectError(error.BadCredentials, staticOpen(.{ .expires_at = 1 }));
-    try testing.expectError(error.BadCredentials, staticOpen(.{ .akid = "a" ** (sign.akid_max + 1) }));
-    try testing.expectError(error.BadCredentials, staticOpen(.{ .secret = "s" ** (sign.secret_max + 1) }));
+    try testing.expectError(error.BadCredentials, staticOpen(.{ .akid = &@as([(sign.akid_max + 1)]u8, @splat('a')) }));
+    try testing.expectError(error.BadCredentials, staticOpen(.{ .secret = &@as([(sign.secret_max + 1)]u8, @splat('s')) }));
 
     var ok = try staticOpen(.{ .expires_at = std.math.maxInt(i32) });
     ok.deinit();
@@ -1128,7 +1128,7 @@ test "a region or key id that would break the credential scope is refused at ope
 test "an endpoint authority longer than a host buffer holds is refused at open" {
     // 255 is the share `host_max` in `bucket.zig` gives an authority, and it
     // sizes every URL buffer on a stack. One more panicked in `urlForList`.
-    const fits = "https://" ++ "h" ** 255;
+    const fits = "https://" ++ &@as([255]u8, @splat('h'));
     var ok = try staticOpen(.{ .endpoint = fits });
     ok.deinit();
     try testing.expectError(error.BadEndpoint, staticOpen(.{ .endpoint = fits ++ "h" }));

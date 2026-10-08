@@ -1,7 +1,7 @@
 .{
     .name = .nilo_release,
     .version = "0.0.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0x56034646e7db1e7b,
     .dependencies = .{
         // By path: `release.py` copies this directory into a tree exported

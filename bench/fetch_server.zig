@@ -171,7 +171,7 @@ fn call(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
 /// A fixed ~1 KB answer, on a thread that is not the Engine's, so the number
 /// being read is the client's and not an upstream's.
 const Upstream = struct {
-    const body = "A systems nerd who writes Zig before breakfast. " ** 21;
+    const body = repeat("A systems nerd who writes Zig before breakfast. ", 21);
 
     port: u16 = 0,
     ready: std.atomic.Value(bool) = .init(false),
@@ -281,4 +281,16 @@ pub fn main() !void {
     // else's routes and reports them as non-2xx, which is how three runs of
     // this were thrown away before the port was the thing suspected.
     try app.listen(.{ .port = 8791 });
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
 }

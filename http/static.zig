@@ -1560,7 +1560,7 @@ test "a set told to answer any path does what it did before 0.2.0" {
 test "a gzipped copy is smaller, and inflates back to exactly the original" {
     const gpa = testing.allocator;
     // Repetitive enough to compress, which is what a real stylesheet is.
-    const original = "body { margin: 0; padding: 0; } " ** 64;
+    const original = repeat("body { margin: 0; padding: 0; } ", 64);
 
     const squeezed = (try gzipped(gpa, original)) orelse return error.TestExpectedCompression;
     defer gpa.free(squeezed);
@@ -1595,7 +1595,7 @@ test "a file that does not shrink keeps no copy" {
 
 test "the two representations of one file never share an ETag" {
     const gpa = testing.allocator;
-    const html = "<!doctype html><title>hello</title>" ** 64;
+    const html = repeat("<!doctype html><title>hello</title>", 64);
 
     var set = try fromMemory(gpa, &.{.{
         .url = "/index.html",
@@ -1673,7 +1673,7 @@ test "a file over the threshold is listed rather than refused, and holds no byte
     // Text, and repetitive, so this is a file gzip would certainly have been
     // worth had it been held. That is what makes "no compressed copy" a
     // decision here rather than an accident of the contents.
-    const big = "the quick brown fox jumps over the lazy dog. " ** 8;
+    const big = repeat("the quick brown fox jumps over the lazy dog. ", 8);
     var tree = try TmpTree.init(gpa, &.{
         .{ "small.txt", "small" },
         .{ "big.txt", big },
@@ -2423,4 +2423,19 @@ test "reload does not follow a file swapped for a symlink either" {
     const after = try client.get(&app, "/page.html");
     try testing.expectEqual(@as(u16, 404), after.status);
     try testing.expect(std.mem.indexOf(u8, after.body, "outside the tree") == null);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

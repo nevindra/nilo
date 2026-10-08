@@ -542,7 +542,7 @@ test "a body that keeps moving never stalls, however slowly" {
 
             var buf: [64]u8 = undefined;
             const res = try client.get(&scope, try canned.url(&buf), .{});
-            try testing.expectEqualStrings("x" ** 24, res.body.view());
+            try testing.expectEqualStrings(&@as([24]u8, @splat('x')), res.body.view());
         }
     }.run);
 }
@@ -866,7 +866,7 @@ const Traced = struct {
     ended: ?core.trace.Ended = null,
     ended_with: ?core.trace.Outbound = null,
 
-    const context: core.trace.Context = .{ .trace_id = .{0xab} ** 16, .span_id = .{0xcd} ** 8, .sampled = true };
+    const context: core.trace.Context = .{ .trace_id = @splat(0xab), .span_id = @splat(0xcd), .sampled = true };
 
     pub fn arena(self: *Traced) std.mem.Allocator {
         return self.run.arena();
@@ -876,7 +876,7 @@ const Traced = struct {
     }
     pub fn traceBegin(self: *Traced) ?core.trace.Outbound {
         self.begun += 1;
-        return .{ .context = context, .parent = .{1} ** 8, .started_us = 0, .started_mono_us = 0, .state = "vendor=7" };
+        return .{ .context = context, .parent = @splat(1), .started_us = 0, .started_mono_us = 0, .state = "vendor=7" };
     }
     pub fn traceEnd(self: *Traced, begun: core.trace.Outbound, ended: core.trace.Ended) void {
         self.ended_with = begun;
@@ -911,7 +911,7 @@ test "a call made under a Scope that traces carries traceparent, and the Scope h
             const ended = traced.ended.?;
             try testing.expectEqualStrings("GET", ended.method);
             try testing.expect(std.mem.startsWith(u8, ended.url, "http://127.0.0.1:"));
-            try testing.expectEqual(@intFromEnum(res.status), ended.status);
+            try testing.expectEqual(@backingInt(res.status), ended.status);
             try testing.expect(ended.failure == null);
         }
     }.run);
@@ -1813,7 +1813,7 @@ test "a body going out that keeps moving is not a stall, however long it takes" 
                 .body = .{ .stream = .{ .reader = &source.reader, .len = 24 } },
             });
             try testing.expect(head.ok());
-            try testing.expectEqualStrings("y" ** 24, canned.requestBody());
+            try testing.expectEqualStrings(&@as([24]u8, @splat('y')), canned.requestBody());
         }
     }.run);
 }

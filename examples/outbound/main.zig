@@ -95,12 +95,12 @@ fn getCard(github: *GitHub, c: *nilo.Ctx, owner: nilo.Str, name: nilo.Str) !Card
     // on a 429, or GitHub's own `X-RateLimit-Reset` on its 403 — goes into
     // the message rather than being lost with the head
     // ([ADR 187](../../docs/adr/187-a-head-that-outlives-its-body.md)).
-    if (!res.ok()) return switch (@intFromEnum(res.status)) {
+    if (!res.ok()) return switch (@backingInt(res.status)) {
         404 => fail.notFound("no repository {s}/{s}", .{ owner.view(), name.view() }),
         403, 429 => fail.status(502, "github is rate-limiting this address; retry after {s}", .{
             res.header("retry-after") orelse res.header("x-ratelimit-reset") orelse "a while",
         }),
-        else => fail.status(502, "github answered {d}", .{@intFromEnum(res.status)}),
+        else => fail.status(502, "github answered {d}", .{@backingInt(res.status)}),
     };
 
     // The body is a `Str` in this request's Scope, so the parse borrows from

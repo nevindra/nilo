@@ -83,29 +83,29 @@ const b64 = @import("b64.zig");
 const vector = @import("vector.zig");
 
 test "a curve with no branch is refused rather than guessed" {
-    const x = [_]u8{0x01} ** 48;
-    const sig = [_]u8{0} ** 96;
+    const x = @as([48]u8, @splat(0x01));
+    const sig = @as([96]u8, @splat(0));
     try testing.expectError(error.CurveNotSupported, verify("a.b", &sig, "P-384", &x, &x));
 }
 
 test "a signature that is not r || s on this curve is refused by its length" {
-    const x = [_]u8{0x01} ** 32;
-    const der_shaped = [_]u8{0} ** 71;
+    const x = @as([32]u8, @splat(0x01));
+    const der_shaped = @as([71]u8, @splat(0));
     try testing.expectError(error.SignatureWrongLength, verify("a.b", &der_shaped, "P-256", &x, &x));
 }
 
 test "a coordinate that is not thirty-two bytes is not a key" {
-    const short = [_]u8{0x01} ** 31;
-    const full = [_]u8{0x01} ** 32;
-    const sig = [_]u8{0} ** 64;
+    const short = @as([31]u8, @splat(0x01));
+    const full = @as([32]u8, @splat(0x01));
+    const sig = @as([64]u8, @splat(0));
     try testing.expectError(error.KeyNotUsable, verify("a.b", &sig, "P-256", &short, &full));
     try testing.expectError(error.KeyNotUsable, verify("a.b", &sig, "P-256", &full, &short));
 }
 
 test "two coordinates that are not a point on the curve are not a key" {
     // x = y = 1 is not on P-256, and `fromSec1` says so.
-    const one = [_]u8{0} ** 31 ++ [_]u8{0x01};
-    const sig = [_]u8{0x01} ** 64;
+    const one = @as([31]u8, @splat(0)) ++ [_]u8{0x01};
+    const sig = @as([64]u8, @splat(0x01));
     try testing.expectError(error.KeyNotUsable, verify("a.b", &sig, "P-256", &one, &one));
 }
 
@@ -132,6 +132,6 @@ test "an r or s of zero is a bad signature rather than a crash" {
     const y = try b64.keep(gpa, vector.es256_y);
     defer gpa.free(y);
 
-    const zeros = [_]u8{0} ** 64;
+    const zeros = @as([64]u8, @splat(0));
     try testing.expectError(error.BadSignature, verify("a.b", &zeros, "P-256", x, y));
 }

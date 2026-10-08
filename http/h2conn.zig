@@ -1811,7 +1811,7 @@ const Conn = struct {
         var left = head.len / 6;
         while (left > 0) : (left -= 1) {
             const pair = try c.take(6);
-            const id: h2.Setting = @enumFromInt(std.mem.readInt(u16, pair[0..2], .big));
+            const id: h2.Setting = @fromBackingInt(@intCast(std.mem.readInt(u16, pair[0..2], .big)));
             const value = std.mem.readInt(u32, pair[2..6], .big);
             switch (id) {
                 .initial_window_size => {
@@ -3031,7 +3031,7 @@ fn announcedLength(fields: []const hpack.Field) error{Malformed}!?u64 {
 /// The names a field may have: a lowercase token (RFC 9110 §5.6.2, with the
 /// capitals §8.2.1 forbids left out).
 const lower_token: [256]bool = blk: {
-    var t = [_]bool{false} ** 256;
+    var t = @as([256]bool, @splat(false));
     for ('a'..'z' + 1) |ch| t[ch] = true;
     for ('0'..'9' + 1) |ch| t[ch] = true;
     for ("!#$%&'*+-.^_`|~") |ch| t[ch] = true;
@@ -3157,7 +3157,7 @@ const testing = std.testing;
 const reference = struct {
     fn validPseudo(fields: []const hpack.Field) bool {
         const names = [_][]const u8{ ":method", ":scheme", ":path", ":authority" };
-        var seen = [_]bool{false} ** names.len;
+        var seen = @as([names.len]bool, @splat(false));
         var regular = false;
         for (fields) |f| {
             if (f.name.len == 0 or f.name[0] != ':') {
@@ -3435,7 +3435,7 @@ test "the server's own SETTINGS ask for an HPACK table of 0, and cap the calls a
     var saw_cap = false;
     var i: usize = 0;
     while (i < settings.payload.len) : (i += 6) {
-        const id: h2.Setting = @enumFromInt(std.mem.readInt(u16, settings.payload[i..][0..2], .big));
+        const id: h2.Setting = @fromBackingInt(@intCast(std.mem.readInt(u16, settings.payload[i..][0..2], .big)));
         const v = std.mem.readInt(u32, settings.payload[i + 2 ..][0..4], .big);
         if (id == .header_table_size) {
             try testing.expectEqual(@as(u32, 0), v);
@@ -3506,7 +3506,7 @@ test "a gzipped message reaches the route inflated" {
     defer zipped.deinit();
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var compress: std.compress.flate.Compress = try .init(&zipped.writer, &window, .gzip, .default);
-    try compress.writer.writeAll("squeezed " ** 20);
+    try compress.writer.writeAll(repeat("squeezed ", 20));
     try compress.finish();
 
     try client.headersFor(1, "/test.Echo/Say", &.{.{ .name = "grpc-encoding", .value = "gzip" }}, false);
@@ -3514,7 +3514,7 @@ test "a gzipped message reaches the route inflated" {
 
     var got = try converse(&app, &client);
     defer got.deinit();
-    try testing.expectEqualStrings("squeezed " ** 20, try got.message(1));
+    try testing.expectEqualStrings(repeat("squeezed ", 20), try got.message(1));
 }
 
 test "a compressed message in an encoding this server does not read is UNIMPLEMENTED" {
@@ -3786,7 +3786,7 @@ test "an answer larger than the client's window waits for WINDOW_UPDATE, then fi
     defer client.deinit();
     // A client that allows ten bytes a stream, then asks for forty.
     try h2.writeSettings(client.w(), &.{.{ .initial_window_size, 10 }});
-    try client.call(1, "/test.Echo/Say", "0123456789" ** 4);
+    try client.call(1, "/test.Echo/Say", repeat("0123456789", 4));
     try h2.writeWindowUpdate(client.w(), 1, 100);
 
     var got = try converse(&app, &client);
@@ -3794,7 +3794,7 @@ test "an answer larger than the client's window waits for WINDOW_UPDATE, then fi
     const data = Answer.of(.data, &got, 1);
     try testing.expect(data.len >= 2);
     try testing.expectEqual(@as(u24, 10), data[0].head.len);
-    try testing.expectEqualStrings("0123456789" ** 4, try got.message(1));
+    try testing.expectEqualStrings(repeat("0123456789", 4), try got.message(1));
     try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
 }
 
@@ -3837,7 +3837,7 @@ test "a header block that never ends is sent away with ENHANCE_YOUR_CALM, howeve
     defer app.deinit();
     var client = try TestClient.init();
     defer client.deinit();
-    const junk = [_]u8{0} ** 4096;
+    const junk = @as([4096]u8, @splat(0));
     try h2.writeHeader(client.w(), junk.len, .headers, 0, 1);
     try client.w().writeAll(&junk);
     for (0..20) |_| {
@@ -3890,7 +3890,7 @@ test "a flood of frames of a type nobody knows is sent away" {
     defer app.deinit();
     var client = try TestClient.init();
     defer client.deinit();
-    for (0..max_control_run + 1) |_| try h2.writeHeader(client.w(), 0, @enumFromInt(0x20), 0, 0);
+    for (0..max_control_run + 1) |_| try h2.writeHeader(client.w(), 0, @fromBackingInt(@intCast(0x20)), 0, 0);
 
     var got = try converse(&app, &client);
     defer got.deinit();
@@ -3976,10 +3976,19 @@ test "a frame larger than the server allows is a FRAME_SIZE_ERROR" {
 test "a unary call stays inside its budget of heap allocations" {
     var app = try testApp();
     defer app.deinit();
+    // Counted against a fixed buffer, fresh for each run, and not against
+    // `testing.allocator`: the stream's arena asks its allocator to grow the
+    // node it holds before it takes a new one, and whether that succeeds in
+    // `testing.allocator` depends on where earlier tests left its buckets. A
+    // fixed buffer grows the last allocation and nothing else, every time.
+    const room = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(room);
     var counting = @import("budget.zig").Counting{ .child = testing.allocator };
 
     var results: [2]struct { allocs: usize, bytes: usize } = undefined;
     for (&results, 1..) |*r, calls| {
+        var fixed = std.heap.FixedBufferAllocator.init(room);
+        counting.child = fixed.allocator();
         var client = try TestClient.init();
         defer client.deinit();
         var id: u31 = 1;
@@ -4045,7 +4054,7 @@ test "a header block that decodes to more than max_header_list is RESOURCE_EXHAU
     defer app.deinit();
     var client = try TestClient.init();
     defer client.deinit();
-    const bomb = [_]u8{0x82} ** 8000;
+    const bomb = @as([8000]u8, @splat(0x82));
     // A call says what it is before the bomb, a request that is not one
     // says nothing: the first is RESOURCE_EXHAUSTED, the second a 431.
     var call_block: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -4475,7 +4484,7 @@ test "a header block still unfinished when its call's time to arrive is up sends
     defer app.deinit();
     var client = try TestClient.init();
     defer client.deinit();
-    const part = [_]u8{0} ** 16;
+    const part = @as([16]u8, @splat(0));
     try h2.writeHeader(client.w(), part.len, .headers, 0, 1);
     try client.w().writeAll(&part);
 
@@ -4724,7 +4733,7 @@ test "a route's maxBody above max_body takes a message between the two, and its 
     const forty = "forty bytes, which is over sixteen....";
     try client.call(1, "/test.Echo/Say", forty);
     try client.call(3, "/test.Echo/Other", forty);
-    try client.call(5, "/test.Echo/Say", "x" ** 80);
+    try client.call(5, "/test.Echo/Say", &@as([80]u8, @splat('x')));
 
     var got = try converse(&app, &client);
     defer got.deinit();
@@ -4862,7 +4871,7 @@ fn trailingRoute(c: *Ctx) anyerror!void {
 }
 
 fn bigRoute(c: *Ctx) anyerror!void {
-    try c.send(200, "application/octet-stream", "0123456789" ** 4_000);
+    try c.send(200, "application/octet-stream", repeat("0123456789", 4_000));
 }
 
 fn pathRoute(c: *Ctx) anyerror!void {
@@ -5130,7 +5139,7 @@ test "a path parameter and a body reach the route as they do on HTTP/1.1" {
     defer got.deinit();
     try testing.expectEqualStrings("42", got.body);
 
-    var sized = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/size", .body = "x" ** 40_000, .frame = 9_000 });
+    var sized = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/size", .body = &@as([40_000]u8, @splat('x')), .frame = 9_000 });
     defer sized.deinit();
     try testing.expectEqualStrings("40000", sized.body);
 }
@@ -5362,10 +5371,21 @@ test "a file is read into frames on HTTP/2, and a HEAD of it sends the head and 
 test "a request on HTTP/2 stays inside the heap allocations of one on HTTP/1.1, from its second on a connection" {
     var app = try httpApp();
     defer app.deinit();
+    // What the connection allocates from is a fixed buffer fresh for each
+    // count, not `testing.allocator`: the stream's arena asks its allocator to
+    // grow the node it holds before it takes a new one, and whether that
+    // succeeds in `testing.allocator` depends on where earlier tests left its
+    // buckets, so the same connection came out at four trips one time and six
+    // another. Growing in place is a fixed buffer's answer to the last
+    // allocation only, which is the same answer every time.
+    const room = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(room);
     var counting = @import("budget.zig").Counting{ .child = testing.allocator };
 
     var results: [2]usize = undefined;
     for (&results, [_]usize{ 2, 12 }) |*r, requests| {
+        var fixed = std.heap.FixedBufferAllocator.init(room);
+        counting.child = fixed.allocator();
         var client = try TestClient.init();
         defer client.deinit();
         var id: u31 = 1;
@@ -5553,13 +5573,22 @@ test "a body that arrived whole before the handler read it costs the request no 
     // A body that fits the buffer a spare stream keeps, so only a request
     // that copied or allocated for it would show.
     var totals: [2]usize = undefined;
+    // Counted against a fixed buffer, fresh for each run, and not against
+    // `testing.allocator`: the stream's arena asks its allocator to grow the
+    // node it holds before it takes a new one, and whether that succeeds in
+    // `testing.allocator` depends on where earlier tests left its buckets. A
+    // fixed buffer grows the last allocation and nothing else, every time.
+    const room = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(room);
     var gpa_h2 = heap_count.Counting{ .child = testing.allocator };
     for (&totals, [_]usize{ 2, 12 }) |*total, requests| {
+        var fixed = std.heap.FixedBufferAllocator.init(room);
+        gpa_h2.child = fixed.allocator();
         var client = try h2test.TestClient.init();
         defer client.deinit();
         var id: u31 = 1;
         for (0..requests) |_| {
-            try h2test.requestOn(&client, id, .{ .method = "POST", .path = "/size", .body = "b" ** 3_000, .frame = 1_000 });
+            try h2test.requestOn(&client, id, .{ .method = "POST", .path = "/size", .body = &@as([3_000]u8, @splat('b')), .frame = 1_000 });
             id += 2;
         }
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -5581,7 +5610,7 @@ test "a body arriving in many DATA frames after the handler started is read thro
     resetUploads();
     var app = try pipeApp();
     defer app.deinit();
-    var ex = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/upload", .body = "u" ** 60_000, .frame = 4_000 });
+    var ex = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/upload", .body = &@as([60_000]u8, @splat('u')), .frame = 4_000 });
     defer ex.deinit();
     try testing.expectEqual(@as(u16, 200), ex.status);
     try testing.expectEqualStrings("60000", ex.body);
@@ -5625,7 +5654,7 @@ test "a content-length the DATA overruns resets the stream with PROTOCOL_ERROR a
         .method = "POST",
         .path = "/upload",
         .fields = &.{.{ .name = "content-length", .value = "10" }},
-        .body = "x" ** 24,
+        .body = &@as([24]u8, @splat('x')),
         .frame = 12,
     });
     var got = try converse(&app, &client);
@@ -5919,7 +5948,7 @@ fn pieceRoute(c: *Ctx) anyerror!void {
     try out.finish();
 }
 
-const huge_chunk = "0123456789abcdef" ** 256;
+const huge_chunk = repeat("0123456789abcdef", 256);
 const huge_chunks = 75;
 
 /// 307,200 bytes in the stream's buffer's worth, which is more than the
@@ -6058,9 +6087,19 @@ test "a HEAD of a streamed route is its head, ending the stream, and no DATA" {
 test "a piece costs no allocation: a stream of two hundred allocates what a stream of one does" {
     var app = try pipedApp();
     defer app.deinit();
+
+    // Counted against a fixed buffer, fresh for each run, and not against
+    // `testing.allocator`: the stream's arena asks its allocator to grow the
+    // node it holds before it takes a new one, and whether that succeeds in
+    // `testing.allocator` depends on where earlier tests left its buckets. A
+    // fixed buffer grows the last allocation and nothing else, every time.
+    const room = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(room);
     var counting = heap_count.Counting{ .child = testing.allocator };
     var results: [2]usize = undefined;
     for (&results, [_][]const u8{ "/piece", "/pieces" }) |*r, path| {
+        var fixed = std.heap.FixedBufferAllocator.init(room);
+        counting.child = fixed.allocator();
         var client = try TestClient.init();
         defer client.deinit();
         try h2test.requestOn(&client, 1, .{ .path = path });
@@ -6687,9 +6726,19 @@ test "an event stream on HTTP/2 allocates nothing for a post: a hundred cost wha
     defer feed_room = null;
     var app = try feedApp();
     defer app.deinit();
+
+    // Counted against a fixed buffer, fresh for each run, and not against
+    // `testing.allocator`: the stream's arena asks its allocator to grow the
+    // node it holds before it takes a new one, and whether that succeeds in
+    // `testing.allocator` depends on where earlier tests left its buckets. A
+    // fixed buffer grows the last allocation and nothing else, every time.
+    const backing = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(backing);
     var counting = heap_count.Counting{ .child = testing.allocator };
     var results: [2]usize = undefined;
     for (&results, [_]usize{ 1, 100 }) |*result, posts| {
+        var fixed = std.heap.FixedBufferAllocator.init(backing);
+        counting.child = fixed.allocator();
         var client = try TestClient.init();
         defer client.deinit();
         try h2test.requestOn(&client, 1, .{ .path = "/feed" });
@@ -6769,7 +6818,7 @@ test "a client that gives its window back a byte at a time does not make a held 
 
     const stream_mod = @import("stream.zig");
     stream_mod.Http2Events.formatted = 0;
-    const big = [_]u8{'x'} ** 5000;
+    const big = @as([5000]u8, @splat('x'));
     try room.sayText(&big);
     // Nothing can be written: the event is not even formatted.
     try conn.writeReady();
@@ -6820,7 +6869,7 @@ test "a server that stops ends a busy event stream with its end and everything p
             defer conn.deinit();
             while (in.bufferedLen() > 0) try conn.readFrame();
             try conn.writeReady();
-            const piece = [_]u8{'y'} ** 20_000;
+            const piece = @as([20_000]u8, @splat('y'));
             for (0..12) |_| try room.sayText(&piece);
             try conn.goaway(.no_error);
             try conn.endEvents();
@@ -6849,7 +6898,7 @@ test "a server that stops ends a busy event stream with its end and everything p
             defer conn.deinit();
             while (in.bufferedLen() > 0) try conn.readFrame();
             try conn.writeReady();
-            const piece = [_]u8{'z'} ** 5000;
+            const piece = @as([5000]u8, @splat('z'));
             try room.sayText(&piece);
             try conn.goaway(.no_error);
             try conn.endEvents();
@@ -6889,7 +6938,7 @@ test "an event that cannot be kept for want of memory resets its stream and noth
         // The event goes in part, and the rest has nowhere to be kept.
         var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
         conn.gpa = failing.allocator();
-        const piece = [_]u8{'q'} ** 5000;
+        const piece = @as([5000]u8, @splat('q'));
         try room.sayText(&piece);
         try conn.writeReady();
         conn.gpa = testing.allocator;
@@ -6972,4 +7021,19 @@ test "a call that arrives behind a slow upload is stamped when its bytes came, n
     // The stamp was taken after the stall, not before it: a `grpc-timeout`
     // or a body limit counted from it must not already have run out.
     try testing.expect(age < stall_ns / 2);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

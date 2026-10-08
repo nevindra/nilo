@@ -104,6 +104,30 @@ pub const marker = "nilo_table";
 /// schema walker and the staleness trap have one.
 const max_borrow_depth = 8;
 
+/// One field, as the code that lists a Row's fields and its unread columns
+/// together reads it: a name and a type, which is all any of them asks.
+///
+/// `@typeInfo` hands a struct's fields back as three slices of their own
+/// (names, types, attributes), so a list that mixes a Row's fields with columns
+/// that are not fields of it has no element type to borrow from the compiler.
+pub const Field = struct {
+    name: []const u8,
+    type: type,
+};
+
+/// Every field of the struct `T`, in order.
+pub fn fieldsOf(comptime T: type) []const Field {
+    comptime {
+        const info = @typeInfo(T).@"struct";
+        var out: [info.field_names.len]Field = undefined;
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
+            out[i] = .{ .name = f_name, .type = f_type };
+        }
+        const frozen = out;
+        return &frozen;
+    }
+}
+
 /// Whether `T` is a Row. Asked before anything else, so that a plain struct
 /// handed to `select` is refused by name rather than by a missing field.
 pub fn isRow(comptime T: type) bool {
@@ -154,32 +178,33 @@ pub fn besideOf(comptime Row: type) []const []const u8 {
         if (@typeInfo(D) != .@"struct" or !@typeInfo(D).@"struct".is_tuple) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ beside_marker ++ " is a " ++ @typeName(D) ++ "." ++ shape,
         );
-        const entries = @typeInfo(D).@"struct".fields;
-        if (entries.len == 0) @compileError(
+        const entries = @typeInfo(D).@"struct";
+        if (entries.field_names.len == 0) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ beside_marker ++ " names nothing.\n" ++
                 "  A line that does nothing is a line somebody will read as doing " ++
                 "something. Name a field, or take the declaration out.",
         );
-        var out: [entries.len][]const u8 = undefined;
-        for (entries, 0..) |e, i| {
-            if (e.type != @TypeOf(.enum_literal)) @compileError(
+        const row_info = @typeInfo(Row).@"struct";
+        var out: [entries.field_names.len][]const u8 = undefined;
+        for (entries.field_types, 0..) |e_type, i| {
+            if (e_type != @TypeOf(.enum_literal)) @compileError(
                 "nilo: " ++ @typeName(Row) ++ "'s " ++ beside_marker ++ " holds a " ++
-                    @typeName(e.type) ++ "." ++ shape,
+                    @typeName(e_type) ++ "." ++ shape,
             );
             const name = @tagName(decl[i]);
-            const field = for (@typeInfo(Row).@"struct".fields) |f| {
-                if (std.mem.eql(u8, f.name, name)) break f;
+            const at = for (row_info.field_names, 0..) |f_name, j| {
+                if (std.mem.eql(u8, f_name, name)) break j;
             } else {
                 const head = "nilo: " ++ @typeName(Row) ++ "'s " ++ beside_marker ++ " names `" ++
                     name ++ "`, which is not one of its fields.";
                 if (nearest(Row, name)) |near| @compileError(head ++ "\n  Did you mean `" ++ near ++ "`?");
                 @compileError(head ++ "\n  Its fields are: " ++ fieldList(Row) ++ ".");
             };
-            if (field.default_value_ptr == null) @compileError(
+            if (row_info.field_attrs[at].default_value_ptr == null) @compileError(
                 "nilo: " ++ @typeName(Row) ++ " carries `" ++ name ++ "` beside its columns, " ++
                     "and the field has no default.\n" ++
                     "  No statement fills it, so a read has to leave it at something: " ++
-                    "write `" ++ name ++ ": " ++ @typeName(field.type) ++ " = …` — an " ++
+                    "write `" ++ name ++ ": " ++ @typeName(row_info.field_types[at]) ++ " = …` — an " ++
                     "empty list, a null, whatever \"not filled yet\" is for it.",
             );
             for (out[0..i]) |seen| {
@@ -210,8 +235,9 @@ pub fn isBeside(comptime Row: type, comptime name: []const u8) bool {
 pub fn besideDefault(comptime Row: type, comptime name: []const u8) @FieldType(Row, name) {
     comptime {
         @setEvalBranchQuota(budget(Row));
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            if (std.mem.eql(u8, f.name, name)) return f.defaultValue().?;
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types, row_info.field_attrs) |f_name, f_type, f_attrs| {
+            if (std.mem.eql(u8, f_name, name)) return f_attrs.defaultValue(f_type).?;
         }
         unreachable; // `besideOf` checked the name
     }
@@ -222,8 +248,9 @@ fn fieldList(comptime Row: type) []const u8 {
     return comptime blk: {
         @setEvalBranchQuota(budget(Row));
         var out: []const u8 = "";
-        for (@typeInfo(Row).@"struct".fields, 0..) |f, i| {
-            out = out ++ (if (i == 0) "" else ", ") ++ "`" ++ f.name ++ "`";
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, 0..) |f_name, i| {
+            out = out ++ (if (i == 0) "" else ", ") ++ "`" ++ f_name ++ "`";
         }
         break :blk out;
     };
@@ -431,11 +458,11 @@ pub fn throughEntry(comptime Row: type, comptime name: []const u8) ThroughEntry 
         };
         if (info.is_tuple) return .{ .path = pathOf(head, shape, entry), .inner = false, .otherwise = false };
 
-        for (info.fields) |f| {
+        for (info.field_names) |f_name| {
             for (through_words) |w| {
-                if (std.mem.eql(u8, f.name, w)) break;
+                if (std.mem.eql(u8, f_name, w)) break;
             } else @compileError(
-                head ++ " says `." ++ f.name ++ "`, which it does not take.\n" ++
+                head ++ " says `." ++ f_name ++ "`, which it does not take.\n" ++
                     "  It takes `.path`, and `.otherwise` or `.join = .inner`.",
             );
         }
@@ -465,7 +492,7 @@ pub fn throughEntry(comptime Row: type, comptime name: []const u8) ThroughEntry 
 
 fn pathOf(comptime head: []const u8, comptime shape: []const u8, comptime path: anytype) []const []const u8 {
     comptime {
-        if (@typeInfo(@TypeOf(path)).@"struct".fields.len < 2) @compileError(
+        if (@typeInfo(@TypeOf(path)).@"struct".field_names.len < 2) @compileError(
             head ++ " names one column, and reaches no other table.\n" ++ shape,
         );
         var out: []const []const u8 = &.{};
@@ -529,7 +556,7 @@ pub fn overChildrenOf(comptime Row: type, comptime name: []const u8) OverChildre
             "reads, the way a `.references` names a table and its key: `." ++ name ++ " = .{ ." ++
             word ++ " = .{ Line, .shipped_on } }`.";
         const ok = switch (@typeInfo(P)) {
-            .@"struct" => |st| st.is_tuple and st.fields.len == 2,
+            .@"struct" => |st| st.is_tuple and st.field_names.len == 2,
             else => false,
         };
         if (!ok) @compileError(head ++ " gives `." ++ word ++ "` a " ++ @typeName(P) ++ ".\n" ++ shape);
@@ -586,7 +613,7 @@ pub fn childRowOf(comptime T: type) ?type {
 /// allows raises its own
 /// ([ADR 126](../docs/adr/126-a-check-pays-for-its-own-branches.md)).
 pub fn budget(comptime Row: type) u32 {
-    return 10_000 + 1_000 * @as(u32, @intCast(@typeInfo(Row).@"struct".fields.len));
+    return 10_000 + 1_000 * @as(u32, @intCast(@typeInfo(Row).@"struct".field_names.len));
 }
 
 /// The same for a walk that looks at every field in the light of every
@@ -595,7 +622,7 @@ pub fn budget(comptime Row: type) u32 {
 /// aggregates took 300,000 branches and 60 took 5,000,000, which a flat
 /// 200,000 stopped at a line in `std`.
 pub fn shapeBudget(comptime Row: type) u32 {
-    const n: u64 = @typeInfo(Row).@"struct".fields.len;
+    const n: u64 = @typeInfo(Row).@"struct".field_names.len;
     return @intCast(@min(200_000 + 3_000 * n * n, std.math.maxInt(u32)));
 }
 
@@ -612,12 +639,12 @@ pub fn fieldTypeOf(comptime Row: type, comptime name: []const u8) ?type {
 pub fn fieldsOfKind(comptime Row: type, comptime kind: Kind) []const []const u8 {
     return comptime blk: {
         @setEvalBranchQuota(budget(Row));
-        const fields = @typeInfo(Row).@"struct".fields;
-        var out: [fields.len][]const u8 = undefined;
+        const info = @typeInfo(Row).@"struct";
+        var out: [info.field_names.len][]const u8 = undefined;
         var n: usize = 0;
-        for (fields) |f| {
-            if (kindWith(Row, f.name, f.type) != kind) continue;
-            out[n] = f.name;
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            if (kindWith(Row, f_name, f_type) != kind) continue;
+            out[n] = f_name;
             n += 1;
         }
         const frozen = out[0..n].*;
@@ -633,8 +660,9 @@ pub fn isShaped(comptime Row: type) bool {
         @setEvalBranchQuota(budget(Row));
         if (!isRow(Row)) break :blk false;
         if (@hasDecl(Row, aggregate_marker)) break :blk true;
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            switch (kindWith(Row, f.name, f.type)) {
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            switch (kindWith(Row, f_name, f_type)) {
                 .parent, .children, .over_children, .through => break :blk true,
                 else => {},
             }
@@ -676,28 +704,28 @@ pub fn aggregatesOf(comptime Row: type) []const Aggregate {
         if (@typeInfo(D) != .@"struct" or @typeInfo(D).@"struct".is_tuple) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " is a " ++ @typeName(D) ++ "." ++ shape,
         );
-        const entries = @typeInfo(D).@"struct".fields;
-        if (entries.len == 0) @compileError(
+        const entries = @typeInfo(D).@"struct";
+        if (entries.field_names.len == 0) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " names nothing.\n" ++
                 "  A grouped Row with no aggregate is the distinct values of its other fields, " ++
                 "which is a question this module does not answer. Name what each group " ++
                 "carries, or take the declaration out.",
         );
-        var out: [entries.len]Aggregate = undefined;
-        for (entries, 0..) |e, i| {
-            if (fieldTypeOf(Row, e.name) == null) {
+        var out: [entries.field_names.len]Aggregate = undefined;
+        for (entries.field_names, 0..) |e_name, i| {
+            if (fieldTypeOf(Row, e_name) == null) {
                 const head = "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " names `" ++
-                    e.name ++ "`, which is not one of its fields.";
-                if (nearest(Row, e.name)) |near| @compileError(head ++ "\n  Did you mean `" ++ near ++ "`?");
+                    e_name ++ "`, which is not one of its fields.";
+                if (nearest(Row, e_name)) |near| @compileError(head ++ "\n  Did you mean `" ++ near ++ "`?");
                 @compileError(head ++ "\n  Its fields are: " ++ fieldList(Row) ++ ".");
             }
-            if (isBeside(Row, e.name)) @compileError(
-                "nilo: " ++ @typeName(Row) ++ " names `" ++ e.name ++ "` in both " ++
+            if (isBeside(Row, e_name)) @compileError(
+                "nilo: " ++ @typeName(Row) ++ " names `" ++ e_name ++ "` in both " ++
                     beside_marker ++ " and " ++ aggregate_marker ++ ".\n" ++
                     "  A field beside the columns is in no statement, and an aggregate is " ++
                     "read out of one. It is one or the other.",
             );
-            out[i] = aggregateSpec(Row, e.name, @field(decl, e.name));
+            out[i] = aggregateSpec(Row, e_name, @field(decl, e_name));
         }
         const frozen = out;
         break :blk &frozen;
@@ -742,18 +770,18 @@ fn aggregateSpec(comptime Row: type, comptime field: []const u8, comptime said: 
         // A `.where` beside the computation narrows what it reads, and is the
         // one other name an entry may carry.
         const filtered = !info.is_tuple and @hasField(S, "where");
-        if (filtered and info.fields.len == 1) @compileError(
+        if (filtered and info.field_names.len == 1) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " gives `." ++ field ++
                 "` a `.where` and nothing to compute.\n" ++
                 "  The condition narrows a computation: `.{ .sum = .principal, .where = .{ .currency = \"IDR\" } }`. " ++
                 "Rows that match are counted by naming a column that is never null: " ++
                 "`.{ .count = .id, .where = … }`.",
         );
-        if (info.is_tuple or info.fields.len != @as(usize, if (filtered) 2 else 1)) @compileError(
+        if (info.is_tuple or info.field_names.len != @as(usize, if (filtered) 2 else 1)) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " gives `." ++ field ++
                 "` more than one computation.\n  One field holds one answer: " ++ words ++ ".",
         );
-        const word = if (std.mem.eql(u8, info.fields[0].name, "where")) info.fields[1].name else info.fields[0].name;
+        const word = if (std.mem.eql(u8, info.field_names[0], "where")) info.field_names[1] else info.field_names[0];
         const kind = std.meta.stringToEnum(dialect_mod.Aggregate, word) orelse @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s " ++ aggregate_marker ++ " asks `." ++ field ++
                 "` for `." ++ word ++ "`, which is not one it computes.\n  It is " ++ words ++
@@ -1017,14 +1045,14 @@ pub fn columnsOf(comptime Row: type) []const []const u8 {
     return comptime blk: {
         @setEvalBranchQuota(budget(Row));
         assertRow(Row);
-        const fields = @typeInfo(Row).@"struct".fields;
-        var out: [fields.len][]const u8 = undefined;
+        const info = @typeInfo(Row).@"struct";
+        var out: [info.field_names.len][]const u8 = undefined;
         var n: usize = 0;
-        for (fields) |f| {
+        for (info.field_names, info.field_types) |f_name, f_type| {
             // A field beside the columns is not one (ADR 178), and neither
             // is a parent, children or an aggregate (ADR 218).
-            if (kindWith(Row, f.name, f.type) != .column) continue;
-            out[n] = f.name;
+            if (kindWith(Row, f_name, f_type) != .column) continue;
+            out[n] = f_name;
             n += 1;
         }
         const frozen = out[0..n].*;
@@ -1051,27 +1079,27 @@ pub fn Borrowed(comptime Row: type) type {
     return comptime blk: {
         @setEvalBranchQuota(budget(Row));
         assertRow(Row);
-        const fields = @typeInfo(Row).@"struct".fields;
-        var names: [fields.len][]const u8 = undefined;
-        var types: [fields.len]type = undefined;
-        for (fields, 0..) |f, i| {
-            names[i] = f.name;
-            types[i] = switch (kindWith(Row, f.name, f.type)) {
+        const info = @typeInfo(Row).@"struct";
+        var names: [info.field_names.len][]const u8 = undefined;
+        var types: [info.field_names.len]type = undefined;
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
+            names[i] = f_name;
+            types[i] = switch (kindWith(Row, f_name, f_type)) {
                 // A field beside the columns is never read out of the buffer,
                 // so it keeps its own type and its default fills it (ADR 178).
-                .beside => f.type,
+                .beside => f_type,
                 // A parent is borrowed whole, the same rule one level down: its
                 // text dies at the next row like the Row's own (ADR 218).
-                .parent => if (@typeInfo(f.type) == .optional)
-                    ?Borrowed(parentRowOf(f.type).?)
+                .parent => if (@typeInfo(f_type) == .optional)
+                    ?Borrowed(parentRowOf(f_type).?)
                 else
-                    Borrowed(f.type),
+                    Borrowed(f_type),
                 // Read by a second statement after the rows it belongs to,
                 // which a stream never reaches; `db.stream` refuses the Row
                 // before this type is ever built. Kept so the refusal is the
                 // one the caller meets rather than one about this struct.
-                .children => f.type,
-                .column, .aggregate, .over_children, .through => borrowedType(f.type),
+                .children => f_type,
+                .column, .aggregate, .over_children, .through => borrowedType(f_type),
             };
         }
         const frozen_names = names;
@@ -1148,15 +1176,15 @@ pub fn unreadOf(comptime Row: type) []const Unread {
             else => @compileError(head ++ " is a " ++ @typeName(W) ++ ".\n" ++ shape),
         };
         var out: []const Unread = &.{};
-        for (info.fields) |f| {
-            if (f.type != type) @compileError(
-                head ++ " gives `." ++ f.name ++ "` a " ++ @typeName(f.type) ++ ".\n" ++ shape,
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            if (f_type != type) @compileError(
+                head ++ " gives `." ++ f_name ++ "` a " ++ @typeName(f_type) ++ ".\n" ++ shape,
             );
-            if (fieldTypeOf(Row, f.name) != null) @compileError(
-                head ++ " names `" ++ f.name ++ "`, which " ++ @typeName(Row) ++ " reads.\n" ++
+            if (fieldTypeOf(Row, f_name) != null) @compileError(
+                head ++ " names `" ++ f_name ++ "`, which " ++ @typeName(Row) ++ " reads.\n" ++
                     "  A column is read or unread. Take it out of one of them.",
             );
-            out = out ++ &[_]Unread{.{ .name = f.name, .T = @field(written, f.name) }};
+            out = out ++ &[_]Unread{.{ .name = f_name, .T = @field(written, f_name) }};
         }
         return out;
     }
@@ -1211,15 +1239,16 @@ pub fn nearest(comptime Row: type, comptime wrong: []const u8) ?[]const u8 {
     return comptime blk: {
         // One edit distance per field, each paying `distance`'s own quota
         // but not the sum of them.
-        @setEvalBranchQuota(budget(Row) + @typeInfo(Row).@"struct".fields.len *
+        @setEvalBranchQuota(budget(Row) + @typeInfo(Row).@"struct".field_names.len *
             64 * (wrong.len + 1) * 65);
         var best: ?[]const u8 = null;
         var best_distance: usize = std.math.maxInt(usize);
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            const d = distance(wrong, f.name);
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names) |f_name| {
+            const d = distance(wrong, f_name);
             if (d < best_distance) {
                 best_distance = d;
-                best = f.name;
+                best = f_name;
             }
         }
         // Past a third of the name, "did you mean" is a guess rather than a
@@ -1425,11 +1454,12 @@ fn readSpec(comptime Row: type, comptime decl: anytype) Spec {
                 "  The table name is written rather than guessed from the type — " ++
                 "`User` to `users` reads well until `Category`.",
         );
-        for (@typeInfo(D).@"struct".fields) |f| {
+        const d_info = @typeInfo(D).@"struct";
+        for (d_info.field_names) |f_name| {
             for (allowed) |ok| {
-                if (std.mem.eql(u8, f.name, ok)) break;
+                if (std.mem.eql(u8, f_name, ok)) break;
             } else @compileError(
-                "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " sets `." ++ f.name ++
+                "nilo: " ++ @typeName(Row) ++ "'s " ++ marker ++ " sets `." ++ f_name ++
                     "`, which is not part of it.\n" ++
                     "  It takes `.name`, and `.key` when the identity column is not " ++
                     "`id`. The words a migration reads are `.unique`, `.index`, " ++
@@ -1461,7 +1491,7 @@ fn keyNames(comptime Row: type, comptime written: anytype) []const []const u8 {
             else => notAKey(Row, K),
         };
         if (!info.is_tuple) notAKey(Row, K);
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s `.key` is empty.\n" ++
                 "  A row with nothing identifying it cannot be found, updated in a " ++
                 "batch, or pointed at by a `.references`. Name the column: " ++
@@ -1470,8 +1500,8 @@ fn keyNames(comptime Row: type, comptime written: anytype) []const []const u8 {
         // One column written as a tuple is the same key written the long way,
         // and reading it as one keeps `db.find` taking a bare value for it.
         var names: []const []const u8 = &.{};
-        for (info.fields) |f| {
-            const value = @field(written, f.name);
+        for (info.field_names) |f_name| {
+            const value = @field(written, f_name);
             if (@TypeOf(value) != @TypeOf(.enum_literal)) notAKey(Row, K);
             for (names) |already| {
                 if (std.mem.eql(u8, already, @tagName(value))) @compileError(
@@ -1505,14 +1535,15 @@ fn assertDescribesItsTable(comptime Row: type) void {
         const narrower = "  A Row that names its table describes it column by column, which is what " ++
             "the migration tool builds from. Read the rest through a narrower Row: " ++
             "`pub const " ++ marker ++ " = " ++ @typeName(Row) ++ ";`.";
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            const what = switch (kindWith(Row, f.name, f.type)) {
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            const what = switch (kindWith(Row, f_name, f_type)) {
                 .parent => "a parent",
                 .children => "a list of children",
                 else => continue,
             };
             @compileError(
-                "nilo: " ++ @typeName(Row) ++ " names its table and reads `" ++ f.name ++ "` as " ++
+                "nilo: " ++ @typeName(Row) ++ " names its table and reads `" ++ f_name ++ "` as " ++
                     what ++ ".\n" ++ narrower,
             );
         }
@@ -1533,25 +1564,26 @@ fn assertSubset(comptime Narrow: type, comptime Wide: type) void {
         // The aggregate list first: a field it misspells reads as a column
         // the table has not got, and the misspelling is the thing to say.
         if (@hasDecl(Narrow, aggregate_marker)) _ = aggregatesOf(Narrow);
-        for (@typeInfo(Narrow).@"struct".fields) |f| {
+        const narrow_info = @typeInfo(Narrow).@"struct";
+        for (narrow_info.field_names, narrow_info.field_types) |f_name, f_type| {
             // Carried beside the columns rather than read, so the table it
             // borrows need not have it (ADR 178). A parent, children and an
             // aggregate are not columns of this table either, and
             // `shape.zig` checks each against the table it does read
             // (ADR 218).
-            if (kindWith(Narrow, f.name, f.type) != .column) continue;
-            if (!hasColumn(Wide, f.name)) {
-                const head = "nilo: " ++ @typeName(Narrow) ++ " reads `" ++ f.name ++
+            if (kindWith(Narrow, f_name, f_type) != .column) continue;
+            if (!hasColumn(Wide, f_name)) {
+                const head = "nilo: " ++ @typeName(Narrow) ++ " reads `" ++ f_name ++
                     "`, which " ++ @typeName(Wide) ++ " does not have.";
-                if (nearest(Wide, f.name)) |near| {
+                if (nearest(Wide, f_name)) |near| {
                     @compileError(head ++ "\n  Did you mean `" ++ near ++ "`?");
                 }
                 @compileError(head ++ "\n  Its columns are: " ++ columnList(Wide) ++ ".");
             }
-            const theirs = ColumnType(Wide, f.name);
-            if (f.type != theirs) @compileError(
-                "nilo: " ++ @typeName(Narrow) ++ " reads `" ++ f.name ++ "` as " ++
-                    @typeName(f.type) ++ ", and " ++ @typeName(Wide) ++ " reads it as " ++
+            const theirs = ColumnType(Wide, f_name);
+            if (f_type != theirs) @compileError(
+                "nilo: " ++ @typeName(Narrow) ++ " reads `" ++ f_name ++ "` as " ++
+                    @typeName(f_type) ++ ", and " ++ @typeName(Wide) ++ " reads it as " ++
                     @typeName(theirs) ++ ".\n" ++
                     "  Two Rows over one column have to agree, or one of them is " ++
                     "wrong about the table.",

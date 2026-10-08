@@ -79,7 +79,7 @@ pub const Headers = struct {
         comptime {
             const count = switch (@typeInfo(Items)) {
                 .array => |a| a.len,
-                .@"struct" => |s| if (s.is_tuple) s.fields.len else notAList(Items),
+                .@"struct" => |s| if (s.is_tuple) s.field_names.len else notAList(Items),
                 else => notAList(Items),
             };
             if (count > room) @compileError(std.fmt.comptimePrint(

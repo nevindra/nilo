@@ -73,10 +73,10 @@ const testing = std.testing;
 /// always quotes: `CREATE TABLE x_Debug` makes `x_debug`, and
 /// `SELECT … FROM "x_Debug"` then cannot find it.
 const mode_suffix = switch (builtin.mode) {
-    .Debug => "debug",
-    .ReleaseSafe => "releasesafe",
-    .ReleaseFast => "releasefast",
-    .ReleaseSmall => "releasesmall",
+    .debug => "debug",
+    .safe => "releasesafe",
+    .fast => "releasefast",
+    .small => "releasesmall",
 };
 
 const table = "nilo_live_people_" ++ mode_suffix;
@@ -2885,10 +2885,10 @@ test "a version waits for the advisory lock another process holds, so two replic
 
     // A version number of this build's own: both optimize modes run this
     // file against one database at once, and share its ledger.
-    const number: i64 = if (builtin.mode == .Debug) 990_001 else 990_002;
+    const number: i64 = if (builtin.mode == .debug) 990_001 else 990_002;
     const made = "nilo_live_locked_" ++ mode_suffix;
     const forget = "DELETE FROM \"nilo_migrations\" WHERE \"version\" = " ++
-        (if (builtin.mode == .Debug) "990001" else "990002");
+        (if (builtin.mode == .debug) "990001" else "990002");
     _ = try stack.db.exec(&run, forget, .{});
     _ = try stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ made ++ "\"", .{});
     defer _ = stack.db.exec(&run, forget, .{}) catch {};
@@ -2926,10 +2926,10 @@ test "a version gives up on a table another transaction holds after its own lock
     defer run.deinit();
     try migrate.ensureLedger(&stack.db, &run);
 
-    const number: i64 = if (builtin.mode == .Debug) 990_003 else 990_004;
+    const number: i64 = if (builtin.mode == .debug) 990_003 else 990_004;
     const held = "nilo_live_waited_" ++ mode_suffix;
     const forget = "DELETE FROM \"nilo_migrations\" WHERE \"version\" = " ++
-        (if (builtin.mode == .Debug) "990003" else "990004");
+        (if (builtin.mode == .debug) "990003" else "990004");
     _ = try stack.db.exec(&run, forget, .{});
     _ = try stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ held ++ "\"", .{});
     _ = try stack.db.exec(&run, "CREATE TABLE \"" ++ held ++ "\" (\"id\" int)", .{});
@@ -4096,7 +4096,7 @@ test "paging through an order that ties sees every row once" {
     };
     _ = try stack.db.insertMany(Person, &run, @as([]const Newcomer, &rows));
 
-    var seen = [_]bool{false} ** count;
+    var seen = @as([count]bool, @splat(false));
     var offset: i64 = 0;
     while (offset < count) : (offset += 25) {
         const page = try stack.db.page(Person, &run, .{

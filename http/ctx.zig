@@ -243,7 +243,7 @@ pub const Ctx = struct {
     /// The methods that do answer this path, when the one asked for does
     /// not. Set by App only on the way to a 405, which is the one answer
     /// that has to list them.
-    _allowed: router.MethodSet = .initEmpty(),
+    _allowed: router.MethodSet = .empty,
     /// Set while the server is stopping, so a response can say so. Null
     /// when App is driven directly by a test, where nothing is stopping.
     _stopping: ?*const std.atomic.Value(bool) = null,
@@ -744,7 +744,10 @@ pub const Ctx = struct {
     /// ```zig
     /// var span = c.span("charge card");
     /// defer span.end();
-    /// errdefer |err| span.fail(err);
+    /// const receipt = stripe.postJson(c, "/v1/charges", …) catch |err| {
+    ///     span.fail(err);
+    ///     return err;
+    /// };
     /// ```
     ///
     /// `name` is comptime, because a span name has to be one of a few (it is
@@ -1559,7 +1562,7 @@ pub const Ctx = struct {
     pub fn formCollecting(
         self: *Ctx,
         comptime T: type,
-        outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+        outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
     ) !T {
         const content_type = if (self.header("Content-Type")) |h| h.view() else null;
         const b = (try self.body()).view();
@@ -1582,7 +1585,7 @@ pub const Ctx = struct {
     pub fn jsonCollecting(
         self: *Ctx,
         comptime T: type,
-        outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+        outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
     ) !T {
         const b = (try self.body()).view();
         try refuseTooDeep(T, b);
@@ -2053,7 +2056,6 @@ pub const Ctx = struct {
         return self.sendWhole(status, content_type, response_body, true, false);
     }
 
-
     fn sendWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool, owned: bool) !void {
         if (self.answered() != null) return error.AlreadyAnswered; // one request, one response
         try self.contentTypeOk(content_type);
@@ -2112,14 +2114,16 @@ pub const Ctx = struct {
     /// chain already.
     fn holdWhole(self: *Ctx, status: u16, content_type: []const u8, response_body: []const u8, kept: bool, owned: bool, compress: bool) !void {
         const held = try self.heldSlot();
-        held.* = .{ .whole = .{
-            .status = status,
-            .content_type = try self._arena.dupe(u8, content_type),
-            .body = if (kept) response_body else try self._arena.dupe(u8, response_body),
-            .compress = compress,
-            // A copy is in the arena, and so is what the caller said is.
-            .owned = owned or !kept,
-        } };
+        held.* = .{
+            .whole = .{
+                .status = status,
+                .content_type = try self._arena.dupe(u8, content_type),
+                .body = if (kept) response_body else try self._arena.dupe(u8, response_body),
+                .compress = compress,
+                // A copy is in the arena, and so is what the caller said is.
+                .owned = owned or !kept,
+            },
+        };
     }
 
     /// Where a held answer goes: the one already there when an answer is
@@ -2868,7 +2872,7 @@ fn isRoomLike(comptime T: type) bool {
 }
 
 fn roomsIn(comptime T: type) usize {
-    return if (isRoomLike(T)) 1 else @typeInfo(T).@"struct".fields.len;
+    return if (isRoomLike(T)) 1 else @typeInfo(T).@"struct".field_names.len;
 }
 
 /// What `eventsFrom` can sit a stream in, checked where the mistake is made
@@ -2879,12 +2883,12 @@ fn checkRooms(comptime T: type) void {
     if (isRoomLike(T)) return;
     switch (@typeInfo(T)) {
         .@"struct" => |s| if (s.is_tuple) {
-            if (s.fields.len == 0) @compileError(
+            if (s.field_names.len == 0) @compileError(
                 "nilo: eventsFrom was given no rooms, so the stream could only ever send keep-alive comments" ++ shape,
             );
-            for (s.fields) |field| {
-                if (!isRoomLike(field.type)) @compileError(
-                    "nilo: eventsFrom was given a tuple holding " ++ naming.of(field.type) ++ shape,
+            for (s.field_types) |field_type| {
+                if (!isRoomLike(field_type)) @compileError(
+                    "nilo: eventsFrom was given a tuple holding " ++ naming.of(field_type) ++ shape,
                 );
             }
             return;
@@ -2958,11 +2962,11 @@ fn onCycle(comptime T: type, comptime path: []const type) bool {
     for (path) |seen| if (seen == T) return true;
     const deeper = path ++ [_]type{T};
     switch (@typeInfo(T)) {
-        .@"struct" => |s| for (s.fields) |f| {
-            if (onCycle(f.type, deeper)) return true;
+        .@"struct" => |s| for (s.field_types) |f_type| {
+            if (onCycle(f_type, deeper)) return true;
         },
-        .@"union" => |u| for (u.fields) |f| {
-            if (onCycle(f.type, deeper)) return true;
+        .@"union" => |u| for (u.field_types) |f_type| {
+            if (onCycle(f_type, deeper)) return true;
         },
         .optional => |o| return onCycle(o.child, deeper),
         .pointer => |p| return onCycle(p.child, deeper),
@@ -3119,7 +3123,7 @@ fn collectBadBody(
     lifetime: *const str_mod.Lifetime,
     body: []const u8,
     err: anyerror,
-    outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+    outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
 ) !T {
     if (std.mem.trim(u8, body, " \t\r\n").len == 0) return fail.badRequest(
         "the request body is empty. This endpoint expects a JSON object with: {s}",
@@ -3167,10 +3171,11 @@ fn collectBadBody(
     var out: T = undefined;
     var any = false;
 
-    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
         outcomes[i] = .{};
 
-        if (object.get(f.name)) |given| {
+        if (object.get(f_name)) |given| {
             // Only a string has text to quote back. A list or an object is
             // described by its kind instead, which is what `kind` is for.
             if (given == .string) outcomes[i].given = Str.fromRequest(given.string, lifetime);
@@ -3181,46 +3186,46 @@ fn collectBadBody(
             // Read here rather than through `std.json` so that a type which
             // hands over a `jsonParse` and nothing more is still one outcome
             // among the others, in the same words.
-            if (comptime parsedOf(f.type)) |P| {
+            if (comptime parsedOf(f_type)) |P| {
                 var buf: [64]u8 = undefined;
-                if (given == .null and @typeInfo(f.type) == .optional) {
-                    @field(out, f.name) = null;
+                if (given == .null and @typeInfo(f_type) == .optional) {
+                    @field(out, f_name) = null;
                 } else if (textOf(given, &buf)) |text| {
                     if (P.nilo_parse(text)) |value| {
-                        @field(out, f.name) = value;
+                        @field(out, f_name) = value;
                     } else {
                         outcomes[i].reason = .not_that_type;
                         // A number has digits to quote back too, and they
                         // are in a stack buffer, so they are copied out.
                         if (given != .string) outcomes[i].given = Str.fromRequest(try arena.dupe(u8, text), lifetime);
                         any = true;
-                        if (f.defaultValue()) |default| @field(out, f.name) = default;
+                        if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
                     }
                 } else {
                     outcomes[i].reason = .wrong_kind;
                     outcomes[i].kind = kindOf(given);
                     any = true;
-                    if (f.defaultValue()) |default| @field(out, f.name) = default;
+                    if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
                 }
             } else {
                 // `std.json` would read `"1_0"` into a number, so a number is
                 // asked of `fits` first, which reads it the way a query's is
                 // (ADR 084).
-                const read: anyerror!f.type = if (comptime numberOf(f.type) == null)
-                    std.json.parseFromValueLeaky(f.type, arena, given, .{})
-                else if (fits(f.type, given))
-                    std.json.parseFromValueLeaky(f.type, arena, given, .{})
+                const read: anyerror!f_type = if (comptime numberOf(f_type) == null)
+                    std.json.parseFromValueLeaky(f_type, arena, given, .{})
+                else if (fits(f_type, given))
+                    std.json.parseFromValueLeaky(f_type, arena, given, .{})
                 else
                     error.InvalidNumber;
                 if (read) |value| {
-                    @field(out, f.name) = value;
-                } else |_| if (!fits(f.type, given)) {
+                    @field(out, f_name) = value;
+                } else |_| if (!fits(f_type, given)) {
                     // A word that is not one of the choices is the one wrong
                     // value that is the right *kind*, and it gets the sentence a
                     // bad `?stage=` gets rather than one arguing with itself.
-                    if (given == .string and comptime choicesOf(f.type) != null) {
+                    if (given == .string and comptime choicesOf(f_type) != null) {
                         outcomes[i].reason = .not_a_choice;
-                    } else if (numberFault(f.type, arena, given)) |said| {
+                    } else if (numberFault(f_type, arena, given)) |said| {
                         // The number is the right kind and not a value of
                         // this field, so it is quoted back like a query's.
                         outcomes[i].reason = .wrong_kind;
@@ -3230,18 +3235,18 @@ fn collectBadBody(
                         outcomes[i].kind = kindOf(given);
                     }
                     any = true;
-                    if (f.defaultValue()) |default| @field(out, f.name) = default;
+                    if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
                 } else {
                     var deeper = false;
-                    if (describeField(f.type, arena, given, f.name, max_body_depth, &deeper)) |found| return misfit(T, found);
+                    if (describeField(f_type, arena, given, f_name, max_body_depth, &deeper)) |found| return misfit(T, found);
                     return misfit(T, if (deeper) tooDeep() else err);
                 }
             }
-        } else if (f.default_value_ptr == null) {
+        } else if (f_attrs.default_value_ptr == null) {
             outcomes[i].reason = .missing;
             any = true;
         } else {
-            @field(out, f.name) = f.defaultValue().?;
+            @field(out, f_name) = f_attrs.defaultValue(f_type).?;
         }
     }
 
@@ -3296,18 +3301,19 @@ fn describeObject(
     // Something the endpoint needs that the body does not carry. A field
     // with a default is what "absent" is allowed to mean, so it is exempt —
     // the same rule a query struct follows.
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        if (f.default_value_ptr == null and !object.contains(f.name)) return fail.badRequest(
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+        if (f_attrs.default_value_ptr == null and !object.contains(f_name)) return fail.badRequest(
             "the request body is missing \"{s}\" ({s})",
-            .{ nameWithin(arena, where, f.name), comptime expectedOf(f.type) },
+            .{ nameWithin(arena, where, f_name), comptime expectedOf(f_type) },
         );
     }
 
     // Everything is present and nothing is spare, so a value is the wrong
     // shape for the field it landed in — here, or somewhere further down.
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        if (object.get(f.name)) |given| {
-            if (describeField(f.type, arena, given, nameWithin(arena, where, f.name), depth, deeper)) |found| {
+    inline for (info.field_names, info.field_types) |f_name, f_type| {
+        if (object.get(f_name)) |given| {
+            if (describeField(f_type, arena, given, nameWithin(arena, where, f_name), depth, deeper)) |found| {
                 return found;
             }
         }
@@ -3330,11 +3336,11 @@ fn takes(comptime T: type, comptime within: Within) []const u8 {
     comptime {
         if (within.tag.len == 0) return fieldList(T);
         if (@typeInfo(T) != .@"struct") return within.tag;
-        const fields = @typeInfo(T).@"struct".fields;
-        var entries: [fields.len + 1][]const u8 = undefined;
+        const info = @typeInfo(T).@"struct";
+        var entries: [info.field_names.len + 1][]const u8 = undefined;
         entries[0] = within.tag;
-        for (fields, 1..) |f, i| {
-            entries[i] = f.name ++ (if (f.default_value_ptr != null) " (optional)" else "");
+        for (info.field_names, info.field_attrs, 1..) |f_name, f_attrs, i| {
+            entries[i] = f_name ++ (if (f_attrs.default_value_ptr != null) " (optional)" else "");
         }
         return nameList(&entries);
     }
@@ -3381,10 +3387,10 @@ fn describeTagged(
         .{ at, comptime variantList(U), kindOf(given) },
     );
 
-    inline for (@typeInfo(U).@"union".fields, comptime jsonmark.wireNames(U)) |f, on_the_wire| {
+    inline for (@typeInfo(U).@"union".field_types, comptime jsonmark.wireNames(U)) |f_type, on_the_wire| {
         if (std.mem.eql(u8, given.string, on_the_wire)) {
             const within: Within = .{ .tag = key, .variant = on_the_wire };
-            if (f.type == void) {
+            if (f_type == void) {
                 var it = object.iterator();
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
@@ -3396,7 +3402,7 @@ fn describeTagged(
                 }
                 return null;
             }
-            return describeObject(f.type, arena, object, name, within, depth, deeper);
+            return describeObject(f_type, arena, object, name, within, depth, deeper);
         }
     }
 
@@ -3582,7 +3588,7 @@ pub fn expectedOf(comptime T: type) []const u8 {
             .float, .comptime_float => "a number",
             .@"enum" => |e| blk: {
                 var out: []const u8 = "one of ";
-                for (e.fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+                for (e.field_names, 0..) |f_name, i| out = out ++ (if (i == 0) "" else ", ") ++ f_name;
                 break :blk out;
             },
             .@"struct" => "an object",
@@ -3604,7 +3610,7 @@ fn choicesOf(comptime T: type) ?[]const u8 {
             .optional => |o| choicesOf(o.child),
             .@"enum" => |e| blk: {
                 var out: []const u8 = "";
-                for (e.fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+                for (e.field_names, 0..) |f_name, i| out = out ++ (if (i == 0) "" else ", ") ++ f_name;
                 break :blk out;
             },
             else => null,
@@ -3615,10 +3621,10 @@ fn choicesOf(comptime T: type) ?[]const u8 {
 /// The field names of `T`, for saying what the endpoint does take.
 fn fieldList(comptime T: type) []const u8 {
     comptime {
-        const fields = @typeInfo(T).@"struct".fields;
-        var entries: [fields.len][]const u8 = undefined;
-        for (fields, 0..) |f, i| {
-            entries[i] = f.name ++ (if (f.default_value_ptr != null) " (optional)" else "");
+        const info = @typeInfo(T).@"struct";
+        var entries: [info.field_names.len][]const u8 = undefined;
+        for (info.field_names, info.field_attrs, 0..) |f_name, f_attrs, i| {
+            entries[i] = f_name ++ (if (f_attrs.default_value_ptr != null) " (optional)" else "");
         }
         return nameList(&entries);
     }
@@ -3701,8 +3707,8 @@ fn usableRequestId(text: []const u8) bool {
 }
 
 fn hasField(comptime T: type, name: []const u8) bool {
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, name)) return true;
+    inline for (@typeInfo(T).@"struct".field_names) |f_name| {
+        if (std.mem.eql(u8, f_name, name)) return true;
     }
     return false;
 }
@@ -3956,8 +3962,8 @@ test "what a client may put in a request id, and what it may not" {
     try testing.expect(!usableRequestId("a\"b"));
     // And the shapeless ones.
     try testing.expect(!usableRequestId(""));
-    try testing.expect(!usableRequestId("x" ** 65));
-    try testing.expect(usableRequestId("x" ** 64));
+    try testing.expect(!usableRequestId(&@as([65]u8, @splat('x'))));
+    try testing.expect(usableRequestId(&@as([64]u8, @splat('x'))));
 }
 
 test "generated ids do not repeat" {
@@ -4034,15 +4040,15 @@ test "the block-at-a-time query parser agrees with the one it replaced" {
         // Long enough to cross block boundaries, with the delimiters landing
         // either side of them — which is what the mask arithmetic decides.
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=1&bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=2",
-        "a=" ++ "x" ** 40 ++ "&b=" ++ "y" ** 40,
-        "a" ** 31 ++ "=1",
-        "a" ** 32 ++ "=1",
-        "a" ** 33 ++ "=1",
-        "x=1&" ++ "y" ** 31 ++ "=2",
-        "x=1&" ++ "y" ** 32 ++ "=2",
-        "x=1&" ++ "y" ** 33 ++ "=2",
-        "%20" ** 20,
-        "a=1&" ** 20,
+        "a=" ++ &@as([40]u8, @splat('x')) ++ "&b=" ++ &@as([40]u8, @splat('y')),
+        &@as([31]u8, @splat('a')) ++ "=1",
+        &@as([32]u8, @splat('a')) ++ "=1",
+        &@as([33]u8, @splat('a')) ++ "=1",
+        "x=1&" ++ &@as([31]u8, @splat('y')) ++ "=2",
+        "x=1&" ++ &@as([32]u8, @splat('y')) ++ "=2",
+        "x=1&" ++ &@as([33]u8, @splat('y')) ++ "=2",
+        repeat("%20", 20),
+        repeat("a=1&", 20),
     };
 
     for (cases) |raw| {
@@ -4103,4 +4109,19 @@ test "a query string is split in one allocation, whatever it holds" {
     _ = try parseQuery(counting.allocator(), "q=hello%20world&sort=newest");
     // The list, plus the one value that had something to decode.
     try testing.expectEqual(@as(usize, 2), counting.allocs);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

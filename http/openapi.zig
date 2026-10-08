@@ -444,7 +444,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
             .@"enum" => |e| blk: {
                 if (mark.marked(T)) break :blk held(.{ .choice = mark.wireNames(T) });
                 var names: []const []const u8 = &.{};
-                for (e.fields) |f| names = names ++ [_][]const u8{f.name};
+                for (e.field_names) |f_name| names = names ++ [_][]const u8{f_name};
                 break :blk held(.{ .choice = names });
             },
 
@@ -459,12 +459,12 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 const said = mark.of(T);
                 const names = mark.wireNames(T);
                 var cases: []const Case = &.{};
-                for (u.fields, names) |f, on_the_wire| cases = cases ++ [_]Case{.{
+                for (u.field_types, names) |f_type, on_the_wire| cases = cases ++ [_]Case{.{
                     .name = on_the_wire,
                     // A variant carrying nothing has no shape under its name,
                     // and only the internally tagged encoding can say so — the
                     // name is the whole of the object there (ADR 016).
-                    .schema = if (f.type == void) held(.unknown) else schemaWithin(f.type, depth + 1),
+                    .schema = if (f_type == void) held(.unknown) else schemaWithin(f_type, depth + 1),
                 }};
                 break :blk held(.{ .one_of = .{
                     .tag = if (said) |m| m.tag else null,
@@ -488,12 +488,12 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 // Each field is described, and a field that is a struct is a
                 // walk of its own: 200 fields stopped at "evaluation exceeded
                 // 20000 backwards branches" at this line.
-                @setEvalBranchQuota(20_000 + 4 * convert.budget(s.fields));
-                for (s.fields) |f| {
+                @setEvalBranchQuota(20_000 + 4 * convert.budget(s.field_names));
+                for (s.field_names, s.field_types, s.field_attrs) |f_name, f_type, f_attrs| {
                     fields = fields ++ [_]Field{.{
-                        .name = mark.wire(f.name, said),
-                        .schema = schemaWithin(f.type, depth + 1),
-                        .required = f.default_value_ptr == null,
+                        .name = mark.wire(f_name, said),
+                        .schema = schemaWithin(f_type, depth + 1),
+                        .required = f_attrs.default_value_ptr == null,
                     }};
                 }
                 break :blk held(.{ .object = .{

@@ -68,11 +68,11 @@ fn tokens(c: *nilo.Ctx, pace: *Pace) !void {
 }
 
 const poem = [_][]const u8{
-    "the",     "connection", "stays",   "open",   "and",
-    "the",     "words",      "arrive",  "one",    "at",
-    "a",       "time",       "because", "nobody", "knows",
-    "how",     "long",       "this",    "is",     "going",
-    "to",      "be",         "until",   "it",     "is",
+    "the",      "connection", "stays",   "open",   "and",
+    "the",      "words",      "arrive",  "one",    "at",
+    "a",        "time",       "because", "nobody", "knows",
+    "how",      "long",       "this",    "is",     "going",
+    "to",       "be",         "until",   "it",     "is",
     "finished",
 };
 
@@ -110,19 +110,19 @@ const Pace = struct { millis: u64 };
 
 fn page() []const u8 {
     return
-        \\<!doctype html>
-        \\<title>nilo streaming</title>
-        \\<pre id="out" style="font: 16px/1.6 ui-monospace, monospace; padding: 2rem"></pre>
-        \\<script>
-        \\  const out = document.getElementById("out");
-        \\  const events = new EventSource("/tokens");
-        \\  events.addEventListener("token", e => { out.textContent += e.data + " " });
-        \\  events.addEventListener("done", e => {
-        \\    out.textContent += "\n\n(" + JSON.parse(e.data).tokens + " tokens)";
-        \\    events.close();
-        \\  });
-        \\</script>
-        \\
+    \\<!doctype html>
+    \\<title>nilo streaming</title>
+    \\<pre id="out" style="font: 16px/1.6 ui-monospace, monospace; padding: 2rem"></pre>
+    \\<script>
+    \\  const out = document.getElementById("out");
+    \\  const events = new EventSource("/tokens");
+    \\  events.addEventListener("token", e => { out.textContent += e.data + " " });
+    \\  events.addEventListener("done", e => {
+    \\    out.textContent += "\n\n(" + JSON.parse(e.data).tokens + " tokens)";
+    \\    events.close();
+    \\  });
+    \\</script>
+    \\
     ;
 }
 

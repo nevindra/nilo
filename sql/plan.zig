@@ -601,6 +601,6 @@ test "a plan this cannot read says nothing rather than failing" {
     try expectNulls("not json", &.{ false, false });
     try expectNulls("[]", &.{false});
     try expectNulls("[{\"Plan\": {\"Node Type\": ", &.{false});
-    try expectNulls("[" ** 600, &.{false});
+    try expectNulls(&@as([600]u8, @splat('[')), &.{false});
     try expectNulls("[{\"Plan\": {\"Node Type\": \"Result\"}}]", &.{false});
 }

@@ -203,10 +203,11 @@ var memory_pools: std.atomic.Value(usize) = .init(0);
 /// still shared by name, which is what that spelling is for.
 fn privateMemoryName(buf: []u8) [:0]const u8 {
     const n = memory_pools.fetchAdd(1, .monotonic);
-    return std.fmt.bufPrintZ(
+    return std.mem.printSentinel(
         buf,
         "file:nilo-memory-{x}-{d}?mode=memory&cache=shared",
         .{ @intFromPtr(&memory_pools), n },
+        0,
     ) catch unreachable;
 }
 
@@ -510,7 +511,7 @@ pub fn Wire(comptime opts_in: Options) type {
                     .keep => "RELEASE SAVEPOINT ",
                 };
                 var buf: [verb.len + name_prefix.len + 10 + 1]u8 = undefined;
-                const sql = std.fmt.bufPrintZ(&buf, verb ++ name_prefix ++ "{d}", .{id}) catch
+                const sql = std.mem.printSentinel(&buf, verb ++ name_prefix ++ "{d}", .{id}, 0) catch
                     unreachable;
                 try self.wire.command(self.at, sql);
                 if (op == .undo) self.wire.conns[self.at].aborted = false;
@@ -638,7 +639,7 @@ pub fn Wire(comptime opts_in: Options) type {
             const path = if (std.mem.eql(u8, url, ":memory:"))
                 privateMemoryName(&path_buf)
             else
-                std.fmt.bufPrintZ(&path_buf, "{s}", .{url}) catch return error.PathTooLong;
+                std.mem.printSentinel(&path_buf, "{s}", .{url}, 0) catch return error.PathTooLong;
 
             var made: usize = 0;
             errdefer for (conns[0..made]) |*conn| conn.deinit(gpa);
@@ -698,7 +699,7 @@ pub fn Wire(comptime opts_in: Options) type {
 
             if (opts.cache_kib) |kib| {
                 try conn.execNoArgs(
-                    std.fmt.bufPrintZ(&buf, "PRAGMA cache_size = -{d}", .{kib}) catch unreachable,
+                    std.mem.printSentinel(&buf, "PRAGMA cache_size = -{d}", .{kib}, 0) catch unreachable,
                 );
             }
         }
@@ -1649,20 +1650,20 @@ pub fn Wire(comptime opts_in: Options) type {
 fn Blobbed(comptime V: type) type {
     comptime {
         if (@typeInfo(V) != .@"struct") return V;
-        const fields = @typeInfo(V).@"struct".fields;
-        var out: [fields.len]type = undefined;
+        const info = @typeInfo(V).@"struct";
+        var out: [info.field_names.len]type = undefined;
         var changed = false;
-        for (fields, 0..) |f, i| {
-            out[i] = switch (f.type) {
+        for (info.field_types, 0..) |f_type, i| {
+            out[i] = switch (f_type) {
                 wire.Bytes => zqlite.Blob,
                 ?wire.Bytes => ?zqlite.Blob,
-                else => f.type,
+                else => f_type,
             };
-            if (out[i] != f.type) changed = true;
+            if (out[i] != f_type) changed = true;
         }
         if (!changed) return V;
         const frozen = out;
-        return std.meta.Tuple(&frozen);
+        return @Tuple(&frozen);
     }
 }
 
@@ -1675,9 +1676,10 @@ fn Blobbed(comptime V: type) type {
 /// answers the same way. Unrolled while compiling, so a statement holding no
 /// integer wider than `i64` costs nothing here.
 fn intsFit(values: anytype) wire.Error!void {
-    inline for (@typeInfo(@TypeOf(values)).@"struct".fields) |f| {
-        if (comptime wideInt(f.type)) |I| {
-            const held: ?I = @field(values, f.name);
+    const info = @typeInfo(@TypeOf(values)).@"struct";
+    inline for (info.field_names, info.field_types) |f_name, f_type| {
+        if (comptime wideInt(f_type)) |I| {
+            const held: ?I = @field(values, f_name);
             if (held) |n| if (std.math.cast(i64, n) == null) {
                 std.log.warn(
                     "nilo_sql: {d} was refused before it was bound: SQLite stores an " ++
@@ -1698,13 +1700,14 @@ fn intsFit(values: anytype) wire.Error!void {
 /// bound, with a message that names it. An infinity is not refused: SQLite
 /// stores and reads it back as itself, the same as Postgres does.
 fn floatsKept(values: anytype) wire.Error!void {
-    inline for (@typeInfo(@TypeOf(values)).@"struct".fields) |f| {
-        const F = switch (@typeInfo(f.type)) {
-            .float => f.type,
+    const info = @typeInfo(@TypeOf(values)).@"struct";
+    inline for (info.field_names, info.field_types) |f_name, f_type| {
+        const F = switch (@typeInfo(f_type)) {
+            .float => f_type,
             .optional => |o| if (@typeInfo(o.child) == .float) o.child else continue,
             else => continue,
         };
-        const held: ?F = @field(values, f.name);
+        const held: ?F = @field(values, f_name);
         if (held) |x| if (std.math.isNan(x)) {
             std.log.warn(
                 "nilo_sql: a NaN was refused before it was bound: SQLite stores a NaN " ++
@@ -1734,9 +1737,10 @@ fn blobbed(values: anytype) Blobbed(@TypeOf(values)) {
     if (comptime Blobbed(V) == V) return values;
 
     var out: Blobbed(V) = undefined;
-    inline for (@typeInfo(V).@"struct".fields, 0..) |f, i| {
-        const held = @field(values, f.name);
-        out[i] = switch (f.type) {
+    const v_info = @typeInfo(V).@"struct";
+    inline for (v_info.field_names, v_info.field_types, 0..) |f_name, f_type, i| {
+        const held = @field(values, f_name);
+        out[i] = switch (f_type) {
             wire.Bytes => zqlite.blob(held.bytes),
             ?wire.Bytes => if (held) |b| zqlite.blob(b.bytes) else null,
             else => held,

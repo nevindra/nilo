@@ -231,7 +231,7 @@ const Pg = struct {
     /// build — see the header.
     fn open() !?*Pg {
         const url = live_config.database_url orelse return null;
-        if (builtin.mode != .Debug) return null;
+        if (builtin.mode != .debug) return null;
         const p = try testing.allocator.create(Pg);
         errdefer testing.allocator.destroy(p);
         p.threaded = .init(testing.allocator, .{});
@@ -322,8 +322,7 @@ test "on Postgres a kind this program does not know is left in the queue" {
     try testing.expect((try table.claim(&p.run, live_kinds, 1_000, 5_000)) == null);
 
     const Row = PgTable.Row;
-    const left = (try p.db.rawOne(Row, &p.run,
-        "SELECT * FROM \"nilo_jobs\" WHERE \"kind\" = 'from-another-binary'", .{})).?;
+    const left = (try p.db.rawOne(Row, &p.run, "SELECT * FROM \"nilo_jobs\" WHERE \"kind\" = 'from-another-binary'", .{})).?;
     try testing.expectEqual(job.State.queued, left.state);
     try testing.expectEqual(@as(i32, 0), left.attempts);
 }

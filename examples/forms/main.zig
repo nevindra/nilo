@@ -220,14 +220,16 @@ fn uploadAvatar(user: SignedIn, incoming: nilo.Form(NewAvatar)) !nilo.Status(201
     const image = incoming.value.image;
     if (image.len() == 0) return fail.badRequest("no file was chosen", .{});
 
-    return .{ .value = .{
-        .caption = incoming.value.caption.view(),
-        // What the client called it, which a client can make up. It is a
-        // label to show back, never a path to write to.
-        .filename = image.filename.view(),
-        .content_type = image.content_type.view(),
-        .bytes = image.len(),
-    } };
+    return .{
+        .value = .{
+            .caption = incoming.value.caption.view(),
+            // What the client called it, which a client can make up. It is a
+            // label to show back, never a path to write to.
+            .filename = image.filename.view(),
+            .content_type = image.content_type.view(),
+            .bytes = image.len(),
+        },
+    };
 }
 
 // ---- a form that comes back with one box marked ----
@@ -424,11 +426,13 @@ test "remember me is the difference between a session cookie and a lasting one" 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const answer = try signIn(&sessions, arena.allocator(), .{ .value = .{
-        .email = .static("wati@example.dev"),
-        .password = .static("hunter2"),
-        .remember = true, // what `remember=on` off a ticked checkbox becomes
-    } });
+    const answer = try signIn(&sessions, arena.allocator(), .{
+        .value = .{
+            .email = .static("wati@example.dev"),
+            .password = .static("hunter2"),
+            .remember = true, // what `remember=on` off a ticked checkbox becomes
+        },
+    });
     try testing.expect(std.mem.indexOf(u8, answer.headers.view()[0].value, "Max-Age=1209600") != null);
 }
 

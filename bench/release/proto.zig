@@ -98,8 +98,8 @@ const Program = struct {
             .severity_text = "INFO",
             .body = .{ .value = .{ .string_value = "request completed" } },
             .attributes = &attrs,
-            .trace_id = &([_]u8{0xab} ** 16),
-            .span_id = &([_]u8{0xcd} ** 8),
+            .trace_id = &(@as([16]u8, @splat(0xab))),
+            .span_id = &(@as([8]u8, @splat(0xcd))),
         };
         const req: Request = .{ .resource_logs = &.{.{
             .resource = .{ .attributes = &.{text("checkout")} },

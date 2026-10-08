@@ -171,7 +171,7 @@ pub fn Ordering(comptime Row: type, comptime keys: anytype) type {
             const table = comptime fragments(D);
             for (self.chosen(), 0..) |t, i| {
                 try w.writeAll(if (i == 0) " ORDER BY " else ", ");
-                try w.writeAll(table[@intFromEnum(t.key)][@intFromEnum(t.direction)]);
+                try w.writeAll(table[@backingInt(t.key)][@backingInt(t.direction)]);
             }
         }
 
@@ -184,7 +184,7 @@ pub fn Ordering(comptime Row: type, comptime keys: anytype) type {
                 break :blk out;
             };
             for (self.chosen()) |t| {
-                const named = columns[@intFromEnum(t.key)] orelse continue;
+                const named = columns[@backingInt(t.key)] orelse continue;
                 if (std.mem.eql(u8, named, column)) return true;
             }
             return false;
@@ -239,8 +239,9 @@ pub fn Ordering(comptime Row: type, comptime keys: anytype) type {
                     else
                         s.expr.?;
                     if (s.of) |T| dialect_mod.assertDecimalCompares(D, Row, s.name, T, "the ordering key `" ++ s.name ++ "`");
-                    for (@typeInfo(Direction).@"enum".fields) |f| {
-                        const d: Direction = @field(Direction, f.name);
+                    const direction_info = @typeInfo(Direction).@"enum";
+                    for (direction_info.field_names, direction_info.field_values) |f_name, f_value| {
+                        const d: Direction = @field(Direction, f_name);
                         var frag: []const u8 = what ++ (if (d.descending()) " DESC" else " ASC");
                         // The term's own placement wins; the key's is what
                         // applies when the request said only which way.
@@ -249,7 +250,7 @@ pub fn Ordering(comptime Row: type, comptime keys: anytype) type {
                             frag = frag ++ (D.nulls(where_nulls) orelse
                                 dialect_mod.noNullsOrder(D, Row, s.name));
                         }
-                        out[i][f.value] = frag;
+                        out[i][f_value] = frag;
                     }
                 }
                 break :blk out;
@@ -268,7 +269,7 @@ pub fn Ordering(comptime Row: type, comptime keys: anytype) type {
     };
 }
 
-const directions = @typeInfo(Direction).@"enum".fields.len;
+const directions = @typeInfo(Direction).@"enum".field_names.len;
 
 /// Whether `T` is an `Ordering`, and for which Row.
 pub fn orderingOf(comptime T: type) ?type {
@@ -352,18 +353,18 @@ fn readKeys(comptime Row: type, comptime keys: anytype) []const Key {
                 "  Each field is what a request may say, and its value is what that means: " ++
                 "`.{ .due = .due_date, .title = \"lower(title)\" }`.",
         );
-        const fields = @typeInfo(K).@"struct".fields;
-        if (fields.len == 0) @compileError(
+        const info = @typeInfo(K).@"struct";
+        if (info.field_names.len == 0) @compileError(
             "nilo: `sql.Ordering(" ++ @typeName(Row) ++ ", .{})` declares no keys, so " ++
                 "there is nothing a request could choose.\n" ++
                 "  Name at least one: `.{ .due = .due_date }`.",
         );
         // Every key is looked up in the Row, so the walk grows with both.
-        @setEvalBranchQuota(row_mod.budget(Row) + 2_000 * fields.len);
+        @setEvalBranchQuota(row_mod.budget(Row) + 2_000 * info.field_names.len);
         var out: []const Key = &.{};
-        for (fields) |f| {
-            const said = @field(keys, f.name);
-            out = out ++ [_]Key{readKey(Row, f.name, said)};
+        for (info.field_names) |f_name| {
+            const said = @field(keys, f_name);
+            out = out ++ [_]Key{readKey(Row, f_name, said)};
         }
         return out;
     }
@@ -380,17 +381,18 @@ fn readKey(comptime Row: type, comptime name: []const u8, comptime said: anytype
         }
         if (@typeInfo(S) == .@"struct" and !@typeInfo(S).@"struct".is_tuple) {
             var key = Key{ .name = name, .column = null, .expr = null, .nulls = null };
-            for (@typeInfo(S).@"struct".fields) |f| {
-                if (std.mem.eql(u8, f.name, "column")) {
+            const s_info = @typeInfo(S).@"struct";
+            for (s_info.field_names) |f_name| {
+                if (std.mem.eql(u8, f_name, "column")) {
                     key.column = columnOf(Row, name, said.column);
                     key.of = storedTypeOf(Row, said.column);
-                } else if (std.mem.eql(u8, f.name, "expr")) {
+                } else if (std.mem.eql(u8, f_name, "expr")) {
                     key.expr = textOf(Row, name, said.expr);
-                } else if (std.mem.eql(u8, f.name, "nulls")) {
+                } else if (std.mem.eql(u8, f_name, "nulls")) {
                     key.nulls = nullsOf(Row, name, said.nulls);
                 } else @compileError(
                     "nilo: the ordering key `" ++ name ++ "` on " ++ @typeName(Row) ++ " says `." ++
-                        f.name ++ "`, which is not something a key can say.\n" ++
+                        f_name ++ "`, which is not something a key can say.\n" ++
                         "  A key is `.column` or `.expr`, and may add `.nulls = .first` or `.last`.",
                 );
             }
@@ -493,8 +495,8 @@ fn isPath(comptime S: type) bool {
             .@"struct" => |s| s,
             else => return false,
         };
-        if (!info.is_tuple or info.fields.len < 2) return false;
-        for (info.fields) |f| if (f.type != @TypeOf(.enum_literal)) return false;
+        if (!info.is_tuple or info.field_names.len < 2) return false;
+        for (info.field_types) |f_type| if (f_type != @TypeOf(.enum_literal)) return false;
         return true;
     }
 }

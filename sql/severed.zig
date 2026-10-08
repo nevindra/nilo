@@ -86,10 +86,10 @@ const testing = std.testing;
 /// `zig build test-sql` runs the Debug and ReleaseSafe binaries at once,
 /// against one database, and they must not drop each other's table.
 const mode_suffix = switch (builtin.mode) {
-    .Debug => "debug",
-    .ReleaseSafe => "releasesafe",
-    .ReleaseFast => "releasefast",
-    .ReleaseSmall => "releasesmall",
+    .debug => "debug",
+    .safe => "releasesafe",
+    .fast => "releasefast",
+    .small => "releasesmall",
 };
 
 const table = "nilo_severed_" ++ mode_suffix;

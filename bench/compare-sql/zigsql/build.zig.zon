@@ -2,7 +2,7 @@
     .name = .zigsql,
     .version = "0.0.0",
     .fingerprint = 0xd3fe64fe938414e,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // The repository this benchmark measures, reached by path rather than
         // by URL: the point is to time the working tree, not a release.
@@ -12,8 +12,8 @@
         // same pg.zig — a control on a different version measures the driver's
         // release notes.
         .pg = .{
-            .url = "git+https://github.com/lalinsky/pg.zig#2bc34051c4af054c5134cbaef3bd152083b2fc96",
-            .hash = "pg-0.0.0-Wp_7geLTBgD4EYiBCcl3DuG6Hn6xcmtHtzsy_4f3M2WY",
+            .url = "git+https://github.com/lalinsky/pg.zig#7b4609ca35377101d39327eb8274243434d7fc4b",
+            .hash = "pg-0.0.0-Wp_7gWz9BgBeAtfduH-xeTY0XI96NFz8iwYPFANy9-RG",
         },
     },
     .paths = .{

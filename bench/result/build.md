@@ -321,6 +321,45 @@ it afterwards, it does. On this machine the LLVM row is bounded by
 LLVM emit on two cores and should divide by the core count elsewhere; that
 is a guess until somebody runs it on the sixteen-core box in the header.
 
+## What a save costs on Zig 0.17
+
+**Not the machine in the header.** 2 cores (Xeon Platinum 8255C, KVM), 7.9
+GB, x86_64 Linux 6.8, against the tree at `b7acd22`: Zig 0.16.0 on
+`git archive` of that commit, and Zig 0.17.0 on the same commit ported, run
+the same afternoon. Taken during the port, to see whether 0.17 had fixed
+the incremental row of [the table above](#what-a-restart-on-save-costs-per-save).
+
+The measure is the whole loop rather than the compile: `zig build
+dev-hello` running, then a script rewrites the string
+`examples/hello/main.zig` returns and polls `GET /` every 50 ms until the
+new string comes back. Five saves in a row, 3 s apart, the first one after
+the loop has been up for ten seconds. So a figure is compile, install, the
+two polls `nilo-dev` waits for, the old server's drain (about 200 ms) and
+the new one's start.
+
+| `zig build dev-hello`, save to new string served | Zig 0.16.0 | Zig 0.17.0 |
+|---|---|---|
+| default (self-hosted, pruned) | 4.07–4.67 s | 3.61–4.49 s |
+| `-- --incremental` | 10.4–11.65 s (with `-Dllvm`; without it the binary does not run) | **0.56–0.70 s** (no `-Dllvm`), three runs of five |
+
+Resident under `--incremental` on 0.17.0: the compiler 189 MB RSS, the
+maker 8 MB, `nilo-dev` 5 MB, the server 8 MB.
+
+`zig build-exe m.zig -lc` on a five-line program, the reproduction from the
+table above, links and runs on 0.17.0 natively. It also did on 0.16.0 on
+this host when tried the same afternoon, so the `crt1.o` relocation error
+CLAUDE.md describes was not reproduced here by a small program either way.
+
+**What it changed:** `nilo-dev` builds incrementally by default, with
+`--no-incremental` as the way back to the pruned rebuild
+([ADR 190](../../docs/adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)),
+and nothing asks for LLVM to get it.
+
+**Can it go further:** the floor under 0.56 s is mostly not the compiler:
+a stamp seen twice on 250 ms polls before a restart, and a 200 ms drain,
+are `nilo-dev`'s, and both are there on purpose (ADR 190). The default row is one compile of the
+changed module and has not moved between releases by more than its spread.
+
 ## What a save has to touch
 
 16 cores, x86_64 Linux, Zig 0.16.0, commit `b012502`, Debug, self-hosted backend, cache warm, `-Dtarget=x86_64-linux-gnu` on both `zig build`s because of the host's glibc. The question was whether the dev loop is the back end's or the repository's: a project keeping a front end beside its server should be able to save under the front end without the server going away. ADR 190 says the loop watches the binary, and the guide had a sentence saying `zig build dev` could watch a bundler's directory, so the two were put to a save each rather than argued.

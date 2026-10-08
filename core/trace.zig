@@ -171,7 +171,7 @@ test "a later version is read for the part every version keeps" {
 }
 
 test "an unsampled context is written with its flag clear" {
-    const ctx: Context = .{ .trace_id = .{1} ** 16, .span_id = .{2} ** 8, .sampled = false };
+    const ctx: Context = .{ .trace_id = @splat(1), .span_id = @splat(2), .sampled = false };
     var buf: [text_len]u8 = undefined;
     try testing.expectEqualStrings(
         "00-01010101010101010101010101010101-0202020202020202-00",

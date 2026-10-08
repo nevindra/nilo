@@ -101,7 +101,7 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A WebSocket over TLS has no test of its own for a second frame that arrived with the first.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A TLS listener that reloads its certificate without a restart.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.
-- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Client certificates on a TLS listener.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Session resumption on a TLS listener.
 - [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · More than one certificate on a listener, chosen by SNI.

@@ -48,7 +48,7 @@ fn ours(comptime T: type) ?[]const u8 {
             .optional => |o| if (ours(o.child)) |inner| "?" ++ inner else null,
             .pointer => |p| switch (p.size) {
                 .one => if (ours(p.child)) |inner|
-                    (if (p.is_const) "*const " else "*") ++ inner
+                    (if (p.attrs.@"const") "*const " else "*") ++ inner
                 else
                     null,
                 // A sentinel is part of how a slice is spelled and this does
@@ -56,7 +56,7 @@ fn ours(comptime T: type) ?[]const u8 {
                 // has ever produced — keeps its own name rather than being
                 // spelled wrong.
                 .slice => if (p.sentinel() == null) (if (ours(p.child)) |inner|
-                    (if (p.is_const) "[]const " else "[]") ++ inner
+                    (if (p.attrs.@"const") "[]const " else "[]") ++ inner
                 else
                     null) else null,
                 else => null,

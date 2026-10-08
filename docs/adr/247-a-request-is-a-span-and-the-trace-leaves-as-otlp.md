@@ -15,7 +15,7 @@ try app.trace(.{ .service = "orders" });            // a collector on localhost:
 
 var span = c.span("reserve stock");                 // in a handler
 defer span.end();
-errdefer |err| span.fail(err);
+reserve(c) catch |err| { span.fail(err); return err; };
 ```
 
 - **A server span is named for the route**, `GET /users/:id`, and carries the attributes the HTTP semantic conventions call required: `http.request.method` (`_OTHER` for a method outside the list), `http.route`, `http.response.status_code`, `url.path` (its first 96 bytes). A 5xx is an error with `error.type`. A request that matched no route is named for its method alone.

@@ -387,7 +387,7 @@ pub fn checkRootWiring() void {
 ///
 /// `ReleaseFast` and `ReleaseSmall` are still one answer, which is why the
 /// message names them as a pair rather than guessing.
-pub const program_mode: ?std.builtin.OptimizeMode =
+pub const program_mode: ?std.lang.Optimize =
     modeFrom(std.log.default_level, std.debug.runtime_safety);
 
 /// The derivation, as a function so that **every arm of it can be run from a
@@ -396,12 +396,12 @@ pub const program_mode: ?std.builtin.OptimizeMode =
 /// `program_mode` is one value per compilation, so the `ReleaseFast` arm could
 /// only ever be *not run* — and that is how it shipped wrong
 /// ([ADR 032](../docs/adr/032-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)).
-pub fn modeFrom(level: std.log.Level, safety: bool) ?std.builtin.OptimizeMode {
+pub fn modeFrom(level: std.log.Level, safety: bool) ?std.lang.Optimize {
     return switch (level) {
-        .debug => .Debug,
+        .debug => .debug,
         // The level alone cannot tell the three release modes apart, so the
         // safety flag splits the pair off.
-        .info => if (safety) .ReleaseSafe else null,
+        .info => if (safety) .safe else null,
         // No optimize mode produces any other level. A future std that
         // changes this lands here, and null is the answer that warns nobody
         // rather than everybody.
@@ -426,7 +426,7 @@ pub fn warnIfBuiltDifferently() void {
     const differs = comptime if (program_mode) |theirs|
         theirs != ours
     else
-        ours == .Debug or ours == .ReleaseSafe;
+        ours == .debug or ours == .safe;
 
     if (comptime !differs) return;
 

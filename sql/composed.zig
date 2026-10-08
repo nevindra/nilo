@@ -240,7 +240,7 @@ test "a name that is not an identifier is refused, so a string cannot get in as 
     try std.testing.expectError(error.NotAnIdentifier, s.ident("drop table"));
     try std.testing.expectError(error.NotAnIdentifier, s.ident("1abc"));
     try std.testing.expectError(error.NotAnIdentifier, s.ident(""));
-    try std.testing.expectError(error.NotAnIdentifier, s.ident("a" ** 64));
+    try std.testing.expectError(error.NotAnIdentifier, s.ident(&@as([64]u8, @splat('a'))));
     try std.testing.expectError(error.NotAParameter, s.param(0));
     // Nothing was written by a refused call.
     try std.testing.expectEqualStrings("", s.view());

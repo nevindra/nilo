@@ -618,7 +618,7 @@ const Spilled = struct {
 
     /// Longer than one page and not a round number of them, so a partial last
     /// chunk is exercised rather than an exact multiple.
-    const contents = "nilo sends this from a descriptor, not from memory. " ** 200;
+    const contents = repeat("nilo sends this from a descriptor, not from memory. ", 200);
 
     fn init(gpa: std.mem.Allocator) !Spilled {
         var tmp = nilo.testing.tmpDir();
@@ -1499,4 +1499,19 @@ test "spawned work that swallowed the stop's cancel still stops at its next slee
     try live.stop();
     try testing.expectEqual(@as(u32, 1), work.swallowed.load(.acquire));
     try testing.expectEqual(@as(u32, 1), work.gone.load(.acquire));
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

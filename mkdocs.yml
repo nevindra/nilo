@@ -3,7 +3,7 @@
 # Links out of the guide are rewritten to GitHub by docs/site/hooks.py.
 
 site_name: nilo
-site_description: An HTTP framework for Zig 0.16, and the toolkit it is built from
+site_description: An HTTP framework for Zig 0.17, and the toolkit it is built from
 site_url: https://nevindra.github.io/nilo/
 repo_url: https://github.com/nevindra/nilo
 repo_name: nevindra/nilo

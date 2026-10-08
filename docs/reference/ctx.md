@@ -138,7 +138,7 @@ Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, w
 |---|---|
 | `c.span(comptime name)` | `nilo.trace.Span`: a span of this request's trace, a child of the current span and current itself until `end`. A `nilo_fetch` call or another `c.span` while it is open is its child. On an App that does not trace, or a trace that is not recorded, it records nothing |
 | `span.end()` | records it and makes its parent current again. `defer span.end()` |
-| `span.fail(err)` | marks it failed, with the error's name as `error.type` and the status message. `errdefer \|err\| span.fail(err)` |
+| `span.fail(err)` | marks it failed, with the error's name as `error.type` and the status message. `call() catch \|err\| { span.fail(err); return err; }` |
 | `c.traceId()` | `?[32]u8`: the trace id as lowercase hex, or null on an App that does not trace |
 
 The name is comptime so that it is one of a few, which is what a trace view groups by ([ADR 247](../adr/247-a-request-is-a-span-and-the-trace-leaves-as-otlp.md)). The guide page is [Tracing](../guide/tracing.md).

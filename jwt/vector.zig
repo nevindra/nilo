@@ -27,33 +27,20 @@
 
 /// The whole RS256 token: header, payload, signature.
 pub const token =
-    "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5IiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2FjY2"
-     ++ "91bnRzLmV4YW1wbGUiLCJhdWQiOiJjbGllbnQtMSIsInN1YiI6InUtNyIsImVtYWlsIjoiYUBleGFtcGxlLmNv"
-     ++ "bSIsImV4cCI6MjAwMDAwMDAwMCwibmJmIjoxMDAwMDAwMDAwfQ.AcbsMWT1PLcxeCcSGyy0huOFwmr2veRJJNv"
-     ++ "aLBP2UBsI2Y7_F6-CYF0z6wSahQU5wtFSnR7-ebRGWTpar5J1qFVVg9_XJ4FqhA2R1VmtxijbOXYJkJHQQtuTK"
-     ++ "eRv_AicyxI0oFudf495-reWHHKjBCQJj65Zp-Jd51AqsLpk_jTDZD8NeWRwsXVH-wuofPrb7mKkgsEFIFdAfs2"
-     ++ "ioGPJVI-sdbN7lSKD22UNC2_XWqLCiF50v7rHNJUmVYeozKr2FvTMiF51wh6OGJZ3XUSzDLTXLr80cqDV9__d1"
-     ++ "nQ-VcVWFc8uyNXQChdhihk3GCOjsz3ty6-aIwhEcVvi1lBcvw";
+    "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3Qta2V5IiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2FjY2" ++ "91bnRzLmV4YW1wbGUiLCJhdWQiOiJjbGllbnQtMSIsInN1YiI6InUtNyIsImVtYWlsIjoiYUBleGFtcGxlLmNv" ++ "bSIsImV4cCI6MjAwMDAwMDAwMCwibmJmIjoxMDAwMDAwMDAwfQ.AcbsMWT1PLcxeCcSGyy0huOFwmr2veRJJNv" ++ "aLBP2UBsI2Y7_F6-CYF0z6wSahQU5wtFSnR7-ebRGWTpar5J1qFVVg9_XJ4FqhA2R1VmtxijbOXYJkJHQQtuTK" ++ "eRv_AicyxI0oFudf495-reWHHKjBCQJj65Zp-Jd51AqsLpk_jTDZD8NeWRwsXVH-wuofPrb7mKkgsEFIFdAfs2" ++ "ioGPJVI-sdbN7lSKD22UNC2_XWqLCiF50v7rHNJUmVYeozKr2FvTMiF51wh6OGJZ3XUSzDLTXLr80cqDV9__d1" ++ "nQ-VcVWFc8uyNXQChdhihk3GCOjsz3ty6-aIwhEcVvi1lBcvw";
 
 /// The RS256 token's middle segment on its own, for the forged-header tests.
 pub const payload =
-    "eyJpc3MiOiJodHRwczovL2FjY291bnRzLmV4YW1wbGUiLCJhdWQiOiJjbGllbnQtMSIsInN1YiI6InUtNyIsIm"
-     ++ "VtYWlsIjoiYUBleGFtcGxlLmNvbSIsImV4cCI6MjAwMDAwMDAwMCwibmJmIjoxMDAwMDAwMDAwfQ";
+    "eyJpc3MiOiJodHRwczovL2FjY291bnRzLmV4YW1wbGUiLCJhdWQiOiJjbGllbnQtMSIsInN1YiI6InUtNyIsIm" ++ "VtYWlsIjoiYUBleGFtcGxlLmNvbSIsImV4cCI6MjAwMDAwMDAwMCwibmJmIjoxMDAwMDAwMDAwfQ";
 
 /// The RS256 token's last segment on its own, for a forged header over a
 /// real signature.
 pub const signature =
-    "AcbsMWT1PLcxeCcSGyy0huOFwmr2veRJJNvaLBP2UBsI2Y7_F6-CYF0z6wSahQU5wtFSnR7-ebRGWTpar5J1qFVVg9_"
-     ++ "XJ4FqhA2R1VmtxijbOXYJkJHQQtuTKeRv_AicyxI0oFudf495-reWHHKjBCQJj65Zp-Jd51AqsLpk_jTDZD8NeWR"
-     ++ "wsXVH-wuofPrb7mKkgsEFIFdAfs2ioGPJVI-sdbN7lSKD22UNC2_XWqLCiF50v7rHNJUmVYeozKr2FvTMiF51wh6"
-     ++ "OGJZ3XUSzDLTXLr80cqDV9__d1nQ-VcVWFc8uyNXQChdhihk3GCOjsz3ty6-aIwhEcVvi1lBcvw";
+    "AcbsMWT1PLcxeCcSGyy0huOFwmr2veRJJNvaLBP2UBsI2Y7_F6-CYF0z6wSahQU5wtFSnR7-ebRGWTpar5J1qFVVg9_" ++ "XJ4FqhA2R1VmtxijbOXYJkJHQQtuTKeRv_AicyxI0oFudf495-reWHHKjBCQJj65Zp-Jd51AqsLpk_jTDZD8NeWR" ++ "wsXVH-wuofPrb7mKkgsEFIFdAfs2ioGPJVI-sdbN7lSKD22UNC2_XWqLCiF50v7rHNJUmVYeozKr2FvTMiF51wh6" ++ "OGJZ3XUSzDLTXLr80cqDV9__d1nQ-VcVWFc8uyNXQChdhihk3GCOjsz3ty6-aIwhEcVvi1lBcvw";
 
 /// The RSA key's `n`, as the JWKS spells it.
 pub const rsa_n =
-    "tBFYa_IZgELJqUxuRyKGQDsWWYVZO0GHU2VoZzGs8ALOaNcUbtCa50wrUo0cG8BBa069mmo_meOs0IsqOsZCZw4t"
-     ++ "14l8SwHLd2mNthp69GO4djVqC586QAKJ1I8Ngn_uwTDxru9jONNAzu2F1fKiHCZMyD8_QupubOQXlDWLAqk0VHA"
-     ++ "byoEwjdCZhoXCxjuSa8xfdZxOMeiRMrtPbDhIiSJWlRjm3UBMXJXehIuLf1zH9jGtb3PuAPK4IB_JMh0IT-4t28"
-     ++ "bQKxJwUWixCUirVvCI4RQFjjgpIoJn7k4cFWOEFgaejyzqP7mt_mvsqws3rVEuUaViHs6hkbZ_ateTew";
+    "tBFYa_IZgELJqUxuRyKGQDsWWYVZO0GHU2VoZzGs8ALOaNcUbtCa50wrUo0cG8BBa069mmo_meOs0IsqOsZCZw4t" ++ "14l8SwHLd2mNthp69GO4djVqC586QAKJ1I8Ngn_uwTDxru9jONNAzu2F1fKiHCZMyD8_QupubOQXlDWLAqk0VHA" ++ "byoEwjdCZhoXCxjuSa8xfdZxOMeiRMrtPbDhIiSJWlRjm3UBMXJXehIuLf1zH9jGtb3PuAPK4IB_JMh0IT-4t28" ++ "bQKxJwUWixCUirVvCI4RQFjjgpIoJn7k4cFWOEFgaejyzqP7mt_mvsqws3rVEuUaViHs6hkbZ_ateTew";
 
 // RFC 7515 Appendix A.3: "Example JWS Using ECDSA P-256 SHA-256".
 

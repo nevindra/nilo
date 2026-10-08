@@ -11,7 +11,9 @@ points here rather than repeating them.
 
 ## Held by something
 
-**zio is a one-person project, and it could stop when Zig 0.17 lands.** The
+**zio is a one-person project, and it could stop at any Zig release.** It
+did not at 0.17: `main` carried the port within a week of the release,
+though no tag did yet. The
 Bulkhead, fitted from the first stage rather than patched on later
 ([ADR 001](./adr/001-zio-as-the-engine-behind-the-bulkhead.md)). It is the
 entire contract nilo asks of an Engine, listed in one file's header.

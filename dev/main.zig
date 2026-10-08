@@ -2,7 +2,7 @@
 //! ([ADR 190](../docs/adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)).
 //!
 //! ```
-//! nilo-dev [--zig <path>] [--build <step>] [--incremental] [--keep-cache] [-D<option>…] <exe> [-- <server args>]
+//! nilo-dev [--zig <path>] [--build <step>] [--no-incremental] [--keep-cache] [-D<option>…] <exe> [-- <server args>]
 //! ```
 //!
 //! This is not hot reloading and cannot be: a Zig binary does not swap its
@@ -32,8 +32,17 @@
 //! schema the sources no longer had. If that build fails the stale binary is
 //! removed, and the first build that compiles is the first thing started.
 //!
-//! **Every save leaves one file behind, and this file deletes the stale
-//! ones.** A rebuild that is not incremental writes the whole binary into a
+//! **The build is incremental unless asked otherwise.** The compiler stays
+//! resident and patches what it already made, so a save is served in under
+//! a second on Zig 0.17, against about four without it, for 189 MB of
+//! resident compiler per artifact the step builds. There is nothing to
+//! prune either: a directory the resident compiler is patching in place is
+//! not stale, so nothing is. On 0.16 its output only ran under LLVM when
+//! libc was linked, which every nilo server does through zio, and it was
+//! opt-in for that reason. The numbers are in the ADR.
+//!
+//! **`--no-incremental` is the other loop, and it deletes what it leaves
+//! behind.** A rebuild that is not incremental writes the whole binary into a
 //! new `.zig-cache/o/<hash>/` — 27 MB for `examples/hello`, the size of
 //! the Debug binary for anything else — and Zig evicts nothing, so a day of
 //! saves is a gigabyte. After every restart the runner walks `o/`, keeps
@@ -42,15 +51,6 @@
 //! the content: an undo back to a previous version rebuilds into the same
 //! directory rather than failing on a cache hit with nothing behind it,
 //! which was tried before it was relied on. `--keep-cache` turns it off.
-//!
-//! **`--incremental` is the other way to keep the cache flat, and it is
-//! opt-in.** The compiler stays resident and patches what it already made,
-//! so there is nothing to prune — and nothing is pruned, because a
-//! directory the resident compiler is patching in place is not stale. On
-//! Zig 0.16.0 its output only *runs* under the LLVM backend when libc is
-//! linked — and every nilo server links libc through zio — so the flag
-//! wants `exe.use_llvm = true` beside it, and costs an LLVM emit per save.
-//! The numbers, all five rows of them, are in the ADR.
 //!
 //! **The old server is asked, not killed.** SIGTERM, which nilo answers by
 //! draining what is in flight (ADR 077); SIGKILL only after `drain_ms`.
@@ -75,14 +75,16 @@ const Options = struct {
     exe: []const u8,
     zig: []const u8 = "zig",
     step: []const u8 = "install",
-    incremental: bool = false,
+    /// `--no-incremental` turns it off; `--incremental`, the flag from when
+    /// it was opt-in, is still accepted and changes nothing.
+    incremental: bool = true,
     /// `--keep-cache`: leave the stale `o/<hash>/` directories where they
     /// are.
     prune: bool = true,
     /// `--trace`: print the binary's stamp on every poll it changes.
     trace: bool = false,
-    /// `-D…` options handed on to `zig build`, so a project can flip the
-    /// backend for the dev loop alone: `-Dllvm`, say.
+    /// `-D…` options handed on to `zig build`, so a project can set
+    /// something for the dev loop alone: `-Dllvm`, say.
     build_options: []const []const u8 = &.{},
     server_args: []const []const u8 = &.{},
 };
@@ -169,7 +171,7 @@ var stopping: std.atomic.Value(bool) = .init(false);
 /// The signal number's type, read off `Sigaction` the way the Engine does.
 const SigNum = @typeInfo(@typeInfo(@typeInfo(
     @FieldType(@FieldType(std.posix.Sigaction, "handler"), "handler"),
-).optional.child).pointer.child).@"fn".params[0].type.?;
+).optional.child).pointer.child).@"fn".param_types[0].?;
 
 fn onSignal(_: SigNum) callconv(.c) void {
     stopping.store(true, .release);
@@ -256,9 +258,8 @@ pub fn main(init: std.process.Init) !void {
         if (server) |r| if (r.exited()) {
             say("the server exited ({s}); waiting for the next build", .{termText(r.exit)});
             if (opts.incremental and r.diedAtOnce(io) and r.exit != .signal) say(
-                "  if it said `undefined symbol: main`: on Zig 0.16.0 an incremental binary that " ++
-                    "links libc only runs under LLVM. Set `exe.use_llvm = true` for the dev loop, " ++
-                    "or drop --incremental",
+                "  if it died at start, try once with --no-incremental: " ++
+                    "the release notes list incremental compilation's known bugs",
                 .{},
             );
             r.waiter.join();
@@ -354,6 +355,8 @@ fn parse(arena: std.mem.Allocator, args: std.process.Args) ?Options {
             opts.step = it.next() orelse return null;
         } else if (std.mem.eql(u8, arg, "--incremental")) {
             opts.incremental = true;
+        } else if (std.mem.eql(u8, arg, "--no-incremental")) {
+            opts.incremental = false;
         } else if (std.mem.eql(u8, arg, "--keep-cache")) {
             opts.prune = false;
         } else if (std.mem.eql(u8, arg, "--trace")) {
@@ -376,14 +379,14 @@ fn parse(arena: std.mem.Allocator, args: std.process.Args) ?Options {
 
 fn usage() noreturn {
     std.debug.print(
-        \\usage: nilo-dev [--zig <path>] [--build <step>] [--incremental] [--keep-cache] [--trace] [-D<option>…] <exe> [-- <server args>]
+        \\usage: nilo-dev [--zig <path>] [--build <step>] [--no-incremental] [--keep-cache] [--trace] [-D<option>…] <exe> [-- <server args>]
         \\
         \\  runs `zig build <step> --watch` once, and starts <exe> again every time that
         \\  build writes it. --build defaults to `install`. -D options go to `zig build`.
-        \\  --incremental keeps the compiler resident and .zig-cache flat, at an LLVM
-        \\  emit a save on Zig 0.16.0 (`exe.use_llvm = true`). Without it every save
-        \\  leaves the previous binary in .zig-cache/o/, and the runner deletes those
-        \\  after each restart; --keep-cache leaves them.
+        \\  The build is incremental: the compiler stays resident, .zig-cache stays
+        \\  flat, and a save is served in under a second. --no-incremental rebuilds
+        \\  instead, every save leaves the previous binary in .zig-cache/o/, and the
+        \\  runner deletes those after each restart; --keep-cache leaves them.
         \\  --trace prints the binary's size and mtime whenever they move.
         \\
     , .{});
@@ -525,7 +528,7 @@ test "the exe is the one bare argument, and everything after -- is the server's"
     try testing.expectEqualStrings("zig-out/bin/app", opts.exe);
     try testing.expectEqualStrings("zig", opts.zig);
     try testing.expectEqualStrings("install", opts.step);
-    try testing.expect(!opts.incremental);
+    try testing.expect(opts.incremental);
     try testing.expectEqual(@as(usize, 2), opts.server_args.len);
     try testing.expectEqualStrings("--port", opts.server_args[0]);
     try testing.expectEqualStrings("9000", opts.server_args[1]);
@@ -535,16 +538,23 @@ test "the flags name the zig, the step, the incremental mode, and -D options go 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const opts = parse(arena.allocator(), argsOf(&.{
-        "nilo-dev",      "--zig",  "/opt/zig/zig",  "--build",                   "example-hello",
-        "--incremental", "-Dllvm", "-Dstrip=false", "zig-out/bin/example-hello",
+        "nilo-dev",         "--zig",  "/opt/zig/zig",  "--build",                   "example-hello",
+        "--no-incremental", "-Dllvm", "-Dstrip=false", "zig-out/bin/example-hello",
     })).?;
     try testing.expectEqualStrings("/opt/zig/zig", opts.zig);
     try testing.expectEqualStrings("example-hello", opts.step);
-    try testing.expect(opts.incremental);
+    try testing.expect(!opts.incremental);
     try testing.expectEqual(@as(usize, 2), opts.build_options.len);
     try testing.expectEqualStrings("-Dllvm", opts.build_options[0]);
     try testing.expectEqualStrings("-Dstrip=false", opts.build_options[1]);
     try testing.expectEqualStrings("zig-out/bin/example-hello", opts.exe);
+}
+
+test "--incremental, the flag from when it was opt-in, still parses and changes nothing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const opts = parse(arena.allocator(), argsOf(&.{ "nilo-dev", "--incremental", "zig-out/bin/app" })).?;
+    try testing.expect(opts.incremental);
 }
 
 test "no exe, two exes, a flag with no value, or a flag nobody knows is usage" {

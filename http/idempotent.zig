@@ -149,7 +149,7 @@ const prefix = 1 + 2 + 8 + 2;
 /// The bytes a marker for a request in flight takes.
 pub fn marker(fingerprint: u64) [prefix]u8 {
     var out: [prefix]u8 = undefined;
-    out[0] = @intFromEnum(Kind.in_flight);
+    out[0] = @backingInt(Kind.in_flight);
     std.mem.writeInt(u16, out[1..3], 0, .little);
     std.mem.writeInt(u64, out[3..11], fingerprint, .little);
     std.mem.writeInt(u16, out[11..13], 0, .little);
@@ -181,7 +181,7 @@ pub fn encode(
     const llen: usize = if (labelled) 2 + content_type.len else 0;
 
     const out = try arena.alloc(u8, prefix + hlen + llen + body.len);
-    out[0] = @intFromEnum(kind);
+    out[0] = @backingInt(kind);
     std.mem.writeInt(u16, out[1..3], status, .little);
     std.mem.writeInt(u64, out[3..11], fingerprint, .little);
     std.mem.writeInt(u16, out[11..13], @intCast(hlen), .little);
@@ -214,8 +214,8 @@ pub fn encode(
 /// that were never a record — which is a miss, and the request runs.
 pub fn decode(bytes: []const u8) ?Record {
     if (bytes.len < prefix) return null;
-    if (bytes[0] > @intFromEnum(Kind.own)) return null;
-    const kind: Kind = @enumFromInt(bytes[0]);
+    if (bytes[0] > @backingInt(Kind.own)) return null;
+    const kind: Kind = @fromBackingInt(@intCast(bytes[0]));
     const hlen = std.mem.readInt(u16, bytes[11..13], .little);
     if (bytes.len < prefix + hlen) return null;
     var rest = bytes[prefix + hlen ..];

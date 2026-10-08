@@ -255,14 +255,14 @@ pub fn Jobs(comptime options: anytype) type {
         "nilo: `job.Jobs`'s `.kinds` is not a list.\n" ++
             "  Write `.kinds = .{ SendWelcome, Nightly }`, a tuple of job types.",
     );
-    comptime var kinds_list: [kinds_info.@"struct".fields.len]type = undefined;
-    inline for (kinds_info.@"struct".fields, 0..) |f, i| {
-        if (f.type != type) @compileError(
+    comptime var kinds_list: [kinds_info.@"struct".field_names.len]type = undefined;
+    inline for (kinds_info.@"struct".field_names, kinds_info.@"struct".field_types, 0..) |fname, FT, i| {
+        if (FT != type) @compileError(
             "nilo: `job.Jobs`'s `.kinds` holds something that is not a type at position " ++
                 std.fmt.comptimePrint("{d}", .{i}) ++ ".\n" ++
                 "  Every entry is a job struct: `.kinds = .{ SendWelcome, Nightly }`.",
         );
-        kinds_list[i] = @field(kinds_tuple, f.name);
+        kinds_list[i] = @field(kinds_tuple, fname);
     }
     const kinds: [kinds_list.len]type = kinds_list;
 
@@ -588,10 +588,10 @@ pub fn Jobs(comptime options: anytype) type {
                 "nilo: `jobs.push`'s last argument is the options and it has to be a struct.\n" ++
                     "  `.{}` for none; `.{ .after_ms = 60_000 }`, `.{ .at = micros }`, `.{ .unique = key }`.",
             );
-            for (info.@"struct".fields) |f| {
-                if (!std.mem.eql(u8, f.name, "unique") and !std.mem.eql(u8, f.name, "within") and
-                    !std.mem.eql(u8, f.name, "after_ms") and !std.mem.eql(u8, f.name, "at"))
-                    @compileError("nilo: `jobs.push` does not know the option `." ++ f.name ++ "`.\n" ++
+            for (info.@"struct".field_names) |fname| {
+                if (!std.mem.eql(u8, fname, "unique") and !std.mem.eql(u8, fname, "within") and
+                    !std.mem.eql(u8, fname, "after_ms") and !std.mem.eql(u8, fname, "at"))
+                    @compileError("nilo: `jobs.push` does not know the option `." ++ fname ++ "`.\n" ++
                         "  The options are `.after_ms`, `.at`, `.unique` and `.within`.");
             }
             if (@hasField(O, "after_ms") and @hasField(O, "at")) @compileError(
@@ -1090,8 +1090,8 @@ pub fn Jobs(comptime options: anytype) type {
         /// the set's names, so a kind with no `final` costs nothing here.
         fn isFinal(comptime K: type, err: anyerror) bool {
             if (comptime !@hasDecl(K, "final")) return false;
-            inline for (comptime @typeInfo(K.final).error_set.?) |e| {
-                if (err == @field(anyerror, e.name)) return true;
+            inline for (comptime @typeInfo(K.final).error_set.error_names.?) |name| {
+                if (err == @field(anyerror, name)) return true;
             }
             return false;
         }
@@ -1171,12 +1171,12 @@ pub fn Jobs(comptime options: anytype) type {
         /// where a `job.Tick` is asked for, and every pointer looked up in
         /// `deps` by type.
         fn call(self: *Self, comptime K: type, value: K, scope: anytype, tick: Tick) anyerror!void {
-            const params = @typeInfo(@TypeOf(K.run)).@"fn".params;
+            const param_types = @typeInfo(@TypeOf(K.run)).@"fn".param_types;
             var args: std.meta.ArgsTuple(@TypeOf(K.run)) = undefined;
             args[0] = value;
             args[1] = runOf(scope);
-            inline for (params[2..], 2..) |p, i| {
-                const P = p.type.?;
+            inline for (param_types[2..], 2..) |PT, i| {
+                const P = PT.?;
                 if (P == Tick) {
                     args[i] = tick;
                 } else {
@@ -1288,7 +1288,7 @@ fn depsIsFn(comptime T: type) bool {
     );
     const f = info.@"fn";
     const returns_a_type = f.return_type == null or f.return_type.? == type;
-    const takes_a_type = f.params.len == 1 and (f.params[0].type == null or f.params[0].type.? == type);
+    const takes_a_type = f.param_types.len == 1 and (f.param_types[0] == null or f.param_types[0].? == type);
     if (!returns_a_type or !takes_a_type) @compileError(
         "nilo: `job.Jobs`'s `.deps` is a function, and it does not have the shape `fn (comptime Jobs: type) type`.\n" ++
             "  A `run` that pushes the next job asks for `*Jobs`, and `Jobs` does not exist while its own `.deps` is being read, " ++
@@ -1304,8 +1304,9 @@ fn depsIsFn(comptime T: type) bool {
 /// arguments, so a queue whose checks were deferred and never reached
 /// still cannot run a `run` that asks for something nobody gave.
 fn depField(comptime name: []const u8, comptime Deps: type, comptime P: type) []const u8 {
-    for (@typeInfo(Deps).@"struct".fields) |f| {
-        if (f.type == P) return f.name;
+    const info = @typeInfo(Deps).@"struct";
+    for (info.field_names, info.field_types) |fname, FT| {
+        if (FT == P) return fname;
     }
     @compileError(
         "nilo: the job " ++ name ++ "'s `run` asks for a " ++ @typeName(P) ++ ", and `job.Jobs`'s `.deps` has no such thing.\n" ++
@@ -1331,7 +1332,7 @@ fn budget(comptime kinds: []const type) u32 {
         var fields: u64 = 0;
         for (kinds) |K| {
             longest = @max(longest, @typeName(K).len);
-            if (@typeInfo(K) == .@"struct") fields += @typeInfo(K).@"struct".fields.len;
+            if (@typeInfo(K) == .@"struct") fields += @typeInfo(K).@"struct".field_names.len;
         }
         const n: u64 = kinds.len;
         return @intCast(@min(20_000 + 100 * (n + 1) * (n + 1) * longest + 4_000 * fields, std.math.maxInt(u32)));
@@ -1379,7 +1380,7 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type) void {
             );
         }
 
-        for (@typeInfo(K).@"struct".fields) |f| checkPayload(f.type, name, name ++ "." ++ f.name);
+        for (@typeInfo(K).@"struct".field_names, @typeInfo(K).@"struct".field_types) |fname, FT| checkPayload(FT, name, name ++ "." ++ fname);
 
         if (!@hasDecl(K, "retry")) @compileError(
             "nilo: the job " ++ name ++ " says nothing about `retry`, and a job that fails has to say what happens next.\n" ++
@@ -1391,7 +1392,7 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type) void {
                 "  `pub const retry: job.Retry = …` — the type on the declaration is what makes it one.",
         );
         if (@hasDecl(K, "final")) {
-            if (@TypeOf(K.final) != type or @typeInfo(K.final) != .error_set or @typeInfo(K.final).error_set == null) @compileError(
+            if (@TypeOf(K.final) != type or @typeInfo(K.final) != .error_set or @typeInfo(K.final).error_set.error_names == null) @compileError(
                 "nilo: the job " ++ name ++ "'s `final` is not an error set.\n" ++
                     "  It names the failures that are final: `pub const final = error{ Rejected };` — " ++
                     "a `run` that fails with one of them is dead on that attempt, whatever `retry` says (ADR 179).",
@@ -1440,9 +1441,9 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type) void {
                 "nilo: the scheduled job " ++ name ++ "'s `missed` is not a `job.Missed`.\n" ++
                     "  `pub const missed: job.Missed = .drop;` or `.catch_up`.",
             );
-            for (@typeInfo(K).@"struct".fields) |f| {
-                if (f.default_value_ptr == null) @compileError(
-                    "nilo: the scheduled job " ++ name ++ " has a field `" ++ f.name ++ "` with no default, and nobody pushes a scheduled job.\n" ++
+            for (@typeInfo(K).@"struct".field_names, @typeInfo(K).@"struct".field_attrs) |fname, attrs| {
+                if (attrs.default_value_ptr == null) @compileError(
+                    "nilo: the scheduled job " ++ name ++ " has a field `" ++ fname ++ "` with no default, and nobody pushes a scheduled job.\n" ++
                         "  The clock does, with nothing in hand. Give the field a default, or take it out.",
                 );
             }
@@ -1456,13 +1457,13 @@ fn checkPayload(comptime T: type, comptime job_name: []const u8, comptime path: 
         .int, .float, .bool, .@"enum", .void => {},
         .optional => |o| checkPayload(o.child, job_name, path ++ ".?"),
         .array => |a| checkPayload(a.child, job_name, path ++ "[0]"),
-        .@"struct" => |s| for (s.fields) |f| checkPayload(f.type, job_name, path ++ "." ++ f.name),
+        .@"struct" => |s| for (s.field_names, s.field_types) |fname, FT| checkPayload(FT, job_name, path ++ "." ++ fname),
         .@"union" => |u| {
             if (u.tag_type == null) @compileError(
                 "nilo: the job " ++ job_name ++ " cannot carry `" ++ path ++ "`, which is an untagged union.\n" ++
                     "  A payload is written as JSON and read back, and an untagged union does not say which arm it is.",
             );
-            for (u.fields) |f| checkPayload(f.type, job_name, path ++ "." ++ f.name);
+            for (u.field_names, u.field_types) |fname, FT| checkPayload(FT, job_name, path ++ "." ++ fname);
         },
         .pointer => |p| {
             if (p.size == .slice) {
@@ -1496,9 +1497,10 @@ fn checkDepsShape(comptime Deps: type) void {
         "nilo: `job.Jobs`'s `.deps` is " ++ @typeName(Deps) ++ ", and it has to be a struct of pointers.\n" ++
             "  `.deps = struct { db: *Db, mail: *Mailer }` — one field per service a `run` may ask for.",
     );
-    for (@typeInfo(Deps).@"struct".fields) |f| {
-        if (@typeInfo(f.type) != .pointer or @typeInfo(f.type).pointer.size != .one) @compileError(
-            "nilo: `job.Jobs`'s `.deps." ++ f.name ++ "` is " ++ @typeName(f.type) ++ ", and a dep is a pointer.\n" ++
+    const deps_info = @typeInfo(Deps).@"struct";
+    for (deps_info.field_names, deps_info.field_types) |fname, FT| {
+        if (@typeInfo(FT) != .pointer or @typeInfo(FT).pointer.size != .one) @compileError(
+            "nilo: `job.Jobs`'s `.deps." ++ fname ++ "` is " ++ @typeName(FT) ++ ", and a dep is a pointer.\n" ++
                 "  A `run` asks for a service by `*T`, the way a route does; a value has no address to hand it.",
         );
     }
@@ -1514,23 +1516,23 @@ fn checkRun(comptime K: type, comptime name: []const u8, comptime Deps: type) vo
         "nilo: the job " ++ name ++ "'s `run` is not a function.\n" ++
             "  `pub fn run(self: " ++ name ++ ", scope: *nilo.Run) !void`",
     );
-    const params = info.@"fn".params;
+    const params = info.@"fn".param_types;
     const shape = "\n  `pub fn run(self: " ++ name ++ ", scope: *nilo.Run, …) !void` — the job by value, then the Run, then any service by pointer, and `tick: job.Tick` by value if it wants to know which tick it is.";
     if (params.len < 2) @compileError(
         "nilo: the job " ++ name ++ "'s `run` takes " ++ std.fmt.comptimePrint("{d}", .{params.len}) ++
             " argument(s), and it takes at least two." ++ shape,
     );
-    if (params[0].type != K) @compileError(
-        "nilo: the job " ++ name ++ "'s `run` takes " ++ @typeName(params[0].type orelse void) ++
+    if (params[0] != K) @compileError(
+        "nilo: the job " ++ name ++ "'s `run` takes " ++ @typeName(params[0] orelse void) ++
             " first, and it takes the job itself, by value." ++ shape,
     );
-    if (params[1].type != *core.Run) @compileError(
-        "nilo: the job " ++ name ++ "'s `run` takes " ++ @typeName(params[1].type orelse void) ++
+    if (params[1] != *core.Run) @compileError(
+        "nilo: the job " ++ name ++ "'s `run` takes " ++ @typeName(params[1] orelse void) ++
             " second, and it takes a `*nilo.Run`." ++ shape ++
             "\n  Not a `*Ctx`: a job runs with no request to answer, so there is nothing for a fail function to write into.",
     );
-    for (params[2..], 2..) |p, i| {
-        const P = p.type orelse @compileError(
+    for (params[2..], 2..) |PT, i| {
+        const P = PT orelse @compileError(
             "nilo: the job " ++ name ++ "'s `run` has an `anytype` argument at position " ++
                 std.fmt.comptimePrint("{d}", .{i}) ++ ", and a service is asked for by its type." ++ shape,
         );
@@ -2379,7 +2381,7 @@ const FakeSpace = struct {
 
     const Entry = struct { id: Id, status: Status };
 
-    slots: [8]?Entry = [_]?Entry{null} ** 8,
+    slots: [8]?Entry = @splat(null),
 
     pub fn get(self: *FakeSpace, key: []const u8) ?Status {
         const id = std.fmt.parseInt(Id, key, 10) catch return null;
@@ -3009,7 +3011,7 @@ fn WideKind(comptime n: usize) type {
 const wide_kind_count = 40;
 const wide_kinds = blk: {
     @setEvalBranchQuota(100_000);
-    const Tuple = std.meta.Tuple(&([_]type{type} ** wide_kind_count));
+    const Tuple = @Tuple(&(@as([wide_kind_count]type, @splat(type))));
     var tuple: Tuple = undefined;
     for (0..wide_kind_count) |i| tuple[i] = WideKind(i);
     break :blk tuple;

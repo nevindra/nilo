@@ -1027,7 +1027,7 @@ test "a post carries the frame nilo would have written by hand" {
     room.release(binary);
 
     // And a message past 125 bytes takes the longer header, still once.
-    try room.sayText("z" ** 300);
+    try room.sayText(&@as([300]u8, @splat('z')));
     const long = room.take(ticket).?;
     const framed = room.framedBytes(long);
     try testing.expectEqualStrings("\x81\x7e\x01\x2c", framed[0..4]);
@@ -1057,10 +1057,10 @@ test "a formatted message and a JSON one need no buffer of the caller's own" {
 
     // Longer than the counter's own scratch buffer, so the counting pass has
     // to have drained rather than only measured what it held.
-    try room.print("{s}", .{"y" ** 900});
+    try room.print("{s}", .{&@as([900]u8, @splat('y'))});
     const long = room.take(ticket).?;
     try testing.expectEqual(@as(usize, 900), room.contentsOf(long).data.len);
-    try testing.expectEqualStrings("y" ** 900, room.contentsOf(long).data);
+    try testing.expectEqualStrings(&@as([900]u8, @splat('y')), room.contentsOf(long).data);
     room.release(long);
 }
 
@@ -1337,7 +1337,7 @@ test "the roll keeps every seat once, however the room fills and empties" {
 /// Every seat index exactly once, the taken ones in front, and every taken
 /// seat's `slot` pointing back at where it sits.
 fn expectWholeRoll(room: *Room) !void {
-    var seen = [_]bool{false} ** 64;
+    var seen = @as([64]bool, @splat(false));
     for (room.roll) |index| {
         try testing.expect(!seen[index]);
         seen[index] = true;
@@ -1412,7 +1412,7 @@ test "a room with history keeps its latest text posts, inside both bounds" {
 
     // A post bigger than the whole byte bound is not kept, and costs nothing
     // already kept.
-    try room.sayText("x" ** 300);
+    try room.sayText(&@as([300]u8, @splat('x')));
     try testing.expectEqual(@as(usize, 3), room.kept_count);
     try testing.expect(room.kept_bytes <= 200);
 

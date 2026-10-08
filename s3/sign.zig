@@ -115,9 +115,9 @@ pub const Signed = struct {
     }
 
     /// The value in a field, whether or not it is optional.
-    fn valueOf(self: Signed, comptime field: std.builtin.Type.StructField) ?[]const u8 {
-        const v = @field(self, field.name);
-        return switch (@typeInfo(field.type)) {
+    fn valueOf(self: Signed, comptime name: []const u8) ?[]const u8 {
+        const v = @field(self, name);
+        return switch (@typeInfo(@FieldType(Signed, name))) {
             .optional => v,
             else => v,
         };
@@ -129,10 +129,10 @@ pub const Signed = struct {
 // here rather than producing signatures S3 rejects with
 // `SignatureDoesNotMatch` and no hint as to which byte did it.
 comptime {
-    const fields = @typeInfo(Signed).@"struct".fields;
-    for (fields[1..], 0..) |field, i| {
-        const before = Signed.wireName(fields[i].name);
-        const here = Signed.wireName(field.name);
+    const names = @typeInfo(Signed).@"struct".field_names;
+    for (names[1..], 0..) |name, i| {
+        const before = Signed.wireName(names[i]);
+        const here = Signed.wireName(name);
         if (std.mem.order(u8, before, here) != .lt) @compileError(
             "nilo: the headers SigV4 signs have to be listed in sorted order, and `" ++
                 here ++ "` is not after `" ++ before ++ "`.\n" ++
@@ -146,7 +146,7 @@ comptime {
 /// by semicolons. Comptime, so a caller's buffer cannot be one byte short.
 pub const signed_headers_max = blk: {
     var n: usize = 0;
-    for (@typeInfo(Signed).@"struct".fields) |field| n += Signed.wireName(field.name).len + 1;
+    for (@typeInfo(Signed).@"struct".field_names) |name| n += Signed.wireName(name).len + 1;
     break :blk n;
 };
 
@@ -313,15 +313,15 @@ pub const Request = struct {
 /// so this is a walk rather than a sort.
 pub fn signedHeaders(out: *[signed_headers_max]u8, headers: Signed) []const u8 {
     var n: usize = 0;
-    inline for (@typeInfo(Signed).@"struct".fields) |field| {
-        if (headers.valueOf(field) != null) {
+    inline for (@typeInfo(Signed).@"struct".field_names) |name| {
+        if (headers.valueOf(name) != null) {
             if (n != 0) {
                 out[n] = ';';
                 n += 1;
             }
-            const name = Signed.wireName(field.name);
-            @memcpy(out[n..][0..name.len], name);
-            n += name.len;
+            const wire = Signed.wireName(name);
+            @memcpy(out[n..][0..wire.len], wire);
+            n += wire.len;
         }
     }
     return out[0..n];
@@ -367,9 +367,9 @@ pub fn canonicalHash(req: Request, headers_list: []const u8) [32]u8 {
     w.writeAll(req.query) catch unreachable;
     w.writeByte('\n') catch unreachable;
 
-    inline for (@typeInfo(Signed).@"struct".fields) |field| {
-        if (req.headers.valueOf(field)) |value| {
-            w.writeAll(Signed.wireName(field.name)) catch unreachable;
+    inline for (@typeInfo(Signed).@"struct".field_names) |name| {
+        if (req.headers.valueOf(name)) |value| {
+            w.writeAll(Signed.wireName(name)) catch unreachable;
             w.writeByte(':') catch unreachable;
             // Folded, because SigV4 canonicalises the value: leading and
             // trailing whitespace go and every run inside becomes one space
@@ -939,7 +939,7 @@ test "a header value with a run of spaces or tabs inside it signs as AWS's Trima
 }
 
 test "a secret longer than the ceiling is refused rather than truncated" {
-    const long = "x" ** (secret_max + 1);
+    const long = &@as([(secret_max + 1)]u8, @splat('x'));
     try testing.expectError(error.SecretTooLong, derive(long, "20130524", "us-east-1"));
 }
 
@@ -1065,7 +1065,7 @@ test "policySize is a ceiling rather than an estimate" {
     // by `policySize`, so being one byte short is a panic in production rather
     // than an error. The worst case is every byte of every runtime part
     // needing a six-byte escape.
-    const worst = "\x01" ** 64;
+    const worst = &@as([64]u8, @splat('\x01'));
     const p: Policy = .{
         .bucket = worst,
         .key = worst,

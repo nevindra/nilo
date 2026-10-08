@@ -440,7 +440,7 @@ test "an edit can leave a field alone, replace it, or empty it out" {
 
     const doc = try store.file(arena, "kantor", .{
         .title = "laporan",
-        .meta = .{ .author = "wati", .@"type" = .invoice },
+        .meta = .{ .author = "wati", .type = .invoice },
     });
 
     const untouched = (try store.edit(arena, doc.id, .{})).?;
@@ -449,10 +449,10 @@ test "an edit can leave a field alone, replace it, or empty it out" {
 
     const replaced = (try store.edit(arena, doc.id, .{
         .title = "laporan akhir",
-        .meta = .{ .set = .{ .author = "budi", .@"type" = .contract } },
+        .meta = .{ .set = .{ .author = "budi", .type = .contract } },
     })).?;
     try testing.expectEqualStrings("laporan akhir", replaced.title);
-    try testing.expectEqual(domain.Kind.contract, replaced.meta.?.@"type");
+    try testing.expectEqual(domain.Kind.contract, replaced.meta.?.type);
 
     const cleared = (try store.edit(arena, doc.id, .{ .meta = .clear })).?;
     try testing.expectEqual(@as(?domain.Meta(Text), null), cleared.meta);

@@ -1,10 +1,10 @@
 # Getting started
 
-**Add nilo to a Zig 0.16 project, write a first server, and restart it on every save.**
+**Add nilo to a Zig 0.17 project, write a first server, and restart it on every save.**
 
 **Reference:** [`App`](../reference/app.md#app), [`listen` options](../reference/app.md#listen-options), [root wiring](../reference/README.md#declarations-in-the-root-file) · **Design:** [nilo's design principles](../design/principles.md)
 
-nilo needs **Zig 0.16**. Nothing else: no C library, no system package.
+nilo needs **Zig 0.17**. Nothing else: no C library, no system package. **v0.7.0, the tag pinned below, and every tag before it build on Zig 0.16.0**, and this page describes `main`: with 0.16, pin the tag and read the page at that tag.
 
 ## Add it to your project
 
@@ -15,7 +15,7 @@ zig init
 zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
 ```
 
-That writes nilo into your `build.zig.zon`, pinned to the commit the tag points at. **Keep the `#commit`.** The `?ref=` on its own is not a pin: nilo's tags are annotated, Zig 0.16's `zig fetch` does not resolve an annotated tag, and what it gives you for `?ref=v0.7.0` alone is whatever `main` was that day. Two people installing a week apart would get two different versions, and neither asked for one. The commit for each tag is on [its release page](https://github.com/nevindra/nilo/releases).
+That writes nilo into your `build.zig.zon`, pinned to the commit the tag points at. **Keep the `#commit`.** The `?ref=` on its own is not a pin: nilo's tags are annotated, `zig fetch` does not resolve an annotated tag (checked again on 0.17.0), and what it gives you for `?ref=v0.7.0` alone is whatever `main` was that day. Two people installing a week apart would get two different versions, and neither asked for one. The commit for each tag is on [its release page](https://github.com/nevindra/nilo/releases).
 
 `zig init` leaves a library-and-executable scaffold built around `src/root.zig`, which is not what you want. **Replace the generated `build.zig` with the one below instead of pasting into it, and delete `src/root.zig`.** That template comes from Zig, and nilo can't change it. Keep `build.zig.zon`, which is where `zig fetch` just wrote nilo.
 
@@ -127,19 +127,26 @@ wati
 
 ## Restarting on every save
 
-**`nilo-dev` rebuilds and restarts your server every time you save.** A Zig binary cannot swap its own code, so there is no hot reload. Instead, `nilo-dev` (shipped with the package) runs one `zig build --watch` and restarts your server whenever the binary it produces changes ([ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)). Add four lines under the `run` step:
+**`nilo-dev` rebuilds and restarts your server every time you save.** A Zig binary cannot swap its own code, so there is no hot reload. Instead, `nilo-dev` (shipped with the package) runs one `zig build --watch` and restarts your server whenever the binary it produces changes ([ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)). Add these lines under the `run` step:
 
 ```zig
 const dev = b.addRunArtifact(nilo.artifact("nilo-dev"));
-dev.addArgs(&.{ "--zig", b.graph.zig_exe, b.getInstallPath(.bin, exe.out_filename) });
-if (b.args) |args| dev.addArgs(args); // what follows `--` on the command line
+dev.addArg("--zig");
+dev.addFileArg(.zig_exe);
+dev.addPassthruArgs(); // what follows `--` on the command line
+// Where `install` puts the binary: a directory argument, because a file one
+// would be an input, and this one is written by the build nilo-dev starts.
+dev.addDirectoryArg2(
+    .{ .relative = .{ .base = .install_bin, .sub_path = exe.out_filename } },
+    .{ .make_absolute = true },
+);
 b.step("dev", "Rebuild and restart on every save").dependOn(&dev.step);
 ```
 
 ```
 $ zig build dev
-nilo-dev: building with `zig build install` before starting anything
-nilo-dev: watching with `zig build install --watch`; serving zig-out/bin/my-app when it is written
+nilo-dev: building with `zig build install -fincremental` before starting anything
+nilo-dev: watching with `zig build install --watch -fincremental`; serving zig-out/bin/my-app when it is written
 nilo-dev: started zig-out/bin/my-app (pid 41022)
 info: nilo listening on 127.0.0.1:8787 across 8 thread(s)
    ← save a file
@@ -162,21 +169,17 @@ A build step that reads the front end (an `installDirectory` of its assets, say)
 
 **A build that fails changes nothing.** The errors print, the old server keeps serving, and the next save that compiles restarts it. The old server gets SIGTERM and five seconds to finish what it was answering before it is killed. Ctrl-C stops everything.
 
-The fourth line is what passes anything after `--` to `nilo-dev`: `-D` options go to the `zig build` it keeps running (for example `-Dtarget=x86_64-linux-gnu` on a host with the [link error](#fixing-the-sframe-link-error)), a second `--` and what follows go to your server, and `--build <step>` picks a build step other than `install`.
+`addPassthruArgs` is what passes anything after `--` to `nilo-dev`: `-D` options go to the `zig build` it keeps running (for example `-Dtarget=x86_64-linux-gnu` on a host with the [link error](#fixing-the-sframe-link-error)), a second `--` and what follows go to your server, and `--build <step>` picks a build step other than `install`.
 
-**Every save writes a whole new binary into `.zig-cache`, and Zig never deletes the old one**: 27 MB a save for the smallest example, the size of your program for yours. So after each restart, `nilo-dev` deletes the cache directories holding earlier builds of the binary it serves, and nothing else. Four saves in a row left the cache 0.0 MB larger. Undo is safe: going back to a version it deleted rebuilds it. `--keep-cache` keeps them.
+**The build is incremental, so a save is served in under a second.** The compiler stays running and patches what it already built: on two cores, a save to `examples/hello` is answered by the new server 0.56 to 0.70 s later, where a full rebuild takes 3.6 to 4.5 s. It costs memory, 189 MB of resident compiler per binary the step builds, and it keeps `.zig-cache` from growing ([ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)). On Zig 0.16 it needed `exe.use_llvm = true` and was off by default; 0.17 needs nothing.
 
-`--incremental` is the other way to keep the cache flat: the compiler stays running and patches what it already built, so a rebuild takes milliseconds when there are cores free. On 0.16.0 its output only runs under the LLVM backend when libc is linked, which every nilo server does through zio. So the flag needs one more line in `build.zig`, and costs an LLVM build step per save:
-
-```zig
-exe.use_llvm = true; // or behind a -D option, for the dev loop only
-```
+`--no-incremental` rebuilds on every save instead, for a machine short of memory or a bug in incremental compilation:
 
 ```
-$ zig build dev -- --incremental
+$ zig build dev -- --no-incremental
 ```
 
-The numbers behind both paragraphs (0.12 s for an incremental binary that did not run, 27 MB a save for one that did) are in [`bench/result/build.md`](../../bench/result/build.md#what-a-restart-on-save-costs-per-save). Files served by `staticWith(.{ .reload = true })` need none of this, because they are already read from disk per request ([static files](./static-files.md)).
+**A rebuild writes a whole new binary into `.zig-cache`, and Zig never deletes the old one**: 27 MB a save for the smallest example, the size of your program for yours. So under `--no-incremental`, after each restart, `nilo-dev` deletes the cache directories holding earlier builds of the binary it serves. Four saves in a row left the cache 0.0 MB larger. Undo is safe: going back to a version it deleted rebuilds it. A build of the same binary for another target or mode loses its cache entry too, and fails until it is rebuilt from a clean cache, which is a known bug. `--keep-cache` keeps them. The numbers behind both paragraphs are in [`bench/result/build.md`](../../bench/result/build.md#what-a-save-costs-on-zig-017). Files served by `staticWith(.{ .reload = true })` need none of this, because they are already read from disk per request ([static files](./static-files.md)).
 
 ## Logging setup: `std_options` and `debug_io`
 

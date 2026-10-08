@@ -760,9 +760,7 @@ test "the case-folding unique is the one that stops two addresses differing only
         .where = .{ .email = .{ .ieq = @as([]const u8, "") } },
     })).sql;
     try testing.expect(std.mem.endsWith(u8, where_ieq, "WHERE \"email\" COLLATE NOCASE = ?1 COLLATE NOCASE"));
-    const plan = try fx.db.raw(Step, &fx.run,
-        "EXPLAIN QUERY PLAN SELECT * FROM \"users\" WHERE \"email\" COLLATE NOCASE = $1 COLLATE NOCASE",
-        .{@as([]const u8, "wati@example.dev")});
+    const plan = try fx.db.raw(Step, &fx.run, "EXPLAIN QUERY PLAN SELECT * FROM \"users\" WHERE \"email\" COLLATE NOCASE = $1 COLLATE NOCASE", .{@as([]const u8, "wati@example.dev")});
     try testing.expect(plan.len > 0);
     try testing.expect(std.mem.indexOf(u8, plan[0].detail, "USING INDEX") != null);
 }

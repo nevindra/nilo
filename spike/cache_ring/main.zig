@@ -504,12 +504,9 @@ fn torture(gpa: std.mem.Allocator, writers: usize, readers: usize, seconds: u64,
         \\  WRONG     {d}
         \\
     , .{
-        writers,       readers,                                                    seconds, ring_mb, keys,
-        total.puts,    total.gets,
-        total.hits,    pct(total.hits, total.gets),
-        total.raced,   pct(total.raced, total.gets),
-        total.evicted, total.absent,
-        total.wrong,
+        writers,                      readers,       seconds,      ring_mb,                     keys,
+        total.puts,                   total.gets,    total.hits,   pct(total.hits, total.gets), total.raced,
+        pct(total.raced, total.gets), total.evicted, total.absent, total.wrong,
     });
     if (total.wrong != 0) std.process.exit(1);
 }

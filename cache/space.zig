@@ -448,13 +448,13 @@ test "a claim on a Space goes to whoever was first, and getInto reads without a 
     var short: [4]u8 = undefined;
     try testing.expect(jobs.getInto("nightly", &short) == null);
 
-    try testing.expectError(error.TooLarge, jobs.putIfAbsent("big", "x" ** 65));
+    try testing.expectError(error.TooLarge, jobs.putIfAbsent("big", &@as([65]u8, @splat('x'))));
 
     // The same claim with a lifetime of its own is still a claim.
     try testing.expect(try jobs.putIfAbsentFor("weekly", "worker-1", 60));
     try testing.expect(!try jobs.putIfAbsentFor("weekly", "worker-2", 60));
     try testing.expectEqualStrings("worker-1", jobs.getInto("weekly", &buf).?);
-    try testing.expectError(error.TooLarge, jobs.putIfAbsentFor("big", "x" ** 65, 60));
+    try testing.expectError(error.TooLarge, jobs.putIfAbsentFor("big", &@as([65]u8, @splat('x')), 60));
 
     const Locks = Space("lock", u32, .{});
     const locks = Locks.open(&store);
@@ -475,7 +475,7 @@ test "incr on a key too large for the cache is an error rather than a count" {
     const Attempts = Space("attempts", u32, .{ .ttl_s = 60 });
     var attempts = Attempts.open(&store);
 
-    try testing.expectError(error.TooLarge, attempts.incr("k" ** 70_000, 1));
+    try testing.expectError(error.TooLarge, attempts.incr(&@as([70_000]u8, @splat('k')), 1));
     try testing.expectEqual(@as(u32, 1), try attempts.incr("ada@example", 1));
 }
 

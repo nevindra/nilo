@@ -562,7 +562,7 @@ test "rapid reset: a call the client cancels still counts against the cap until 
         const head = h2.Header.parse(try reader.interface.takeArray(h2.header_len));
         const payload = try reader.interface.take(head.len);
         if (head.type == .rst_stream and
-            std.mem.readInt(u32, payload[0..4], .big) == @intFromEnum(h2.ErrorCode.refused_stream)) refused += 1;
+            std.mem.readInt(u32, payload[0..4], .big) == @backingInt(h2.ErrorCode.refused_stream)) refused += 1;
         if (head.type == .goaway) return error.SentAway;
         if (head.type == .ping and head.has(h2.Flags.ack)) break;
     }
@@ -667,7 +667,7 @@ test "a zero window is let go of on time however often the client sends a frame"
     // having gone, which is the point.
     for (0..20) |_| {
         std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
-        h2.writeHeader(&writer.interface, 0, @enumFromInt(0x20), 0, 0) catch break;
+        h2.writeHeader(&writer.interface, 0, @fromBackingInt(@intCast(0x20)), 0, 0) catch break;
         writer.interface.flush() catch break;
     }
     while (true) {
@@ -744,7 +744,7 @@ test "a call whose message never finishes arriving is cancelled, and the connect
         const payload = try reader.interface.take(head.len);
         if (head.type == .goaway) return error.SentAway;
         if (head.type == .rst_stream and head.stream == 1)
-            cancelled = @enumFromInt(std.mem.readInt(u32, payload[0..4], .big));
+            cancelled = @fromBackingInt(@intCast(std.mem.readInt(u32, payload[0..4], .big)));
     }
     try testing.expectEqual(h2.ErrorCode.cancel, cancelled.?);
 

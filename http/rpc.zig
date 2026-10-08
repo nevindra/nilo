@@ -56,12 +56,12 @@ pub fn methodsOf(comptime T: type) []const Method {
         );
         const service = serviceName(T);
         var out: []const Method = &.{};
-        for (@typeInfo(T).@"struct".decls) |decl| {
-            const f = @field(T, decl.name);
+        for (@typeInfo(T).@"struct".decl_names) |decl_name| {
+            const f = @field(T, decl_name);
             if (@typeInfo(@TypeOf(f)) != .@"fn") continue;
-            const path = "/" ++ service ++ "/" ++ methodName(decl.name);
+            const path = "/" ++ service ++ "/" ++ methodName(decl_name);
             if (!message.speaks(@TypeOf(f))) @compileError(
-                "nilo: " ++ naming.of(T) ++ "." ++ decl.name ++ " is a `pub fn` of an RPC service, " ++
+                "nilo: " ++ naming.of(T) ++ "." ++ decl_name ++ " is a `pub fn` of an RPC service, " ++
                     "so it is served as \"POST " ++ path ++ "\", and it neither reads nor answers a " ++
                     "message.\n" ++
                     "  A method takes a struct with a `wire` table and answers one. If it is a " ++
@@ -69,11 +69,11 @@ pub fn methodsOf(comptime T: type) []const Method {
             );
             for (out) |seen| if (std.mem.eql(u8, seen.path, path)) @compileError(
                 "nilo: " ++ naming.of(T) ++ "." ++ seen.fn_name ++ " and " ++ naming.of(T) ++ "." ++
-                    decl.name ++ " are both served as \"POST " ++ path ++ "\": a method's name is its " ++
+                    decl_name ++ " are both served as \"POST " ++ path ++ "\": a method's name is its " ++
                     "function's with the first letter upper-cased.\n" ++
                     "  Rename one of them.",
             );
-            out = out ++ &[_]Method{.{ .fn_name = decl.name, .path = path }};
+            out = out ++ &[_]Method{.{ .fn_name = decl_name, .path = path }};
         }
         if (out.len == 0) @compileError(
             "nilo: " ++ naming.of(T) ++ " is given to `app.rpc` and has no `pub fn`, so it serves " ++

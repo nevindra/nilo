@@ -229,11 +229,12 @@ pub fn assertFlat(comptime Row: type, comptime call: []const u8) void {
     comptime {
         if (!row_mod.isRow(Row)) return;
         @setEvalBranchQuota(row_mod.budget(Row));
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            switch (row_mod.kindWith(Row, f.name, f.type)) {
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            switch (row_mod.kindWith(Row, f_name, f_type)) {
                 .parent, .children => @compileError(
-                    "nilo: `" ++ call ++ "` into " ++ @typeName(Row) ++ ", which reads `" ++ f.name ++
-                        "` as a " ++ (if (row_mod.kindWith(Row, f.name, f.type) == .parent) "parent" else "list of children") ++ ".\n" ++
+                    "nilo: `" ++ call ++ "` into " ++ @typeName(Row) ++ ", which reads `" ++ f_name ++
+                        "` as a " ++ (if (row_mod.kindWith(Row, f_name, f_type) == .parent) "parent" else "list of children") ++ ".\n" ++
                         "  That is filled from a statement nilo writes, and a raw statement fills one " ++
                         "field per column. Read it with `db.select`, or give the raw statement a Row " ++
                         "with one field per column it selects.",
@@ -246,11 +247,11 @@ pub fn assertFlat(comptime Row: type, comptime call: []const u8) void {
 
 /// The Row's fields a statement fills, in order: every one but those carried
 /// beside the columns (ADR 178).
-pub fn columnFields(comptime Row: type) []const std.builtin.Type.StructField {
+pub fn columnFields(comptime Row: type) []const row_mod.Field {
     comptime {
         @setEvalBranchQuota(row_mod.budget(Row));
-        const all = @typeInfo(Row).@"struct".fields;
-        var out: [all.len]std.builtin.Type.StructField = undefined;
+        const all = row_mod.fieldsOf(Row);
+        var out: [all.len]row_mod.Field = undefined;
         var n: usize = 0;
         for (all) |f| {
             if (row_mod.isBeside(Row, f.name)) continue;
@@ -650,7 +651,7 @@ pub fn assertParams(comptime sql: []const u8, comptime V: type, comptime call: [
         // struct, which zqlite binds by `:name`) is the driver's to read.
         const info = @typeInfo(V);
         if (info != .@"struct" or !info.@"struct".is_tuple) return;
-        const given = info.@"struct".fields.len;
+        const given = info.@"struct".field_names.len;
         const found = paramMisfit(sql, given) orelse return;
         switch (found.kind) {
             .count => @compileError(std.fmt.comptimePrint(
@@ -705,7 +706,7 @@ fn paramMisfit(comptime sql: []const u8, comptime given: usize) ?ParamMisfit {
         const mark: []const u8 = if (dollars) "$" else "?";
         if (highest != given) break :blk ParamMisfit{ .kind = .count, .mark = mark, .highest = highest, .missing = 0 };
 
-        var seen = [_]bool{false} ** (given + 1);
+        var seen = @as([(given + 1)]bool, @splat(false));
         for (tk.list) |t| {
             if (t.kind == .param and t.dollar == dollars) seen[t.n] = true;
         }

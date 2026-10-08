@@ -389,9 +389,9 @@ fn shapeOf(comptime path: []const u8, comptime pieces: []const Piece, comptime A
         if (st.is_tuple) {
             if (named != 0) @compileError("nilo: the path `" ++ path ++ "` names its segments and was given a tuple. " ++
                 "Name the fields, `.{ ." ++ firstNamed(pieces) ++ " = … }`.");
-            if (st.fields.len != positional) @compileError("nilo: the path `" ++ path ++ "` has " ++
-                count(positional, "segment") ++ " to fill and was given " ++ count(st.fields.len, "argument") ++ ".");
-            for (st.fields, 0..) |f, i| checkSegment(path, std.fmt.comptimePrint("{d}", .{i + 1}), f.type);
+            if (st.field_names.len != positional) @compileError("nilo: the path `" ++ path ++ "` has " ++
+                count(positional, "segment") ++ " to fill and was given " ++ count(st.field_names.len, "argument") ++ ".");
+            for (st.field_types, 0..) |FT, i| checkSegment(path, std.fmt.comptimePrint("{d}", .{i + 1}), FT);
             return .positional;
         }
 

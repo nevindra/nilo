@@ -88,7 +88,7 @@ pub fn createTable(comptime D: type, comptime Row: type) []const u8 {
         // budget is a function of how wide the table is rather than a constant
         // somebody raises again every few years. Comptime only: none of this
         // exists at run time.
-        @setEvalBranchQuota(20_000 + 4_000 * @typeInfo(Row).@"struct".fields.len);
+        @setEvalBranchQuota(20_000 + 4_000 * @typeInfo(Row).@"struct".field_names.len);
         const desc = table_mod.descOf(D, Row);
         var out: []const u8 = "CREATE TABLE " ++ D.qualify(desc.schema, desc.table) ++ " (";
         for (desc.columns, 0..) |c, i| {
@@ -127,7 +127,7 @@ pub fn createdFor(comptime D: type, comptime Row: type) Created {
         // budget is a function of how wide the table is rather than a constant
         // somebody raises again every few years. Comptime only: none of this
         // exists at run time.
-        @setEvalBranchQuota(20_000 + 4_000 * @typeInfo(Row).@"struct".fields.len);
+        @setEvalBranchQuota(20_000 + 4_000 * @typeInfo(Row).@"struct".field_names.len);
         const desc = table_mod.descOf(D, Row);
         var out: [desc.uniques.len + desc.indexes.len]Named = undefined;
         for (desc.uniques, 0..) |u, i| {
@@ -283,7 +283,7 @@ pub fn dropTable(comptime D: type, comptime Row: type) []const u8 {
         // budget is a function of how wide the table is rather than a constant
         // somebody raises again every few years. Comptime only: none of this
         // exists at run time.
-        @setEvalBranchQuota(20_000 + 4_000 * @typeInfo(Row).@"struct".fields.len);
+        @setEvalBranchQuota(20_000 + 4_000 * @typeInfo(Row).@"struct".field_names.len);
         const desc = table_mod.descOf(D, Row);
         return "DROP TABLE " ++ D.qualify(desc.schema, desc.table);
     }

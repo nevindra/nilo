@@ -309,7 +309,7 @@ test "an over-long message is truncated, not dropped" {
     const previous = bulkhead.setFallbackSlot(&failure);
     defer _ = bulkhead.setFallbackSlot(previous);
 
-    try testing.expectError(error.Failed, asUnion(badRequest("{s}", .{"x" ** (max_message * 2)})));
+    try testing.expectError(error.Failed, asUnion(badRequest("{s}", .{&@as([(max_message * 2)]u8, @splat('x'))})));
     try testing.expectEqual(@as(u16, 400), failure.status);
     try testing.expect(failure.message().len <= max_message);
 }
@@ -348,16 +348,16 @@ test "a message cut at the limit is cut between characters, never inside one" {
     defer _ = bulkhead.setFallbackSlot(previous);
 
     // 239 bytes, then a two-byte character that has room for only half of it.
-    try testing.expectError(error.Failed, asUnion(badRequest("{s}\u{e9}", .{"x" ** (max_message - 1)})));
+    try testing.expectError(error.Failed, asUnion(badRequest("{s}\u{e9}", .{&@as([(max_message - 1)]u8, @splat('x'))})));
     try testing.expect(std.unicode.utf8ValidateSlice(failure.message()));
     try testing.expectEqual(@as(usize, max_message - 1), failure.message().len);
 
     // A four-byte one cut after its first three bytes.
-    try testing.expectError(error.Failed, asUnion(badRequest("{s}\u{1F600}", .{"x" ** (max_message - 3)})));
+    try testing.expectError(error.Failed, asUnion(badRequest("{s}\u{1F600}", .{&@as([(max_message - 3)]u8, @splat('x'))})));
     try testing.expect(std.unicode.utf8ValidateSlice(failure.message()));
 
     // One that fits whole is kept whole.
-    try testing.expectError(error.Failed, asUnion(badRequest("{s}\u{e9}", .{"x" ** (max_message - 2)})));
+    try testing.expectError(error.Failed, asUnion(badRequest("{s}\u{e9}", .{&@as([(max_message - 2)]u8, @splat('x'))})));
     try testing.expectEqual(@as(usize, max_message), failure.message().len);
 }
 

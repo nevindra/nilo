@@ -233,7 +233,7 @@ pub fn readIntoCollecting(
     lifetime: *const str_mod.Lifetime,
     content_type: ?[]const u8,
     body: []const u8,
-    outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+    outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
 ) !T {
     const fields = try parsedFor(T, arena, content_type, body);
     return fillCollecting(T, arena, fields, lifetime, outcomes);
@@ -319,60 +319,61 @@ pub fn parse(arena: std.mem.Allocator, kind: Kind, body: []const u8) !Fields {
 }
 
 /// Whether a field may be left out: it is optional, or it has a default.
-pub fn mayBeAbsent(comptime f: std.builtin.Type.StructField) bool {
-    return f.defaultValue() != null or @typeInfo(f.type) == .optional;
+pub fn mayBeAbsent(comptime FieldType: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) bool {
+    return attrs.defaultValue(FieldType) != null or @typeInfo(FieldType) == .optional;
 }
 
 /// What a field left out is: its default, or null.
-pub fn absentValue(comptime f: std.builtin.Type.StructField) f.type {
-    if (f.defaultValue()) |default| return default;
+pub fn absentValue(comptime FieldType: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) FieldType {
+    if (attrs.defaultValue(FieldType)) |default| return default;
     return null;
 }
 
 /// Fill `T` from an already-parsed form.
 fn fill(comptime T: type, arena: std.mem.Allocator, fields: Fields, lifetime: *const str_mod.Lifetime) !T {
-    comptime @setEvalBranchQuota(convert.budget(@typeInfo(T).@"struct".fields));
+    const info = @typeInfo(T).@"struct";
+    comptime @setEvalBranchQuota(convert.budget(info.field_names));
     var out: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        const label = "\"" ++ f.name ++ "\"";
-        const Inner = switch (@typeInfo(f.type)) {
+    inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+        const label = "\"" ++ f_name ++ "\"";
+        const Inner = switch (@typeInfo(f_type)) {
             .optional => |o| o.child,
-            else => f.type,
+            else => f_type,
         };
 
-        if (comptime convert.listElement(f.type)) |Item| {
+        if (comptime convert.listElement(f_type)) |Item| {
             // A list is never missing: a checkbox group with nothing ticked
             // sends nothing, and that is the empty list (ADR 132).
-            @field(out, f.name) = try collectList(Item, arena, fields, f.name, lifetime, label);
+            @field(out, f_name) = try collectList(Item, arena, fields, f_name, lifetime, label);
         } else if (Inner == Upload) {
-            if (fields.file(f.name)) |part| {
-                @field(out, f.name) = Upload{
+            if (fields.file(f_name)) |part| {
+                @field(out, f_name) = Upload{
                     .filename = Str.fromRequest(part.filename, lifetime),
                     .content_type = Str.fromRequest(part.content_type, lifetime),
                     .bytes = Str.fromRequest(part.bytes, lifetime),
                 };
-            } else if (f.defaultValue()) |default| {
-                @field(out, f.name) = default;
-            } else if (@typeInfo(f.type) == .optional) {
-                @field(out, f.name) = null;
+            } else if (f_attrs.defaultValue(f_type)) |default| {
+                @field(out, f_name) = default;
+            } else if (@typeInfo(f_type) == .optional) {
+                @field(out, f_name) = null;
             } else {
                 return fail.badRequest("the form is missing the file " ++ label, .{});
             }
-        } else if (fields.find(f.name)) |raw| {
+        } else if (fields.find(f_name)) |raw| {
             const arrived = Str.fromRequest(raw, lifetime);
-            if ((comptime mayBeAbsent(f)) and convert.emptyIsAbsent(Inner, .form, arrived)) {
-                @field(out, f.name) = comptime absentValue(f);
+            if ((comptime mayBeAbsent(f_type, f_attrs)) and convert.emptyIsAbsent(Inner, .form, arrived)) {
+                @field(out, f_name) = comptime absentValue(f_type, f_attrs);
             } else {
-                @field(out, f.name) = try convert.convert(Inner, .form, arrived, label);
+                @field(out, f_name) = try convert.convert(Inner, .form, arrived, label);
             }
-        } else if (f.defaultValue()) |default| {
-            @field(out, f.name) = default;
-        } else if (@typeInfo(f.type) == .optional) {
-            @field(out, f.name) = null;
+        } else if (f_attrs.defaultValue(f_type)) |default| {
+            @field(out, f_name) = default;
+        } else if (@typeInfo(f_type) == .optional) {
+            @field(out, f_name) = null;
         } else {
             return fail.badRequest(
                 "the form is missing " ++ label ++ " ({s})",
-                .{comptime ctx_mod.expectedOf(f.type)},
+                .{comptime ctx_mod.expectedOf(f_type)},
             );
         }
     }
@@ -392,34 +393,35 @@ fn fillCollecting(
     arena: std.mem.Allocator,
     fields: Fields,
     lifetime: *const str_mod.Lifetime,
-    outcomes: *[@typeInfo(T).@"struct".fields.len]convert.Outcome,
+    outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
 ) T {
-    comptime @setEvalBranchQuota(convert.budget(@typeInfo(T).@"struct".fields));
+    const info = @typeInfo(T).@"struct";
+    comptime @setEvalBranchQuota(convert.budget(info.field_names));
     var out: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
-        const Inner = switch (@typeInfo(f.type)) {
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
+        const Inner = switch (@typeInfo(f_type)) {
             .optional => |o| o.child,
-            else => f.type,
+            else => f_type,
         };
         outcomes[i] = .{};
 
-        if (comptime convert.listElement(f.type)) |Item| {
-            @field(out, f.name) = collectListCollecting(Item, arena, fields, f.name, lifetime, &outcomes[i]) catch &.{};
+        if (comptime convert.listElement(f_type)) |Item| {
+            @field(out, f_name) = collectListCollecting(Item, arena, fields, f_name, lifetime, &outcomes[i]) catch &.{};
         } else if (Inner == Upload) {
-            if (fields.file(f.name)) |part| {
-                @field(out, f.name) = Upload{
+            if (fields.file(f_name)) |part| {
+                @field(out, f_name) = Upload{
                     .filename = Str.fromRequest(part.filename, lifetime),
                     .content_type = Str.fromRequest(part.content_type, lifetime),
                     .bytes = Str.fromRequest(part.bytes, lifetime),
                 };
-            } else if (f.defaultValue()) |default| {
-                @field(out, f.name) = default;
-            } else if (@typeInfo(f.type) == .optional) {
-                @field(out, f.name) = null;
+            } else if (f_attrs.defaultValue(f_type)) |default| {
+                @field(out, f_name) = default;
+            } else if (@typeInfo(f_type) == .optional) {
+                @field(out, f_name) = null;
             } else {
                 outcomes[i].reason = .missing;
             }
-        } else if (fields.find(f.name)) |raw| {
+        } else if (fields.find(f_name)) |raw| {
             const arrived = Str.fromRequest(raw, lifetime);
             // Kept before the conversion is tried, and kept whether or not
             // it works: the box a form puts back on the page holds what was
@@ -427,18 +429,18 @@ fn fillCollecting(
             outcomes[i].given = arrived;
 
             var converted: Inner = undefined;
-            if ((comptime mayBeAbsent(f)) and convert.emptyIsAbsent(Inner, .form, arrived)) {
-                @field(out, f.name) = comptime absentValue(f);
+            if ((comptime mayBeAbsent(f_type, f_attrs)) and convert.emptyIsAbsent(Inner, .form, arrived)) {
+                @field(out, f_name) = comptime absentValue(f_type, f_attrs);
             } else if (convert.tryConvert(Inner, .form, arrived, &converted)) |reason| {
                 outcomes[i].reason = reason;
-                if (f.defaultValue()) |default| @field(out, f.name) = default;
+                if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
             } else {
-                @field(out, f.name) = converted;
+                @field(out, f_name) = converted;
             }
-        } else if (f.defaultValue()) |default| {
-            @field(out, f.name) = default;
-        } else if (@typeInfo(f.type) == .optional) {
-            @field(out, f.name) = null;
+        } else if (f_attrs.defaultValue(f_type)) |default| {
+            @field(out, f_name) = default;
+        } else if (@typeInfo(f_type) == .optional) {
+            @field(out, f_name) = null;
         } else {
             outcomes[i].reason = .missing;
         }
@@ -534,26 +536,26 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
             ),
         };
 
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: " ++ what ++ " has no fields, so it would read nothing.\n" ++
                 "  Add one field per form field you want: `email: nilo.Str`.",
         );
 
-        for (info.fields) |f| {
-            const Inner = switch (@typeInfo(f.type)) {
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            const Inner = switch (@typeInfo(f_type)) {
                 .optional => |o| o.child,
-                else => f.type,
+                else => f_type,
             };
             if (Inner == Upload) continue;
-            if (convert.convertible(f.type)) continue;
+            if (convert.convertible(f_type)) continue;
             // A list of anything a form value can become, filled from the
             // repeated name a checkbox group or a `<select multiple>` sends
             // (ADR 132). A list of files is not one: `Upload` is a part
             // rather than a value, and a field takes one.
-            if (convert.listElement(f.type)) |Item| {
+            if (convert.listElement(f_type)) |Item| {
                 if (Item != Upload and convert.convertible(Item) and @typeInfo(Item) != .optional) continue;
                 @compileError(
-                    "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of " ++ what ++
+                    "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of " ++ what ++
                         " is a list of something a form value cannot become.\n" ++
                         "  A list field takes every value sent under its name, and each is a " ++
                         "`nilo.Str`, a number, a `bool`, an enum, or a type that parses itself " ++
@@ -561,7 +563,7 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
                 );
             }
             @compileError(
-                "nilo: the field `" ++ f.name ++ ": " ++ naming.of(f.type) ++ "` of " ++ what ++
+                "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of " ++ what ++
                     " is not something a form value can become.\n" ++
                     "  A form field arrives as text, so a field is a `nilo.Str`, a number, a " ++
                     "`bool`, an enum, or a type that parses itself with `nilo_parse` — or a " ++
@@ -575,11 +577,12 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
 /// served by a urlencoded form at all.
 pub fn holdsAFile(comptime T: type) bool {
     comptime {
-        @setEvalBranchQuota(convert.budget(@typeInfo(T).@"struct".fields));
-        for (@typeInfo(T).@"struct".fields) |f| {
-            const Inner = switch (@typeInfo(f.type)) {
+        const info = @typeInfo(T).@"struct";
+        @setEvalBranchQuota(convert.budget(info.field_names));
+        for (info.field_types) |f_type| {
+            const Inner = switch (@typeInfo(f_type)) {
                 .optional => |o| o.child,
-                else => f.type,
+                else => f_type,
             };
             if (Inner == Upload) return true;
         }
@@ -1071,7 +1074,7 @@ test "one value that will not convert names the field, and the binding still rea
 
     // Collecting: the first bad value is the one recorded, and the good
     // ones around it are still in the list, the way a query list reads.
-    var outcomes: [@typeInfo(Post).@"struct".fields.len]convert.Outcome = undefined;
+    var outcomes: [@typeInfo(Post).@"struct".field_names.len]convert.Outcome = undefined;
     const filled = try readIntoCollecting(
         Post,
         arena.allocator(),

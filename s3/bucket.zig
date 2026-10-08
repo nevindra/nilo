@@ -1756,7 +1756,7 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             } else if (reason.code.len != 0) {
                 std.log.warn("nilo_s3: {s} answered {d} {s}: {s}", .{
                     self.name,
-                    @intFromEnum(got.status),
+                    @backingInt(got.status),
                     reason.code,
                     reason.message,
                 });
@@ -2024,15 +2024,15 @@ fn check(comptime name: []const u8, comptime opts: anytype) Options {
         );
 
         var settings: Options = .{};
-        for (@typeInfo(Given).@"struct".fields) |field| {
-            if (!@hasField(Options, field.name)) {
-                checkNotASecret(field.name);
+        for (@typeInfo(Given).@"struct".field_names) |field| {
+            if (!@hasField(Options, field)) {
+                checkNotASecret(field);
                 @compileError(
-                    "nilo: s3.Bucket has no option called `" ++ field.name ++ "`.\n" ++
+                    "nilo: s3.Bucket has no option called `" ++ field ++ "`.\n" ++
                         "  It takes " ++ optionList() ++ ".",
                 );
             }
-            @field(settings, field.name) = @field(opts, field.name);
+            @field(settings, field) = @field(opts, field);
         }
 
         if (settings.max_bytes == 0) @compileError(
@@ -2069,9 +2069,9 @@ fn check(comptime name: []const u8, comptime opts: anytype) Options {
 fn optionList() []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (@typeInfo(Options).@"struct".fields, 0..) |field, i| {
+        for (@typeInfo(Options).@"struct".field_names, 0..) |field, i| {
             if (i != 0) out = out ++ ", ";
-            out = out ++ "`" ++ field.name ++ "`";
+            out = out ++ "`" ++ field ++ "`";
         }
         return out;
     }
@@ -2476,7 +2476,7 @@ test "a run-time name is refused by the rules the declared one is, with the reas
     defer store.deinit();
 
     const Virtual = Bucket("durable", .{});
-    const bad = [_][]const u8{ "", "ab", "a" ** 64, "Prod-data", "prod_data", "prod data", "-prod", "prod.", "10.0.0.1", "a/b" };
+    const bad = [_][]const u8{ "", "ab", &@as([64]u8, @splat('a')), "Prod-data", "prod_data", "prod data", "-prod", "prod.", "10.0.0.1", "a/b" };
     for (bad) |name_under_test| {
         try testing.expectError(error.BadBucketName, Virtual.openAs(&store, name_under_test));
         try testing.expect(Virtual.nameProblem(name_under_test) != null);

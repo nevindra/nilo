@@ -134,11 +134,12 @@ const Layout = struct {
 pub fn width(comptime Row: type) usize {
     comptime {
         var n: usize = 0;
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            n += switch (row_mod.kindWith(Row, f.name, f.type)) {
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            n += switch (row_mod.kindWith(Row, f_name, f_type)) {
                 .column, .aggregate, .over_children, .through => 1,
-                .parent => (if (@typeInfo(f.type) == .optional) 1 else 0) +
-                    width(row_mod.parentRowOf(f.type).?),
+                .parent => (if (@typeInfo(f_type) == .optional) 1 else 0) +
+                    width(row_mod.parentRowOf(f_type).?),
                 .children, .beside => 0,
             };
         }
@@ -197,33 +198,34 @@ fn visit(
     comptime keys: *[]const GroupKey,
 ) void {
     comptime {
-        for (@typeInfo(Level).@"struct".fields) |f| {
-            const at = path ++ &[_][]const u8{f.name};
+        const level_info = @typeInfo(Level).@"struct";
+        for (level_info.field_names, level_info.field_types) |f_name, f_type| {
+            const at = path ++ &[_][]const u8{f_name};
             const name = row_mod.pathName(at);
-            switch (row_mod.kindWith(Level, f.name, f.type)) {
+            switch (row_mod.kindWith(Level, f_name, f_type)) {
                 .column => {
-                    const column = here ++ "." ++ D.quote(f.name);
+                    const column = here ++ "." ++ D.quote(f_name);
                     outputs.* = outputs.* ++ &[_]Output{.{
-                        .read = D.readAs(column, f.type),
+                        .read = D.readAs(column, f_type),
                         .name = name,
                         .group = column,
-                        .bare = if (types_mod.asText(f.type) != null) column else null,
+                        .bare = if (types_mod.asText(f_type) != null) column else null,
                     }};
                 },
                 .aggregate => {
-                    const aggregate = row_mod.aggregateOf(Level, f.name).?;
+                    const aggregate = row_mod.aggregateOf(Level, f_name).?;
                     const call = where_mod.aggregateCall(D, Level, relation, aggregate);
                     outputs.* = outputs.* ++ &[_]Output{.{
-                        .read = D.readAggregate(call, aggregate.kind, f.type),
+                        .read = D.readAggregate(call, aggregate.kind, f_type),
                         .name = name,
                         .group = null,
-                        .bare = if (types_mod.asText(f.type) != null) call else null,
+                        .bare = if (types_mod.asText(f_type) != null) call else null,
                     }};
                 },
                 .parent => {
-                    const Parent = row_mod.parentRowOf(f.type).?;
-                    const link = parentLink(Level, f.name);
-                    const optional = @typeInfo(f.type) == .optional;
+                    const Parent = row_mod.parentRowOf(f_type).?;
+                    const link = parentLink(Level, f_name);
+                    const optional = @typeInfo(f_type) == .optional;
                     const alias = D.quote(name);
                     // Against the bare table name as well as the relation: a
                     // table with a schema is `"app"."orders"`, whose name in
@@ -281,19 +283,19 @@ fn visit(
                     visit(D, Top, Parent, alias, at, relation, left, joins, outputs, keys);
                 },
                 .over_children => outputs.* = outputs.* ++ &[_]Output{.{
-                    .read = overChildrenRead(D, Level, f.name, f.type, here),
+                    .read = overChildrenRead(D, Level, f_name, f_type, here),
                     .name = name,
                     .group = null,
                 }},
                 .through => {
-                    if (optional_above and row_mod.throughEntry(Level, f.name).inner) @compileError(
+                    if (optional_above and row_mod.throughEntry(Level, f_name).inner) @compileError(
                         "nilo: " ++ @typeName(Top) ++ " reads `." ++ row_mod.pathName(at) ++ "` with `.join = " ++
                             ".inner`, inside a parent that may be missing.\n" ++
                             "  The parent is an outer join, and an inner one after it would leave out " ++
                             "every row whose parent is missing, not only those the path does not reach. " ++
                             "Read the field as optional, or say `.otherwise`.",
                     );
-                    const reached = throughOf(D, Level, f.name, here, row_mod.pathName(path), optional_above);
+                    const reached = throughOf(D, Level, f_name, here, row_mod.pathName(path), optional_above);
                     for (reached.joins) |j| {
                         const seen = for (joins.*) |had| {
                             if (std.mem.eql(u8, had.alias, j.alias)) break true;
@@ -301,10 +303,10 @@ fn visit(
                         if (!seen) joins.* = joins.* ++ &[_]Join{j};
                     }
                     outputs.* = outputs.* ++ &[_]Output{.{
-                        .read = D.readAs(reached.read, f.type),
+                        .read = D.readAs(reached.read, f_type),
                         .name = name,
                         .group = reached.read,
-                        .bare = if (types_mod.asText(f.type) != null) reached.read else null,
+                        .bare = if (types_mod.asText(f_type) != null) reached.read else null,
                     }};
                     // Grouped by the referenced row too, not only its value: two
                     // customers named alike are two groups.
@@ -772,72 +774,74 @@ pub fn assertShape(comptime Row: type) void {
         const Owner = row_mod.ownerOf(Row);
         const grouped = row_mod.isGrouped(Row);
 
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            switch (row_mod.kindWith(Row, f.name, f.type)) {
-                .parent => assertParentRow(Row, f.name),
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            switch (row_mod.kindWith(Row, f_name, f_type)) {
+                .parent => assertParentRow(Row, f_name),
                 .children => {
                     if (grouped) @compileError(
-                        "nilo: " ++ @typeName(Row) ++ " is grouped and reads `" ++ f.name ++ "` as children.\n" ++
+                        "nilo: " ++ @typeName(Row) ++ " is grouped and reads `" ++ f_name ++ "` as children.\n" ++
                             "  A group is many rows, and children belong to one. Read the children " ++
                             "through a Row that is not grouped.",
                     );
-                    const found = childrenOf(Row, f.name);
+                    const found = childrenOf(Row, f_name);
                     if (row_mod.isGrouped(found.Child)) @compileError(
-                        "nilo: " ++ @typeName(Row) ++ "'s children `" ++ f.name ++ "` are " ++
+                        "nilo: " ++ @typeName(Row) ++ "'s children `" ++ f_name ++ "` are " ++
                             @typeName(found.Child) ++ ", which is grouped.\n" ++
                             "  A child is one row of the table that points back. A total over them " ++
                             "is a grouped Row read on its own.",
                     );
                     if (row_mod.fieldsOfKind(found.Child, .children).len > 0) @compileError(
-                        "nilo: " ++ @typeName(Row) ++ "'s children `" ++ f.name ++ "` are " ++
+                        "nilo: " ++ @typeName(Row) ++ "'s children `" ++ f_name ++ "` are " ++
                             @typeName(found.Child) ++ ", which has children of its own.\n" ++
                             "  One level is read for every parent at once; a second would be a " ++
                             "third statement per level. Read the grandchildren with their own call.",
                     );
                     assertChildRow(found.Child);
                 },
-                .aggregate => assertAggregate(Row, Owner, f.name, f.type),
-                .through => assertThrough(Row, f.name, f.type),
+                .aggregate => assertAggregate(Row, Owner, f_name, f_type),
+                .through => assertThrough(Row, f_name, f_type),
                 .over_children => {
-                    const over = row_mod.overChildrenOf(Row, f.name);
+                    const over = row_mod.overChildrenOf(Row, f_name);
                     if (grouped) @compileError(
-                        "nilo: " ++ @typeName(Row) ++ " is grouped and reads `" ++ f.name ++ "` " ++
+                        "nilo: " ++ @typeName(Row) ++ " is grouped and reads `" ++ f_name ++ "` " ++
                             overHow(over) ++ " over the rows pointing back.\n" ++
                             "  That belongs to one row, and a group is many. Read it through a Row " ++
                             "that is not grouped.",
                     );
                     if (over.column) |column| {
                         const C = row_mod.ColumnType(row_mod.ownerOf(over.Child), column);
-                        assertOrdersForMinMax(Row, f.name, over.word, column, C);
+                        assertOrdersForMinMax(Row, f_name, over.word, column, C);
                         const Bare = switch (@typeInfo(C)) {
                             .optional => |o| o.child,
                             else => C,
                         };
-                        if (f.type != ?Bare) @compileError(
-                            "nilo: " ++ @typeName(Row) ++ " reads `." ++ f.name ++ "`, the " ++ over.word ++
+                        if (f_type != ?Bare) @compileError(
+                            "nilo: " ++ @typeName(Row) ++ " reads `." ++ f_name ++ "`, the " ++ over.word ++
                                 " of `" ++ column ++ "` over the rows pointing back, as " ++
-                                @typeName(f.type) ++ ".\n" ++
+                                @typeName(f_type) ++ ".\n" ++
                                 "  It answers the column's own type, and null for a row none point " ++
-                                "back at: `" ++ f.name ++ ": ?" ++ @typeName(Bare) ++ "`.",
+                                "back at: `" ++ f_name ++ ": ?" ++ @typeName(Bare) ++ "`.",
                         );
-                    } else if (f.type != i64) @compileError(
-                        "nilo: " ++ @typeName(Row) ++ " reads `." ++ f.name ++ "`, a count, as " ++
-                            @typeName(f.type) ++ ".\n" ++
+                    } else if (f_type != i64) @compileError(
+                        "nilo: " ++ @typeName(Row) ++ " reads `." ++ f_name ++ "`, a count, as " ++
+                            @typeName(f_type) ++ ".\n" ++
                             "  A count is a whole number and is never null, none included: `" ++
-                            f.name ++ ": i64`.",
+                            f_name ++ ": i64`.",
                     );
-                    _ = backLink(Row, f.name, over.Child, overHow(over));
+                    _ = backLink(Row, f_name, over.Child, overHow(over));
                 },
                 .column, .beside => {},
             }
         }
         if (@hasDecl(Row, row_mod.children_marker)) assertChildrenMarker(Row);
         if (@hasDecl(Row, row_mod.via_marker)) {
-            for (@typeInfo(@TypeOf(@field(Row, row_mod.via_marker))).@"struct".fields) |e| {
-                switch (row_mod.kindOf(Row, e.name)) {
+            const via_info = @typeInfo(@TypeOf(@field(Row, row_mod.via_marker))).@"struct";
+            for (via_info.field_names) |e_name| {
+                switch (row_mod.kindOf(Row, e_name)) {
                     .parent, .children, .over_children => {},
                     else => @compileError(
-                        "nilo: " ++ @typeName(Row) ++ "'s " ++ row_mod.via_marker ++ " names `" ++ e.name ++
+                        "nilo: " ++ @typeName(Row) ++ "'s " ++ row_mod.via_marker ++ " names `" ++ e_name ++
                             "`, which is not a parent or a list of children.\n" ++
                             "  It says which reference such a field follows, and only such a field " ++
                             "follows one.",
@@ -862,31 +866,33 @@ fn assertChildrenMarker(comptime Row: type) void {
         if (@typeInfo(D) != .@"struct" or @typeInfo(D).@"struct".is_tuple) @compileError(
             head ++ " is a " ++ @typeName(D) ++ "." ++ shape,
         );
-        for (@typeInfo(D).@"struct".fields) |e| {
-            if (row_mod.fieldTypeOf(Row, e.name) == null) @compileError(
-                head ++ " names `" ++ e.name ++ "`, which is not one of its fields." ++ shape,
+        const d_info = @typeInfo(D).@"struct";
+        for (d_info.field_names, d_info.field_types) |e_name, e_type| {
+            if (row_mod.fieldTypeOf(Row, e_name) == null) @compileError(
+                head ++ " names `" ++ e_name ++ "`, which is not one of its fields." ++ shape,
             );
-            const E = e.type;
+            const E = e_type;
             if (@typeInfo(E) != .@"struct" or @typeInfo(E).@"struct".is_tuple) @compileError(
-                head ++ " gives `." ++ e.name ++ "` a " ++ @typeName(E) ++ "." ++ shape,
+                head ++ " gives `." ++ e_name ++ "` a " ++ @typeName(E) ++ "." ++ shape,
             );
-            const allowed: []const []const u8 = switch (row_mod.kindOf(Row, e.name)) {
+            const allowed: []const []const u8 = switch (row_mod.kindOf(Row, e_name)) {
                 .children => &.{ "order", "where" },
                 .over_children => &.{ "count", "max", "min", "where" },
                 else => @compileError(
-                    head ++ " names `" ++ e.name ++ "`, which is not a list of children.\n" ++
+                    head ++ " names `" ++ e_name ++ "`, which is not a list of children.\n" ++
                         "  An entry orders or narrows a field of type `[]const <Row>`, counts " ++
                         "with `.{ .count = <Row> }` into a field of type `i64`, or reads " ++
                         "`.{ .max = .{ <Row>, .<column> } }` or `.min` into an optional of the column's type.",
                 ),
             };
-            for (@typeInfo(E).@"struct".fields) |w| {
+            const e_info = @typeInfo(E).@"struct";
+            for (e_info.field_names) |w_name| {
                 for (allowed) |ok| {
-                    if (std.mem.eql(u8, w.name, ok)) break;
+                    if (std.mem.eql(u8, w_name, ok)) break;
                 } else @compileError(
-                    head ++ " gives `." ++ e.name ++ "` a `." ++ w.name ++ "`, which it does not take.\n" ++
+                    head ++ " gives `." ++ e_name ++ "` a `." ++ w_name ++ "`, which it does not take.\n" ++
                         "  A list of children takes `.order` and `.where`; a figure over them takes " ++
-                            "one of `.count`, `.max` and `.min`, and `.where`.",
+                        "one of `.count`, `.max` and `.min`, and `.where`.",
                 );
             }
         }
@@ -904,16 +910,17 @@ fn assertParentRow(comptime Holder: type, comptime field: []const u8) void {
                 ", which is grouped.\n" ++
                 "  A parent is the one row a reference points at, so there is nothing to group.",
         );
-        for (@typeInfo(Parent).@"struct".fields) |f| {
-            switch (row_mod.kindWith(Parent, f.name, f.type)) {
+        const parent_info = @typeInfo(Parent).@"struct";
+        for (parent_info.field_names, parent_info.field_types) |f_name, f_type| {
+            switch (row_mod.kindWith(Parent, f_name, f_type)) {
                 .children => @compileError(
                     "nilo: " ++ @typeName(Holder) ++ "'s parent `" ++ field ++ "` is " ++ @typeName(Parent) ++
                         ", which reads children.\n" ++
                         "  Children are read for the rows of the statement, and a parent is joined " ++
                         "into it. Read them at the top of a Row of their own.",
                 ),
-                .parent => assertParentRow(Parent, f.name),
-                .through => assertThrough(Parent, f.name, f.type),
+                .parent => assertParentRow(Parent, f_name),
+                .through => assertThrough(Parent, f_name, f_type),
                 else => {},
             }
         }
@@ -974,10 +981,11 @@ fn assertThrough(comptime Row: type, comptime field: []const u8, comptime F: typ
 /// check it: its parents resolve.
 fn assertChildRow(comptime Row: type) void {
     comptime {
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            switch (row_mod.kindWith(Row, f.name, f.type)) {
-                .parent => assertParentRow(Row, f.name),
-                .through => assertThrough(Row, f.name, f.type),
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            switch (row_mod.kindWith(Row, f_name, f_type)) {
+                .parent => assertParentRow(Row, f_name),
+                .through => assertThrough(Row, f_name, f_type),
                 else => {},
             }
         }
@@ -1153,10 +1161,11 @@ fn groupTerms(comptime layout: Layout) []const GroupKey {
 fn orderNames(comptime T: type, comptime path: []const []const u8) []const []const u8 {
     comptime {
         var out: []const []const u8 = &.{};
-        for (@typeInfo(T).@"struct".fields) |f| {
-            const at = path ++ &[_][]const u8{f.name};
-            if (@typeInfo(f.type) == .@"struct") {
-                out = out ++ orderNames(f.type, at);
+        const t_info = @typeInfo(T).@"struct";
+        for (t_info.field_names, t_info.field_types) |f_name, f_type| {
+            const at = path ++ &[_][]const u8{f_name};
+            if (@typeInfo(f_type) == .@"struct") {
+                out = out ++ orderNames(f_type, at);
             } else out = out ++ &[_][]const u8{row_mod.pathName(at)};
         }
         return out;
@@ -1512,31 +1521,31 @@ fn childOrder(comptime D: type, comptime Table: type, comptime relation: []const
                     "  Write `.order = .{ .position = .asc }`, one field per term.",
             ),
         };
-        if (info.is_tuple or info.fields.len == 0) @compileError(
+        if (info.is_tuple or info.field_names.len == 0) @compileError(
             "nilo: " ++ what ++ " `.order` names no column.\n" ++
                 "  Write `.order = .{ .position = .asc }`, one field per term, or leave it out " ++
                 "for the child table's key order.",
         );
         var out: []const u8 = "";
-        for (info.fields) |f| {
-            if (!row_mod.hasColumn(Table, f.name)) row_mod.noSuchColumn(Table, f.name, what ++ " `.order`");
-            if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
-                "nilo: " ++ what ++ " `.order` gives `" ++ f.name ++ "` a " ++ @typeName(f.type) ++
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            if (!row_mod.hasColumn(Table, f_name)) row_mod.noSuchColumn(Table, f_name, what ++ " `.order`");
+            if (f_type != Direction and f_type != @TypeOf(.enum_literal)) @compileError(
+                "nilo: " ++ what ++ " `.order` gives `" ++ f_name ++ "` a " ++ @typeName(f_type) ++
                     ".\n  A direction is `.asc` or `.desc`, or one of the four that also say where NULLs go.",
             );
             dialect_mod.assertDecimalCompares(
                 D,
                 Table,
-                f.name,
-                row_mod.ColumnType(Table, f.name),
-                what ++ " `.order." ++ f.name ++ "`",
+                f_name,
+                row_mod.ColumnType(Table, f_name),
+                what ++ " `.order." ++ f_name ++ "`",
             );
-            const direction: Direction = statement.writtenValue(T, f.name, Direction);
+            const direction: Direction = statement.writtenValue(T, f_name, Direction);
             // A slice rather than the array `++` would infer, or a `NULLS`
             // clause appended below is a different length and does not fit.
-            var one: []const u8 = relation ++ "." ++ D.quote(f.name) ++ (if (direction.descending()) " DESC" else " ASC");
+            var one: []const u8 = relation ++ "." ++ D.quote(f_name) ++ (if (direction.descending()) " DESC" else " ASC");
             if (direction.placement()) |where_nulls| {
-                one = one ++ (D.nulls(where_nulls) orelse dialect_mod.noNullsOrder(D, Table, f.name));
+                one = one ++ (D.nulls(where_nulls) orelse dialect_mod.noNullsOrder(D, Table, f_name));
             }
             out = out ++ (if (out.len == 0) "" else ", ") ++ one;
         }
@@ -1733,29 +1742,29 @@ fn orderTerms(
             ),
         };
         var out: []const u8 = "";
-        for (info.fields) |f| {
-            const at = path ++ &[_][]const u8{f.name};
-            const kind: row_mod.Kind = if (row_mod.fieldTypeOf(Level, f.name) == null) .column else row_mod.kindOf(Level, f.name);
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            const at = path ++ &[_][]const u8{f_name};
+            const kind: row_mod.Kind = if (row_mod.fieldTypeOf(Level, f_name) == null) .column else row_mod.kindOf(Level, f_name);
             const term = switch (kind) {
-                .parent => orderTerms(D, row_mod.parentRowOf(row_mod.fieldTypeOf(Level, f.name).?).?, f.type, at, "", outputs),
+                .parent => orderTerms(D, row_mod.parentRowOf(row_mod.fieldTypeOf(Level, f_name).?).?, f_type, at, "", outputs),
                 .column, .aggregate, .over_children, .through => term: {
-                    const carried = row_mod.fieldTypeOf(Level, f.name) != null;
+                    const carried = row_mod.fieldTypeOf(Level, f_name) != null;
                     const through_table = !carried and path.len == 0 and
                         !@hasDecl(Level, row_mod.aggregate_marker) and
-                        row_mod.tableHasColumn(Level, f.name);
+                        row_mod.tableHasColumn(Level, f_name);
                     if (!carried and path.len == 0 and @hasDecl(Level, row_mod.aggregate_marker) and
-                        row_mod.tableHasColumn(Level, f.name)) @compileError(
-                        "nilo: `.order` on " ++ @typeName(Level) ++ " names `" ++ f.name ++
+                        row_mod.tableHasColumn(Level, f_name)) @compileError(
+                        "nilo: `.order` on " ++ @typeName(Level) ++ " names `" ++ f_name ++
                             "`, a column of its table that the Row does not carry, and the Row is grouped.\n" ++
                             "  A grouped Row is one row per group, and a column of the table has one value " ++
                             "per row of the table rather than per group. Order by a field the Row groups by, " ++
                             "or by one of its aggregates.",
                     );
-                    if (!carried and !through_table) row_mod.noSuchColumn(Level, f.name, "`.order`");
-                    if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
-                        "nilo: `.order` on `" ++ row_mod.pathName(at) ++ "` was given a " ++ @typeName(f.type) ++
+                    if (!carried and !through_table) row_mod.noSuchColumn(Level, f_name, "`.order`");
+                    if (f_type != Direction and f_type != @TypeOf(.enum_literal)) @compileError(
+                        "nilo: `.order` on `" ++ row_mod.pathName(at) ++ "` was given a " ++ @typeName(f_type) ++
                             ".\n  A direction is `.asc` or `.desc`, or one of the four that also say " ++
-                            "where NULLs go. A parent takes the terms for its own columns: `." ++ f.name ++
+                            "where NULLs go. A parent takes the terms for its own columns: `." ++ f_name ++
                             " = .{ .<column> = .asc }`.",
                     );
                     // A column, or a `.through` field read at the end of a path,
@@ -1765,24 +1774,24 @@ fn orderTerms(
                     if (kind == .column or kind == .through) dialect_mod.assertDecimalCompares(
                         D,
                         Level,
-                        f.name,
-                        if (carried) row_mod.fieldTypeOf(Level, f.name).? else row_mod.ColumnType(row_mod.ownerOf(Level), f.name),
+                        f_name,
+                        if (carried) row_mod.fieldTypeOf(Level, f_name).? else row_mod.ColumnType(row_mod.ownerOf(Level), f_name),
                         "`.order." ++ row_mod.pathName(at) ++ "`",
                     );
-                    const direction: Direction = statement.writtenValue(T, f.name, Direction);
+                    const direction: Direction = statement.writtenValue(T, f_name, Direction);
                     const named = if (through_table)
-                        relation ++ "." ++ D.quote(f.name)
+                        relation ++ "." ++ D.quote(f_name)
                     else
                         bareOf(outputs, row_mod.pathName(at)) orelse D.quote(row_mod.pathName(at));
                     // A slice, for the reason `childOrder` gives.
                     var one: []const u8 = named ++ (if (direction.descending()) " DESC" else " ASC");
                     if (direction.placement()) |where_nulls| {
                         one = one ++ (D.nulls(where_nulls) orelse
-                            dialect_mod.noNullsOrder(D, Level, f.name));
+                            dialect_mod.noNullsOrder(D, Level, f_name));
                     }
                     break :term one;
                 },
-                .children, .beside => row_mod.noSuchColumn(Level, f.name, "`.order`"),
+                .children, .beside => row_mod.noSuchColumn(Level, f_name, "`.order`"),
             };
             out = out ++ (if (out.len == 0) "" else ", ") ++ term;
         }

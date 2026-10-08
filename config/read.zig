@@ -82,16 +82,16 @@ pub const Failure = struct {
 /// taken. Built once per `(T, prefix)` rather than per reading.
 pub fn Table(comptime T: type, comptime prefix: []const u8) type {
     checkPrefix(prefix);
-    const fields = @typeInfo(T).@"struct".fields;
+    const info = @typeInfo(T).@"struct";
 
     return struct {
         pub const entries = blk: {
-            @setEvalBranchQuota(convert.budget(fields));
-            var t: [fields.len]Entry = undefined;
-            for (fields, 0..) |f, i| t[i] = .{
-                .field = f.name,
-                .name = envName(prefix, f.name),
-                .expected = convert.expectedOf(f.type),
+            @setEvalBranchQuota(convert.budget(info.field_names));
+            var t: [info.field_names.len]Entry = undefined;
+            for (info.field_names, info.field_types, 0..) |name, FT, i| t[i] = .{
+                .field = name,
+                .name = envName(prefix, name),
+                .expected = convert.expectedOf(FT),
             };
             const frozen = t;
             break :blk frozen;
@@ -118,20 +118,20 @@ pub fn Read(comptime T: type) type {
     // stop inside `@typeInfo` with a message about a union field, which is
     // exactly the kind of failure ADR 026 exists to stop being acceptable.
     checkConfig(T);
-    const fields = @typeInfo(T).@"struct".fields;
+    const names = @typeInfo(T).@"struct".field_names;
 
     return struct {
         const Self = @This();
 
         /// The struct the caller actually asked for.
         pub const Value = T;
-        pub const Outcomes = [fields.len]Outcome;
+        pub const Outcomes = [names.len]Outcome;
 
         _value: T,
         _outcomes: Outcomes,
-        _entries: *const [fields.len]Entry,
+        _entries: *const [names.len]Entry,
 
-        pub fn from(filled: T, outcomes: Outcomes, entries: *const [fields.len]Entry) Self {
+        pub fn from(filled: T, outcomes: Outcomes, entries: *const [names.len]Entry) Self {
             return .{ ._value = filled, ._outcomes = outcomes, ._entries = entries };
         }
 
@@ -180,9 +180,9 @@ pub fn Read(comptime T: type) type {
 
         fn indexOf(comptime field: []const u8) usize {
             comptime {
-                @setEvalBranchQuota(convert.budget(fields));
-                for (fields, 0..) |f, i| {
-                    if (std.mem.eql(u8, f.name, field)) return i;
+                @setEvalBranchQuota(convert.budget(names));
+                for (names, 0..) |name, i| {
+                    if (std.mem.eql(u8, name, field)) return i;
                 }
                 @compileError("nilo: the Config `" ++ @typeName(T) ++
                     "` has no field `" ++ field ++ "`.");
@@ -200,7 +200,7 @@ pub fn Read(comptime T: type) type {
             at: usize = 0,
 
             pub fn next(self: *Failures) ?Failure {
-                while (self.at < fields.len) {
+                while (self.at < names.len) {
                     const i = self.at;
                     self.at += 1;
                     const reason = self.read._outcomes[i].reason orelse continue;
@@ -251,16 +251,16 @@ pub fn Read(comptime T: type) type {
 pub fn fill(comptime T: type, comptime prefix: []const u8, source: anytype) Read(T) {
     source_mod.check(@TypeOf(source));
     const entries = &Table(T, prefix).entries;
-    const fields = @typeInfo(T).@"struct".fields;
+    const info = @typeInfo(T).@"struct";
 
     var filled: T = undefined;
     var outcomes: Read(T).Outcomes = @splat(.{});
 
     // The unrolled loop below is analysed in the caller's evaluation, a field
     // at a time.
-    comptime @setEvalBranchQuota(convert.budget(fields));
-    inline for (fields, 0..) |f, i| {
-        const P = comptime convert.unwrap(f.type);
+    comptime @setEvalBranchQuota(convert.budget(info.field_names));
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, FT, attrs, i| {
+        const P = comptime convert.unwrap(FT);
 
         if (source.get(entries[i].name)) |text| {
             // Kept before the conversion is tried, and kept whether or not it
@@ -274,17 +274,17 @@ pub fn fill(comptime T: type, comptime prefix: []const u8, source: anytype) Read
                 // it. `value()` refuses the whole struct either way, so this
                 // is not a value anybody can read — it is one field fewer
                 // left `undefined` in a struct that gets copied out by value.
-                if (f.defaultValue()) |default| @field(filled, f.name) = default;
+                if (attrs.defaultValue(FT)) |default| @field(filled, name) = default;
             } else {
-                @field(filled, f.name) = out;
+                @field(filled, name) = out;
             }
-        } else if (f.defaultValue()) |default| {
+        } else if (attrs.defaultValue(FT)) |default| {
             // A default is checked before `?T` so that `?u8 = 5` answers 5
             // rather than null. Both mean "nothing was set"; only one of
             // them says what to do about it.
-            @field(filled, f.name) = default;
-        } else if (@typeInfo(f.type) == .optional) {
-            @field(filled, f.name) = null;
+            @field(filled, name) = default;
+        } else if (@typeInfo(FT) == .optional) {
+            @field(filled, name) = null;
         } else {
             outcomes[i].reason = .missing;
         }
@@ -316,16 +316,16 @@ fn checkConfig(comptime T: type) void {
             "nilo: a Config is read into a struct, and " ++ @typeName(T) ++ " is not one.",
         );
 
-        const fields = @typeInfo(T).@"struct".fields;
-        @setEvalBranchQuota(convert.budget(fields));
-        if (fields.len == 0) @compileError(
+        const info = @typeInfo(T).@"struct";
+        @setEvalBranchQuota(convert.budget(info.field_names));
+        if (info.field_names.len == 0) @compileError(
             "nilo: the Config `" ++ @typeName(T) ++
                 "` has no fields, so it would read nothing.",
         );
 
-        for (fields) |f| {
-            if (!convert.convertible(f.type)) @compileError(
-                "nilo: the field `" ++ f.name ++ ": " ++ @typeName(f.type) ++
+        for (info.field_names, info.field_types) |name, FT| {
+            if (!convert.convertible(FT)) @compileError(
+                "nilo: the field `" ++ name ++ ": " ++ @typeName(FT) ++
                     "` of the Config `" ++ @typeName(T) ++
                     "` is not something an environment variable can become.\n" ++
                     "  A setting is text, a number, a bool, an enum, or any of those wrapped in `?`.",

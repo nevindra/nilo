@@ -472,7 +472,7 @@ pub fn describesAnswer(name: []const u8, value: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(name, n)) return true;
     }
     if (std.ascii.eqlIgnoreCase(name, "cache-control")) {
-        return std.ascii.indexOfIgnoreCase(value, "no-store") == null;
+        return std.ascii.findIgnoreCase(value, "no-store") == null;
     }
     return false;
 }
@@ -1370,7 +1370,7 @@ noinline fn connectionList(value: []const u8, r: *Request) void {
     // A handshake sends `Upgrade` or `keep-alive, Upgrade`. Searched for
     // rather than matched as an option, because `upgrade` is looser on
     // purpose (see the field).
-    if (std.ascii.indexOfIgnoreCase(value, "upgrade") != null) r.upgrade = true;
+    if (std.ascii.findIgnoreCase(value, "upgrade") != null) r.upgrade = true;
 }
 
 /// `keep-alive` asks for what HTTP/1.1 already does, so there it changes
@@ -2906,7 +2906,7 @@ test "a request arriving in pieces agrees with the same bytes arriving at once" 
         // Bodies of an announced length: short, across the step, and one
         // the client never finishes.
         "POST /send HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\nhelloNEXT",
-        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length:  42  \r\n\r\n" ++ ("0123456789" ** 4) ++ "01NEXT",
+        "POST / HTTP/1.1\r\nHost: t\r\nContent-Length:  42  \r\n\r\n" ++ (repeat("0123456789", 4)) ++ "01NEXT",
         big,
         "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\nabc",
         "POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\nContent-Length: 6\r\n\r\nabcdefNEXT",
@@ -3472,7 +3472,7 @@ test "a chunk that announces a large size and sends nothing does not grow the ar
     try testing.expect(arena.queryCapacity() < announced / 8);
 
     // A chunk over a page that does arrive is still one contiguous body.
-    const big = "a" ** 0x2801;
+    const big = &@as([0x2801]u8, @splat('a'));
     var whole = std.Io.Reader.fixed("2801\r\n" ++ big ++ "\r\n0\r\n\r\n");
     const body = try readChunkedBody(&whole, arena.allocator(), 1 << 20);
     try testing.expectEqualStrings(big, body);
@@ -3648,4 +3648,19 @@ test "findHeader reads every head the parser accepts as the iterator does, at ev
         }
     }
     try testing.expect(checked > 1000);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

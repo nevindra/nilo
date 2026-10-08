@@ -328,7 +328,7 @@ test "a path that would break the line out of its own field cannot" {
 
 test "a line too long for the buffer is cut, not dropped" {
     var lifetime: str_mod.Lifetime = .{};
-    var c = requestThatWas(&lifetime, "/" ++ ("x" ** 200), null);
+    var c = requestThatWas(&lifetime, "/" ++ (&@as([200]u8, @splat('x'))), null);
     var buf: [64]u8 = undefined;
 
     const line = lineFor(.{}, &buf, &c, 200, 1, null);

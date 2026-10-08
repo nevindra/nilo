@@ -286,7 +286,7 @@ test "a Text within its bounds parses and one outside does not" {
     const Password = Text(.{ .min = 10, .max = 72 });
     try testing.expect(Password.nilo_parse("correct horse") != null);
     try testing.expect(Password.nilo_parse("short") == null);
-    try testing.expect(Password.nilo_parse("x" ** 73) == null);
+    try testing.expect(Password.nilo_parse(&@as([73]u8, @splat('x'))) == null);
     try testing.expectEqualStrings("correct horse", Password.nilo_parse("correct horse").?.view());
 }
 
@@ -375,7 +375,7 @@ test "a Text travels through JSON as the string it holds" {
     defer arena.deinit();
     const parsed = try std.json.parseFromSliceLeaky(Body, arena.allocator(), "{\"nick\":\"wa\\u0074i\"}", .{});
     try testing.expectEqualStrings("wati", parsed.nick.view());
-    try testing.expectError(error.InvalidCharacter, std.json.parseFromSliceLeaky(Body, arena.allocator(), "{\"nick\":\"" ++ "x" ** 31 ++ "\"}", .{}));
+    try testing.expectError(error.InvalidCharacter, std.json.parseFromSliceLeaky(Body, arena.allocator(), "{\"nick\":\"" ++ &@as([31]u8, @splat('x')) ++ "\"}", .{}));
 
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();

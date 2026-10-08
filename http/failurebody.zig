@@ -99,9 +99,9 @@ pub fn check(comptime T: type) void {
         );
         const F = @TypeOf(T.nilo_failure);
         const fits = switch (@typeInfo(F)) {
-            .@"fn" => |f| f.params.len == 2 and
-                f.params[0].type == u16 and
-                f.params[1].type == []const u8 and
+            .@"fn" => |f| f.param_types.len == 2 and
+                f.param_types[0] == u16 and
+                f.param_types[1] == []const u8 and
                 f.return_type == T,
             else => false,
         };

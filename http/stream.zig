@@ -1058,7 +1058,7 @@ test "a piece too big for the buffer still goes out whole" {
 
     // 100 bytes through a 64-byte buffer: the writer drains rather than
     // truncating, and the pieces reassemble into what was written.
-    const long = "0123456789" ** 10;
+    const long = repeat("0123456789", 10);
     try body.writeAll(long);
     try body.finish();
 
@@ -1420,4 +1420,19 @@ test "an event stream ends itself when the server stops, after what was queued" 
     try testing.expectEqualStrings("c\r\ndata: last\n\n\r\n0\r\n\r\n", out.buffered());
     // It never waited: a stopped server is not something to park on.
     try testing.expectEqual(@as(usize, 0), script.at);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

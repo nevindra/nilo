@@ -1639,20 +1639,20 @@ pub const Wire = struct {
 fn Opened(comptime V: type) type {
     comptime {
         if (@typeInfo(V) != .@"struct") return V;
-        const fields = @typeInfo(V).@"struct".fields;
-        var out: [fields.len]type = undefined;
+        const info = @typeInfo(V).@"struct";
+        var out: [info.field_names.len]type = undefined;
         var changed = false;
-        for (fields, 0..) |f, i| {
-            out[i] = switch (f.type) {
+        for (info.field_types, 0..) |f_type, i| {
+            out[i] = switch (f_type) {
                 wire.Bytes => []const u8,
                 ?wire.Bytes => ?[]const u8,
-                else => f.type,
+                else => f_type,
             };
-            if (out[i] != f.type) changed = true;
+            if (out[i] != f_type) changed = true;
         }
         if (!changed) return V;
         const frozen = out;
-        return std.meta.Tuple(&frozen);
+        return @Tuple(&frozen);
     }
 }
 
@@ -1661,9 +1661,10 @@ fn opened(values: anytype) Opened(@TypeOf(values)) {
     if (comptime Opened(V) == V) return values;
 
     var out: Opened(V) = undefined;
-    inline for (@typeInfo(V).@"struct".fields, 0..) |f, i| {
-        const held = @field(values, f.name);
-        out[i] = switch (f.type) {
+    const v_info = @typeInfo(V).@"struct";
+    inline for (v_info.field_names, v_info.field_types, 0..) |f_name, f_type, i| {
+        const held = @field(values, f_name);
+        out[i] = switch (f_type) {
             wire.Bytes => held.bytes,
             ?wire.Bytes => if (held) |b| b.bytes else null,
             else => held,
@@ -2455,7 +2456,7 @@ test "a URL nobody can read is refused rather than half understood" {
         );
     }
     for ([_][]const u8{
-        "channel_binding=require", "gssencmode=require",   "target_session_attrs=read-write",
+        "channel_binding=require", "gssencmode=require",     "target_session_attrs=read-write",
         "sslsni=0",                "client_encoding=LATIN1",
     }) |param| {
         const url = try std.fmt.allocPrint(aa, "postgres://h/db?{s}", .{param});

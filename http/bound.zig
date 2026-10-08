@@ -82,14 +82,14 @@ pub const check_marker = "nilo_check";
 /// the struct's own order, and `must` in the shape ADR 034 gave it — the
 /// bool is the rule *holding*, the first sentence about a field wins.
 pub fn Rules(comptime T: type) type {
-    const fields = @typeInfo(T).@"struct".fields;
+    const field_count = @typeInfo(T).@"struct".field_names.len;
     return struct {
         const Self = @This();
 
         /// The struct these rules are about.
         pub const Of = T;
 
-        said: [fields.len][]const u8 = @splat(""),
+        said: [field_count][]const u8 = @splat(""),
 
         pub fn must(self: *Self, comptime name: []const u8, holds: bool, said: []const u8) void {
             if (holds) return;
@@ -122,15 +122,15 @@ pub fn hasCheck(comptime T: type) bool {
             .@"fn" => |f| f,
             else => @compileError(wrong ++ "is a " ++ naming.of(F) ++ ", not a function" ++ fix),
         };
-        if (info.params.len != 2) @compileError(wrong ++ std.fmt.comptimePrint(
+        if (info.param_types.len != 2) @compileError(wrong ++ std.fmt.comptimePrint(
             "takes {d} arguments rather than the value and its rules",
-            .{info.params.len},
+            .{info.param_types.len},
         ) ++ fix);
-        if (info.params[0].type != T) @compileError(
-            wrong ++ "takes a " ++ naming.of(info.params[0].type.?) ++ " rather than the " ++ naming.of(T) ++ " being checked" ++ fix,
+        if (info.param_types[0] != T) @compileError(
+            wrong ++ "takes a " ++ naming.of(info.param_types[0].?) ++ " rather than the " ++ naming.of(T) ++ " being checked" ++ fix,
         );
-        if (info.params[1].type != *Rules(T)) @compileError(
-            wrong ++ "takes a " ++ naming.of(info.params[1].type.?) ++ " rather than `*nilo.Rules(" ++ naming.of(T) ++ ")`" ++ fix,
+        if (info.param_types[1] != *Rules(T)) @compileError(
+            wrong ++ "takes a " ++ naming.of(info.param_types[1].?) ++ " rather than `*nilo.Rules(" ++ naming.of(T) ++ ")`" ++ fix,
         );
         if (info.return_type != void) @compileError(
             wrong ++ "answers " ++ naming.of(info.return_type.?) ++ " rather than nothing: a rule that did not hold is said with `must`, not returned" ++ fix,
@@ -207,7 +207,7 @@ pub const Failure = struct {
 pub fn Bound(comptime W: type) type {
     const slot = comptime slotOf(W);
     const T = comptime valueOf(W, slot);
-    const fields = @typeInfo(T).@"struct".fields;
+    const field_count = @typeInfo(T).@"struct".field_names.len;
     const words = Wording(slot, T);
 
     return struct {
@@ -221,7 +221,7 @@ pub fn Bound(comptime W: type) type {
         /// The struct the handler actually asked for.
         pub const Value = T;
         /// What the engine fills in and hands to `from`.
-        pub const Outcomes = [fields.len]Outcome;
+        pub const Outcomes = [field_count]Outcome;
         /// Whether `T` checks itself, and so whether this binding carries
         /// room for what its check said (ADR 193).
         pub const has_check = hasCheck(T);
@@ -446,11 +446,12 @@ pub fn Bound(comptime W: type) type {
 /// rule cannot come out worded differently from a conversion whichever way
 /// it arrived.
 fn Wording(comptime slot: Slot, comptime T: type) type {
-    const fields = @typeInfo(T).@"struct".fields;
+    const info = @typeInfo(T).@"struct";
+    const field_count = info.field_names.len;
     return struct {
         /// One message per field, in the struct's own order.
-        pub const Sentences = [fields.len][]const u8;
-        pub const Outcomes = [fields.len]Outcome;
+        pub const Sentences = [field_count][]const u8;
+        pub const Outcomes = [field_count]Outcome;
 
         /// What a binding with nothing said against it points at, so that
         /// carrying room for sentences is the business of the types that
@@ -470,12 +471,12 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
         };
 
         const table = blk: {
-            var t: [fields.len]Entry = undefined;
-            for (fields, 0..) |f, i| t[i] = .{
-                .name = f.name,
-                .expected = expectedFor(f.type),
-                .say = sayerFor(slot, f.type, f.name),
-                .say_rule = ruleSayerFor(slot, f.name),
+            var t: [field_count]Entry = undefined;
+            for (info.field_names, info.field_types, 0..) |f_name, f_type, i| t[i] = .{
+                .name = f_name,
+                .expected = expectedFor(f_type),
+                .say = sayerFor(slot, f_type, f_name),
+                .say_rule = ruleSayerFor(slot, f_name),
             };
             const frozen = t;
             break :blk frozen;
@@ -487,7 +488,7 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
             _at: usize = 0,
 
             pub fn next(self: *Failures) ?Failure {
-                while (self._at < fields.len) {
+                while (self._at < field_count) {
                     const i = self._at;
                     self._at += 1;
                     const o = self._outcomes[i];
@@ -538,11 +539,11 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
             // that runs out of buffer can still say how much of itself is
             // missing (ADR 034). It used to stop on the first write that did
             // not fit, which ends a 422 mid-word and leaves the reader to
-            // guess whether the list was finished. `fields.len` is the most
+            // guess whether the list was finished. `field_count` is the most
             // failures there can be, so the widest tail is known here.
             const tail_room = comptime std.fmt.comptimePrint(
                 "; and {d} more",
-                .{fields.len},
+                .{field_count},
             ).len;
             var w = std.Io.Writer.fixed(buf[0 .. buf.len - tail_room]);
 
@@ -585,8 +586,8 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
 /// fields there are.
 fn indexIn(comptime T: type, comptime name: []const u8) usize {
     comptime {
-        for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
-            if (std.mem.eql(u8, f.name, name)) return i;
+        for (@typeInfo(T).@"struct".field_names, 0..) |f_name, i| {
+            if (std.mem.eql(u8, f_name, name)) return i;
         }
         @compileError(
             "nilo: `" ++ naming.of(T) ++ "` has no field `" ++ name ++ "`.\n" ++
@@ -754,8 +755,8 @@ fn ruleSayerFor(
 fn fieldList(comptime T: type) []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
-            out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+        for (@typeInfo(T).@"struct".field_names, 0..) |f_name, i| {
+            out = out ++ (if (i == 0) "" else ", ") ++ f_name;
         }
         return out;
     }

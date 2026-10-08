@@ -103,8 +103,8 @@ fn build(arena: std.mem.Allocator) ![]u8 {
             .severity_text = "INFO",
             .body = .{ .value = .{ .string_value = try std.fmt.allocPrint(arena, "request {d} completed in {d}ms", .{ i, i % 250 }) } },
             .attributes = attrs,
-            .trace_id = &([_]u8{0xab} ** 16),
-            .span_id = &([_]u8{0xcd} ** 8),
+            .trace_id = &(@as([16]u8, @splat(0xab))),
+            .span_id = &(@as([8]u8, @splat(0xcd))),
         };
     }
     return proto.encode(Request, arena, .{ .resource_logs = &.{.{ .scope_logs = &.{.{ .log_records = records }} }} });

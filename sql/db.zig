@@ -384,10 +384,10 @@ fn columnsNamed(comptime Row: type, comptime columns: anytype) []const []const u
     comptime {
         const C = @TypeOf(columns);
         if (C == @TypeOf(.enum_literal)) return columnsNamed(Row, .{columns});
-        const fields = @typeInfo(C).@"struct".fields;
-        var out: [fields.len][]const u8 = undefined;
-        for (fields, 0..) |f, i| {
-            const name = @tagName(@field(columns, f.name));
+        const info = @typeInfo(C).@"struct";
+        var out: [info.field_names.len][]const u8 = undefined;
+        for (info.field_names, 0..) |f_name, i| {
+            const name = @tagName(@field(columns, f_name));
             if (!row_mod.hasColumn(Row, name)) row_mod.noSuchColumn(Row, name, "`sql.violated`");
             out[i] = name;
         }
@@ -942,7 +942,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
         /// Move one of them. `delta` is `.Add` or `.Sub`; the amount is
         /// always one, because these count things that are held.
-        fn hold(self: *Self, field: *usize, comptime delta: std.builtin.AtomicRmwOp) void {
+        fn hold(self: *Self, field: *usize, comptime delta: std.lang.AtomicRmwOp) void {
             _ = self;
             _ = @atomicRmw(usize, field, delta, 1, .monotonic);
         }
@@ -2158,7 +2158,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             if (!stmt.gapless()) return error.ParamCountMismatch;
             const info = @typeInfo(V);
             if (comptime info != .@"struct" or !info.@"struct".is_tuple) return;
-            if (stmt.params != info.@"struct".fields.len) return error.ParamCountMismatch;
+            if (stmt.params != info.@"struct".field_names.len) return error.ParamCountMismatch;
         }
 
         /// A statement that answers with **nothing**, and the number of rows
@@ -3265,26 +3265,27 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const B = row_mod.Borrowed(Row);
             var out: B = undefined;
             comptime var col = at;
-            inline for (@typeInfo(Row).@"struct".fields) |f| {
-                const F = @FieldType(B, f.name);
-                switch (comptime row_mod.kindWith(Row, f.name, f.type)) {
+            const row_info = @typeInfo(Row).@"struct";
+            inline for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+                const F = @FieldType(B, f_name);
+                switch (comptime row_mod.kindWith(Row, f_name, f_type)) {
                     .column, .aggregate, .over_children, .through => {
-                        @field(out, f.name) = try borrowColumn(w, rows, F, col);
+                        @field(out, f_name) = try borrowColumn(w, rows, F, col);
                         col += 1;
                     },
                     .parent => {
-                        const P = comptime row_mod.parentRowOf(f.type).?;
-                        if (comptime @typeInfo(f.type) == .optional) {
+                        const P = comptime row_mod.parentRowOf(f_type).?;
+                        if (comptime @typeInfo(f_type) == .optional) {
                             const present = try w.read(rows, bool, col);
                             col += 1;
-                            @field(out, f.name) = if (present) try borrowRow(P, col, w, rows) else null;
+                            @field(out, f_name) = if (present) try borrowRow(P, col, w, rows) else null;
                         } else {
-                            @field(out, f.name) = try borrowRow(P, col, w, rows);
+                            @field(out, f_name) = try borrowRow(P, col, w, rows);
                         }
                         col += comptime shape.width(P);
                     },
-                    .children => @field(out, f.name) = &.{},
-                    .beside => @field(out, f.name) = comptime row_mod.besideDefault(Row, f.name),
+                    .children => @field(out, f_name) = &.{},
+                    .beside => @field(out, f_name) = comptime row_mod.besideDefault(Row, f_name),
                 }
             }
             return out;
@@ -3780,7 +3781,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// caller wrote out is a comptime field and cannot be set.
         fn fromTheTop(comptime paged: rawcheck.Paging, values: anytype) Unfrozen(@TypeOf(values)) {
             var out: Unfrozen(@TypeOf(values)) = undefined;
-            inline for (0..@typeInfo(@TypeOf(values)).@"struct".fields.len) |i| {
+            inline for (0..@typeInfo(@TypeOf(values)).@"struct".field_names.len) |i| {
                 if (comptime paged.offset == i) {
                     out[i] = 0;
                 } else if (comptime paged.limit == i) {
@@ -3863,38 +3864,39 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const batched = comptime plainTextCount(Row) >= 2;
             var lent: [plainTextCount(Row)]?[]const u8 = undefined;
             var total: usize = 0;
-            inline for (@typeInfo(Row).@"struct".fields) |f| {
-                switch (comptime row_mod.kindWith(Row, f.name, f.type)) {
+            const row_info = @typeInfo(Row).@"struct";
+            inline for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+                switch (comptime row_mod.kindWith(Row, f_name, f_type)) {
                     .column, .aggregate, .over_children, .through => {
-                        if (comptime batched and isPlainText(f.type) and
-                            row_mod.kindWith(Row, f.name, f.type) == .column)
+                        if (comptime batched and isPlainText(f_type) and
+                            row_mod.kindWith(Row, f_name, f_type) == .column)
                         {
-                            const slot = comptime plainTextIndex(Row, f.name);
+                            const slot = comptime plainTextIndex(Row, f_name);
                             // Asked for as the field is, so a NULL in a column
                             // that cannot hold one fails here the way it did.
-                            lent[slot] = try w.read(rows, if (comptime @typeInfo(f.type) == .optional) ?[]const u8 else []const u8, col);
+                            lent[slot] = try w.read(rows, if (comptime @typeInfo(f_type) == .optional) ?[]const u8 else []const u8, col);
                             if (lent[slot]) |text| total += text.len;
                         } else {
-                            @field(filled, f.name) = try readColumn(w, rows, f.type, col, c);
+                            @field(filled, f_name) = try readColumn(w, rows, f_type, col, c);
                         }
                         col += 1;
                     },
                     .parent => {
-                        const P = comptime row_mod.parentRowOf(f.type).?;
+                        const P = comptime row_mod.parentRowOf(f_type).?;
                         // A parent that may be missing says whether it is
                         // there in a column of its own, ahead of its columns:
                         // they can all be null on a parent that exists.
-                        if (comptime @typeInfo(f.type) == .optional) {
+                        if (comptime @typeInfo(f_type) == .optional) {
                             const present = try w.read(rows, bool, col);
                             col += 1;
-                            @field(filled, f.name) = if (present) try readRow(P, col, w, rows, c) else null;
+                            @field(filled, f_name) = if (present) try readRow(P, col, w, rows, c) else null;
                         } else {
-                            @field(filled, f.name) = try readRow(P, col, w, rows, c);
+                            @field(filled, f_name) = try readRow(P, col, w, rows, c);
                         }
                         col += comptime shape.width(P);
                     },
-                    .children => @field(filled, f.name) = &.{},
-                    .beside => @field(filled, f.name) = comptime row_mod.besideDefault(Row, f.name),
+                    .children => @field(filled, f_name) = &.{},
+                    .beside => @field(filled, f_name) = comptime row_mod.besideDefault(Row, f_name),
                 }
             }
             if (comptime batched) {
@@ -3903,18 +3905,18 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // response is written, as it kept each of the copies.
                 const slab = try c.arena().alloc(u8, total);
                 var used: usize = 0;
-                inline for (@typeInfo(Row).@"struct".fields) |f| {
-                    if (comptime isPlainText(f.type) and row_mod.kindWith(Row, f.name, f.type) == .column) {
-                        const source = lent[comptime plainTextIndex(Row, f.name)];
+                inline for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+                    if (comptime isPlainText(f_type) and row_mod.kindWith(Row, f_name, f_type) == .column) {
+                        const source = lent[comptime plainTextIndex(Row, f_name)];
                         const copy: ?[]const u8 = if (source) |text| blk: {
                             const at_slab = slab[used..][0..text.len];
                             @memcpy(at_slab, text);
                             used += text.len;
                             break :blk at_slab;
                         } else null;
-                        const Held = comptime if (@typeInfo(f.type) == .optional) @typeInfo(f.type).optional.child else f.type;
+                        const Held = comptime if (@typeInfo(f_type) == .optional) @typeInfo(f_type).optional.child else f_type;
                         const made: ?Held = if (copy) |text| (if (comptime Held == core.Str) c.str(text) else text) else null;
-                        @field(filled, f.name) = if (comptime @typeInfo(f.type) == .optional) made else made.?;
+                        @field(filled, f_name) = if (comptime @typeInfo(f_type) == .optional) made else made.?;
                     }
                 }
             }
@@ -3932,8 +3934,9 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         fn plainTextCount(comptime Row: type) usize {
             comptime {
                 var n: usize = 0;
-                for (@typeInfo(Row).@"struct".fields) |f| {
-                    if (isPlainText(f.type) and row_mod.kindWith(Row, f.name, f.type) == .column) n += 1;
+                const row_info = @typeInfo(Row).@"struct";
+                for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+                    if (isPlainText(f_type) and row_mod.kindWith(Row, f_name, f_type) == .column) n += 1;
                 }
                 return n;
             }
@@ -3943,9 +3946,10 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         fn plainTextIndex(comptime Row: type, comptime field: []const u8) usize {
             comptime {
                 var n: usize = 0;
-                for (@typeInfo(Row).@"struct".fields) |f| {
-                    if (!isPlainText(f.type) or row_mod.kindWith(Row, f.name, f.type) != .column) continue;
-                    if (std.mem.eql(u8, f.name, field)) return n;
+                const row_info = @typeInfo(Row).@"struct";
+                for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+                    if (!isPlainText(f_type) or row_mod.kindWith(Row, f_name, f_type) != .column) continue;
+                    if (std.mem.eql(u8, f_name, field)) return n;
                     n += 1;
                 }
                 unreachable;
@@ -4434,8 +4438,9 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             if (comptime Out == V) return values;
 
             var out: Out = undefined;
-            inline for (@typeInfo(V).@"struct".fields, 0..) |f, i| {
-                out[i] = try forWire(@TypeOf(out[i]), @field(values, f.name), c);
+            const v_info = @typeInfo(V).@"struct";
+            inline for (v_info.field_names, 0..) |f_name, i| {
+                out[i] = try forWire(@TypeOf(out[i]), @field(values, f_name), c);
             }
             return out;
         }
@@ -4483,11 +4488,11 @@ fn Maybe(comptime T: type) type {
 /// What a raw page past its last row is asked again with (ADR 205).
 fn Unfrozen(comptime V: type) type {
     comptime {
-        const given = @typeInfo(V).@"struct".fields;
-        var fields: [given.len]type = undefined;
-        for (given, 0..) |f, i| fields[i] = f.type;
+        const given = @typeInfo(V).@"struct";
+        var fields: [given.field_names.len]type = undefined;
+        for (given.field_types, 0..) |f_type, i| fields[i] = f_type;
         const frozen = fields;
-        return std.meta.Tuple(&frozen);
+        return @Tuple(&frozen);
     }
 }
 
@@ -4505,7 +4510,7 @@ fn BatchValues(comptime D: type, comptime Row: type, comptime stmt: statement.St
             fields[i] = []const ArrayElement(D, row_mod.ColumnType(Row, param.column));
         }
         const frozen = fields;
-        break :blk std.meta.Tuple(&frozen);
+        break :blk @Tuple(&frozen);
     };
 }
 
@@ -4615,7 +4620,7 @@ fn batchElement(comptime Row: type, comptime R: type) type {
 /// Whether the Debug-only traps are compiled in. The same rule `Str`'s
 /// staleness trap follows: a check that costs something is a check for the
 /// mode people develop in (ADR 003).
-const traps_enabled = builtin.mode == .Debug;
+const traps_enabled = builtin.mode == .debug;
 
 /// The tuple type for a statement's parameters: one field per placeholder,
 /// each the type of the column it is compared against.
@@ -4675,7 +4680,7 @@ fn Values(
             else if (param.nullable) Maybe(F) else F;
         }
         const frozen = fields;
-        break :blk std.meta.Tuple(&frozen);
+        break :blk @Tuple(&frozen);
     };
 }
 
@@ -4698,15 +4703,15 @@ fn RawValues(comptime D: type, comptime V: type) type {
         // Not a struct at all: leave it to the driver, whose message is about
         // the shape of `values` rather than about any one field.
         if (info != .@"struct") return V;
-        const given = info.@"struct".fields;
+        const given = info.@"struct";
 
         if (!info.@"struct".is_tuple) {
             // A named struct is zqlite's `:name` binding and is left alone —
             // but a value nilo would have converted cannot be, because
             // rebuilding it as a tuple is what would go wrong quietly.
-            for (given) |f| {
-                if (WireWrite(D, f.type) != f.type) @compileError(
-                    "nilo: `db.raw` was given `" ++ @typeName(f.type) ++ "` in a struct with " ++
+            for (given.field_types) |f_type| {
+                if (WireWrite(D, f_type) != f_type) @compileError(
+                    "nilo: `db.raw` was given `" ++ @typeName(f_type) ++ "` in a struct with " ++
                         "named fields, and nilo converts a parameter by position.\n" ++
                         "  Pass the values as a tuple — `.{ id, tag }` — which is what a " ++
                         "numbered placeholder binds against. A named struct binds by " ++
@@ -4715,16 +4720,16 @@ fn RawValues(comptime D: type, comptime V: type) type {
             }
             return V;
         }
-        var fields: [given.len]type = undefined;
+        var fields: [given.field_names.len]type = undefined;
         var moved = false;
-        for (given, 0..) |f, i| {
-            fields[i] = RawWrite(D, f.type);
-            if (fields[i] != f.type) moved = true;
+        for (given.field_types, 0..) |f_type, i| {
+            fields[i] = RawWrite(D, f_type);
+            if (fields[i] != f_type) moved = true;
         }
         if (!moved) return V;
 
         const frozen = fields;
-        return std.meta.Tuple(&frozen);
+        return @Tuple(&frozen);
     }
 }
 
@@ -4964,24 +4969,25 @@ fn enumOf(comptime E: type, raw: []const u8) !E {
 /// its element.
 fn assertReadable(comptime Row: type) void {
     comptime {
-        for (@typeInfo(Row).@"struct".fields) |f| {
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
             // A parent's columns and a child's are judged by their own Row,
             // and a field beside the columns is never read at all.
-            switch (row_mod.kindWith(Row, f.name, f.type)) {
+            switch (row_mod.kindWith(Row, f_name, f_type)) {
                 .beside => continue,
                 .parent => {
-                    assertReadable(row_mod.parentRowOf(f.type).?);
+                    assertReadable(row_mod.parentRowOf(f_type).?);
                     continue;
                 },
                 .children => {
-                    assertReadable(row_mod.childRowOf(f.type).?);
+                    assertReadable(row_mod.childRowOf(f_type).?);
                     continue;
                 },
                 .column, .aggregate, .over_children, .through => {},
             }
-            const Column = switch (@typeInfo(f.type)) {
+            const Column = switch (@typeInfo(f_type)) {
                 .optional => |o| o.child,
-                else => f.type,
+                else => f_type,
             };
             const listed = types.listElement(Column) != null;
             const Item = if (types.listElement(Column)) |I| switch (@typeInfo(I)) {
@@ -4989,8 +4995,8 @@ fn assertReadable(comptime Row: type) void {
                 else => I,
             } else Column;
             if (numberNoneStores(Item, listed)) |why| @compileError(
-                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as " ++
-                    @typeName(f.type) ++ ", " ++ why,
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f_name ++ "` as " ++
+                    @typeName(f_type) ++ ", " ++ why,
             );
             // A list is narrower than a scalar: pg.zig decodes an array
             // element into a number, a bool, text, or a `uuid` (`WireList`),
@@ -4998,8 +5004,8 @@ fn assertReadable(comptime Row: type) void {
             // `readable` accepts alone stopped inside the driver with its own
             // `cannot decode value of type` from four frames down.
             if (listed and readable(Item) and !listReadable(Item)) @compileError(
-                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as " ++
-                    @typeName(f.type) ++ ", a list of " ++ @typeName(Item) ++ ", which the driver " ++
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f_name ++ "` as " ++
+                    @typeName(f_type) ++ ", a list of " ++ @typeName(Item) ++ ", which the driver " ++
                     "cannot decode as an array element.\n" ++
                     "  A list holds `i16`, `i32`, `i64`, `f32`, `f64`, `bool`, text, `sql.Uuid` " ++
                     "or an enum, each optional if the array may hold NULL.\n" ++
@@ -5008,8 +5014,8 @@ fn assertReadable(comptime Row: type) void {
             );
             if (readable(Item)) continue;
             @compileError(
-                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as " ++
-                    @typeName(f.type) ++ ", which no Dialect can decode.\n" ++
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f_name ++ "` as " ++
+                    @typeName(f_type) ++ ", which no Dialect can decode.\n" ++
                     "  A column is a number, a bool, text (`[]const u8` or `Str`), " ++
                     "`sql.Bytes`, `sql.Uuid`, `sql.Timestamp`, `sql.Date`, an enum, a type that " ++
                     "carries `nilo_read` and `nilo_write` (`sql.AsText(\"…\")` is the " ++
@@ -5111,18 +5117,19 @@ fn readable(comptime T: type) bool {
 /// row holds only what the read buffer already holds.**
 fn assertStreamable(comptime Row: type) void {
     comptime {
-        for (@typeInfo(Row).@"struct".fields) |f| {
-            switch (row_mod.kindWith(Row, f.name, f.type)) {
+        const row_info = @typeInfo(Row).@"struct";
+        for (row_info.field_names, row_info.field_types) |f_name, f_type| {
+            switch (row_mod.kindWith(Row, f_name, f_type)) {
                 // Never read out of the buffer, so it may hold anything.
                 .beside => continue,
                 .parent => {
-                    assertStreamable(row_mod.parentRowOf(f.type).?);
+                    assertStreamable(row_mod.parentRowOf(f_type).?);
                     continue;
                 },
                 // A second statement per stream, whose rows would have to be
                 // held until the parent they belong to came past (ADR 218).
                 .children => @compileError(
-                    "nilo: `db.stream` on " ++ @typeName(Row) ++ ", which reads `" ++ f.name ++
+                    "nilo: `db.stream` on " ++ @typeName(Row) ++ ", which reads `" ++ f_name ++
                         "` as children.\n" ++
                         "  Children are read by a second statement once the rows are in hand, " ++
                         "and a stream never has them in hand. Stream a Row without the list, " ++
@@ -5130,12 +5137,12 @@ fn assertStreamable(comptime Row: type) void {
                 ),
                 .column, .aggregate, .over_children, .through => {},
             }
-            const Inner = switch (@typeInfo(f.type)) {
+            const Inner = switch (@typeInfo(f_type)) {
                 .optional => |o| o.child,
-                else => f.type,
+                else => f_type,
             };
             if (types.jsonPayload(Inner) != null) @compileError(
-                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as a Json column, " ++
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f_name ++ "` as a Json column, " ++
                     "and a streamed row cannot hold one.\n" ++
                     "  A borrowed row allocates nothing, which is what makes a million of " ++
                     "them run flat, and parsing a document costs one allocation per row. " ++
@@ -5143,7 +5150,7 @@ fn assertStreamable(comptime Row: type) void {
                     "and parse it where it is needed.",
             );
             if (types.listElement(Inner) != null) @compileError(
-                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f.name ++ "` as a list column, " ++
+                "nilo: " ++ @typeName(Row) ++ " reads `" ++ f_name ++ "` as a list column, " ++
                     "and a streamed row cannot hold one.\n" ++
                     "  A borrowed row allocates nothing, which is what makes a million of " ++
                     "them run flat, and an array has to be built per row — there is no " ++
@@ -5770,7 +5777,7 @@ test "every column of a Row is read from its own position, a parent's and a miss
     // something only it could, so a position read twice or skipped reads a
     // value of the wrong kind and fails, or the wrong value and is seen.
     const present = [_]wire_mod.Fake.Cell{
-        .{ .int = 10 },    .{ .int = 250 }, .{ .text = "Acme" }, .null,
+        .{ .int = 10 },      .{ .int = 250 },      .{ .text = "Acme" }, .null,
         .{ .text = "Wati" }, .{ .boolean = true }, .{ .text = "Budi" },
     };
     db.wire = .{ .answers = 1, .cells = &present };
@@ -5798,7 +5805,7 @@ test "every column of a Row is read from its own position, a parent's and a miss
     // An approver that is not there: its presence column says so, and the
     // column after it is never read as a name.
     const absent = [_]wire_mod.Fake.Cell{
-        .{ .int = 12 },    .{ .int = 40 },           .{ .text = "Borealis" }, .{ .text = "north" },
+        .{ .int = 12 },      .{ .int = 40 },        .{ .text = "Borealis" }, .{ .text = "north" },
         .{ .text = "Wati" }, .{ .boolean = false }, .null,
     };
     db.wire = .{ .answers = 1, .cells = &absent };
@@ -6017,8 +6024,8 @@ test "the parameter tuple is built from the paths the statement worked out" {
     // `18` is written as a `comptime_int` and has to reach the database as
     // whatever `age` is, or there is nothing to put on the wire.
     const Tuple = Values(dialect.Postgres, User, @TypeOf(options), stmt);
-    try testing.expectEqual(@as(usize, 1), @typeInfo(Tuple).@"struct".fields.len);
-    try testing.expectEqual(i32, @typeInfo(Tuple).@"struct".fields[0].type);
+    try testing.expectEqual(@as(usize, 1), @typeInfo(Tuple).@"struct".field_names.len);
+    try testing.expectEqual(i32, @typeInfo(Tuple).@"struct".field_types[0]);
 }
 
 test "a nullable column keeps its optional, because a write may be null" {
@@ -6032,13 +6039,13 @@ test "a nullable column keeps its optional, because a write may be null" {
     // Comparing: the `?` is harmless, a non-null optional binds the value.
     const found = .{ .where = .{ .nickname = "bo" } };
     const read = comptime statement.select(dialect.Postgres, User, @TypeOf(found));
-    try testing.expectEqual(?[]const u8, @typeInfo(Values(dialect.Postgres, User, @TypeOf(found), read)).@"struct".fields[0].type);
+    try testing.expectEqual(?[]const u8, @typeInfo(Values(dialect.Postgres, User, @TypeOf(found), read)).@"struct".field_types[0]);
 
     // Writing: the `?` is the whole point. `.nickname = null` is how a
     // column is set to NULL, and stripping it would leave nothing to write.
     const written = .{ .nickname = @as(?[]const u8, null) };
     const wrote = comptime statement.insert(dialect.Postgres, User, @TypeOf(written));
-    try testing.expectEqual(?[]const u8, @typeInfo(Values(dialect.Postgres, User, @TypeOf(written), wrote)).@"struct".fields[0].type);
+    try testing.expectEqual(?[]const u8, @typeInfo(Values(dialect.Postgres, User, @TypeOf(written), wrote)).@"struct".field_types[0]);
 }
 
 test "a limit held in a variable binds as a count, not as a column" {
@@ -6074,13 +6081,13 @@ test "a count binds as the integer the caller is holding, whatever it is" {
     _ = &per_page;
     const options = .{ .where = .{ .age = .{ .gt = 18 } }, .limit = per_page };
     const stmt = comptime statement.select(dialect.Postgres, User, @TypeOf(options));
-    const fields = @typeInfo(Values(dialect.Postgres, User, @TypeOf(options), stmt)).@"struct".fields;
+    const info = @typeInfo(Values(dialect.Postgres, User, @TypeOf(options), stmt)).@"struct";
 
-    try testing.expectEqual(@as(usize, 2), fields.len);
+    try testing.expectEqual(@as(usize, 2), info.field_names.len);
     // The condition still binds as its column's type, which is the half that
     // was always right.
-    try testing.expectEqual(i32, fields[0].type);
-    try testing.expectEqual(usize, fields[1].type);
+    try testing.expectEqual(i32, info.field_types[0]);
+    try testing.expectEqual(usize, info.field_types[1]);
 }
 
 test "the three types Zig has no word for are taken apart for the wire" {
@@ -6181,10 +6188,10 @@ test "an `in` over uuids is one parameter of slices rather than of arrays" {
     // attaches children to its rows, and it is the call that did not compile.
     const options = .{ .where = .{ .id = .{ .in = &[_]types.Uuid{types.Uuid.nil} } } };
     const stmt = comptime statement.select(dialect.Postgres, Keyed, @TypeOf(options));
-    const fields = @typeInfo(Values(dialect.Postgres, Keyed, @TypeOf(options), stmt)).@"struct".fields;
+    const info = @typeInfo(Values(dialect.Postgres, Keyed, @TypeOf(options), stmt)).@"struct";
 
-    try testing.expectEqual(@as(usize, 1), fields.len);
-    try testing.expectEqual([]const []const u8, fields[0].type);
+    try testing.expectEqual(@as(usize, 1), info.field_names.len);
+    try testing.expectEqual([]const []const u8, info.field_types[0]);
 
     // A scalar one is still the array, and that is not an inconsistency: the
     // tuple is all the driver has to read from, so a lone `Uuid` has nothing
@@ -6193,7 +6200,7 @@ test "an `in` over uuids is one parameter of slices rather than of arrays" {
     const single = comptime statement.select(dialect.Postgres, Keyed, @TypeOf(one));
     try testing.expectEqual(
         [types.Uuid.byte_len]u8,
-        @typeInfo(Values(dialect.Postgres, Keyed, @TypeOf(one), single)).@"struct".fields[0].type,
+        @typeInfo(Values(dialect.Postgres, Keyed, @TypeOf(one), single)).@"struct".field_types[0],
     );
 }
 
@@ -6206,22 +6213,22 @@ test "a raw parameter is taken apart the way a Row's is" {
     const bare = .{types.Uuid.nil};
     try testing.expectEqual(
         [types.Uuid.byte_len]u8,
-        @typeInfo(RawValues(dialect.Postgres, @TypeOf(bare))).@"struct".fields[0].type,
+        @typeInfo(RawValues(dialect.Postgres, @TypeOf(bare))).@"struct".field_types[0],
     );
     // And the other Wire, which stores the thirty-six characters — the one
     // place the two disagree (ADR 067), and it is the same disagreement
     // `WireWrite` already knew about.
     try testing.expectEqual(
         []const u8,
-        @typeInfo(RawValues(dialect.SQLite, @TypeOf(bare))).@"struct".fields[0].type,
+        @typeInfo(RawValues(dialect.SQLite, @TypeOf(bare))).@"struct".field_types[0],
     );
 
     // A `Str` and a `Timestamp` are the same story, and both were the same
     // run-time refusal.
     const held = .{ types.Timestamp{ .micros = 1 }, types.Uuid.nil };
-    const two = @typeInfo(RawValues(dialect.Postgres, @TypeOf(held))).@"struct".fields;
-    try testing.expectEqual(i64, two[0].type);
-    try testing.expectEqual([types.Uuid.byte_len]u8, two[1].type);
+    const two = @typeInfo(RawValues(dialect.Postgres, @TypeOf(held))).@"struct";
+    try testing.expectEqual(i64, two.field_types[0]);
+    try testing.expectEqual([types.Uuid.byte_len]u8, two.field_types[1]);
 }
 
 test "a raw tuple with nothing to convert is the caller's own, which is most of them" {
@@ -6246,31 +6253,31 @@ test "a literal beside a value that has to be converted still reaches the driver
     // `null` have no runtime representation at all, so the rebuilt tuple gives
     // each the type both drivers already bind the same way (ADR 116).
     const mixed = .{ types.Uuid.nil, 42, 1.5, null, "cap" };
-    const fields = @typeInfo(RawValues(dialect.Postgres, @TypeOf(mixed))).@"struct".fields;
+    const info = @typeInfo(RawValues(dialect.Postgres, @TypeOf(mixed))).@"struct";
 
-    try testing.expectEqual([types.Uuid.byte_len]u8, fields[0].type);
-    try testing.expectEqual(i64, fields[1].type);
-    try testing.expectEqual(f64, fields[2].type);
-    try testing.expectEqual(?u8, fields[3].type);
-    try testing.expectEqual(*const [3:0]u8, fields[4].type);
+    try testing.expectEqual([types.Uuid.byte_len]u8, info.field_types[0]);
+    try testing.expectEqual(i64, info.field_types[1]);
+    try testing.expectEqual(f64, info.field_types[2]);
+    try testing.expectEqual(?u8, info.field_types[3]);
+    try testing.expectEqual(*const [3:0]u8, info.field_types[4]);
 }
 
 test "a uuid column that is not sixteen bytes is refused rather than trimmed" {
     try testing.expectError(error.QueryFailed, uuidOf("short"));
-    const ok = try uuidOf(&[_]u8{0xab} ** types.Uuid.byte_len);
+    const ok = try uuidOf(&@as([types.Uuid.byte_len]u8, @splat(0xab)));
     try testing.expectEqual(@as(u8, 0xab), ok.bytes[15]);
 }
 
 test "a borrowed row is the same row with its Strs told the truth" {
     const B = row_mod.Borrowed(Person);
-    const fields = @typeInfo(B).@"struct".fields;
+    const info = @typeInfo(B).@"struct";
 
-    try testing.expectEqual(@as(usize, 4), fields.len);
+    try testing.expectEqual(@as(usize, 4), info.field_names.len);
     // `email` was a Str and is now a plain slice; the numbers did not move.
-    try testing.expectEqual(i64, fields[0].type);
-    try testing.expectEqual([]const u8, fields[1].type);
-    try testing.expectEqual(?[]const u8, fields[2].type);
-    try testing.expectEqual(i32, fields[3].type);
+    try testing.expectEqual(i64, info.field_types[0]);
+    try testing.expectEqual([]const u8, info.field_types[1]);
+    try testing.expectEqual(?[]const u8, info.field_types[2]);
+    try testing.expectEqual(i32, info.field_types[3]);
 }
 
 /// A handler that opens a transaction and walks away from it. The `defer`
@@ -6674,8 +6681,38 @@ fn allocationsFor(rows: usize, comptime options: anytype) !usize {
     return allocationsOf(Tick, rows, options);
 }
 
+/// What the arena sits on: it counts every block the arena asks for and
+/// **never grows one in place**. The arena extends its last block when the
+/// allocator under it says it can, and whether `testing.allocator` can depends
+/// on what happens to follow the block in memory, so under Zig 0.17 a count
+/// taken through it moved from one run of the same test to the next.
+const Pages = struct {
+    backing: std.mem.Allocator,
+    count: usize = 0,
+
+    fn allocator(self: *Pages) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *Pages = @ptrCast(@alignCast(ptr));
+        self.count += 1;
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *Pages = @ptrCast(@alignCast(ptr));
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
 fn allocationsOf(comptime Row: type, rows: usize, comptime options: anytype) !usize {
-    var counting = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var counting: Pages = .{ .backing = testing.allocator };
     var run = nilo.Run.init(counting.allocator());
     defer run.deinit();
 
@@ -6685,7 +6722,7 @@ fn allocationsOf(comptime Row: type, rows: usize, comptime options: anytype) !us
 
     const found = try db.select(Row, &run, options);
     try testing.expectEqual(rows, found.len);
-    return counting.allocations;
+    return counting.count;
 }
 
 // The number ADR 036 claims, held rather than asserted — the same job the
@@ -7138,13 +7175,13 @@ test "a row's plain text columns are copied out of the read buffer together, eac
 test "the batch tuple is a slice per column, not a value per row" {
     const stmt = comptime statement.insertMany(dialect.Postgres, Person, Line);
     const Tuple = BatchValues(dialect.Postgres, Person, stmt);
-    const fields = @typeInfo(Tuple).@"struct".fields;
+    const info = @typeInfo(Tuple).@"struct";
 
     // Two columns and any number of rows: the tuple's shape is the column
     // list, which is what makes the statement a constant.
-    try testing.expectEqual(@as(usize, 2), fields.len);
-    try testing.expectEqual([]const []const u8, fields[0].type);
-    try testing.expectEqual([]const i32, fields[1].type);
+    try testing.expectEqual(@as(usize, 2), info.field_names.len);
+    try testing.expectEqual([]const []const u8, info.field_types[0]);
+    try testing.expectEqual([]const i32, info.field_types[1]);
 }
 
 test "the three column types that travel differently in a batch say so" {
@@ -8908,7 +8945,9 @@ test "a $n in a raw statement is the nth value on SQLite too, whatever order it 
 
     // `$2` first, `$1` second, and `$2` twice: the number is what binds.
     const filter: ?[]const u8 = "kid@example.dev";
-    const found = try db.raw(nilo.Str, &run,
+    const found = try db.raw(
+        nilo.Str,
+        &run,
         "SELECT email FROM accounts WHERE ($2 IS NULL OR email = $2) AND id >= $1 ORDER BY id",
         .{ @as(i64, 1), filter },
     );
@@ -8918,7 +8957,9 @@ test "a $n in a raw statement is the nth value on SQLite too, whatever order it 
     // And the optional bound as NULL takes the `IS NULL` arm, which is the
     // `sql.given` of a statement the caller wrote.
     const none: ?[]const u8 = null;
-    const all = try db.raw(nilo.Str, &run,
+    const all = try db.raw(
+        nilo.Str,
+        &run,
         "SELECT email FROM accounts WHERE ($2 IS NULL OR email = $2) AND id >= $1 ORDER BY id",
         .{ @as(i64, 1), none },
     );
@@ -9825,7 +9866,7 @@ test "an ordering a request chose ends in the key where a limit cuts it, so tied
     }
     const TieSort = ordering.Ordering(SqliteAccount, .{ .who = .public, .id = .id });
 
-    var seen = [_]bool{false} ** 10;
+    var seen = @as([10]bool, @splat(false));
     var offset: i64 = 0;
     while (offset < 10) : (offset += 3) {
         const page = try db.page(SqliteAccount, &run, .{

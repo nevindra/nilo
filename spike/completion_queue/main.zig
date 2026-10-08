@@ -147,7 +147,7 @@ fn owner(shared: *Shared, handle: zio.ev.Backend.NetHandle, rearm: Rearm, pace: 
         // than `null`, and `submit` can refuse.
         const done = cq.wait() catch |err| {
             shared.parked.store(false, .release);
-            shared.outcome.store(@intFromEnum(switch (err) {
+            shared.outcome.store(@backingInt(switch (err) {
                 error.Canceled => Outcome.canceled,
                 error.Closed => Outcome.emptied,
             }), .release);
@@ -501,7 +501,7 @@ fn run(rearm: Rearm, pace: Pace) !void {
     const poll_wakes = shared.poll_wakes.load(.acquire);
     const posted = shared.posted.load(.acquire);
     const drained = shared.drained.load(.acquire);
-    const outcome: Outcome = @enumFromInt(shared.outcome.load(.acquire));
+    const outcome: Outcome = @fromBackingInt(@intCast(shared.outcome.load(.acquire)));
 
     std.debug.print(
         "parked={} async_wakes={d}/{d} drained={d}/{d} poll_wakes={d} write_rc={d} outcome={s} stranger={}\n",

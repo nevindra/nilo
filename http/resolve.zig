@@ -98,13 +98,13 @@ fn valueWithin(comptime V: type, comptime being_resolved: []const type, c: *Ctx)
 
     const f = @field(V, marker);
     const Fn = comptime fnTypeOf(V, @TypeOf(f));
-    const params = @typeInfo(Fn).@"fn".params;
+    const params = @typeInfo(Fn).@"fn".param_types;
     const roles = comptime rolesOf(V, params);
     const deeper = being_resolved ++ [_]type{V};
 
     var args: std.meta.ArgsTuple(Fn) = undefined;
-    inline for (params, 0..) |p, i| {
-        const P = p.type.?;
+    inline for (params, 0..) |param, i| {
+        const P = param.?;
         switch (comptime roles[i]) {
             .ctx => args[i] = c,
             .service => args[i] = c._services.get(P) orelse return fail.internal(
@@ -145,16 +145,16 @@ fn requirementsWithin(
         checkResolvable(V, being_resolved);
 
         const Fn = fnTypeOf(V, @TypeOf(@field(V, marker)));
-        const params = @typeInfo(Fn).@"fn".params;
+        const params = @typeInfo(Fn).@"fn".param_types;
         const roles = rolesOf(V, params);
         const deeper = being_resolved ++ [_]type{V};
 
         var list: []const service_mod.Requirement = &.{};
-        for (params, 0..) |p, i| {
+        for (params, 0..) |param, i| {
             switch (roles[i]) {
                 .service => list = list ++
-                    [_]service_mod.Requirement{service_mod.requirementFor(p.type.?, route)},
-                .resolved => list = list ++ requirementsWithin(p.type.?, deeper, route),
+                    [_]service_mod.Requirement{service_mod.requirementFor(param.?, route)},
+                .resolved => list = list ++ requirementsWithin(param.?, deeper, route),
                 else => {},
             }
         }
@@ -201,15 +201,15 @@ fn checkResolvable(comptime V: type, comptime being_resolved: []const type) void
                 "it has to hand back that type.",
         );
 
-        _ = rolesOf(V, info.params);
+        _ = rolesOf(V, info.param_types);
     }
 }
 
-fn rolesOf(comptime V: type, comptime params: []const std.builtin.Type.Fn.Param) []const Role {
+fn rolesOf(comptime V: type, comptime params: []const ?type) []const Role {
     comptime {
         var roles: [params.len]Role = undefined;
-        for (params, 0..) |p, i| {
-            const P = p.type orelse @compileError(
+        for (params, 0..) |param, i| {
+            const P = param orelse @compileError(
                 "nilo: argument " ++ num(i + 1) ++ " of the resolver on `" ++ naming.of(V) ++
                     "` has no type.",
             );

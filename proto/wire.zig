@@ -149,7 +149,7 @@ pub inline fn splitKey(v: u64) Error!Key {
     if (wire > 5) return error.InvalidKey;
     const number: u32 = @intCast(v >> 3);
     if (number == 0) return error.InvalidKey;
-    return .{ .number = number, .wire = @enumFromInt(wire) };
+    return .{ .number = number, .wire = @fromBackingInt(@intCast(wire)) };
 }
 
 pub const Varint = struct { value: u64, pos: usize };
@@ -207,7 +207,7 @@ pub const Writer = struct {
     }
 
     pub inline fn key(w: *Writer, number: u32, wire: WireType) void {
-        w.varint((@as(u64, number) << 3) | @intFromEnum(wire));
+        w.varint((@as(u64, number) << 3) | @backingInt(wire));
     }
 
     pub inline fn raw(w: *Writer, b: []const u8) void {

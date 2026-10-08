@@ -160,24 +160,24 @@ pub const Expectation = struct {
 /// caught by the migration diff and not by the boot check.
 pub fn expectationsOf(comptime D: type, comptime Row: type) []const Expectation {
     return comptime blk: {
-        const fields = @typeInfo(Row).@"struct".fields;
+        const info = @typeInfo(Row).@"struct";
         const builds = row_mod.managedOf(Row);
-        var out: [fields.len]Expectation = undefined;
+        var out: [info.field_names.len]Expectation = undefined;
         var n: usize = 0;
-        for (fields) |f| {
+        for (info.field_names, info.field_types) |f_name, f_type| {
             // Carried beside the columns, so there is nothing in the table
             // to expect (ADR 178).
-            if (!row_mod.isColumnField(Row, f.name)) continue;
-            const accepts: []const []const u8 = D.accepts(f.type) orelse
-                (if (builds and table_mod.enumValues(f.type).len > 0)
+            if (!row_mod.isColumnField(Row, f_name)) continue;
+            const accepts: []const []const u8 = D.accepts(f_type) orelse
+                (if (builds and table_mod.enumValues(f_type).len > 0)
                     D.text_accepts
                 else
                     &.{});
             out[n] = .{
-                .column = f.name,
+                .column = f_name,
                 .accepts = accepts,
                 .expected = list(accepts),
-                .optional = @typeInfo(f.type) == .optional,
+                .optional = @typeInfo(f_type) == .optional,
             };
             n += 1;
         }
@@ -292,18 +292,18 @@ pub const EnumColumn = struct { column: []const u8, type_name: []const u8, E: ty
 
 pub fn enumColumnsOf(comptime Row: type) []const EnumColumn {
     return comptime blk: {
-        const fields = @typeInfo(Row).@"struct".fields;
-        var out: [fields.len]EnumColumn = undefined;
+        const info = @typeInfo(Row).@"struct";
+        var out: [info.field_names.len]EnumColumn = undefined;
         var n: usize = 0;
-        for (fields) |f| {
-            if (!row_mod.isColumnField(Row, f.name)) continue;
-            const Inner = switch (@typeInfo(f.type)) {
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            if (!row_mod.isColumnField(Row, f_name)) continue;
+            const Inner = switch (@typeInfo(f_type)) {
                 .optional => |o| o.child,
-                else => f.type,
+                else => f_type,
             };
             if (@typeInfo(Inner) != .@"enum") continue;
             if (!@hasDecl(Inner, "nilo_column")) continue;
-            out[n] = .{ .column = f.name, .type_name = Inner.nilo_column, .E = Inner };
+            out[n] = .{ .column = f_name, .type_name = Inner.nilo_column, .E = Inner };
             n += 1;
         }
         const frozen = out[0..n].*;
@@ -429,15 +429,16 @@ pub fn compareEnum(
             found += 1;
         }
     }
-    inline for (@typeInfo(E).@"enum".fields) |f| {
+    const e_info = @typeInfo(E).@"enum";
+    inline for (e_info.field_names) |f_name| {
         var present = false;
         for (labels) |label| {
-            if (std.mem.eql(u8, label, f.name)) present = true;
+            if (std.mem.eql(u8, label, f_name)) present = true;
         }
         if (!present) {
             var problem = base;
             problem.kind = .value_type_lacks;
-            problem.found = f.name;
+            problem.found = f_name;
             try out.append(gpa, problem);
             found += 1;
         }

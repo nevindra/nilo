@@ -520,9 +520,9 @@ pub fn filtersNothing(where: anytype) bool {
         .@"struct" => |s| s,
         else => return false,
     };
-    if (info.fields.len == 0) return true;
-    inline for (info.fields) |f| {
-        if (!termFiltersNothing(f.name, @field(where, f.name))) return false;
+    if (info.field_names.len == 0) return true;
+    inline for (info.field_names) |f_name| {
+        if (!termFiltersNothing(f_name, @field(where, f_name))) return false;
     }
     return true;
 }
@@ -530,16 +530,17 @@ pub fn filtersNothing(where: anytype) bool {
 fn termFiltersNothing(comptime name: []const u8, value: anytype) bool {
     const T = @TypeOf(value);
     if (comptime std.mem.eql(u8, name, any_field)) {
-        inline for (@typeInfo(T).@"struct".fields) |alt| {
-            if (filtersNothing(@field(value, alt.name))) return true;
+        const t_info = @typeInfo(T).@"struct";
+        inline for (t_info.field_names) |alt_name| {
+            if (filtersNothing(@field(value, alt_name))) return true;
         }
         return false;
     }
     if (comptime std.mem.eql(u8, name, across_field)) {
         const info = @typeInfo(T).@"struct";
         if (!info.is_tuple) return entryFiltersNothing(value);
-        inline for (info.fields) |entry| {
-            if (!entryFiltersNothing(@field(value, entry.name))) return false;
+        inline for (info.field_names) |entry_name| {
+            if (!entryFiltersNothing(@field(value, entry_name))) return false;
         }
         return true;
     }
@@ -552,9 +553,10 @@ fn termFiltersNothing(comptime name: []const u8, value: anytype) bool {
 /// A column's operators, or an `.across` entry's: ANDed, so the set narrows
 /// nothing only when every operator in it narrows nothing.
 fn entryFiltersNothing(ops: anytype) bool {
-    inline for (@typeInfo(@TypeOf(ops)).@"struct".fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, across_columns)) continue;
-        if (!opFiltersNothing(f.name, @field(ops, f.name))) return false;
+    const info = @typeInfo(@TypeOf(ops)).@"struct";
+    inline for (info.field_names) |f_name| {
+        if (comptime std.mem.eql(u8, f_name, across_columns)) continue;
+        if (!opFiltersNothing(f_name, @field(ops, f_name))) return false;
     }
     return true;
 }
@@ -757,47 +759,47 @@ fn walk(
                     "  Write it out where it is used: `.where = .{ .id = 7 }`.",
             ),
         };
-        if (info.fields.len == 0) return "";
+        if (info.field_names.len == 0) return "";
 
         var out: []const u8 = "";
-        for (info.fields) |f| {
-            const path = prefix ++ &[_][]const u8{f.name};
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            const path = prefix ++ &[_][]const u8{f_name};
             const term = term: {
                 // A name on a shaped Row may be something other than a column
                 // (ADR 218), and which clause it belongs to follows from what
                 // it is.
-                if (state.shape) |Shape| switch (row_mod.kindOf(Shape, f.name)) {
+                if (state.shape) |Shape| switch (row_mod.kindOf(Shape, f_name)) {
                     .aggregate => {
                         if (state.nested) @compileError(
-                            "nilo: `." ++ f.name ++ "` is an aggregate of " ++ @typeName(Shape) ++
+                            "nilo: `." ++ f_name ++ "` is an aggregate of " ++ @typeName(Shape) ++
                                 ", named inside `.any`.\n" ++
                                 "  A condition on a group is a `HAVING` and one on a row is a " ++
                                 "`WHERE`, and an alternative cannot be half of each. Name the " ++
                                 "aggregate beside the `.any`, where it narrows the groups.",
                         );
                         if (state.phase != .groups) continue;
-                        break :term groupTerm(D, Shape, f.name, f.type, path, state);
+                        break :term groupTerm(D, Shape, f_name, f_type, path, state);
                     },
                     .parent => {
                         if (state.phase == .groups) continue;
-                        break :term parentTerm(D, Shape, f.name, f.type, path, state);
+                        break :term parentTerm(D, Shape, f_name, f_type, path, state);
                     },
                     .over_children => {
                         if (state.phase == .groups) continue;
-                        break :term overChildrenTerm(D, Shape, f.name, f.type, path, state);
+                        break :term overChildrenTerm(D, Shape, f_name, f_type, path, state);
                     },
                     .through => {
                         if (state.phase == .groups) continue;
-                        break :term throughTerm(D, Shape, f.name, f.type, path, state);
+                        break :term throughTerm(D, Shape, f_name, f_type, path, state);
                     },
-                    .children => row_mod.noSuchColumn(Shape, f.name, "a condition"),
+                    .children => row_mod.noSuchColumn(Shape, f_name, "a condition"),
                     .column, .beside => {},
                 };
                 if (state.phase == .groups) continue;
-                if (std.mem.eql(u8, f.name, any_field)) break :term anyOf(D, Row, f.type, path, state);
-                if (std.mem.eql(u8, f.name, exists_field)) break :term existsOf(D, Row, f.type, path, state, false);
-                if (std.mem.eql(u8, f.name, not_exists_field)) break :term existsOf(D, Row, f.type, path, state, true);
-                if (std.mem.eql(u8, f.name, across_field)) break :term acrossOf(D, Row, f.type, path, state);
+                if (std.mem.eql(u8, f_name, any_field)) break :term anyOf(D, Row, f_type, path, state);
+                if (std.mem.eql(u8, f_name, exists_field)) break :term existsOf(D, Row, f_type, path, state, false);
+                if (std.mem.eql(u8, f_name, not_exists_field)) break :term existsOf(D, Row, f_type, path, state, true);
+                if (std.mem.eql(u8, f_name, across_field)) break :term acrossOf(D, Row, f_type, path, state);
                 // A narrower Row may be narrowed by a column of its table it
                 // does not carry, as it may be ordered by one: the statement
                 // reads the table, and the condition is about the table's
@@ -805,31 +807,31 @@ fn walk(
                 // the type its value is bound as. A field the Row carries
                 // beside its columns keeps its own refusal: the name means
                 // that field to whoever reads the Row.
-                const Column = if (row_mod.hasColumn(Row, f.name))
+                const Column = if (row_mod.hasColumn(Row, f_name))
                     Row
-                else if (row_mod.fieldTypeOf(Row, f.name) == null and row_mod.tableHasColumn(Row, f.name))
+                else if (row_mod.fieldTypeOf(Row, f_name) == null and row_mod.tableHasColumn(Row, f_name))
                     row_mod.ownerOf(Row)
                 else
-                    row_mod.noSuchColumn(Row, f.name, "a condition");
+                    row_mod.noSuchColumn(Row, f_name, "a condition");
                 // `.due_date = .today`: the database's clock, compared with
                 // `=`, and nothing bound. Read here rather than in `condition`,
                 // which is handed the type and not the struct the word sits in.
-                if (f.type == @TypeOf(.enum_literal)) {
-                    if (clockWord(D, Column, f.name, fieldValue(W, f.name), "`." ++ f.name ++ " = ." ++
-                        @tagName(fieldValue(W, f.name)) ++ "`")) |clock|
+                if (f_type == @TypeOf(.enum_literal)) {
+                    if (clockWord(D, Column, f_name, fieldValue(W, f_name), "`." ++ f_name ++ " = ." ++
+                        @tagName(fieldValue(W, f_name)) ++ "`")) |clock|
                     {
-                        break :term state.qualifier ++ D.quote(f.name) ++ " = " ++ clock;
+                        break :term state.qualifier ++ D.quote(f_name) ++ " = " ++ clock;
                     }
                 }
-                if (isShiftShape(f.type)) {
-                    const shift = clockShifted(D, Column, f.name, f.type, fieldValue(W, f.name), "`." ++
-                        f.name ++ " = .{ ." ++ @typeInfo(f.type).@"struct".fields[0].name ++ " = … }`").?;
-                    break :term state.qualifier ++ D.quote(f.name) ++ " = " ++ shift;
+                if (isShiftShape(f_type)) {
+                    const shift = clockShifted(D, Column, f_name, f_type, fieldValue(W, f_name), "`." ++
+                        f_name ++ " = .{ ." ++ @typeInfo(f_type).@"struct".field_names[0] ++ " = … }`").?;
+                    break :term state.qualifier ++ D.quote(f_name) ++ " = " ++ shift;
                 }
-                if (Column == Row) break :term condition(D, Row, f.name, f.type, path, state);
+                if (Column == Row) break :term condition(D, Row, f_name, f_type, path, state);
                 const held = state.inner;
                 state.inner = Column;
-                const widened = condition(D, Column, f.name, f.type, path, state);
+                const widened = condition(D, Column, f_name, f_type, path, state);
                 state.inner = held;
                 break :term widened;
             };
@@ -861,7 +863,7 @@ fn anyOf(
         // Empty first: `.{}` is a struct literal Zig does not call a tuple,
         // so asking about tuple-ness first would answer an emptiness mistake
         // with a message about shape.
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: `.any` is empty.\n" ++
                 "  An empty list of alternatives matches nothing, which is almost " ++
                 "never what was meant; leave it out instead.",
@@ -873,12 +875,12 @@ fn anyOf(
         );
 
         var out: []const u8 = "(";
-        for (info.fields, 0..) |f, i| {
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
             if (i > 0) out = out ++ " OR ";
             const before = state.count;
             const was_nested = state.nested;
             state.nested = true;
-            const sub = walk(D, Row, f.type, path ++ &[_][]const u8{f.name}, state);
+            const sub = walk(D, Row, f_type, path ++ &[_][]const u8{f_name}, state);
             state.nested = was_nested;
             // **`.any` is OR, and that reverses what dropping a term means**
             // (ADR 149). Everywhere else a term that is not there widens the
@@ -1081,7 +1083,7 @@ fn existsOf(
                     "one entry per test.",
             ),
         };
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: `." ++ word ++ "` is empty.\n" ++
                 "  A test over no table matches nothing, which is almost never what was " ++
                 "meant; leave it out instead.",
@@ -1097,13 +1099,13 @@ fn existsOf(
         );
 
         var out: []const u8 = "";
-        for (info.fields, 0..) |f, i| {
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
             if (i > 0) out = out ++ " AND ";
             out = out ++ oneExists(
                 D,
                 Outer,
-                f.type,
-                path ++ &[_][]const u8{f.name},
+                f_type,
+                path ++ &[_][]const u8{f_name},
                 state,
                 negate,
                 word,
@@ -1130,11 +1132,12 @@ fn oneExists(
         if (@typeInfo(T) != .@"struct" or @typeInfo(T).@"struct".is_tuple) @compileError(
             "nilo: an entry of `." ++ word ++ "` is a " ++ @typeName(T) ++ ".\n" ++ shape,
         );
-        for (@typeInfo(T).@"struct".fields) |f| {
+        const t_info = @typeInfo(T).@"struct";
+        for (t_info.field_names) |f_name| {
             for (exists_known) |ok| {
-                if (std.mem.eql(u8, f.name, ok)) break;
+                if (std.mem.eql(u8, f_name, ok)) break;
             } else @compileError(
-                "nilo: an entry of `." ++ word ++ "` sets `." ++ f.name ++
+                "nilo: an entry of `." ++ word ++ "` sets `." ++ f_name ++
                     "`, which is not part of it.\n" ++
                     "  It takes `.in`, `.where`, and `.on` or `.via` when the join column " ++
                     "is not one a `.references` already names.",
@@ -1308,13 +1311,13 @@ fn acrossOf(
             ),
         };
         if (!info.is_tuple) return oneAcross(D, Row, T, path, state);
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: `.across` is empty.\n  Leave it out instead.",
         );
         var out: []const u8 = "";
-        for (info.fields, 0..) |f, i| {
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
             if (i > 0) out = out ++ " AND ";
-            out = out ++ oneAcross(D, Row, f.type, path ++ &[_][]const u8{f.name}, state);
+            out = out ++ oneAcross(D, Row, f_type, path ++ &[_][]const u8{f_name}, state);
         }
         return out;
     }
@@ -1360,19 +1363,19 @@ fn oneAcross(
                 "nilo: `.across`'s `.columns` is a " ++ @typeName(Columns) ++ ".\n" ++ across_shape,
             ),
         };
-        if (columns_info.fields.len < 2) @compileError(
-            "nilo: `.across` names " ++ (if (columns_info.fields.len == 0) "no column" else "one column") ++
+        if (columns_info.field_names.len < 2) @compileError(
+            "nilo: `.across` names " ++ (if (columns_info.field_names.len == 0) "no column" else "one column") ++
                 ".\n  One column is an ordinary condition: write `." ++
-                (if (columns_info.fields.len == 1) @tagName(fieldValue(Columns, "0")) else "code") ++
+                (if (columns_info.field_names.len == 1) @tagName(fieldValue(Columns, "0")) else "code") ++
                 " = …`. `.across` is for a value tested against several.",
         );
-        var columns: [columns_info.fields.len][]const u8 = undefined;
-        for (columns_info.fields, 0..) |f, i| {
-            if (f.type != @TypeOf(.enum_literal)) @compileError(
-                "nilo: `.across`'s `.columns` holds a " ++ @typeName(f.type) ++
+        var columns: [columns_info.field_names.len][]const u8 = undefined;
+        for (columns_info.field_names, columns_info.field_types, 0..) |f_name, f_type, i| {
+            if (f_type != @TypeOf(.enum_literal)) @compileError(
+                "nilo: `.across`'s `.columns` holds a " ++ @typeName(f_type) ++
                     ".\n  A column is named as it is in a condition: `.code`.",
             );
-            const name = @tagName(fieldValue(Columns, f.name));
+            const name = @tagName(fieldValue(Columns, f_name));
             if (!row_mod.hasColumn(Row, name)) row_mod.noSuchColumn(Row, name, "an `.across`");
             columns[i] = name;
         }
@@ -1391,14 +1394,14 @@ fn oneAcross(
         // The operators: everything else in the entry, ANDed per column the
         // way a column's own operators are.
         var ops: []const Operator = &.{};
-        for (info.fields) |f| {
-            if (std.mem.eql(u8, f.name, across_columns)) continue;
-            if (spelling(f.name) == null and patternSpelling(f.name) == null and
-                listSpelling(f.name) == null and nullSafeSpelling(f.name) == null and
-                foldedSpelling(f.name) == null)
+        for (info.field_names, info.field_types) |f_name, f_type| {
+            if (std.mem.eql(u8, f_name, across_columns)) continue;
+            if (spelling(f_name) == null and patternSpelling(f_name) == null and
+                listSpelling(f_name) == null and nullSafeSpelling(f_name) == null and
+                foldedSpelling(f_name) == null)
             {
                 @compileError(
-                    "nilo: an entry of `.across` sets `." ++ f.name ++ "`, which is not an operator.\n" ++
+                    "nilo: an entry of `.across` sets `." ++ f_name ++ "`, which is not an operator.\n" ++
                         "  Beside `.columns` it takes what a column takes: `.eq`, `.icontains`, " ++
                         "`.gt` and the rest, each with its value.",
                 );
@@ -1406,8 +1409,8 @@ fn oneAcross(
             // ORed columns and a negated operator do not say what they read
             // as (ADR 172): "not equal to q" over two columns is "some column
             // differs" to the OR and "no column equals" to a person.
-            if (negatesWord(f.name)) @compileError(
-                "nilo: an entry of `.across` sets `." ++ f.name ++ "`, which is a negation.\n" ++
+            if (negatesWord(f_name)) @compileError(
+                "nilo: an entry of `.across` sets `." ++ f_name ++ "`, which is a negation.\n" ++
                     "  `.across` keeps a row when any column meets the condition, so a negated " ++
                     "one would keep a row whose other column still matches: `.not_icontains = \"test\"` " ++
                     "over `code` and `name` would keep a row whose name contains it.\n" ++
@@ -1415,7 +1418,7 @@ fn oneAcross(
                     "`.code = .{ .not_icontains = q }, .name = .{ .not_icontains = q }`, " ++
                     "each with its own `sql.given` if the box may be empty.",
             );
-            ops = ops ++ &[_]Operator{.{ .name = f.name, .T = f.type }};
+            ops = ops ++ &[_]Operator{.{ .name = f_name, .T = f_type }};
         }
         if (ops.len == 0) @compileError(
             "nilo: an entry of `.across` names its columns and no condition.\n" ++ across_shape,
@@ -1696,20 +1699,22 @@ fn correlation(
 /// `statement.writtenValue` reads one — one field, never the whole struct, so
 /// a sibling holding a runtime value is not demanded to be comptime as well.
 fn fieldValue(comptime T: type, comptime field: []const u8) blk: {
-    for (@typeInfo(T).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, field)) break :blk f.type;
+    const t_info = @typeInfo(T).@"struct";
+    for (t_info.field_names, t_info.field_types) |f_name, f_type| {
+        if (std.mem.eql(u8, f_name, field)) break :blk f_type;
     }
     break :blk void;
 } {
     comptime {
-        for (@typeInfo(T).@"struct".fields) |f| {
-            if (!std.mem.eql(u8, f.name, field)) continue;
-            const written = f.default_value_ptr orelse @compileError(
+        const t_info2 = @typeInfo(T).@"struct";
+        for (t_info2.field_names, t_info2.field_types, t_info2.field_attrs) |f_name, f_type, f_attrs| {
+            if (!std.mem.eql(u8, f_name, field)) continue;
+            const written = f_attrs.default_value_ptr orelse @compileError(
                 "nilo: `." ++ field ++ "` has no value written out where it is used.\n" ++
                     "  It is settled while compiling, so it has to be a literal rather " ++
                     "than something worked out at run time.",
             );
-            return @as(*const f.type, @ptrCast(@alignCast(written))).*;
+            return @as(*const f_type, @ptrCast(@alignCast(written))).*;
         }
         unreachable;
     }
@@ -1819,8 +1824,8 @@ pub fn clockShifted(
             .@"struct" => |st| st,
             else => return null,
         };
-        if (info.is_tuple or info.fields.len != 1) return null;
-        const name = info.fields[0].name;
+        if (info.is_tuple or info.field_names.len != 1) return null;
+        const name = info.field_names[0];
         const today = std.mem.eql(u8, name, "today");
         if (!today and !std.mem.eql(u8, name, "now")) return null;
         const word = if (today) .today else .now;
@@ -1841,12 +1846,12 @@ pub fn clockShifted(
                     "`.{ .now = .{ .days = -90 } }`, or `.hours`, `.minutes`, `.seconds`.",
             ),
         };
-        if (unit_info.fields.len != 1) @compileError(
+        if (unit_info.field_names.len != 1) @compileError(
             "nilo: " ++ said ++ " moves `.now` by " ++
-                std.fmt.comptimePrint("{d}", .{unit_info.fields.len}) ++ " units.\n" ++
+                std.fmt.comptimePrint("{d}", .{unit_info.field_names.len}) ++ " units.\n" ++
                 "  Name one: `.{ .now = .{ .days = -90 } }`, or `.hours`, `.minutes`, `.seconds`.",
         );
-        const unit_name = unit_info.fields[0].name;
+        const unit_name = unit_info.field_names[0];
         const unit = std.meta.stringToEnum(dialect_mod.ClockUnit, unit_name) orelse @compileError(
             "nilo: " ++ said ++ " moves `.now` by `." ++ unit_name ++ "`, which is not a unit it takes.\n" ++
                 "  They are `.days`, `.hours`, `.minutes` and `.seconds`.",
@@ -1940,7 +1945,7 @@ fn clockTerm(
         if (op.T != @TypeOf(.enum_literal)) {
             if (!isShiftShape(op.T)) return null;
             const shift = clockShifted(D, Row, column, op.T, fieldValue(T, op.name), "`." ++ column ++
-                " = .{ ." ++ op.name ++ " = .{ ." ++ @typeInfo(op.T).@"struct".fields[0].name ++ " = … } }`").?;
+                " = .{ ." ++ op.name ++ " = .{ ." ++ @typeInfo(op.T).@"struct".field_names[0] ++ " = … } }`").?;
             return quoted ++ " " ++ spelled ++ " " ++ shift;
         }
         const word = fieldValue(T, op.name);
@@ -1958,8 +1963,8 @@ pub fn isShiftShape(comptime V: type) bool {
             .@"struct" => |st| st,
             else => return false,
         };
-        if (info.is_tuple or info.fields.len != 1) return false;
-        const name = info.fields[0].name;
+        if (info.is_tuple or info.field_names.len != 1) return false;
+        const name = info.field_names[0];
         return std.mem.eql(u8, name, "today") or std.mem.eql(u8, name, "now");
     }
 }
@@ -2001,17 +2006,17 @@ fn operatorsOf(comptime T: type) ?[]const Operator {
             .@"struct" => |s| s,
             else => return null,
         };
-        if (info.is_tuple or info.fields.len == 0) return null;
-        for (info.fields) |f| {
-            if (spelling(f.name) != null) continue;
-            if (listSpelling(f.name) != null) continue;
-            if (nullSafeSpelling(f.name) != null) continue;
-            if (patternSpelling(f.name) != null) continue;
-            if (foldedSpelling(f.name) != null) continue;
+        if (info.is_tuple or info.field_names.len == 0) return null;
+        for (info.field_names) |f_name| {
+            if (spelling(f_name) != null) continue;
+            if (listSpelling(f_name) != null) continue;
+            if (nullSafeSpelling(f_name) != null) continue;
+            if (patternSpelling(f_name) != null) continue;
+            if (foldedSpelling(f_name) != null) continue;
             return null;
         }
-        var out: [info.fields.len]Operator = undefined;
-        for (info.fields, 0..) |f, i| out[i] = .{ .name = f.name, .T = f.type };
+        var out: [info.field_names.len]Operator = undefined;
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| out[i] = .{ .name = f_name, .T = f_type };
         const frozen = out;
         return &frozen;
     }
@@ -2259,8 +2264,8 @@ fn listHoldsNull(comptime T: type) bool {
             .array => |a| a.child != u8 and elementIsNull(a.child),
             .@"struct" => |st| blk: {
                 if (!st.is_tuple) break :blk false;
-                for (st.fields) |f| {
-                    if (elementIsNull(f.type)) break :blk true;
+                for (st.field_types) |f_type| {
+                    if (elementIsNull(f_type)) break :blk true;
                 }
                 break :blk false;
             },

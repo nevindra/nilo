@@ -1600,7 +1600,7 @@ test "a claim is taken by whoever was first, and an expired one is free again" {
     try testing.expectEqual(Store.Claim.stored, store.putIfAbsent(1, "job-7", "second", 0));
 
     // A value too large is refused the way `put` refuses it, not taken.
-    const huge = "x" ** (1 << 20);
+    const huge = &@as([(1 << 20)]u8, @splat('x'));
     try testing.expectEqual(Store.Claim.refused, store.putIfAbsent(1, "big", huge, 0));
 
     // And one that expired is nobody's: written with a one-second life and
@@ -1699,7 +1699,7 @@ test "the ring forgets the oldest first, and says eviction rather than miss" {
 
     // Fill well past the ring, then ask for the first thing written.
     var key: [32]u8 = undefined;
-    const value = "x" ** 512;
+    const value = &@as([512]u8, @splat('x'));
     for (0..400) |i| {
         _ = store.put(1, try std.fmt.bufPrint(&key, "k{d}", .{i}), value, 0);
     }
@@ -1774,7 +1774,7 @@ test "an entry that will not fit before the end starts again at the beginning" {
     // A value that still fits, so what is being watched is the wrap and not a
     // refusal. It goes through whichever region `put` chooses, and the round
     // trip below is what says the wrap did not cut it in half.
-    const value = "a" ** 300 ++ "b" ** 300;
+    const value = &@as([300]u8, @splat('a')) ++ &@as([300]u8, @splat('b'));
     var key: [32]u8 = undefined;
     for (0..400) |i| {
         _ = store.put(1, try std.fmt.bufPrint(&key, "k{d}", .{i}), value, 0);
@@ -1853,7 +1853,7 @@ test "a key that is read again survives a flood of keys that are not" {
     // the cursor with no margin at all. One extra byte written to `main` and it
     // failed. Warming first gives it the nine tenths of the ring it should have.
     for (0..30_000) |i| {
-        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), "x" ** 32, 0);
+        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), &@as([32]u8, @splat('x')), 0);
     }
 
     // Read twice, which is what gets it out of the doorkeeper and into main.
@@ -1864,7 +1864,7 @@ test "a key that is read again survives a flood of keys that are not" {
     // Now write far more one-shot keys than the ring can hold, reading each
     // one exactly never. Ten laps of `small` and one of the whole ring.
     for (0..200_000) |i| {
-        _ = store.put(1, try std.fmt.bufPrint(&key, "flood{d}", .{i}), "x" ** 32, 0);
+        _ = store.put(1, try std.fmt.bufPrint(&key, "flood{d}", .{i}), &@as([32]u8, @splat('x')), 0);
     }
 
     const n = store.get(1, "wanted", &out) orelse return error.TestExpectedHit;
@@ -1886,7 +1886,7 @@ test "a key already past the doorkeeper is not sent back through it by a refresh
     var out: [64]u8 = undefined;
     var key: [32]u8 = undefined;
     for (0..30_000) |i| {
-        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), "x" ** 32, 0);
+        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), &@as([32]u8, @splat('x')), 0);
     }
 
     _ = store.put(1, "hot", "first", 0);
@@ -1897,7 +1897,7 @@ test "a key already past the doorkeeper is not sent back through it by a refresh
     // doorkeeper, ten laps of `small` would take it.
     _ = store.put(1, "hot", "second", 0);
     for (0..60_000) |i| {
-        _ = store.put(1, try std.fmt.bufPrint(&key, "later{d}", .{i}), "x" ** 32, 0);
+        _ = store.put(1, try std.fmt.bufPrint(&key, "later{d}", .{i}), &@as([32]u8, @splat('x')), 0);
     }
 
     const n = store.get(1, "hot", &out) orelse return error.TestExpectedHit;
@@ -2105,13 +2105,13 @@ test "an add refused for its size is an error and never a count" {
 
     // A key the header cannot express, which `write` refuses before it has
     // set the sum. This used to answer whatever the stack held.
-    const long_key = "k" ** (std.math.maxInt(u16) + 1);
+    const long_key = &@as([(std.math.maxInt(u16) + 1)]u8, @splat('k'));
     try testing.expectError(error.TooLarge, store.add(u32, 1, long_key, 1, 10));
     try testing.expectEqual(@as(u64, 1), store.stats().refused);
 
     // And an entry over a quarter of the shard's ring, with a key that is
     // itself within the header's limit.
-    const wide_key = "k" ** (1 << 15);
+    const wide_key = &@as([(1 << 15)]u8, @splat('k'));
     var small = try Store.open(testing.allocator, .{ .bytes = 1 << 16, .shards = 1, .seed = 1 });
     defer small.deinit();
     try testing.expectError(error.TooLarge, small.add(u32, 1, wide_key, 1, 10));
@@ -2148,7 +2148,7 @@ test "a counter that is only ever incremented survives the churn that laps the d
     // Past the filling phase, or every write skips the doorkeeper and the
     // test measures nothing.
     for (0..30_000) |i| {
-        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), "x" ** 32, 0);
+        _ = store.put(1, try std.fmt.bufPrint(&key, "warm{d}", .{i}), &@as([32]u8, @splat('x')), 0);
     }
 
     // Two adds back to back, which is the second ask, then enough one-shot
@@ -2162,7 +2162,7 @@ test "a counter that is only ever incremented survives the churn that laps the d
         }
         for (0..3_000) |_| {
             churn += 1;
-            _ = store.put(1, try std.fmt.bufPrint(&key, "flood{d}", .{churn}), "x" ** 32, 0);
+            _ = store.put(1, try std.fmt.bufPrint(&key, "flood{d}", .{churn}), &@as([32]u8, @splat('x')), 0);
         }
     }
     try testing.expectEqual(@as(u32, 1_000), try store.add(u32, 1, "hits", 0, 0));
@@ -2176,7 +2176,7 @@ test "a fingerprint carries all fourteen bits whichever shard the key landed in"
     defer store.deinit();
     try testing.expectEqual(@as(usize, 64), store.shardCount());
 
-    var seen = [_]bool{false} ** (1 << 14);
+    var seen = @as([(1 << 14)]bool, @splat(false));
     var distinct: usize = 0;
     var in_shard: usize = 0;
     var buf: [16]u8 = undefined;

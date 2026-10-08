@@ -542,7 +542,7 @@ fn columnsOf(
         // columns of the table like any other and are only left out of what
         // this Row reads.
         const unread = row_mod.unreadOf(Row);
-        const fields = @typeInfo(Row).@"struct".fields ++ unreadFields(unread);
+        const fields = row_mod.fieldsOf(Row) ++ unreadFields(unread);
         var out: [fields.len]Column = undefined;
         var n: usize = 0;
         for (fields) |f| {
@@ -604,17 +604,11 @@ fn columnsOf(
 
 /// The unread columns as struct fields, so `columnsOf` and `requiredOf` walk
 /// them with the Row's own: a name and a type is all either reads.
-fn unreadFields(comptime unread: []const row_mod.Unread) []const std.builtin.Type.StructField {
+fn unreadFields(comptime unread: []const row_mod.Unread) []const row_mod.Field {
     comptime {
-        var out: []const std.builtin.Type.StructField = &.{};
+        var out: []const row_mod.Field = &.{};
         for (unread) |u| {
-            out = out ++ &[_]std.builtin.Type.StructField{.{
-                .name = u.name,
-                .type = u.T,
-                .default_value_ptr = null,
-                .is_comptime = false,
-                .alignment = null,
-            }};
+            out = out ++ &[_]row_mod.Field{.{ .name = u.name, .type = u.T }};
         }
         return out;
     }
@@ -637,9 +631,9 @@ pub fn enumValues(comptime T: type) []const []const u8 {
         if (@typeInfo(Inner) != .@"enum") return &.{};
         if (types_mod.declaredColumn(Inner) != null) return &.{};
 
-        const tags = @typeInfo(Inner).@"enum".fields;
-        var out: [tags.len][]const u8 = undefined;
-        for (tags, 0..) |t, i| out[i] = t.name;
+        const tags = @typeInfo(Inner).@"enum";
+        var out: [tags.field_names.len][]const u8 = undefined;
+        for (tags.field_names, 0..) |t_name, i| out[i] = t_name;
         const frozen = out;
         return &frozen;
     }
@@ -652,12 +646,12 @@ fn assertDefaultsAreColumns(comptime Row: type, comptime decl: anytype) void {
     comptime {
         if (!@hasField(@TypeOf(decl), "default")) return;
         const D = @TypeOf(decl.default);
-        const fields = if (isNamedForm(D)) @typeInfo(D).@"struct".fields else @compileError(
+        const names = if (isNamedForm(D)) @typeInfo(D).@"struct".field_names else @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s `.default` is a " ++ @typeName(D) ++ ".\n" ++
                 "  It is keyed by the column it fills in: " ++
                 "`.default = .{ .created_at = .now, .status = .draft }`.",
         );
-        for (fields) |f| checkColumn(Row, "default", f.name);
+        for (names) |name| checkColumn(Row, "default", name);
     }
 }
 
@@ -686,7 +680,7 @@ pub fn requiredOf(comptime Row: type) []const []const u8 {
         const has_default = @hasField(@TypeOf(decl), "default");
 
         var out: []const []const u8 = &.{};
-        for (@typeInfo(owner).@"struct".fields ++ unreadFields(row_mod.unreadOf(owner))) |f| {
+        for (row_mod.fieldsOf(owner) ++ unreadFields(row_mod.unreadOf(owner))) |f| {
             if (row_mod.isBeside(owner, f.name)) continue;
             if (@typeInfo(f.type) == .optional) continue;
             if (has_default and @hasField(@TypeOf(decl.default), f.name)) continue;
@@ -1193,26 +1187,26 @@ fn readColumns(
         }
 
         const inner = if (named) entry.columns else entry;
-        const fields = @typeInfo(@TypeOf(inner)).@"struct".fields;
-        if (fields.len == 0) @compileError(
+        const info = @typeInfo(@TypeOf(inner)).@"struct";
+        if (info.field_names.len == 0) @compileError(
             "nilo: " ++ @typeName(Row) ++ " has an empty entry in `." ++ what ++ "`.\n" ++
                 "  A constraint over no columns is nothing, and writing it is more " ++
                 "likely a half-finished line than a decision.",
         );
 
-        var names: [fields.len][]const u8 = undefined;
-        var down: [fields.len][]const u8 = undefined;
+        var names: [info.field_names.len][]const u8 = undefined;
+        var down: [info.field_names.len][]const u8 = undefined;
         var n_down: usize = 0;
-        for (fields, 0..) |f, i| {
-            const value = @field(inner, f.name);
+        for (info.field_names, 0..) |f_name, i| {
+            const value = @field(inner, f_name);
             const V = @TypeOf(value);
             if (@typeInfo(V) == .enum_literal) {
                 checkColumn(Row, what, @tagName(value));
                 names[i] = @tagName(value);
                 continue;
             }
-            if (isNamedForm(V) and @typeInfo(V).@"struct".fields.len == 1) {
-                const only = @typeInfo(V).@"struct".fields[0].name;
+            if (isNamedForm(V) and @typeInfo(V).@"struct".field_names.len == 1) {
+                const only = @typeInfo(V).@"struct".field_names[0];
                 if (!allow_direction) @compileError(
                     "nilo: " ++ @typeName(Row) ++ "'s `." ++ what ++ "` reads `" ++ only ++
                         "` in a direction.\n" ++
@@ -1267,11 +1261,12 @@ fn assertKnownWords(
     comptime E: type,
 ) void {
     comptime {
-        for (@typeInfo(E).@"struct".fields) |f| {
+        const e_info = @typeInfo(E).@"struct";
+        for (e_info.field_names) |f_name| {
             for (known) |ok| {
-                if (std.mem.eql(u8, f.name, ok)) break;
+                if (std.mem.eql(u8, f_name, ok)) break;
             } else @compileError(
-                "nilo: " ++ @typeName(Row) ++ "'s `." ++ what ++ "` sets `." ++ f.name ++
+                "nilo: " ++ @typeName(Row) ++ "'s `." ++ what ++ "` sets `." ++ f_name ++
                     "`, which is not part of an entry.\n" ++
                     "  It takes " ++ wordList(known) ++ ".",
             );
@@ -1387,10 +1382,10 @@ fn uniquesOf(
 ) []const Unique {
     comptime {
         if (!@hasField(@TypeOf(decl), "unique")) return &.{};
-        const entries = @typeInfo(@TypeOf(decl.unique)).@"struct".fields;
-        var out: [entries.len]Unique = undefined;
-        for (entries, 0..) |f, i| {
-            const entry = @field(decl.unique, f.name);
+        const entries = @typeInfo(@TypeOf(decl.unique)).@"struct";
+        var out: [entries.field_names.len]Unique = undefined;
+        for (entries.field_names, 0..) |f_name, i| {
+            const entry = @field(decl.unique, f_name);
             const cols = readColumns(Row, "unique", &unique_words, false, entry);
             const E = @TypeOf(entry);
             const folding = isNamedForm(E) and
@@ -1443,10 +1438,10 @@ fn indexesOf(
 ) []const Index {
     comptime {
         if (!@hasField(@TypeOf(decl), "index")) return &.{};
-        const entries = @typeInfo(@TypeOf(decl.index)).@"struct".fields;
-        var out: [entries.len]Index = undefined;
-        for (entries, 0..) |f, i| {
-            const entry = @field(decl.index, f.name);
+        const entries = @typeInfo(@TypeOf(decl.index)).@"struct";
+        var out: [entries.field_names.len]Index = undefined;
+        for (entries.field_names, 0..) |f_name, i| {
+            const entry = @field(decl.index, f_name);
             const cols = readColumns(Row, "index", &index_words, true, entry);
             out[i] = .{
                 .name = entryName(Row, "index", table, cols.names, "idx", entry),
@@ -1496,17 +1491,17 @@ fn whereText(comptime D: type, comptime Row: type, comptime entry: anytype) []co
             "  It is keyed by the column it tests, the way a condition is: " ++
             "`.where = .{ .deleted_at = null }`.";
         if (!isNamedForm(W)) @compileError(shape);
-        const fields = @typeInfo(W).@"struct".fields;
-        if (fields.len == 0) @compileError(
+        const info = @typeInfo(W).@"struct";
+        if (info.field_names.len == 0) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s `.index` has an empty `.where`.\n" ++
                 "  An index over every row is the ordinary kind: leave `.where` out.",
         );
 
         var out: []const u8 = "";
-        for (fields, 0..) |f, i| {
-            checkColumn(Row, "index", f.name);
+        for (info.field_names, 0..) |f_name, i| {
+            checkColumn(Row, "index", f_name);
             out = out ++ (if (i == 0) "" else " AND ") ++
-                whereTerm(D, Row, f.name, @field(entry.where, f.name));
+                whereTerm(D, Row, f_name, @field(entry.where, f_name));
         }
         return out;
     }
@@ -1524,8 +1519,8 @@ fn whereTerm(
         if (W == @TypeOf(null)) return quoted ++ " IS NULL";
 
         if (isNamedForm(W)) {
-            const fields = @typeInfo(W).@"struct".fields;
-            if (fields.len != 1 or !std.mem.eql(u8, fields[0].name, "ne")) @compileError(
+            const info = @typeInfo(W).@"struct";
+            if (info.field_names.len != 1 or !std.mem.eql(u8, info.field_names[0], "ne")) @compileError(
                 "nilo: " ++ @typeName(Row) ++ "'s `.index` tests `" ++ column ++
                     "` with something that is not one of the four terms.\n" ++
                     "  They are `null`, `.{ .ne = null }`, a value of the column's own " ++
@@ -1634,7 +1629,7 @@ fn clockLiteral(
         // A way through a reference into a row with a column called `now` or
         // `today` is that, and not the clock.
         if (pointedFrom(Row, column)) |pointed| {
-            if (row_mod.hasColumn(pointed.row, @typeInfo(W).@"struct".fields[0].name)) return null;
+            if (row_mod.hasColumn(pointed.row, @typeInfo(W).@"struct".field_names[0])) return null;
         }
         return where_mod.clockShifted(D, Row, column, W, written, said);
     }
@@ -1656,15 +1651,15 @@ fn literalWalk(
                 "  It is keyed by the column it tests, the way a condition is: " ++
                 "`.where = .{ .currency = \"IDR\" }`.",
         );
-        const fields = @typeInfo(W).@"struct".fields;
-        if (fields.len == 0) @compileError(
+        const info = @typeInfo(W).@"struct";
+        if (info.field_names.len == 0) @compileError(
             "nilo: " ++ what ++ " is empty.\n" ++
                 "  An aggregate over every row of the group is the ordinary kind: leave `.where` out.",
         );
         var out: []const u8 = "";
-        for (fields, 0..) |f, i| {
-            if (!row_mod.hasColumn(Row, f.name)) row_mod.noSuchColumn(Row, f.name, what);
-            const term = literalTerm(D, Row, qualifier, what, f.name, @field(where, f.name), reach, hops);
+        for (info.field_names, 0..) |f_name, i| {
+            if (!row_mod.hasColumn(Row, f_name)) row_mod.noSuchColumn(Row, f_name, what);
+            const term = literalTerm(D, Row, qualifier, what, f_name, @field(where, f_name), reach, hops);
             out = out ++ (if (i == 0) "" else " AND ") ++ term;
         }
         return out;
@@ -1689,16 +1684,16 @@ fn literalTerm(
         if (!isNamedForm(W)) return quoted ++ " = " ++ literalText(Row, what, column, written);
 
         const words = "`.eq`, `.ne`, `.gt`, `.gte`, `.lt`, `.lte`, `.in` and `.not_in`";
-        const fields = @typeInfo(W).@"struct".fields;
-        if (fields.len == 0) @compileError(
+        const info = @typeInfo(W).@"struct";
+        if (info.field_names.len == 0) @compileError(
             "nilo: " ++ what ++ " tests `" ++ column ++ "` with no operator.\n  They are " ++ words ++ ".",
         );
 
         // A struct of columns rather than of operators: a way through the
         // reference this column is, into the row it points at.
         var operators: usize = 0;
-        for (fields) |f| {
-            if (listWord(f.name) != null or comparisonWord(f.name) != null) operators += 1;
+        for (info.field_names) |f_name| {
+            if (listWord(f_name) != null or comparisonWord(f_name) != null) operators += 1;
         }
         if (operators == 0) {
             if (pointedFrom(Row, column)) |pointed| {
@@ -1723,29 +1718,29 @@ fn literalTerm(
         }
 
         var out: []const u8 = "";
-        for (fields, 0..) |f, i| {
-            const value = @field(written, f.name);
-            const term = if (listWord(f.name)) |negate| blk: {
+        for (info.field_names, 0..) |f_name, i| {
+            const value = @field(written, f_name);
+            const term = if (listWord(f_name)) |negate| blk: {
                 if (!isListLiteral(@TypeOf(value))) @compileError(
-                    "nilo: " ++ what ++ " gives `" ++ column ++ "`'s `." ++ f.name ++ "` a " ++
+                    "nilo: " ++ what ++ " gives `" ++ column ++ "`'s `." ++ f_name ++ "` a " ++
                         @typeName(@TypeOf(value)) ++ ".\n" ++
-                        "  It takes a list written out: `.{ ." ++ f.name ++ " = &.{ .done, .cancelled } }`.",
+                        "  It takes a list written out: `.{ ." ++ f_name ++ " = &.{ .done, .cancelled } }`.",
                 );
                 var list: []const u8 = "";
                 for (value, 0..) |element, n| {
                     list = list ++ (if (n == 0) "" else ", ") ++ literalText(Row, what, column, element);
                 }
                 if (list.len == 0) @compileError(
-                    "nilo: " ++ what ++ " gives `" ++ column ++ "`'s `." ++ f.name ++ "` an empty list.\n" ++
+                    "nilo: " ++ what ++ " gives `" ++ column ++ "`'s `." ++ f_name ++ "` an empty list.\n" ++
                         "  `IN ()` is not SQL, and a condition nothing can meet is one to take out.",
                 );
                 break :blk quoted ++ (if (negate) " NOT IN (" else " IN (") ++ list ++ ")";
-            } else if (comparisonWord(f.name)) |op| blk: {
+            } else if (comparisonWord(f_name)) |op| blk: {
                 if (@TypeOf(value) == @TypeOf(null)) {
                     if (std.mem.eql(u8, op, "=")) break :blk quoted ++ " IS NULL";
                     if (std.mem.eql(u8, op, "<>")) break :blk quoted ++ " IS NOT NULL";
                     @compileError(
-                        "nilo: " ++ what ++ " asks whether `" ++ column ++ "` is `." ++ f.name ++
+                        "nilo: " ++ what ++ " asks whether `" ++ column ++ "` is `." ++ f_name ++
                             "` null.\n  Nothing is greater or less than null: `null` is IS NULL " ++
                             "and `.{ .ne = null }` is IS NOT NULL.",
                     );
@@ -1758,13 +1753,13 @@ fn literalTerm(
                         Row,
                         column,
                         row_mod.ColumnType(Row, column),
-                        "`." ++ f.name ++ "` in " ++ what,
+                        "`." ++ f_name ++ "` in " ++ what,
                     );
                 }
                 break :blk quoted ++ " " ++ op ++ " " ++
                     (clockLiteral(D, Row, what, column, value) orelse literalText(Row, what, column, value));
             } else @compileError(
-                "nilo: " ++ what ++ " tests `" ++ column ++ "` with `." ++ f.name ++
+                "nilo: " ++ what ++ " tests `" ++ column ++ "` with `." ++ f_name ++
                     "`, which is not one it writes.\n  They are " ++ words ++
                     (if (operators == 0)
                         ". A column with a `.references` of one column is also a way into the " ++
@@ -1810,8 +1805,8 @@ fn listWord(comptime name: []const u8) ?bool {
 
 fn comparisonWord(comptime name: []const u8) ?[]const u8 {
     const table = .{
-        .{ "eq", "=" }, .{ "ne", "<>" }, .{ "gt", ">" },
-        .{ "gte", ">=" }, .{ "lt", "<" }, .{ "lte", "<=" },
+        .{ "eq", "=" },   .{ "ne", "<>" }, .{ "gt", ">" },
+        .{ "gte", ">=" }, .{ "lt", "<" },  .{ "lte", "<=" },
     };
     inline for (table) |pair| {
         if (std.mem.eql(u8, name, pair[0])) return pair[1];
@@ -1830,17 +1825,17 @@ fn referencesOf(
     comptime {
         if (!@hasField(@TypeOf(decl), "references")) return &.{};
         const D = @TypeOf(decl.references);
-        const entries = @typeInfo(D).@"struct".fields;
-        if (entries.len > 0 and entries[0].name[0] >= '0' and entries[0].name[0] <= '9')
+        const entries = @typeInfo(D).@"struct";
+        if (entries.field_names.len > 0 and entries.field_names[0][0] >= '0' and entries.field_names[0][0] <= '9')
             @compileError(
                 "nilo: " ++ @typeName(Row) ++ "'s `.references` is a list.\n" ++
                     "  It is keyed by the column doing the pointing: " ++
                     "`.references = .{ .org_id = .{ Org, .id } }`.",
             );
 
-        var out: [entries.len]Reference = undefined;
-        for (entries, 0..) |f, i| {
-            out[i] = oneReference(Row, table, f.name, @field(decl.references, f.name));
+        var out: [entries.field_names.len]Reference = undefined;
+        for (entries.field_names, 0..) |f_name, i| {
+            out[i] = oneReference(Row, table, f_name, @field(decl.references, f_name));
         }
         const frozen = out;
         return &frozen;
@@ -1917,9 +1912,10 @@ fn targetOf(
                     "  It is a column of the other table — `.id` — or several of them " ++
                     "as one key: `.{ .id, .department_id }`.",
             );
-            var out: [@typeInfo(C).@"struct".fields.len][]const u8 = undefined;
-            for (@typeInfo(C).@"struct".fields, 0..) |f, i| {
-                const written = @field(column_list, f.name);
+            var out: [@typeInfo(C).@"struct".field_names.len][]const u8 = undefined;
+            const c_info = @typeInfo(C).@"struct";
+            for (c_info.field_names, 0..) |f_name, i| {
+                const written = @field(column_list, f_name);
                 if (@typeInfo(@TypeOf(written)) != .enum_literal) @compileError(
                     "nilo: " ++ @typeName(Row) ++ "'s `.references." ++ mine ++
                         "` names a column it points at as text.\n" ++
@@ -1981,14 +1977,14 @@ fn oneReference(
             );
             const To = @TypeOf(entry.to);
             if (@typeInfo(To) != .@"struct" or !@typeInfo(To).@"struct".is_tuple or
-                @typeInfo(To).@"struct".fields.len != 2) @compileError(
+                @typeInfo(To).@"struct".field_names.len != 2) @compileError(
                 "nilo: " ++ @typeName(Row) ++ "'s `.references." ++ key ++
                     "`'s `.to` is not a table and its columns.\n" ++
                     "  It is the pair: `.to = .{ WorkEpic, .{ .id, .department_id } }`.",
             );
         } else {
             if (!@typeInfo(E).@"struct".is_tuple) @compileError(shape);
-            const parts = @typeInfo(E).@"struct".fields.len;
+            const parts = @typeInfo(E).@"struct".field_names.len;
             if (parts < 2 or parts > 3) @compileError(shape);
             checkColumn(Row, "references", key);
         }
@@ -2030,7 +2026,7 @@ fn oneReference(
         const said_on_delete = if (long)
             @hasField(E, "on_delete")
         else
-            @typeInfo(E).@"struct".fields.len == 3;
+            @typeInfo(E).@"struct".field_names.len == 3;
         const on_delete: OnDelete = if (!said_on_delete) .no_action else read: {
             const written = if (long) entry.on_delete else entry[2];
             if (@typeInfo(@TypeOf(written)) != .enum_literal) @compileError(shape);
@@ -2121,23 +2117,23 @@ pub fn namedTargetsOf(comptime Row: type) []const NamedTarget {
         const decl = @field(owner, row_mod.marker);
         if (!@hasField(@TypeOf(decl), "references")) break :blk &.{};
 
-        const entries = @typeInfo(@TypeOf(decl.references)).@"struct".fields;
-        var out: [entries.len]NamedTarget = undefined;
+        const entries = @typeInfo(@TypeOf(decl.references)).@"struct";
+        var out: [entries.field_names.len]NamedTarget = undefined;
         var n: usize = 0;
-        for (entries) |f| {
-            const entry = @field(decl.references, f.name);
+        for (entries.field_names) |f_name| {
+            const entry = @field(decl.references, f_name);
             const long = isNamedForm(@TypeOf(entry));
             const spec = if (long)
-                targetOf(owner, f.name, entry.to[0], entry.to[1])
+                targetOf(owner, f_name, entry.to[0], entry.to[1])
             else
-                targetOf(owner, f.name, entry[0], entry[1]);
+                targetOf(owner, f_name, entry[0], entry[1]);
             if (spec.row != null) continue;
             out[n] = .{
-                .key = f.name,
+                .key = f_name,
                 .columns = if (long)
                     readColumns(owner, "references", &reference_words, false, entry.columns).names
                 else
-                    &.{f.name},
+                    &.{f_name},
                 .schema = spec.schema,
                 .table = spec.table,
                 .targets = spec.columns,
@@ -2196,26 +2192,26 @@ pub fn assertTargetsResolve(comptime Rows: []const type) void {
 fn renamesOf(comptime Row: type, comptime decl: anytype) []const Rename {
     comptime {
         if (!@hasField(@TypeOf(decl), "was")) return &.{};
-        const entries = @typeInfo(@TypeOf(decl.was)).@"struct".fields;
-        var out: [entries.len]Rename = undefined;
-        for (entries, 0..) |f, i| {
-            checkColumn(Row, "was", f.name);
-            const from = @field(decl.was, f.name);
+        const entries = @typeInfo(@TypeOf(decl.was)).@"struct";
+        var out: [entries.field_names.len]Rename = undefined;
+        for (entries.field_names, 0..) |f_name, i| {
+            checkColumn(Row, "was", f_name);
+            const from = @field(decl.was, f_name);
             if (@typeInfo(@TypeOf(from)) == .enum_literal) @compileError(
-                "nilo: " ++ @typeName(Row) ++ "'s `.was." ++ f.name ++ "` is `." ++
+                "nilo: " ++ @typeName(Row) ++ "'s `.was." ++ f_name ++ "` is `." ++
                     @tagName(from) ++ "`.\n" ++
                     "  The old name is text rather than a column, because it is not one " ++
-                    "any more: `.was = .{ ." ++ f.name ++ " = \"" ++ @tagName(from) ++ "\" }`.",
+                    "any more: `.was = .{ ." ++ f_name ++ " = \"" ++ @tagName(from) ++ "\" }`.",
             );
             // The old name being a column too would mean the Row has both, and
             // then a rename and a drop are the same statement written twice.
             if (row_mod.hasColumn(Row, from)) @compileError(
-                "nilo: " ++ @typeName(Row) ++ " says `" ++ f.name ++ "` was called `" ++
+                "nilo: " ++ @typeName(Row) ++ " says `" ++ f_name ++ "` was called `" ++
                     from ++ "`, and it reads a column called `" ++ from ++ "` as well.\n" ++
                     "  Both cannot be true. A rename leaves one column, so one of the " ++
                     "two fields is the one that should go.",
             );
-            out[i] = .{ .from = from, .to = f.name };
+            out[i] = .{ .from = from, .to = f_name };
         }
         const frozen = out;
         return &frozen;
@@ -2257,14 +2253,14 @@ fn namedEntries(
     comptime Row: type,
     comptime what: []const u8,
     comptime written: anytype,
-) []const std.builtin.Type.StructField {
+) []const [:0]const u8 {
     comptime {
         const W = @TypeOf(written);
         const info = @typeInfo(W);
         // `.{}` is a tuple with no fields, and it is the honest way to write
         // "none of these" — so it is the one tuple that gets in.
         const shaped = info == .@"struct" and
-            (!info.@"struct".is_tuple or info.@"struct".fields.len == 0);
+            (!info.@"struct".is_tuple or info.@"struct".field_names.len == 0);
         // A tuple's `@typeName` is the whole of its contents, which makes a
         // one-line message four lines of literal. What the reader needs is
         // that it was written as a list.
@@ -2276,7 +2272,7 @@ fn namedEntries(
                 "derive one from, and an object nobody named is reported by the database " ++
                 "under a name it made up.",
         );
-        return info.@"struct".fields;
+        return info.@"struct".field_names;
     }
 }
 
@@ -2329,15 +2325,15 @@ fn checksOf(comptime Row: type, comptime decl: anytype) []const NamedText {
         const entries = namedEntries(Row, "check", decl.check);
         var out: [entries.len]NamedText = undefined;
         var n: usize = 0;
-        for (entries) |f| {
-            const entry = @field(decl.check, f.name);
-            if (wordsOf(Row, f.name, entry) != null) continue;
+        for (entries) |f_name| {
+            const entry = @field(decl.check, f_name);
+            if (wordsOf(Row, f_name, entry) != null) continue;
             checkIdentifier(
-                f.name,
-                @typeName(Row) ++ "'s check is named `" ++ f.name ++ "`, which",
+                f_name,
+                @typeName(Row) ++ "'s check is named `" ++ f_name ++ "`, which",
                 "Make it shorter.",
             );
-            out[n] = .{ .name = f.name, .body = namedBody(Row, "check." ++ f.name, entry) };
+            out[n] = .{ .name = f_name, .body = namedBody(Row, "check." ++ f_name, entry) };
             n += 1;
         }
         const frozen = out[0..n].*;
@@ -2361,8 +2357,8 @@ fn wordsOf(comptime Row: type, comptime name: []const u8, comptime entry: anytyp
     comptime {
         const E = @TypeOf(entry);
         if (!isNamedForm(E)) return null;
-        const fields = @typeInfo(E).@"struct".fields;
-        if (fields.len != 1 or !std.mem.eql(u8, fields[0].name, "words_of")) @compileError(
+        const info = @typeInfo(E).@"struct";
+        if (info.field_names.len != 1 or !std.mem.eql(u8, info.field_names[0], "words_of")) @compileError(
             "nilo: " ++ @typeName(Row) ++ "'s `.check." ++ name ++ "` is written as a " ++
                 "struct.\n" ++
                 "  A check is SQL, as text. The one other shape is " ++
@@ -2406,16 +2402,16 @@ fn wordsCheckName(
         if (!@hasField(@TypeOf(decl), "check")) return "";
         const entries = namedEntries(Row, "check", decl.check);
         var found: []const u8 = "";
-        for (entries) |f| {
-            const named = wordsOf(Row, f.name, @field(decl.check, f.name)) orelse continue;
+        for (entries) |f_name| {
+            const named = wordsOf(Row, f_name, @field(decl.check, f_name)) orelse continue;
             if (!std.mem.eql(u8, named, column)) continue;
             if (found.len > 0) @compileError(
                 "nilo: " ++ @typeName(Row) ++ " names the check over `" ++ column ++
-                    "`'s words twice, as `" ++ found ++ "` and as `" ++ f.name ++ "`.\n" ++
+                    "`'s words twice, as `" ++ found ++ "` and as `" ++ f_name ++ "`.\n" ++
                     "  A column has one check over the words its type has, so one of the " ++
                     "two entries would be a constraint the database never gets. Keep one.",
             );
-            found = f.name;
+            found = f_name;
         }
         return found;
     }
@@ -2443,27 +2439,27 @@ fn triggersOf(comptime Row: type, comptime decl: anytype) []const NamedText {
         if (!@hasField(@TypeOf(decl), "trigger")) return &.{};
         const entries = namedEntries(Row, "trigger", decl.trigger);
         var out: [entries.len]NamedText = undefined;
-        for (entries, 0..) |f, i| {
-            const entry = @field(decl.trigger, f.name);
+        for (entries, 0..) |f_name, i| {
+            const entry = @field(decl.trigger, f_name);
             const E = @TypeOf(entry);
             const halves = isNamedForm(E) and @hasField(E, "when") and @hasField(E, "run");
             if (!halves) @compileError(
-                "nilo: " ++ @typeName(Row) ++ "'s `.trigger." ++ f.name ++ "` is not two " ++
+                "nilo: " ++ @typeName(Row) ++ "'s `.trigger." ++ f_name ++ "` is not two " ++
                     "halves.\n" ++
                     "  nilo writes `ON \"<table>\"` between them, so it needs both: " ++
                     "`.{ .when = \"BEFORE UPDATE\", .run = \"FOR EACH ROW EXECUTE FUNCTION " ++
                     "set_updated_at()\" }`.",
             );
-            assertKnownWords(Row, "trigger." ++ f.name, &trigger_words, E);
+            assertKnownWords(Row, "trigger." ++ f_name, &trigger_words, E);
             checkIdentifier(
-                f.name,
-                @typeName(Row) ++ "'s trigger is named `" ++ f.name ++ "`, which",
+                f_name,
+                @typeName(Row) ++ "'s trigger is named `" ++ f_name ++ "`, which",
                 "Make it shorter.",
             );
             out[i] = .{
-                .name = f.name,
-                .body = namedBody(Row, "trigger." ++ f.name ++ ".when", entry.when),
-                .tail = namedBody(Row, "trigger." ++ f.name ++ ".run", entry.run),
+                .name = f_name,
+                .body = namedBody(Row, "trigger." ++ f_name ++ ".when", entry.when),
+                .tail = namedBody(Row, "trigger." ++ f_name ++ ".run", entry.run),
             };
         }
         const frozen = out;

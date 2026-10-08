@@ -196,11 +196,11 @@ test "a Config that cannot be read hands back every reason at once" {
 
 test "a Config is read from a .env" {
     const r = from(Settings, Dotenv{ .text =
-    \\# what this thing serves on
-    \\PORT=9000
-    \\DATABASE_URL="postgres://localhost/app"
-    \\LOG_LEVEL=warn
-    \\
+        \\# what this thing serves on
+        \\PORT=9000
+        \\DATABASE_URL="postgres://localhost/app"
+        \\LOG_LEVEL=warn
+        \\
     });
 
     const settings = r.value().?;
@@ -262,9 +262,9 @@ test "a line that is not a setting is a mistake the .env reports, not the Config
 
 test "a prefix reads a .env the same way it reads the environment" {
     const r = fromWith(Settings, .{ .prefix = "NILO_" }, Dotenv{ .text =
-    \\NILO_PORT=9000
-    \\NILO_DATABASE_URL=postgres://
-    \\
+        \\NILO_PORT=9000
+        \\NILO_DATABASE_URL=postgres://
+        \\
     });
     try testing.expect(!r.failed());
     try testing.expectEqual(@as(u16, 9000), r.value().?.port);

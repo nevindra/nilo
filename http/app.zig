@@ -66,7 +66,7 @@ fn healthRoute(c: *Ctx) anyerror!void {
     const outcome = try health_mod.write(&out.writer, &scope, c._services.entries.items, c.stopping());
     // A health answer a proxy remembers is a health answer about the past.
     try c.setStaticHeader("Cache-Control", "no-store");
-    try c.send(@intFromEnum(outcome), health_mod.content_type, out.written());
+    try c.send(@backingInt(outcome), health_mod.content_type, out.written());
 }
 
 /// The two calls `app.trace` gives the request path (`serve.trace_hooks`).
@@ -796,9 +796,9 @@ pub const App = struct {
             "own Scope, made by `listen()` on the server's loop and thrown away when " ++
             "the work returns; what the work needs after it — a `*Db`, a `*Client` — " ++
             "is handed over as `.{ &db }`.";
-        if (info.params.len == 0 or info.params[0].type != *str_mod.Run) @compileError(
+        if (info.param_types.len == 0 or info.param_types[0] != *str_mod.Run) @compileError(
             "nilo: app.before() was given a function whose first parameter is " ++
-                (if (info.params.len == 0) "nothing" else @typeName(info.params[0].type.?)) ++
+                (if (info.param_types.len == 0) "nothing" else @typeName(info.param_types[0].?)) ++
                 ", and it has to be `*nilo.Run`." ++ shape,
         );
         const R = info.return_type.?;
@@ -812,10 +812,10 @@ pub const App = struct {
             "nilo: app.before() was given a function that answers with " ++ @typeName(payload) ++
                 ", and there is nobody to hand the value to." ++ shape,
         );
-        var types: [info.params.len - 1]type = undefined;
-        for (info.params[1..], 0..) |p, i| types[i] = p.type.?;
+        var types: [info.param_types.len - 1]type = undefined;
+        for (info.param_types[1..], 0..) |p, i| types[i] = p.?;
         const frozen = types;
-        return std.meta.Tuple(&frozen);
+        return @Tuple(&frozen);
     }
 
     pub fn get(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {

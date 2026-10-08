@@ -84,7 +84,7 @@ const Scope = struct {
 /// The answer is one constant written with one flush, so each call is one
 /// read and one write on either side and nothing in it varies run to run.
 const Upstream = struct {
-    const body = "0123456789" ** 10;
+    const body = repeat("0123456789", 10);
     const answer = std.fmt.comptimePrint(
         "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\n\r\n{s}",
         .{ body.len, body },
@@ -132,3 +132,15 @@ const Upstream = struct {
         }
     }
 };
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
+}

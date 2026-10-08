@@ -97,7 +97,7 @@ pub fn mediaType(content_type: []const u8) []const u8 {
 /// methods (ADR 258).
 pub fn speaks(comptime Fn: type) bool {
     comptime {
-        for (@typeInfo(Fn).@"fn".params) |p| if (p.type) |P| if (isMessage(P)) return true;
+        for (@typeInfo(Fn).@"fn".param_types) |p| if (p) |P| if (isMessage(P)) return true;
         const Returned = @typeInfo(Fn).@"fn".return_type orelse return false;
         var V = switch (@typeInfo(Returned)) {
             .error_union => |u| u.payload,
@@ -292,9 +292,9 @@ pub fn check(comptime pattern: []const u8, comptime T: type) void {
         );
         const D = @TypeOf(T.nilo_decode);
         const fits = switch (@typeInfo(D)) {
-            .@"fn" => |f| f.params.len == 2 and
-                f.params[0].type == []const u8 and
-                f.params[1].type == std.mem.Allocator and
+            .@"fn" => |f| f.param_types.len == 2 and
+                f.param_types[0] == []const u8 and
+                f.param_types[1] == std.mem.Allocator and
                 f.return_type != null and
                 switch (@typeInfo(f.return_type.?)) {
                     .error_union => |eu| eu.payload == T,
@@ -349,12 +349,12 @@ test "a request's content type names protobuf, and anything else, none included,
 
 test "codecIn answers what codecOf of the found value does, for every shape of value" {
     const values = [_][]const u8{
-        "application/json",            "Application/JSON",         "application/json; charset=utf-8",
-        "application/jsonx",           "application/json\t",       "application/proto",
-        "application/protobuf",        "APPLICATION/X-PROTOBUF",   "application/grpc",
-        "application/grpc+proto",      "application/grpc+json",    "text/plain",
-        "application\x0fjson",         "application/jso",          "",
-        "  application/json",          "\tapplication/proto ; x=1", "application/json ",
+        "application/json",       "Application/JSON",          "application/json; charset=utf-8",
+        "application/jsonx",      "application/json\t",        "application/proto",
+        "application/protobuf",   "APPLICATION/X-PROTOBUF",    "application/grpc",
+        "application/grpc+proto", "application/grpc+json",     "text/plain",
+        "application\x0fjson",    "application/jso",           "",
+        "  application/json",     "\tapplication/proto ; x=1", "application/json ",
         "application@json",
     };
     for (values) |v| {

@@ -53,7 +53,7 @@ pub const Stage = enum {
 pub fn Meta(comptime T: type) type {
     return struct {
         author: T,
-        @"type": Kind = .note,
+        type: Kind = .note,
         pages: ?u32 = null,
     };
 }

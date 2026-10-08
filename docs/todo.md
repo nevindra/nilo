@@ -25,7 +25,7 @@ Inside a tier, entries sit under their module, because **two modules touch no fi
 
 **Ranked at 0.7.0.** The tiers were last set against the code and the numbers at that version, and [rule 9](#how-this-file-is-written) says when they are set again.
 
-**0.7.0 needs Zig 0.16.** The latest stable release only, on one branch: the people this is aimed at download Zig, run `zig build`, and give up if it fails, and they are not going to go hunting for the right branch. Every new Zig release brings a few awkward weeks, made worse by zio following a branch-per-version pattern too.
+**The next release needs Zig 0.17, and 0.7.0 is the last on 0.16.** The latest stable release only, on one branch: the people this is aimed at download Zig, run `zig build`, and give up if it fails, and they are not going to go hunting for the right branch. Every new Zig release brings a few awkward weeks, made worse by zio following a branch-per-version pattern too: at 0.17 its tags stayed on the 0.16 line and only `main` built.
 
 ---
 
@@ -442,11 +442,11 @@ Nothing is open at this tier.
 
 **22% of `std.flate`'s CPU on a 4 KB body is a buffer rebuilt after every block, and it has not been filed upstream.** `toks.* = .empty` in `writeBlock` rebuilds the 96 KB token buffer from its constant after every block, where assigning the fields one by one gives byte-identical output 18% to 44% faster ([`http.md`](../bench/result/http.md#which-deflate-is-fastest-and-whether-brotli-or-zstd-would-beat-it)). ADR 211 refuses a fork of `Compress.zig`.
 
-**Needs:** the issue filed against zig, `lib/std/compress/flate/Compress.zig` lines 987 and 1055. Last checked at 0.16.0.
+**Needs:** the issue filed against zig, `lib/std/compress/flate/Compress.zig` lines 987 and 1055. Last checked at 0.17.0, where both lines are unchanged.
 
-**`zig build dev -- --incremental` cannot run without LLVM.** `-fincremental` with the self-hosted backend and the new ELF linker rebuilds `examples/hello` in 0.12 s and leaves `.zig-cache` flat, and its output dies at exec with `undefined symbol: main` whenever libc is linked, which every nilo server is; the old ELF linker spins on the first update instead ([ADR 190](./adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md), [`build.md`](../bench/result/build.md#what-a-restart-on-save-costs-per-save)). `zig build-exe main.zig -lc -fincremental` on a five-line program reproduces it.
+**Under `--no-incremental`, `nilo-dev` prunes a binary of the same name built for another target or mode, and that build then fails until its cache entry is rebuilt by hand.** After a restart it keeps the one `o/<hash>/` directory holding the binary it serves and deletes every other directory holding a file of that name ([ADR 190](./adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)), whatever target or optimize mode built it. The manifest of the deleted build stays, so the next `zig build` of that configuration is a cache hit on a file that is gone, and install fails with `FileNotFound`, on every run after. Found when `zig build examples -Dtarget=x86_64-linux-gnu` failed after a native `dev-hello` session, and reproduced with a two-file project on Zig 0.16.0 and 0.17.0 alike, so it is not the port's.
 
-**Needs:** zig. Last checked at 0.16.0; re-test with `zig build dev-hello -- --incremental` and no `-Dllvm` on each release.
+**Needs:** pruning that keys on the configuration as well as the name, or removes the manifest with the directory. Last checked at 0.17.0.
 
 **A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.** With it, so is a session ticket, which is what the session resumption entry needs to turn a full handshake per reconnection into a resumption.
 
@@ -454,11 +454,15 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream.** It is upstream's `zig-0.16.x` plus two commits: one signs an RSA key through its CRT form, 13.7 ms of handshake CPU down to 2.6 ([the run](../bench/result/http.md#what-an-rsa-certificate-costs-a-handshake)), and one adds the server's `offload` option, which runs the signature off the executor ([ADR 217](./adr/217-a-handshakes-signature-is-computed-off-the-executor.md)). The first is offered upstream and the second is not yet. Once both merge, the pin moves to upstream's commit and the fork is not used again.
+**The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.** It is upstream's `main`, the Zig 0.17 line, plus two commits: one signs an RSA key through its CRT form, 13.7 ms of handshake CPU down to 2.6 ([the run](../bench/result/http.md#what-an-rsa-certificate-costs-a-handshake)), and one adds the server's `offload` option, which runs the signature off the executor ([ADR 217](./adr/217-a-handshakes-signature-is-computed-off-the-executor.md)). The first was merged into `zig-0.16.x` as #59 and not into `main`. Once both merge into `main`, the pin moves to upstream's commit and the fork is not used again.
 
-**Needs:** [ianic/tls.zig#59](https://github.com/ianic/tls.zig/pull/59) merged, and the second commit offered. Last checked at `73290ca`.
+**Needs:** [ianic/tls.zig#61](https://github.com/ianic/tls.zig/pull/61) and [#62](https://github.com/ianic/tls.zig/pull/62) merged. Last checked at `1d1dda2`.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
+**The pg.zig pin is a fork, `nevindra/pg.zig`, until its Zig 0.17 port reaches lalinsky's.** lalinsky's `master` builds its tls.zig on 0.17 and nothing else of it: the driver still reads `@typeInfo` the 0.16 way, its metrics.zig pin reads `b.args`, and xsync calls a `mutexLock` that 0.17 made cancelable. The fork is that `master` plus one commit, and points at a fork of xsync with one commit of its own. `test-sql` passes on it, the live Postgres tests included.
+
+**Needs:** [lalinsky/pg.zig#23](https://github.com/lalinsky/pg.zig/pull/23) and [lalinsky/xsync.zig#1](https://github.com/lalinsky/xsync.zig/pull/1) merged. Last checked at `c205ebd`.
 
 ---
 

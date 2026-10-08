@@ -27,7 +27,7 @@ fn Wide(comptime n: usize) type {
     const zero: u32 = 0;
     var names: [n][:0]const u8 = undefined;
     var types: [n]type = undefined;
-    var attributes: [n]std.builtin.Type.StructField.Attributes = undefined;
+    var attributes: [n]std.lang.Type.Struct.FieldAttributes = undefined;
     for (&names, &types, &attributes, 0..) |*name, *T, *attribute, i| {
         name.* = std.fmt.comptimePrint("a_field_with_a_long_descriptive_name_{d:0>4}", .{i});
         T.* = u32;
@@ -75,7 +75,7 @@ const Big = blk: {
     break :blk @Enum(u16, .exhaustive, &names, &values);
 };
 
-const Pick = struct { kind: Big = @enumFromInt(0), other: ?Big = null };
+const Pick = struct { kind: Big = @fromBackingInt(@intCast(0)), other: ?Big = null };
 
 fn pickByQuery(params: typed.Query(Pick)) Big {
     return params.value.kind;

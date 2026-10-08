@@ -176,14 +176,15 @@ fn check(comptime pattern: []const u8, comptime Args: type) void {
         // `.{}` is a tuple with no fields, and it is the right thing to write
         // for a pattern with no params — so a tuple is only wrong once it has
         // something in it to be positional about.
-        if (info != .@"struct" or (info.@"struct".is_tuple and info.@"struct".fields.len > 0))
+        if (info != .@"struct" or (info.@"struct".is_tuple and info.@"struct".field_names.len > 0))
             @compileError(
                 "nilo: the values for \"" ++ pattern ++ "\" are given by name — " ++
                     ".{ .id = 42 } — and this is " ++ naming.of(Args) ++ ".",
             );
 
         const params = paramsOf(pattern);
-        const fields = info.@"struct".fields;
+        const field_names = info.@"struct".field_names;
+        const field_types = info.@"struct".field_types;
 
         for (params) |name| {
             if (name.len == 0) @compileError(
@@ -196,19 +197,19 @@ fn check(comptime pattern: []const u8, comptime Args: type) void {
             );
         }
 
-        for (fields) |f| {
+        for (field_names, field_types) |field_name, field_type| {
             var wanted = false;
             for (params) |name| {
-                if (std.mem.eql(u8, name, f.name)) wanted = true;
+                if (std.mem.eql(u8, name, field_name)) wanted = true;
             }
             if (!wanted) @compileError(
-                "nilo: \"" ++ pattern ++ "\" has no param called `:" ++ f.name ++ "`, so the " ++
+                "nilo: \"" ++ pattern ++ "\" has no param called `:" ++ field_name ++ "`, so the " ++
                     "value given for it would go nowhere.\n" ++
                     "  Its params are: " ++ list(params) ++ ".",
             );
-            if (!writable(f.type)) @compileError(
-                "nilo: `:" ++ f.name ++ "` in \"" ++ pattern ++ "\" was given a " ++
-                    naming.of(f.type) ++ ", which is not something a path segment can carry.\n" ++
+            if (!writable(field_type)) @compileError(
+                "nilo: `:" ++ field_name ++ "` in \"" ++ pattern ++ "\" was given a " ++
+                    naming.of(field_type) ++ ", which is not something a path segment can carry.\n" ++
                     "  A param can be text, a number, a bool or an enum — the same types one " ++
                     "arrives as.",
             );

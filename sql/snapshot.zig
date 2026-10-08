@@ -120,22 +120,34 @@ pub const Origin = enum { current, upgraded };
 /// anything this file would write about a file somebody edited. **Every caller
 /// that shows a person the failure passes one** — `sql/cli.zig` does, and a
 /// `null` there is how a stack trace reached a user once.
+///
+/// **The `Doc` and the diagnostics are allocated out of `arena` and given back
+/// with it.** `std.zon` allocates a result and its diagnostics in one arena
+/// since Zig 0.17, so nothing here can be freed one piece at a time.
 pub fn parse(
-    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     text: [:0]const u8,
     diag: ?*std.zon.parse.Diagnostics,
 ) !Doc {
-    return parseWith(gpa, text, diag, null);
+    return parseWith(arena, text, diag, null);
 }
 
 /// The same, saying which shape the file turned out to be in.
 pub fn parseWith(
-    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     text: [:0]const u8,
     diag: ?*std.zon.parse.Diagnostics,
     origin: ?*Origin,
 ) !Doc {
-    if (std.zon.parse.fromSliceAlloc(Doc, gpa, text, diag, .{})) |doc| {
+    // `std.zon` fills a `Diagnostics` whether or not a caller wants it, so a
+    // caller that passed none gets one it never reads.
+    var unread: std.zon.parse.Diagnostics = undefined;
+    if (std.zon.parse.fromSlice(Doc, .{
+        .gpa = arena,
+        .arena = arena,
+        .source = text,
+        .diagnostics = diag orelse &unread,
+    })) |doc| {
         if (origin) |o| o.* = .current;
         return doc;
     } else |err| {
@@ -143,7 +155,7 @@ pub fn parseWith(
         // The older shape, tried second and with no `diag` of its own: the
         // caller's is already full of what is wrong with the file read as the
         // current shape, which is the message they want when this fails too.
-        const older = upgraded(gpa, text) catch return err;
+        const older = upgraded(arena, text) catch return err;
         if (origin) |o| o.* = .upgraded;
         return older;
     }
@@ -164,24 +176,27 @@ pub fn parseWith(
 /// the marker gained since arrived as a field with a default, and `std.zon`
 /// fills a missing field from its default, which is the property every new word
 /// keeps and a renamed field does not (ADR 181).
-fn upgraded(gpa: std.mem.Allocator, text: [:0]const u8) !Doc {
-    // A `Diagnostics` nobody reads, because `std.zon.parse.fromSliceAlloc`
-    // **leaks on a failing parse when it is handed none** — `zig test` on four
-    // lines of std and no nilo says so. It owns the ast and the zoir either
-    // way; with null it frees the two it can see and not what `fromZoirAlloc`
-    // made. A local one, deinit'd here, gives the allocation an owner.
-    var scratch: std.zon.parse.Diagnostics = .{};
-    defer scratch.deinit(gpa);
+fn upgraded(arena: std.mem.Allocator, text: [:0]const u8) !Doc {
+    // A `Diagnostics` nobody reads, because `std.zon.parse.fromSlice` takes
+    // one. Before Zig 0.17 a null one **leaked on a failing parse**, `zig test`
+    // on four lines of std and no nilo said so; now the diagnostics and the
+    // result are allocated in the arena, so there is nothing left to own.
+    var scratch: std.zon.parse.Diagnostics = undefined;
 
-    const old = try std.zon.parse.fromSliceAlloc(Older, gpa, text, &scratch, .{});
+    const old = try std.zon.parse.fromSlice(Older, .{
+        .gpa = arena,
+        .arena = arena,
+        .source = text,
+        .diagnostics = &scratch,
+    });
 
-    const tables = try gpa.alloc(Desc, old.tables.len);
+    const tables = try arena.alloc(Desc, old.tables.len);
     for (old.tables, 0..) |t, i| {
-        const refs = try gpa.alloc(table_mod.Reference, t.references.len);
+        const refs = try arena.alloc(table_mod.Reference, t.references.len);
         for (t.references, 0..) |r, j| {
-            const columns = try gpa.alloc([]const u8, 1);
+            const columns = try arena.alloc([]const u8, 1);
             columns[0] = r.column;
-            const targets = try gpa.alloc([]const u8, 1);
+            const targets = try arena.alloc([]const u8, 1);
             targets[0] = r.target;
             refs[j] = .{
                 .name = r.name,
@@ -234,12 +249,6 @@ const Older = struct {
     };
 };
 
-/// Give back what `parse` took. Unnecessary when the allocator was an arena,
-/// which is how a `Run` holds one, and that is the shape to prefer.
-pub fn free(gpa: std.mem.Allocator, doc: Doc) void {
-    std.zon.parse.free(gpa, doc);
-}
-
 // -- tests ---------------------------------------------------------------
 
 const testing = std.testing;
@@ -285,11 +294,12 @@ test "a snapshot written and read back describes the same table" {
     const text = try render(gpa, doc);
     defer gpa.free(text);
 
-    const zeroed = try gpa.dupeZ(u8, text);
+    const zeroed = try gpa.dupeSentinel(u8, text, 0);
     defer gpa.free(zeroed);
 
-    const back = try parse(gpa, zeroed, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), zeroed, null);
 
     try testing.expectEqual(@as(u32, 7), back.version);
     try testing.expectEqualStrings("postgres", back.dialect);
@@ -312,10 +322,11 @@ test "what a Row says about its table survives the round trip, because that is w
     defer gpa.free(doc.tables);
     const text = try render(gpa, doc);
     defer gpa.free(text);
-    const zeroed = try gpa.dupeZ(u8, text);
+    const zeroed = try gpa.dupeSentinel(u8, text, 0);
     defer gpa.free(zeroed);
-    const back = try parse(gpa, zeroed, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), zeroed, null);
 
     const t = back.table(null, "users").?;
 
@@ -424,10 +435,11 @@ test "a default, a column's words and a partial index survive the round trip" {
 
     const text = try render(gpa, .{ .version = 3, .dialect = Pg.name, .tables = tables });
     defer gpa.free(text);
-    const zeroed = try gpa.dupeZ(u8, text);
+    const zeroed = try gpa.dupeSentinel(u8, text, 0);
     defer gpa.free(zeroed);
-    const back = try parse(gpa, zeroed, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), zeroed, null);
 
     const t = back.table(null, "tickets").?;
     try testing.expectEqualStrings("now()", t.column("opened_at").?.default.?);
@@ -481,10 +493,11 @@ test "a foreign key of two columns is written down as two, and read back as two"
 
     const text = try render(gpa, .{ .version = 5, .dialect = Pg.name, .tables = tables });
     defer gpa.free(text);
-    const zeroed = try gpa.dupeZ(u8, text);
+    const zeroed = try gpa.dupeSentinel(u8, text, 0);
     defer gpa.free(zeroed);
-    const back = try parse(gpa, zeroed, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), zeroed, null);
 
     const fk = back.table(null, "cards").?.references[0];
     try testing.expectEqualStrings("cards_board_id_org_id_fkey", fk.name);
@@ -557,16 +570,17 @@ test "a file that is in neither shape fails with what is wrong about the current
     // what a person is shown is still about the file they have rather than
     // about a struct this module no longer writes.
     const gpa = testing.allocator;
-    var diag: std.zon.parse.Diagnostics = .{};
-    defer diag.deinit(gpa);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    var diag: std.zon.parse.Diagnostics = undefined;
 
     const broken =
         \\.{ .version = 1, .dialect = "postgres", .tables = .{ .{ .tabel = "users" } } }
     ;
-    try testing.expectError(error.ParseZon, parse(gpa, broken, &diag));
+    try testing.expectError(error.ParseZon, parse(parsed.allocator(), broken, &diag));
 
     var buf: [512]u8 = undefined;
-    const said = try std.fmt.bufPrint(&buf, "{f}", .{diag});
+    const said = try std.fmt.bufPrint(&buf, "{f}", .{diag.fmt("snapshot.zon")});
     try testing.expect(std.mem.indexOf(u8, said, "tabel") != null);
 }
 
@@ -595,8 +609,9 @@ test "a snapshot written before these fields existed still parses as the schema 
         \\    },
         \\}
     ;
-    const back = try parse(gpa, older, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), older, null);
 
     const t = back.table(null, "tickets").?;
     try testing.expectEqual(@as(?[]const u8, null), t.column("level").?.default);
@@ -607,18 +622,19 @@ test "a snapshot written before these fields existed still parses as the schema 
 
 test "a snapshot somebody broke says where, rather than failing silently" {
     const gpa = testing.allocator;
-    var diag: std.zon.parse.Diagnostics = .{};
-    defer diag.deinit(gpa);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    var diag: std.zon.parse.Diagnostics = undefined;
 
     const broken =
         \\.{ .version = 1, .dialect = "postgres", .tables = .{ .{ .table = "users" } } }
     ;
-    try testing.expectError(error.ParseZon, parse(gpa, broken, &diag));
+    try testing.expectError(error.ParseZon, parse(parsed.allocator(), broken, &diag));
 
     // `std.zon` writes the sentence, and it names the field that is missing.
     var buf: [512]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try w.print("{f}", .{diag});
+    try w.print("{f}", .{diag.fmt("snapshot.zon")});
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "key") != null);
 }
 
@@ -660,10 +676,11 @@ test "a check and a trigger go into the file as a name and a hash, and no SQL at
     try testing.expect(std.mem.indexOf(u8, text, "ledgers_amount_is_positive") != null);
     try testing.expect(std.mem.indexOf(u8, text, "ledgers_touch") != null);
 
-    const zeroed = try gpa.dupeZ(u8, text);
+    const zeroed = try gpa.dupeSentinel(u8, text, 0);
     defer gpa.free(zeroed);
-    const back = try parse(gpa, zeroed, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), zeroed, null);
     const t = back.table(null, "ledgers").?;
     try testing.expectEqual(@as(usize, 1), t.checks.len);
     try testing.expectEqualStrings("ledgers_amount_is_positive", t.checks[0].name);
@@ -691,10 +708,11 @@ test "a schema's extensions go into the file by name, and its functions and view
     try testing.expect(std.mem.indexOf(u8, text, "LANGUAGE plpgsql") == null);
     try testing.expect(std.mem.indexOf(u8, text, "FROM orgs") == null);
 
-    const zeroed = try gpa.dupeZ(u8, text);
+    const zeroed = try gpa.dupeSentinel(u8, text, 0);
     defer gpa.free(zeroed);
-    const back = try parse(gpa, zeroed, null);
-    defer free(gpa, back);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const back = try parse(parsed.allocator(), zeroed, null);
     try testing.expectEqual(@as(usize, 1), back.extensions.len);
     try testing.expectEqualStrings("pgcrypto", back.extensions[0]);
     try testing.expectEqualStrings("touch", back.functions[0].name);
@@ -721,8 +739,9 @@ test "a snapshot written before a table could carry a check reads back as one wi
         \\}
     ;
 
-    const doc = try parse(gpa, text, null);
-    defer free(gpa, doc);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    const doc = try parse(parsed.allocator(), text, null);
     // `std.zon` fills a missing field from its default, which is the property
     // ADR 181 was careful to keep — so a word added to the marker never needs
     // a mirror struct the way the `.references` rename did.

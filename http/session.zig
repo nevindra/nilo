@@ -207,10 +207,10 @@ fn sizeOf(comptime T: type) usize {
         },
         .@"struct" => |s| blk: {
             var total: usize = 0;
-            // `inline`: a `StructField` carries a `type`, which does not
+            // `inline`: the field types are `type`s, which do not
             // exist at runtime, so an ordinary loop over them is a compile
             // error rather than slow code.
-            inline for (s.fields) |f| total += sizeOf(f.type);
+            inline for (s.field_types) |f_type| total += sizeOf(f_type);
             break :blk total;
         },
         else => unsupported(T, "not something a session can carry"),
@@ -252,10 +252,10 @@ fn describe(comptime T: type, hasher: anytype) void {
         switch (@typeInfo(T)) {
             .@"struct" => |s| {
                 hasher.update("{");
-                for (s.fields) |f| {
-                    hasher.update(f.name);
+                for (s.field_names, s.field_types) |f_name, f_type| {
+                    hasher.update(f_name);
                     hasher.update(":");
-                    describe(f.type, hasher);
+                    describe(f_type, hasher);
                     hasher.update(",");
                 }
                 hasher.update("}");
@@ -272,7 +272,7 @@ fn describe(comptime T: type, hasher: anytype) void {
                 // rename, but reordering one changes what the number means.
                 hasher.update("enum(");
                 describe(e.tag_type, hasher);
-                for (e.fields) |f| hasher.update(std.fmt.comptimePrint("{d};", .{f.value}));
+                for (e.field_values) |f_value| hasher.update(std.fmt.comptimePrint("{d};", .{f_value}));
                 hasher.update(")");
             },
             else => hasher.update(@typeName(T)),
@@ -294,11 +294,11 @@ fn encode(comptime T: type, value: T, out: []u8) usize {
             at += i.bits / 8;
         },
         .float => |f| {
-            const Bits = std.meta.Int(.unsigned, f.bits);
+            const Bits = @Int(.unsigned, f.bits);
             std.mem.writeInt(Bits, out[at..][0 .. f.bits / 8], @bitCast(value), .little);
             at += f.bits / 8;
         },
-        .@"enum" => |e| at += encode(e.tag_type, @intFromEnum(value), out[at..]),
+        .@"enum" => |e| at += encode(e.tag_type, @backingInt(value), out[at..]),
         .optional => |o| {
             out[at] = if (value == null) 0 else 1;
             at += 1;
@@ -311,7 +311,7 @@ fn encode(comptime T: type, value: T, out: []u8) usize {
             at += a.len;
         },
         .@"struct" => |s| {
-            inline for (s.fields) |f| at += encode(f.type, @field(value, f.name), out[at..]);
+            inline for (s.field_names, s.field_types) |f_name, f_type| at += encode(f_type, @field(value, f_name), out[at..]);
         },
         else => comptime unsupported(T, "not something a session can carry"),
     }
@@ -337,7 +337,7 @@ fn decode(comptime T: type, in: []const u8) Unreadable!Decoded(T) {
             return .{ .value = v, .used = i.bits / 8 };
         },
         .float => |f| {
-            const Bits = std.meta.Int(.unsigned, f.bits);
+            const Bits = @Int(.unsigned, f.bits);
             const bits = std.mem.readInt(Bits, in[0 .. f.bits / 8], .little);
             return .{ .value = @bitCast(bits), .used = f.bits / 8 };
         },
@@ -365,9 +365,9 @@ fn decode(comptime T: type, in: []const u8) Unreadable!Decoded(T) {
         },
         .@"struct" => |s| {
             var v: T = undefined;
-            inline for (s.fields) |f| {
-                const got = try decode(f.type, in[at..]);
-                @field(v, f.name) = got.value;
+            inline for (s.field_names, s.field_types) |f_name, f_type| {
+                const got = try decode(f_type, in[at..]);
+                @field(v, f_name) = got.value;
                 at += got.used;
             }
             return .{ .value = v, .used = at };
@@ -568,7 +568,7 @@ pub fn Session(comptime T: type) type {
                 "  A session is a struct of your own, one field per thing you want to remember:\n" ++
                 "      const Signed = struct { user: u32, admin: bool = false };",
         );
-        if (@typeInfo(T).@"struct".fields.len == 0) @compileError(
+        if (@typeInfo(T).@"struct".field_names.len == 0) @compileError(
             "nilo: the `Session(" ++ naming.of(T) ++ ")` has no fields, so it would remember " ++
                 "nothing.",
         );
@@ -974,8 +974,8 @@ test "the size is worked out at compile time and matches what is written" {
 
 test "a secret has to be the cipher's key length" {
     try testing.expectError(error.SessionSecretWrongLength, checkSecret("too short"));
-    try testing.expectError(error.SessionSecretWrongLength, checkSecret("x" ** (key_len + 1)));
-    const key = try checkSecret("x" ** key_len);
+    try testing.expectError(error.SessionSecretWrongLength, checkSecret(&@as([(key_len + 1)]u8, @splat('x'))));
+    const key = try checkSecret(&@as([key_len]u8, @splat('x')));
     try testing.expectEqual(@as(u8, 'x'), key[0]);
 }
 
@@ -1040,11 +1040,11 @@ test "every byte of a cookie under a fallback secret is still covered by its tag
 
 test "fallback secrets are checked the way the current one is, and a rotation that did not happen is refused" {
     var into: [max_fallbacks]Key = undefined;
-    const a = "a" ** key_len;
-    const b = "b" ** key_len;
-    const c = "c" ** key_len;
-    const d = "d" ** key_len;
-    const current: Key = ("n" ** key_len).*;
+    const a = &@as([key_len]u8, @splat('a'));
+    const b = &@as([key_len]u8, @splat('b'));
+    const c = &@as([key_len]u8, @splat('c'));
+    const d = &@as([key_len]u8, @splat('d'));
+    const current: Key = (&@as([key_len]u8, @splat('n'))).*;
 
     // No fallbacks is nothing to check, with or without a current key.
     try testing.expectEqual(@as(usize, 0), (try checkFallbacks(null, &.{}, &into)).len);
@@ -1056,7 +1056,7 @@ test "fallback secrets are checked the way the current one is, and a rotation th
     try testing.expectError(error.SessionSecretMissing, checkFallbacks(null, &.{a}, &into));
     try testing.expectError(error.SessionSecretsTooMany, checkFallbacks(current, &.{ a, b, c, d }, &into));
     try testing.expectError(error.SessionSecretWrongLength, checkFallbacks(current, &.{ a, "short" }, &into));
-    try testing.expectError(error.SessionSecretRepeated, checkFallbacks(current, &.{"n" ** key_len}, &into));
+    try testing.expectError(error.SessionSecretRepeated, checkFallbacks(current, &.{&@as([key_len]u8, @splat('n'))}, &into));
     try testing.expectError(error.SessionSecretRepeated, checkFallbacks(current, &.{ a, b, a }, &into));
 }
 

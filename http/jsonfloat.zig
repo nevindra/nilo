@@ -110,7 +110,7 @@ pub fn spell(comptime T: type, buf: *[maxLen(T)]u8, v: T) []const u8 {
     const I = @Int(.unsigned, @bitSizeOf(T));
     const DT = if (@bitSizeOf(T) <= 64) u64 else u128;
     const tables = comptime switch (DT) {
-        u64 => if (@import("builtin").mode == .ReleaseSmall)
+        u64 => if (@import("builtin").mode == .small)
             &std.fmt.float.Backend64_TablesSmall
         else
             &std.fmt.float.Backend64_TablesFull,
@@ -284,7 +284,7 @@ fn roundTrips(comptime T: type, v: T) !void {
     var buf: [maxLen(T)]u8 = undefined;
     const text = spell(T, &buf, v);
     const back = try std.fmt.parseFloat(T, text);
-    const U = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const U = @Int(.unsigned, @bitSizeOf(T));
     try testing.expectEqual(@as(U, @bitCast(v)), @as(U, @bitCast(back)));
     // JSON number grammar: no leading `+`, no bare `.`, no `inf`.
     try testing.expect(text[0] == '-' or std.ascii.isDigit(text[0]));

@@ -604,7 +604,7 @@ test "bytes a read took are given back once a half window has been read, and not
     var fx: Fixture = .{};
     var inbox = Inbox.init(testing.allocator, fx.link(), 1 << 20);
     defer inbox.deinit();
-    const chunk = [_]u8{'x'} ** 16_000;
+    const chunk = @as([16_000]u8, @splat('x'));
     for (0..4) |_| try arrive(&inbox, &chunk);
 
     var sink: [10_000]u8 = undefined;
@@ -622,7 +622,7 @@ test "an upload through the buffer never holds more than one frame however long 
     var fx: Fixture = .{};
     var inbox = Inbox.init(testing.allocator, fx.link(), 1 << 20);
     defer inbox.deinit();
-    const frame = [_]u8{'u'} ** 16_000;
+    const frame = @as([16_000]u8, @splat('u'));
     var sink: [16_000]u8 = undefined;
     for (0..50) |_| {
         try arrive(&inbox, &frame);
@@ -768,7 +768,7 @@ test "a read into a writer never runs the writer's drain under the monitor, buff
     var fx: Fixture = .{};
     var inbox = Inbox.init(testing.allocator, fx.link(), 1 << 20);
     defer inbox.deinit();
-    const chunk = [_]u8{'s'} ** 3_000;
+    const chunk = @as([3_000]u8, @splat('s'));
     for (0..10) |_| try arrive(&inbox, &chunk);
 
     var small: [64]u8 = undefined;

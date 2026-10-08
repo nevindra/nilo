@@ -132,7 +132,7 @@ const Harness = struct {
 
 /// Four kilobytes of text a client would rather have gzipped.
 fn sendLongText(c: *Ctx) anyerror!void {
-    try c.send(200, "text/plain", "the quick brown fox jumps over the lazy dog; " ** 96);
+    try c.send(200, "text/plain", repeat("the quick brown fox jumps over the lazy dog; ", 96));
 }
 
 fn testGetUser(c: *Ctx) anyerror!void {
@@ -1620,7 +1620,7 @@ test "a key too long for the Space is refused before the handler runs, not a cra
     // `by` says whose; a caller string longer than the Space holds a key to
     // is not something it can claim, and a write that cannot be claimed is
     // a write a retry would make twice, so it is not made at all.
-    const who = "a" ** 600;
+    const who = &@as([600]u8, @splat('a'));
     const raw = "POST /orders HTTP/1.1\r\nHost: t\r\nX-Account: " ++ who ++ "\r\nIdempotency-Key: k\r\nContent-Length: 0\r\n\r\n";
     for (0..2) |_| {
         const answer = h.send(&app, raw).response;
@@ -2202,11 +2202,11 @@ test "a body whose type holds itself is refused past the nesting it may have, be
     const cases = [_]struct { body: []const u8, status: []const u8 }{
         // Two levels a node, one past the limit: refused, where twenty
         // thousand of these used to take the process down.
-        .{ .body = "{\"c\":[" ** (levels + 1) ++ "{}" ++ "]}" ** (levels + 1), .status = "400" },
+        .{ .body = repeat("{\"c\":[", levels + 1) ++ "{}" ++ repeat("]}", levels + 1), .status = "400" },
         // At the limit, and read.
-        .{ .body = "{\"c\":[" ** (levels - 1) ++ "{}" ++ "]}" ** (levels - 1), .status = "200" },
+        .{ .body = repeat("{\"c\":[", levels - 1) ++ "{}" ++ repeat("]}", levels - 1), .status = "200" },
         // Brackets inside a string are text, not nesting.
-        .{ .body = "{\"name\":\"" ++ "[{" ** 100 ++ "\\\"\",\"c\":[]}", .status = "200" },
+        .{ .body = "{\"name\":\"" ++ repeat("[{", 100) ++ "\\\"\",\"c\":[]}", .status = "200" },
     };
 
     for (cases) |case| {
@@ -2237,8 +2237,8 @@ test "a body nested past the depth the walk follows says so, rather than nothing
     var h = Harness.init();
     defer h.deinit();
 
-    const opens = "{\"down\":" ** 9;
-    const closes = "}" ** 9;
+    const opens = repeat("{\"down\":", 9);
+    const closes = &@as([9]u8, @splat('}'));
 
     const cases = [_]struct { body: []const u8, says: []const u8 }{
         // Below the ceiling there is nothing left to name, and the old
@@ -2371,7 +2371,7 @@ const Oversized = struct {
     detail: []const u8,
 
     pub fn nilo_failure(_: u16, message: []const u8) Oversized {
-        return .{ .padding = "x" ** 2048, .detail = message };
+        return .{ .padding = &@as([2048]u8, @splat('x')), .detail = message };
     }
 };
 
@@ -4482,7 +4482,7 @@ test "two layers each naming a Vary axis both survive onto the response" {
     // and the handler always runs after the middleware, so it was always
     // `Vary: Origin` that went.
     var files = try TmpFiles.init(testing.allocator, &.{
-        .{ "app.css", "body { color: rebeccapurple; }\n" ** 64 },
+        .{ "app.css", repeat("body { color: rebeccapurple; }\n", 64) },
     });
     defer files.deinit(testing.allocator);
 
@@ -4510,7 +4510,7 @@ test "a gzipped file behind a named-origin CORS still allocates nothing" {
     // two, the file five — and `inline_headers` is six, so this is the test
     // that says whether the extra one spills to the arena.
     var files = try TmpFiles.init(testing.allocator, &.{
-        .{ "app.css", "body { color: rebeccapurple; }\n" ** 64 },
+        .{ "app.css", repeat("body { color: rebeccapurple; }\n", 64) },
     });
     defer files.deinit(testing.allocator);
 
@@ -7222,7 +7222,7 @@ test "a body read in pieces allocates nothing" {
     var in_flight = fail.InFlight{};
     var buf: [4096]u8 = undefined;
 
-    const request = "POST /weigh HTTP/1.1\r\nHost: t\r\nContent-Length: 200\r\n\r\n" ++ ("x" ** 200);
+    const request = "POST /weigh HTTP/1.1\r\nHost: t\r\nContent-Length: 200\r\n\r\n" ++ (&@as([200]u8, @splat('x')));
     const send = struct {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
             var in = std.Io.Reader.fixed(request);
@@ -7410,7 +7410,7 @@ test "a failure drops the headers that described the answer it replaced, and kee
     const head = result.response[0..std.mem.indexOf(u8, result.response, "\r\n\r\n").?];
     try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 409 "));
     for ([_][]const u8{ "Content-Encoding", "Cache-Control", "Expires", "ETag", "Last-Modified", "Content-Range", "Content-Disposition", "Location" }) |gone| {
-        if (std.ascii.indexOfIgnoreCase(head, gone) != null) {
+        if (std.ascii.findIgnoreCase(head, gone) != null) {
             std.debug.print("still there: {s}\n", .{gone});
             return error.TestUnexpectedResult;
         }
@@ -7806,7 +7806,7 @@ test "a WebSocket allocates nothing per message, however many it carries" {
 
     // "Hello", masked, two hundred times over.
     const frame = "\x81\x85\x37\xfa\x21\x3d\x7f\x9f\x4d\x51\x58";
-    const conversation = upgrade_request ++ frame ** 200;
+    const conversation = comptime upgrade_request ++ repeat(frame, 200);
 
     const send = struct {
         fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
@@ -8287,7 +8287,7 @@ test "a gzipped body is inflated before anything reads it, so a typed handler se
     try testing.expect(std.mem.endsWith(u8, greeted.response, "\r\n\r\nwati"));
 
     // `c.body()` too, and the old spelling of the coding.
-    const text = "the same line, sent again and again and again and again, " ** 20;
+    const text = repeat("the same line, sent again and again and again and again, ", 20);
     const raw = try gzippedRequest(testing.allocator, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Encoding: x-gzip\r\n", text);
     defer testing.allocator.free(raw);
     const echoed = h.send(&app, raw);
@@ -8319,7 +8319,7 @@ test "a gzipped body that does not decode is a 400 that names the coding, and on
 
     // Over `max_body` once inflated, by the stream's own account — refused
     // by the number, before a byte is inflated.
-    const big = "0123456789abcdef" ** (64 * 1024 / 16 + 1);
+    const big = repeat("0123456789abcdef", 64 * 1024 / 16 + 1);
     const over = try gzippedRequest(testing.allocator, "POST /echo HTTP/1.1\r\nHost: t\r\nContent-Encoding: gzip\r\n", big);
     defer testing.allocator.free(over);
     app.limits.max_body = 64 * 1024;
@@ -8550,7 +8550,7 @@ test "a proxy that adds a field of its own is read the same as one that appends"
     app.limits.trusted_proxies = app.trusted_proxies;
     const stuffed = h.send(
         &app,
-        "GET /who HTTP/1.1\r\nHost: t\r\n" ++ ("X-Forwarded-For: 10.0.0.9\r\n" ** 8) ++
+        "GET /who HTTP/1.1\r\nHost: t\r\n" ++ (repeat("X-Forwarded-For: 10.0.0.9\r\n", 8)) ++
             "X-Forwarded-For: 203.0.113.9\r\n\r\n",
     );
     try testing.expect(std.mem.endsWith(u8, stuffed.response, "203.0.113.9"));
@@ -8659,7 +8659,7 @@ test "a chunked body is counted against max_body as it arrives" {
 
 /// Big enough and repetitive enough to be worth compressing, which is what
 /// a real stylesheet or bundle is.
-const test_css = "body { margin: 0; padding: 0; } " ** 64;
+const test_css = repeat("body { margin: 0; padding: 0; } ", 64);
 
 fn cssApp(gpa: std.mem.Allocator) !App {
     var app = App.init(gpa);
@@ -8840,7 +8840,7 @@ test "response compression does not gzip a static file that has no gzipped copy"
     // Too short for a copy at load, long enough for `min_bytes`. Gzipped per
     // request it would go out under the plain file's strong ETag, and a
     // cache holding it could hand gzip to a client that cannot read it.
-    const text = "plain text that was not worth a gzipped copy at load. " ** 10;
+    const text = repeat("plain text that was not worth a gzipped copy at load. ", 10);
     var app = App.init(testing.allocator);
     defer app.deinit();
     try app.compress(.{ .min_bytes = 16 });
@@ -9068,7 +9068,7 @@ test "reading a cookie allocates nothing" {
 fn answersWithEntropy(c: *Ctx) anyerror!void {
     const first = try c.entropy(16);
     const second = try c.entropy(16);
-    const zeroes = [_]u8{0} ** 16;
+    const zeroes = @as([16]u8, @splat(0));
 
     if (std.mem.eql(u8, &first, &second)) return c.sendText(500, "twice the same");
     if (std.mem.eql(u8, &first, &zeroes)) return c.sendText(500, "all zero");
@@ -9354,7 +9354,7 @@ test "an id that would smuggle something is ignored, not repeated" {
     for (sent) |ch| try testing.expect(std.ascii.isHex(ch));
 
     // And an over-long one is dropped for the same reason.
-    const long = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: " ++ ("a" ** 65) ++ "\r\n\r\n");
+    const long = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: " ++ (&@as([65]u8, @splat('a'))) ++ "\r\n\r\n");
     try testing.expectEqual(@as(usize, 16), sentHeader(long.response, "X-Request-Id").?.len);
 }
 
@@ -10274,22 +10274,22 @@ test "the mode nilo reads off std is the one the program was built at" {
     // The suite runs in Debug and ReleaseSafe, so two of the three arms are
     // covered every run.
     switch (@import("builtin").mode) {
-        .Debug => {
+        .debug => {
             try testing.expectEqual(std.log.Level.debug, std.log.default_level);
             try testing.expect(std.debug.runtime_safety);
-            try testing.expectEqual(@as(?std.builtin.OptimizeMode, .Debug), wiring.program_mode);
+            try testing.expectEqual(@as(?std.lang.Optimize, .debug), wiring.program_mode);
         },
-        .ReleaseSafe => {
+        .safe => {
             try testing.expectEqual(std.log.Level.info, std.log.default_level);
             try testing.expect(std.debug.runtime_safety);
-            try testing.expectEqual(@as(?std.builtin.OptimizeMode, .ReleaseSafe), wiring.program_mode);
+            try testing.expectEqual(@as(?std.lang.Optimize, .safe), wiring.program_mode);
         },
         // ReleaseFast and ReleaseSmall are one answer, which is why the
         // warning names them as a pair rather than picking one.
-        .ReleaseFast, .ReleaseSmall => {
+        .fast, .small => {
             try testing.expectEqual(std.log.Level.info, std.log.default_level);
             try testing.expect(!std.debug.runtime_safety);
-            try testing.expectEqual(@as(?std.builtin.OptimizeMode, null), wiring.program_mode);
+            try testing.expectEqual(@as(?std.lang.Optimize, null), wiring.program_mode);
         },
     }
 
@@ -10301,9 +10301,9 @@ test "the arm the suite never builds in is checked anyway" {
     // The whole point of `modeFrom` being a function. Two of these three
     // lines cannot be reached by `wiring.program_mode` in a suite that runs Debug
     // and ReleaseSafe, and the unreachable one is the one that was wrong.
-    try testing.expectEqual(@as(?std.builtin.OptimizeMode, .Debug), wiring.modeFrom(.debug, true));
-    try testing.expectEqual(@as(?std.builtin.OptimizeMode, .ReleaseSafe), wiring.modeFrom(.info, true));
-    try testing.expectEqual(@as(?std.builtin.OptimizeMode, null), wiring.modeFrom(.info, false));
+    try testing.expectEqual(@as(?std.lang.Optimize, .debug), wiring.modeFrom(.debug, true));
+    try testing.expectEqual(@as(?std.lang.Optimize, .safe), wiring.modeFrom(.info, true));
+    try testing.expectEqual(@as(?std.lang.Optimize, null), wiring.modeFrom(.info, false));
 
     // And the trap itself, stated: `.info` is *every* release mode. A
     // derivation that reads the level alone answers ReleaseSafe for a
@@ -10744,7 +10744,7 @@ test "an upload read through bodyStream that the client cut short is a failure, 
         const request = try std.fmt.bufPrint(
             &request_buf,
             "POST {s} HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\n{s}",
-            .{ path, "x" ** 300 },
+            .{ path, &@as([300]u8, @splat('x')) },
         );
         const result = h.send(&app, request);
         try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400"));
@@ -10769,7 +10769,7 @@ test "a cut-short upload whose error the handler swallowed still closes the conn
 
     var h = Harness.init();
     defer h.deinit();
-    const result = h.send(&app, "POST /swallow HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\n" ++ ("x" ** 300));
+    const result = h.send(&app, "POST /swallow HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\n" ++ (&@as([300]u8, @splat('x'))));
     try testing.expect(!result.keep_alive);
 }
 
@@ -11189,10 +11189,10 @@ test "a value skipped under .ignore is held to the depth a read body is" {
     var h = Harness.init();
     defer h.deinit();
 
-    const shallow = "{\"text\":\"a\",\"extra\":" ++ "[" ** 30 ++ "]" ** 30 ++ "}";
+    const shallow = "{\"text\":\"a\",\"extra\":" ++ &@as([30]u8, @splat('[')) ++ &@as([30]u8, @splat(']')) ++ "}";
     try expectOk(postBig(&h, &app, "/loose", shallow));
 
-    const deep = "{\"text\":\"a\",\"extra\":" ++ "[" ** 100 ++ "]" ** 100 ++ "}";
+    const deep = "{\"text\":\"a\",\"extra\":" ++ &@as([100]u8, @splat('[')) ++ &@as([100]u8, @splat(']')) ++ "}";
     try expect400(postBig(&h, &app, "/loose", deep), "nests deeper than 64 levels");
 }
 
@@ -11788,7 +11788,7 @@ fn framedCapped(c: *Ctx) anyerror!void {
 }
 
 fn framedMedium(c: *Ctx) anyerror!void {
-    try c.send(200, "text/plain", "0123456789" ** 250);
+    try c.send(200, "text/plain", repeat("0123456789", 250));
 }
 
 /// A streamed answer, a stream that promised its length, an event stream and
@@ -11827,7 +11827,7 @@ fn framedFeed(c: *Ctx) anyerror!void {
 var framed_file: ?*bulkhead.Dir = null;
 /// What the file route sends: more than the 65,535 bytes a connection's
 /// window starts at, and more than a buffer of the pipe's.
-const framed_file_bytes = "0123456789abcdefghijklmnopqrstuvwxyz" ** 2_000;
+const framed_file_bytes = repeat("0123456789abcdefghijklmnopqrstuvwxyz", 2_000);
 
 fn framedFile(c: *Ctx) anyerror!void {
     const file = try framed_file.?.openFile("f.bin");
@@ -12018,10 +12018,10 @@ test "the same requests over HTTP/1.1 and over HTTP/2 get the same answers" {
 
     // A body in several DATA frames, an answer written across several
     // windows, a cookie a client split, and a redirect.
-    try expectSameAnswer(&app, .{ .method = "POST", .path = "/size", .body = "x" ** 60_000, .status = 200, .says = "60000" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/size", .body = &@as([60_000]u8, @splat('x')), .status = 200, .says = "60000" });
     // A body read in pieces, as it arrives on HTTP/2 and as it is read
     // out of the buffer on HTTP/1.1, and one the route holds to a limit.
-    try expectSameAnswer(&app, .{ .method = "POST", .path = "/store", .body = "x" ** 60_000, .status = 200, .says = "\"stored\":60000" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/store", .body = &@as([60_000]u8, @splat('x')), .status = 200, .says = "\"stored\":60000" });
     try expectSameAnswer(&app, .{ .method = "POST", .path = "/capped", .body = "abcdefgh", .status = 200, .says = "took it" });
     try expectSameAnswer(&app, .{
         .method = "POST",
@@ -12122,9 +12122,19 @@ test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 fr
 
     // The same request on HTTP/2: what two and twelve of them reach the
     // general-purpose allocator for differ by what ten more cost.
+    //
+    // Counted against a fixed buffer, fresh for each run, and not against
+    // `testing.allocator`: the stream's arena asks its allocator to grow the
+    // node it holds before it takes a new one, and whether that succeeds in
+    // `testing.allocator` depends on where earlier tests left its buckets. A
+    // fixed buffer grows the last allocation and nothing else, every time.
+    const room = try testing.allocator.alloc(u8, 1 << 20);
+    defer testing.allocator.free(room);
     var gpa_h2 = budget.Counting{ .child = testing.allocator };
     var totals: [2]usize = undefined;
     for (&totals, [_]usize{ 2, 12 }) |*total, requests| {
+        var fixed = std.heap.FixedBufferAllocator.init(room);
+        gpa_h2.child = fixed.allocator();
         var client = try h2test.TestClient.init();
         defer client.deinit();
         var id: u31 = 1;
@@ -12206,4 +12216,19 @@ test "the head a Ctx holds ends at its blank line, over HTTP/1.1 and over HTTP/2
     // The same route over HTTP/2, in a build that has it.
     if (comptime !framing_mod.http2_built) return;
     try expectSameAnswer(&app, .{ .path = "/tail", .fields = &.{.{ .name = "x-wanted", .value = "a" }}, .status = 200, .says = "tail ok a" });
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

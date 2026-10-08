@@ -33,7 +33,7 @@ pub fn requirementFor(comptime P: type, comptime route: []const u8) Requirement 
     const info = @typeInfo(P).pointer;
     return .{
         .type_name = @typeName(info.child),
-        .needs_mutable = !info.is_const,
+        .needs_mutable = !info.attrs.@"const",
         .route = route,
     };
 }
@@ -91,7 +91,7 @@ pub const Registry = struct {
     fn startHook(comptime T: type) ?*const fn (*anyopaque, std.Io, Limits) anyerror!void {
         if (!@hasDecl(T, "nilo_start")) return null;
 
-        const params = @typeInfo(@TypeOf(T.nilo_start)).@"fn".params;
+        const params = @typeInfo(@TypeOf(T.nilo_start)).@"fn".param_types;
         if (params.len != 2 and params.len != 3) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_start takes " ++
                 std.fmt.comptimePrint("{d}", .{params.len}) ++
@@ -131,16 +131,16 @@ pub const Registry = struct {
                 "  fn nilo_stop(self: *" ++ naming.of(T) ++ ") void",
         );
         const f = info.@"fn";
-        if (f.params.len != 1) @compileError(
+        if (f.param_types.len != 1) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_stop takes " ++
-                std.fmt.comptimePrint("{d}", .{f.params.len}) ++
+                std.fmt.comptimePrint("{d}", .{f.param_types.len}) ++
                 " parameters, and it has to take 1.\n" ++
                 "  fn nilo_stop(self: *" ++ naming.of(T) ++ ") void\n" ++
                 "  It runs on the way out of `listen()`, so there is nothing else to hand it.",
         );
-        if (f.params[0].type != *T) @compileError(
+        if (f.param_types[0] != *T) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_stop takes " ++
-                naming.of(f.params[0].type orelse anyopaque) ++
+                naming.of(f.param_types[0] orelse anyopaque) ++
                 ", and it has to take `*" ++ naming.of(T) ++ "`.\n" ++
                 "  A stop hook puts something down, so it needs the service it is putting down.",
         );
@@ -188,19 +188,19 @@ pub const Registry = struct {
         const f = info.@"fn";
         const shape = comptime "\n  fn nilo_ready(self: *" ++ naming.of(T) ++ ", scope: *nilo_core.AnyScope) ?[]const u8\n" ++
             "  Answer null when the service can do its job, and a sentence saying why when it cannot.";
-        if (f.params.len != 2) @compileError(
+        if (f.param_types.len != 2) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_ready takes " ++
-                std.fmt.comptimePrint("{d}", .{f.params.len}) ++
+                std.fmt.comptimePrint("{d}", .{f.param_types.len}) ++
                 " parameters, and it has to take 2." ++ shape,
         );
-        if (f.params[0].type != *T and f.params[0].type != *const T) @compileError(
+        if (f.param_types[0] != *T and f.param_types[0] != *const T) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_ready takes " ++
-                naming.of(f.params[0].type orelse anyopaque) ++
+                naming.of(f.param_types[0] orelse anyopaque) ++
                 " first, and it has to take `*" ++ naming.of(T) ++ "`." ++ shape,
         );
-        if (f.params[1].type != *AnyScope) @compileError(
+        if (f.param_types[1] != *AnyScope) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_ready takes " ++
-                naming.of(f.params[1].type orelse anyopaque) ++
+                naming.of(f.param_types[1] orelse anyopaque) ++
                 " second, and it has to take `*nilo_core.AnyScope`." ++ shape,
         );
         if (f.return_type != ?[]const u8) @compileError(
@@ -241,19 +241,19 @@ pub const Registry = struct {
             "nilo: " ++ naming.of(T) ++ ".nilo_check is not a function, and it has to be one." ++ shape,
         );
         const f = info.@"fn";
-        if (f.params.len != 2) @compileError(
+        if (f.param_types.len != 2) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_check takes " ++
-                std.fmt.comptimePrint("{d}", .{f.params.len}) ++
+                std.fmt.comptimePrint("{d}", .{f.param_types.len}) ++
                 " parameters, and it has to take 2." ++ shape,
         );
-        if (f.params[0].type != *T) @compileError(
+        if (f.param_types[0] != *T) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_check takes " ++
-                naming.of(f.params[0].type orelse anyopaque) ++
+                naming.of(f.param_types[0] orelse anyopaque) ++
                 " first, and it has to take `*" ++ naming.of(T) ++ "`." ++ shape,
         );
-        if (f.params[1].type != std.Io) @compileError(
+        if (f.param_types[1] != std.Io) @compileError(
             "nilo: " ++ naming.of(T) ++ ".nilo_check takes " ++
-                naming.of(f.params[1].type orelse anyopaque) ++
+                naming.of(f.param_types[1] orelse anyopaque) ++
                 " second, and it has to take `std.Io`." ++ shape,
         );
 
@@ -293,7 +293,7 @@ pub const Registry = struct {
             "nilo: app.provide() wants a pointer to a single value, not " ++ naming.of(P) ++ ".",
         );
 
-        if (info.is_const and @hasDecl(info.child, "nilo_start")) @compileError(
+        if (info.attrs.@"const" and @hasDecl(info.child, "nilo_start")) @compileError(
             "nilo: " ++ naming.of(info.child) ++ " has a `nilo_start`, so it finishes building " ++
                 "itself when the server starts — and it was provided as `*const`, which " ++
                 "leaves it nothing to build into.\n  Provide it as `app.provide(&thing)` " ++
@@ -308,7 +308,7 @@ pub const Registry = struct {
             .type_name = type_name,
             .name = comptime naming.of(info.child),
             .ptr = @ptrCast(@constCast(ptr)),
-            .is_const = info.is_const,
+            .is_const = info.attrs.@"const",
             .start = startHook(info.child),
             .stop = stopHook(info.child),
             .ready = readyHook(info.child),
@@ -403,7 +403,7 @@ pub const Registry = struct {
         const type_name = @typeName(info.child);
         for (self.entries.items) |e| {
             if (!sameName(e.type_name, type_name)) continue;
-            if (e.is_const and !info.is_const) return null;
+            if (e.is_const and !info.attrs.@"const") return null;
             return @ptrCast(@alignCast(e.ptr));
         }
         return null;

@@ -305,7 +305,7 @@ test "a body that trickles under the Engine is re-armed on every byte and never 
     // 1.44 s of body under a one-second silence bound: a timer armed once at
     // `begin` would have fired at one second, and one re-armed by each chunk
     // never does. The whole body coming back is the proof of the re-arm.
-    try testing.expectEqualStrings("x" ** 24, body);
+    try testing.expectEqualStrings(&@as([24]u8, @splat('x')), body);
 }
 
 /// One request over a real socket, from a thread that is not the Engine's.

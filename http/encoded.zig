@@ -114,7 +114,7 @@ fn gzipped(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
 
 test "a gzipped body comes back as the bytes that were compressed, in one allocation of their size" {
     const gpa = testing.allocator;
-    const text = "{\"name\":\"wati\",\"tags\":[\"a\",\"b\",\"a\",\"b\",\"a\",\"b\"]}" ** 40;
+    const text = repeat("{\"name\":\"wati\",\"tags\":[\"a\",\"b\",\"a\",\"b\",\"a\",\"b\"]}", 40);
     const packed_bytes = try gzipped(gpa, text);
     defer gpa.free(packed_bytes);
     try testing.expect(packed_bytes.len < text.len);
@@ -150,7 +150,7 @@ test "an empty body gzips to a frame and inflates to nothing" {
 
 test "the ceiling is checked against the announced length before a byte is inflated" {
     const gpa = testing.allocator;
-    const text = "x" ** 5000;
+    const text = &@as([5000]u8, @splat('x'));
     const packed_bytes = try gzipped(gpa, text);
     defer gpa.free(packed_bytes);
     // Under it, whole. At it, whole. One under, refused — and refused by
@@ -163,7 +163,7 @@ test "the ceiling is checked against the announced length before a byte is infla
 
 test "a stream that is not what it says it is, is refused rather than read as far as it goes" {
     const gpa = testing.allocator;
-    const packed_bytes = try gzipped(gpa, "the quick brown fox jumps over the lazy dog, twice: " ** 10);
+    const packed_bytes = try gzipped(gpa, repeat("the quick brown fox jumps over the lazy dog, twice: ", 10));
     defer gpa.free(packed_bytes);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -193,4 +193,19 @@ test "a stream that is not what it says it is, is refused rather than read as fa
     defer gpa.free(over);
     std.mem.writeInt(u32, over[over.len - 4 ..][0..4], 100_000, .little);
     try testing.expectError(error.BadEncodedBody, inflate(a, over, 1 << 20));
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

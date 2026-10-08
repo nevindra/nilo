@@ -239,7 +239,7 @@ pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
             naming.of(Loop) ++ " is not one"),
     };
     const wants: usize = if (State == void) 1 else 2;
-    if (info.params.len != wants) {
+    if (info.param_types.len != wants) {
         // The function's own type is not named here the way every other
         // refusal names what the caller wrote: `@typeName` of a function with
         // an inferred error set is four lines of `@typeInfo(@typeInfo(…))`,
@@ -248,17 +248,17 @@ pub fn checkLoop(comptime loop: anytype, comptime State: type) void {
             "*Socket and nothing else, because upgrade was given no state"
         else
             "*Socket and the state passed to upgrade (" ++ naming.of(State) ++ ")") ++
-            "; this one takes " ++ num(info.params.len) ++ " argument" ++
-            (if (info.params.len == 1) "" else "s"));
+            "; this one takes " ++ num(info.param_types.len) ++ " argument" ++
+            (if (info.param_types.len == 1) "" else "s"));
     }
-    if (info.params[0].type != *Socket) {
+    if (info.param_types[0] != *Socket) {
         @compileError("nilo: a WebSocket loop's first argument is *nilo.Socket, not " ++
-            naming.of(info.params[0].type orelse anyopaque));
+            naming.of(info.param_types[0] orelse anyopaque));
     }
-    if (State != void and info.params[1].type != State) {
+    if (State != void and info.param_types[1] != State) {
         @compileError("nilo: upgrade was given state of type " ++ naming.of(State) ++
             ", and the loop's second argument is " ++
-            naming.of(info.params[1].type orelse anyopaque));
+            naming.of(info.param_types[1] orelse anyopaque));
     }
     // The loop runs after the handler has returned, so a `*Ctx` carried into
     // it points into a frame that is gone and at a request that is over: the
@@ -294,14 +294,14 @@ fn ctxIn(comptime T: type, comptime where: []const u8) ?[]const u8 {
         .optional => |o| return ctxIn(o.child, where),
         .array => |a| return ctxIn(a.child, where ++ "'s items"),
         .@"struct" => |s| {
-            for (s.fields) |f| {
-                if (ctxIn(f.type, if (s.is_tuple) where ++ "'s item " ++ f.name else "field `" ++ f.name ++ "` of " ++ where)) |found| return found;
+            for (s.field_names, s.field_types) |f_name, f_type| {
+                if (ctxIn(f_type, if (s.is_tuple) where ++ "'s item " ++ f_name else "field `" ++ f_name ++ "` of " ++ where)) |found| return found;
             }
             return null;
         },
         .@"union" => |u| {
-            for (u.fields) |f| {
-                if (ctxIn(f.type, "field `" ++ f.name ++ "` of " ++ where)) |found| return found;
+            for (u.field_names, u.field_types) |f_name, f_type| {
+                if (ctxIn(f_type, "field `" ++ f_name ++ "` of " ++ where)) |found| return found;
             }
             return null;
         },
@@ -373,7 +373,7 @@ const Opcode = enum(u4) {
     _,
 
     fn isControl(self: Opcode) bool {
-        return @intFromEnum(self) & 0x8 != 0;
+        return @backingInt(self) & 0x8 != 0;
     }
 
     fn of(kind: Kind) Opcode {
@@ -397,7 +397,7 @@ pub fn headerFor(into: *[max_header]u8, kind: Kind, len: u64) []u8 {
 }
 
 fn writeHeader(into: *[max_header]u8, opcode: Opcode, len: u64) []u8 {
-    into[0] = 0x80 | @as(u8, @intFromEnum(opcode)); // FIN, no reserved bits
+    into[0] = 0x80 | @as(u8, @backingInt(opcode)); // FIN, no reserved bits
 
     // A server never masks. The mask exists to stop a hostile page making a
     // browser send bytes that a proxy would read as a request, and only a
@@ -741,7 +741,7 @@ pub const Socket = struct {
         self._closed = true;
 
         var payload: [125]u8 = undefined;
-        std.mem.writeInt(u16, payload[0..2], @intFromEnum(code), .big);
+        std.mem.writeInt(u16, payload[0..2], @backingInt(code), .big);
         const room = fits(reason);
         @memcpy(payload[2..][0..room], reason[0..room]);
         try self.writeFrame(.close, payload[0 .. 2 + room]);
@@ -858,7 +858,7 @@ pub const Socket = struct {
             .fin = lead[0] & 0x80 != 0,
             .reserved = lead[0] & 0x70 != 0,
             .masked = masked,
-            .opcode = @enumFromInt(@as(u4, @truncate(lead[0]))),
+            .opcode = @fromBackingInt(@intCast(@as(u4, @truncate(lead[0])))),
             .len = switch (short) {
                 126 => std.mem.readInt(u16, bytes[2..4], .big),
                 127 => std.mem.readInt(u64, bytes[2..10], .big),
@@ -1755,7 +1755,7 @@ const Trickle = struct {
     ) std.Io.Reader.StreamError!usize {
         const self: *Trickle = @alignCast(@fieldParentPtr("reader", r));
         if (self.rest.len == 0) return error.EndOfStream;
-        const n = @min(self.rest.len, self.per, @intFromEnum(limit));
+        const n = @min(self.rest.len, self.per, @backingInt(limit));
         const wrote = try w.write(self.rest[0..n]);
         self.rest = self.rest[wrote..];
         return wrote;
@@ -1788,7 +1788,7 @@ const Reset = struct {
     ) std.Io.Reader.StreamError!usize {
         const self: *Reset = @alignCast(@fieldParentPtr("reader", r));
         if (self.rest.len == 0) return error.ReadFailed;
-        const n = @min(self.rest.len, @intFromEnum(limit));
+        const n = @min(self.rest.len, @backingInt(limit));
         const wrote = try w.write(self.rest[0..n]);
         self.rest = self.rest[wrote..];
         return wrote;
@@ -2086,7 +2086,7 @@ test "a frame that arrives a few bytes at a time is the same message" {
     // to be byte for byte what the fast path produces.
     var peer: Peer = .{};
     defer peer.deinit();
-    const long = "the quick brown fox jumps over the lazy dog. " ** 12; // 528 bytes
+    const long = repeat("the quick brown fox jumps over the lazy dog. ", 12); // 528 bytes
     try peer.frame(true, 2, long);
     // A ceiling well under the header's 8 bytes for one read, and far under
     // the payload.
@@ -2114,7 +2114,7 @@ test "an empty first fragment and a quiet spell do not leave the message in a bu
     // the buffer, and it has to be one the socket still holds.
     var peer: Peer = .{};
     defer peer.deinit();
-    const long = "a continuation too long for the read buffer. " ** 8;
+    const long = repeat("a continuation too long for the read buffer. ", 8);
     try peer.frame(false, 1, "");
     try peer.frame(true, 0, long);
 
@@ -2253,7 +2253,7 @@ test "a close reason too long for a control frame is cut on a character" {
     // 122 bytes of ASCII and then a three-byte character, so the 123rd byte
     // is the start of a character that does not fit. Cutting at 123 would
     // send half of it, and half a character is not UTF-8.
-    const reason = "x" ** 122 ++ "€" ++ "tail";
+    const reason = &@as([122]u8, @splat('x')) ++ "€" ++ "tail";
     try socket.close(.policy, reason);
 
     const sent = peer.sent();
@@ -2261,7 +2261,7 @@ test "a close reason too long for a control frame is cut on a character" {
     const payload = sent[2..][0..sent[1]];
     try testing.expectEqual(@as(usize, 124), payload.len); // 2 + 122
     try testing.expect(std.unicode.utf8ValidateSlice(payload[2..]));
-    try testing.expectEqualStrings("x" ** 122, payload[2..]);
+    try testing.expectEqualStrings(&@as([122]u8, @splat('x')), payload[2..]);
 }
 
 test "an unmasked frame from a client is refused" {
@@ -2299,7 +2299,7 @@ test "text that is not UTF-8 is refused with the status that says so" {
 test "a message bigger than the buffer closes the connection rather than growing" {
     var peer: Peer = .{};
     defer peer.deinit();
-    try peer.frame(true, 1, "x" ** 200);
+    try peer.frame(true, 1, &@as([200]u8, @splat('x')));
     var socket = peer.socketHolding(100);
 
     try testing.expectError(error.MessageTooBig, socket.receive());
@@ -2312,7 +2312,7 @@ test "a frame announcing more than the buffer holds is refused before its bytes 
     defer peer.deinit();
     // Announced as 60,000 bytes, and only two of them actually sent. A
     // reader that trusted the header would sit waiting for the rest.
-    try peer.frame(true, 1, "x" ** 300);
+    try peer.frame(true, 1, &@as([300]u8, @splat('x')));
     std.mem.writeInt(u16, peer.to_server.items[2..4], 60_000, .big);
     var socket = peer.socketHolding(100);
 
@@ -2326,8 +2326,8 @@ test "fragments are measured against what is left of the buffer, not all of it" 
     // that matters is what the first one left.
     var peer: Peer = .{};
     defer peer.deinit();
-    try peer.frame(false, 1, "x" ** 40);
-    try peer.frame(true, 0, "y" ** 40);
+    try peer.frame(false, 1, &@as([40]u8, @splat('x')));
+    try peer.frame(true, 0, &@as([40]u8, @splat('y')));
     var socket = peer.socketHolding(64);
 
     try testing.expectError(error.MessageTooBig, socket.receive());
@@ -2356,7 +2356,7 @@ test "a reserved bit set means an extension nobody negotiated" {
 test "a long message uses the sixteen-bit length form, both ways" {
     var peer: Peer = .{};
     defer peer.deinit();
-    const long = "abcdefghij" ** 40; // 400 bytes
+    const long = repeat("abcdefghij", 40); // 400 bytes
     try peer.frame(true, 2, long);
     var socket = peer.socket();
 
@@ -2380,12 +2380,12 @@ test "a formatted message needs no buffer of the handler's own" {
 
     // And one long enough to need the sixteen-bit length form, so the header
     // the counting pass chose is the one the bytes deserve.
-    try socket.print("{s}", .{"z" ** 300});
+    try socket.print("{s}", .{&@as([300]u8, @splat('z'))});
     const rest = peer.sent()[17..];
     try testing.expectEqual(@as(u8, 0x81), rest[0]);
     try testing.expectEqual(@as(u8, 126), rest[1]);
     try testing.expectEqual(@as(u16, 300), std.mem.readInt(u16, rest[2..4], .big));
-    try testing.expectEqualStrings("z" ** 300, rest[4..]);
+    try testing.expectEqualStrings(&@as([300]u8, @splat('z')), rest[4..]);
 }
 
 /// A value that formats differently the second time it is asked — which is
@@ -2669,7 +2669,7 @@ test "a ping longer than a control frame can carry is cut, not sent broken" {
     defer peer.deinit();
     var socket = peer.socket();
 
-    try socket.ping("p" ** 300);
+    try socket.ping(&@as([300]u8, @splat('p')));
     const sent = peer.sent();
     // 125 is the most a control frame holds; a 126 here would be the
     // sixteen-bit length form, which a control frame may not use.
@@ -2724,4 +2724,19 @@ test "a handshake key is sixteen bytes of base64 and nothing else" {
     try testing.expect(!keyIsValid("dGhlIHNhbXBsZSBub25jZQ=!"));
     // Eighteen bytes, which is a valid base64 string and the wrong key.
     try testing.expect(!keyIsValid("dGhlIHNhbXBsZSBub25jZQECAwQF"));
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

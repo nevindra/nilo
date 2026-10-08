@@ -1093,7 +1093,7 @@ pub const Postgres = struct {
         };
     }
 
-    fn intAccepts(comptime info: std.builtin.Type.Int) Accepts {
+    fn intAccepts(comptime info: std.lang.Type.Int) Accepts {
         // Postgres has no unsigned integers, so an unsigned Zig type reads
         // out of the next width up — the one that can hold all of it. A
         // wider column is read range-checked (`postgres.Wire.read`): a value
@@ -1771,7 +1771,7 @@ pub const SQLite = struct {
         if (declared.len == 0) return null;
         const has = struct {
             fn has(text: []const u8, part: []const u8) bool {
-                return std.ascii.indexOfIgnoreCase(text, part) != null;
+                return std.ascii.findIgnoreCase(text, part) != null;
             }
         }.has;
         if (has(declared, "INT")) return "INTEGER";

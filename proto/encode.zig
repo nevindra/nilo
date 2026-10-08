@@ -205,7 +205,7 @@ inline fn scalarBits(comptime sc: schema.Scalar, value: anytype) u64 {
         .sfixed64 => @bitCast(value),
         .float => @as(u32, @bitCast(value)),
         .double => @bitCast(value),
-        .enumeration => @bitCast(@as(i64, @intFromEnum(value))),
+        .enumeration => @bitCast(@as(i64, @backingInt(value))),
         .string, .bytes => unreachable,
     };
 }

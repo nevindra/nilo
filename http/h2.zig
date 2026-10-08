@@ -102,7 +102,7 @@ pub const Header = struct {
     pub fn parse(bytes: *const [header_len]u8) Header {
         return .{
             .len = std.mem.readInt(u24, bytes[0..3], .big),
-            .type = @enumFromInt(bytes[3]),
+            .type = @fromBackingInt(@intCast(bytes[3])),
             .flags = bytes[4],
             // The reserved top bit is ignored on receipt (§4.1).
             .stream = @intCast(std.mem.readInt(u32, bytes[5..9], .big) & 0x7fff_ffff),
@@ -117,7 +117,7 @@ pub const Header = struct {
 pub fn writeHeader(w: *std.Io.Writer, len: usize, t: Type, flags: u8, stream: u31) std.Io.Writer.Error!void {
     var bytes: [header_len]u8 = undefined;
     std.mem.writeInt(u24, bytes[0..3], @intCast(len), .big);
-    bytes[3] = @intFromEnum(t);
+    bytes[3] = @backingInt(t);
     bytes[4] = flags;
     std.mem.writeInt(u32, bytes[5..9], stream, .big);
     try w.writeAll(&bytes);
@@ -127,7 +127,7 @@ pub fn writeSettings(w: *std.Io.Writer, settings: []const struct { Setting, u32 
     try writeHeader(w, settings.len * 6, .settings, 0, 0);
     for (settings) |s| {
         var bytes: [6]u8 = undefined;
-        std.mem.writeInt(u16, bytes[0..2], @intFromEnum(s[0]), .big);
+        std.mem.writeInt(u16, bytes[0..2], @backingInt(s[0]), .big);
         std.mem.writeInt(u32, bytes[2..6], s[1], .big);
         try w.writeAll(&bytes);
     }
@@ -152,7 +152,7 @@ pub fn writeWindowUpdate(w: *std.Io.Writer, stream: u31, increment: u31) std.Io.
 pub fn writeRstStream(w: *std.Io.Writer, stream: u31, code: ErrorCode) std.Io.Writer.Error!void {
     try writeHeader(w, 4, .rst_stream, 0, stream);
     var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, @intFromEnum(code), .big);
+    std.mem.writeInt(u32, &bytes, @backingInt(code), .big);
     try w.writeAll(&bytes);
 }
 
@@ -160,7 +160,7 @@ pub fn writeGoaway(w: *std.Io.Writer, last_stream: u31, code: ErrorCode) std.Io.
     try writeHeader(w, 8, .goaway, 0, 0);
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u32, bytes[0..4], last_stream, .big);
-    std.mem.writeInt(u32, bytes[4..8], @intFromEnum(code), .big);
+    std.mem.writeInt(u32, bytes[4..8], @backingInt(code), .big);
     try w.writeAll(&bytes);
 }
 

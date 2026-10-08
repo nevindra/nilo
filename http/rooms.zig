@@ -511,8 +511,8 @@ test "a key past max_key is refused rather than cut short" {
     var bytes: [8]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     var socket = socketFor(&in, &out);
-    try testing.expectError(error.KeyTooLong, rooms.join("k" ** (max_key + 1), &socket));
-    try rooms.sayText("k" ** (max_key + 1), "nowhere");
+    try testing.expectError(error.KeyTooLong, rooms.join(&@as([(max_key + 1)]u8, @splat('k')), &socket));
+    try rooms.sayText(&@as([(max_key + 1)]u8, @splat('k')), "nowhere");
 }
 
 test "a Room with history keeps its key when it empties, until the pool needs it" {

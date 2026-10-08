@@ -130,7 +130,7 @@ test "the upload id is read out of the initiate answer" {
     // Oversized comes back as it is: the bucket aborts the upload it names
     // before refusing it, which it cannot do without the id.
     try testing.expectEqual(upload_id_max + 1, uploadIdOf(
-        "<UploadId>" ++ ("x" ** (upload_id_max + 1)) ++ "</UploadId>",
+        "<UploadId>" ++ (&@as([(upload_id_max + 1)]u8, @splat('x'))) ++ "</UploadId>",
     ).?.len);
 }
 

@@ -358,8 +358,9 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
             w: *std.Io.Writer,
             req: Request,
         ) !u8 {
-            var diag: std.zon.parse.Diagnostics = .{};
-            defer diag.deinit(a);
+            // Empty until `std.zon` fills it, so a read that failed for another
+            // reason than the parse prints no lines under the sentence.
+            var diag: std.zon.parse.Diagnostics = .{ .errors = &.{} };
             _ = migrations.readWith(a, io, dir, D, .{ .diag = &diag }) catch {};
 
             try writeSnapshotRefusal(w, req, &diag);
@@ -889,7 +890,16 @@ fn writeSnapshotRefusal(
     try w.print("db: {s}/{s} is not a snapshot nilo can read.\n\n", .{
         req.dir, migrations.snapshot_file,
     });
-    try w.print("{f}\n", .{diag});
+    // `line:column: error: message`, the way `std.zon` wrote it before 0.17 made
+    // that a formatter which wants the file's path as well: the sentence above
+    // already names the file.
+    for (diag.errors) |e| {
+        try w.print("{d}:{d}: error: {s}\n", .{ e.loc.line + 1, e.loc.column + 1, e.msg });
+        for (e.notes) |note| {
+            try w.print("{d}:{d}: note: {s}\n", .{ note.loc.line + 1, note.loc.column + 1, note.msg });
+        }
+    }
+    try w.writeAll("\n");
     try w.writeAll(
         "Nothing was written. That file is the other half of every diff, so nothing " ++
             "can be generated or checked until it parses. If it was edited by hand, " ++
@@ -989,9 +999,10 @@ test "the usage says there is no down, because that is the question it gets" {
 
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "There is no `down`") != null);
     // Every command is in it.
-    inline for (@typeInfo(Command).@"enum".fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "help")) continue;
-        try testing.expect(std.mem.indexOf(u8, w.buffered(), "  " ++ f.name) != null);
+    const command_info = @typeInfo(Command).@"enum";
+    inline for (command_info.field_names) |f_name| {
+        if (comptime std.mem.eql(u8, f_name, "help")) continue;
+        try testing.expect(std.mem.indexOf(u8, w.buffered(), "  " ++ f_name) != null);
     }
 }
 
@@ -1115,12 +1126,13 @@ test "a snapshot nilo cannot read is a sentence with the line under it, not a tr
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
 
-    var diag: std.zon.parse.Diagnostics = .{};
-    defer diag.deinit(gpa);
+    var parsed: std.heap.ArenaAllocator = .init(gpa);
+    defer parsed.deinit();
+    var diag: std.zon.parse.Diagnostics = undefined;
     const broken: [:0]const u8 = ".{ .dialect = \"postgres\", .tabels = .{} }";
     try testing.expectError(
         error.ParseZon,
-        migrate.snapshot.parse(gpa, broken, &diag),
+        migrate.snapshot.parse(parsed.allocator(), broken, &diag),
     );
 
     try writeSnapshotRefusal(&w, .{ .command = .generate, .name = "x" }, &diag);
@@ -1152,8 +1164,8 @@ test "a version number is padded without its sign getting in the way" {
     var w = std.Io.Writer.fixed(&buf);
 
     try writeDrift(&w, &.{
-        .{ .version = 3, .name = "three", .recorded = "a" ** 32, .now = "b" ** 32 },
-        .{ .version = 12, .name = "twelve", .recorded = "c" ** 32, .now = "d" ** 32 },
+        .{ .version = 3, .name = "three", .recorded = &@as([32]u8, @splat('a')), .now = &@as([32]u8, @splat('b')) },
+        .{ .version = 12, .name = "twelve", .recorded = &@as([32]u8, @splat('c')), .now = &@as([32]u8, @splat('d')) },
     });
 
     // `{d:0>4}` on an `i64` writes `00+3`, because the sign goes after the

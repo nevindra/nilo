@@ -188,17 +188,17 @@ fn checkParse(comptime T: type) void {
             .@"fn" => |f| f,
             else => wrongParse(T, "is a " ++ naming.of(F) ++ ", not a function"),
         };
-        if (info.is_generic or info.is_var_args) wrongParse(
+        if (info.is_generic or info.attrs.varargs) wrongParse(
             T,
             "is still generic, so nilo cannot tell what it takes",
         );
-        if (info.params.len != 1) wrongParse(
+        if (info.param_types.len != 1) wrongParse(
             T,
-            std.fmt.comptimePrint("takes {d} arguments rather than one", .{info.params.len}),
+            std.fmt.comptimePrint("takes {d} arguments rather than one", .{info.param_types.len}),
         );
-        if (info.params[0].type != []const u8) wrongParse(
+        if (info.param_types[0] != []const u8) wrongParse(
             T,
-            "takes a " ++ naming.of(info.params[0].type.?) ++ " rather than the text that arrived",
+            "takes a " ++ naming.of(info.param_types[0].?) ++ " rather than the text that arrived",
         );
         if (info.return_type != ?T) wrongParse(
             T,
@@ -492,18 +492,18 @@ pub fn spelledAsNumber(text: []const u8, signed: bool, real: bool) bool {
     return i > from and i == rest.len;
 }
 
-/// A branch quota for a walk over `fields` that touches every byte of every
+/// A branch quota for a walk over a type's `field_names` that touches every byte of every
 /// name, written at the site that loops: an enum of a thousand values listed
 /// in a 400's message stopped at "evaluation exceeded 1000 backwards
 /// branches" from a line in this file
 /// ([ADR 126](../docs/adr/126-a-check-pays-for-its-own-branches.md)). Generous
 /// rather than exact, because the compiler keeps the larger of two quotas.
-pub fn budget(comptime fields: anytype) u32 {
+pub fn budget(comptime names: []const [:0]const u8) u32 {
     comptime {
         // Adding the sizes up is itself a loop over the fields.
-        @setEvalBranchQuota(1000 + 2 * fields.len);
+        @setEvalBranchQuota(1000 + 2 * names.len);
         var n: u32 = 2000;
-        for (fields) |f| n += 100 + 20 * @as(u32, @intCast(f.name.len));
+        for (names) |name| n += 100 + 20 * @as(u32, @intCast(name.len));
         return n;
     }
 }
@@ -512,10 +512,11 @@ pub fn budget(comptime fields: anytype) u32 {
 /// expected. Built once at compile time.
 pub fn enumChoices(comptime E: type) []const u8 {
     comptime {
-        @setEvalBranchQuota(budget(@typeInfo(E).@"enum".fields));
+        const names = @typeInfo(E).@"enum".field_names;
+        @setEvalBranchQuota(budget(names));
         var out: []const u8 = "";
-        for (@typeInfo(E).@"enum".fields, 0..) |f, i| {
-            out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+        for (names, 0..) |name, i| {
+            out = out ++ (if (i == 0) "" else ", ") ++ name;
         }
         return out;
     }

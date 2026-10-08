@@ -109,9 +109,9 @@ pub fn check(comptime pattern: []const u8, comptime T: type) void {
 
         const W = @TypeOf(T.nilo_write);
         const fits = switch (@typeInfo(W)) {
-            .@"fn" => |f| f.params.len == 2 and
-                (f.params[0].type == T or f.params[0].type == *const T or f.params[0].type == *T) and
-                f.params[1].type == *std.Io.Writer,
+            .@"fn" => |f| f.param_types.len == 2 and
+                (f.param_types[0] == T or f.param_types[0] == *const T or f.param_types[0] == *T) and
+                f.param_types[1] == *std.Io.Writer,
             else => false,
         };
         if (!fits) @compileError(

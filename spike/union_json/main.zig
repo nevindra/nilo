@@ -295,9 +295,9 @@ pub fn main() !void {
 
     // Interleaved, five times each, because a single run of each is how this
     // repository has published a win it did not earn (CLAUDE.md).
-    var totals = [_]u64{0} ** 6;
-    var best = [_]u64{std.math.maxInt(u64)} ** 6;
-    var worst = [_]u64{0} ** 6;
+    var totals = @as([6]u64, @splat(0));
+    var best = @as([6]u64, @splat(std.math.maxInt(u64)));
+    var worst = @as([6]u64, @splat(0));
 
     for (0..pairs) |_| {
         inline for (.{

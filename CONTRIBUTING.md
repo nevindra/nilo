@@ -10,7 +10,7 @@ cd nilo
 zig build test
 ```
 
-Zig 0.16 and nothing else: no C library, no system package, no database. The first run after a clone builds everything; after that a run that changed nothing is a few seconds, almost all of it the refusals below.
+Zig 0.17 and nothing else: no C library, no system package, no database. The first run after a clone builds everything; after that a run that changed nothing is a few seconds, almost all of it the refusals below.
 
 Then read these four, in this order:
 

@@ -99,7 +99,7 @@ fn post(room: *room_file.Room, done: *const std.atomic.Value(bool)) void {
     var n: u32 = 0;
     while (!done.load(.acquire)) : (n +%= 1) {
         if (n % 37 == 0) {
-            const big = [_]u8{'p'} ** 20_000;
+            const big = @as([20_000]u8, @splat('p'));
             room.sayText(&big) catch {};
         } else room.print("post {d}", .{n}) catch {};
         std.Thread.yield() catch {};
@@ -217,7 +217,7 @@ fn streamed(to: *framing.Framing, method: []const u8) void {
     const head_only = std.mem.eql(u8, method, "HEAD");
     to.streamHead(200, "text/plain", .{ .chunked = false, .ends_connection = false, .bodyless = head_only }, null, true, &.{}) catch return;
     if (!head_only) {
-        const big = [_]u8{'x'} ** 12_000;
+        const big = @as([12_000]u8, @splat('x'));
         to.piece(false, "a", &.{""}, 0) catch return;
         to.piece(false, big[0..4096], &.{""}, 0) catch return;
         to.piece(false, "", &.{"-="}, 3000) catch return;
@@ -623,7 +623,7 @@ fn oneFrame(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
             for (0..len) |_| try w.writeByte(random.int(u8));
             if (padded) try w.writeAll("\x00\x00");
         },
-        5 => try h2.writeRstStream(w, stream, @enumFromInt(random.uintLessThan(u32, 14))),
+        5 => try h2.writeRstStream(w, stream, @fromBackingInt(@intCast(random.uintLessThan(u32, 14)))),
         6 => {
             const ack: u8 = if (random.boolean()) h2.Flags.ack else 0;
             try h2.writeHeader(w, 8, .ping, ack, stream);
@@ -649,7 +649,7 @@ fn oneFrame(random: std.Random, w: *std.Io.Writer, stream: u31) !void {
             const t: h2.Type = switch (random.uintLessThan(u8, 3)) {
                 0 => .priority,
                 1 => .goaway,
-                else => @enumFromInt(0x20 + random.uintLessThan(u8, 8)),
+                else => @fromBackingInt(@intCast(0x20 + random.uintLessThan(u8, 8))),
             };
             const len = random.uintLessThan(u8, 10);
             try h2.writeHeader(w, len, t, random.int(u8), stream);
@@ -715,7 +715,7 @@ const streamed_get = request("\x82\x86\x04\x04/t.x", 0x05);
 const file_get = request("\x82\x86\x04\x04/d.x", 0x05);
 /// Pings behind the request, each a turn of the connection's loop, which is
 /// where a post that has arrived is noticed and written.
-const pings = ("\x00\x00\x08\x06\x00\x00\x00\x00\x00" ++ "12345678") ** 400;
+const pings = repeat("\x00\x00\x08\x06\x00\x00\x00\x00\x00" ++ "12345678", 400);
 const events_get = request("\x82\x86\x04\x04/v.x", 0x05) ++ pings;
 
 /// A frame on the connection, stream 0.
@@ -929,4 +929,19 @@ test "the property refuses an answer that breaks a rule" {
     try testing.expectError(error.HeaderBlockInterrupted, answerHolds(a, h2.preface, settings_frame ++
         "\x00\x00\x01\x01\x00\x00\x00\x00\x01\x88" ++ "\x00\x00\x00\x04\x01\x00\x00\x00\x00"));
     try testing.expectError(error.BlockDoesNotDecode, answerHolds(a, h2.preface, settings_frame ++ "\x00\x00\x01\x01\x04\x00\x00\x00\x01\xff"));
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

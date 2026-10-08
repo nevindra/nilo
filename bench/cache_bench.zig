@@ -78,7 +78,7 @@ const Runner = struct {
     fn run(self: *Runner, seed: u64) void {
         var prng = std.Random.DefaultPrng.init(seed);
         const rand = prng.random();
-        const page = "p" ** 512;
+        const page = &@as([512]u8, @splat('p'));
         var held: Pages.Held = undefined;
 
         while (!self.stop.load(.monotonic)) {
@@ -186,7 +186,7 @@ fn measure(
 /// what it timed was the cost of missing. A miss is cheap, and a benchmark
 /// that quietly measures one reads as a good number.
 fn warm(store: *cache.Store, keys: *const Keys, span: usize, work: Work) void {
-    const page = "p" ** 512;
+    const page = &@as([512]u8, @splat('p'));
     switch (work) {
         .get_flat, .put_flat, .mixed_flat => {
             const carts = Carts.open(store);
@@ -224,7 +224,7 @@ fn perEntry(gpa: std.mem.Allocator, value_len: usize) !void {
     const keys = try Keys.build(gpa, fill_keys_n);
     defer keys.free(gpa);
 
-    const value = "v" ** 1024;
+    const value = &@as([1024]u8, @splat('v'));
     var held: Pages.Held = undefined;
 
     for (keys.text) |k| try pages.put(k, value[0..value_len]);
@@ -365,5 +365,4 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     std.debug.print("\nwhat one entry costs to hold\n", .{});
     for ([_]usize{ 16, 64, 256, 1024 }) |len| try perEntry(gpa, len);
-
 }

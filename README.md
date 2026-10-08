@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ziglang.org/"><img alt="Zig 0.16" src="https://img.shields.io/badge/zig-0.16-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
+  <a href="https://ziglang.org/"><img alt="Zig 0.17" src="https://img.shields.io/badge/zig-0.17-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
   <a href="./CHANGELOG.md"><img alt="version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference/"><img alt="12 modules" src="https://img.shields.io/badge/modules-12-8957e5?style=flat-square"></a>
   <a href="./refusals/README.md"><img alt="532 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-532-e05d44?style=flat-square"></a>
@@ -56,14 +56,14 @@ Those three lines are a complete route. From them you get:
 
 ## ⚡ Quickstart
 
-You need Zig 0.16 and nothing else: no C library, no system package.
+You need Zig 0.17 and nothing else: no C library, no system package. **v0.7.0, the tag below, and every tag before it build on Zig 0.16.0**, so pin one of them with 0.16, or follow `main` with 0.17 until the next tag.
 
 ```console
 $ zig init                                                          # only if you have no build.zig.zon yet
 $ zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
 ```
 
-**Keep the `#commit` part.** The tag is annotated, and Zig 0.16's `zig fetch` doesn't peel it, so `?ref=v0.7.0` on its own gives you whatever `main` is that day.
+**Keep the `#commit` part.** The tag is annotated, and `zig fetch` doesn't peel it (still true on 0.17), so `?ref=v0.7.0` on its own gives you whatever `main` is that day.
 
 ```zig
 const std = @import("std");

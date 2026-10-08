@@ -78,26 +78,26 @@ fn chatLoop(socket: *nilo.Socket, room: *nilo.Room) !void {
 
 fn page() []const u8 {
     return
-        \\<!doctype html>
-        \\<title>nilo chat</title>
-        \\<style>body{font:16px/1.6 ui-monospace,monospace;padding:2rem}
-        \\input{font:inherit;width:20rem}
-        \\p{color:#666;max-width:34rem}</style>
-        \\<p>Open this page in a second tab. What you type here shows up there.</p>
-        \\<pre id="log"></pre>
-        \\<input id="say" placeholder="say something" autofocus>
-        \\<script>
-        \\  const log = document.getElementById("log");
-        \\  const socket = new WebSocket(`ws://${location.host}/ws`);
-        \\  socket.onmessage = e => { log.textContent += e.data + "\n" };
-        \\  socket.onclose = () => { log.textContent += "(closed)\n" };
-        \\  document.getElementById("say").addEventListener("keydown", e => {
-        \\    if (e.key !== "Enter" || !e.target.value) return;
-        \\    socket.send(e.target.value);
-        \\    e.target.value = "";
-        \\  });
-        \\</script>
-        \\
+    \\<!doctype html>
+    \\<title>nilo chat</title>
+    \\<style>body{font:16px/1.6 ui-monospace,monospace;padding:2rem}
+    \\input{font:inherit;width:20rem}
+    \\p{color:#666;max-width:34rem}</style>
+    \\<p>Open this page in a second tab. What you type here shows up there.</p>
+    \\<pre id="log"></pre>
+    \\<input id="say" placeholder="say something" autofocus>
+    \\<script>
+    \\  const log = document.getElementById("log");
+    \\  const socket = new WebSocket(`ws://${location.host}/ws`);
+    \\  socket.onmessage = e => { log.textContent += e.data + "\n" };
+    \\  socket.onclose = () => { log.textContent += "(closed)\n" };
+    \\  document.getElementById("say").addEventListener("keydown", e => {
+    \\    if (e.key !== "Enter" || !e.target.value) return;
+    \\    socket.send(e.target.value);
+    \\    e.target.value = "";
+    \\  });
+    \\</script>
+    \\
     ;
 }
 

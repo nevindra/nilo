@@ -49,7 +49,7 @@ const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r
 /// `std.json` spent escaping that kilobyte was invisible for the whole of v1
 /// and v2 as a result. A profiler measuring a different payload from the
 /// thing being profiled is worse than no profiler.
-const bio = "A systems nerd who writes Zig before breakfast. " ** 19;
+const bio = repeat("A systems nerd who writes Zig before breakfast. ", 19);
 
 const User = struct {
     id: u32,
@@ -351,13 +351,13 @@ fn contentTypeLookups() void {
     var cls_best: u64 = std.math.maxInt(u64);
     for (0..reps + 1) |rep| {
         var started = clock();
-        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(shippedFieldIn(head, "content-type")));
+        for (0..rounds) |_| sink += @backingInt(msg.codecOf(shippedFieldIn(head, "content-type")));
         const old_took = clock() - started;
         started = clock();
-        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(msg.contentTypeIn(head)));
+        for (0..rounds) |_| sink += @backingInt(msg.codecOf(msg.contentTypeIn(head)));
         const new_took = clock() - started;
         started = clock();
-        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(head[40..56]));
+        for (0..rounds) |_| sink += @backingInt(msg.codecOf(head[40..56]));
         const cls_took = clock() - started;
         if (rep > 0) {
             old_best = @min(old_best, old_took);
@@ -1360,4 +1360,19 @@ fn http2JsonPosts() !void {
 
 fn pct(part: u64, whole: u64) f64 {
     return @as(f64, @floatFromInt(part)) * 100.0 / @as(f64, @floatFromInt(whole));
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

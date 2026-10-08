@@ -157,7 +157,7 @@ pub const Memory = struct {
             // and among equals the one that has been due longest.
             if (best) |b| {
                 const cur = self.slots[b];
-                const better = @intFromEnum(s.priority) < @intFromEnum(cur.priority) or
+                const better = @backingInt(s.priority) < @backingInt(cur.priority) or
                     (s.priority == cur.priority and s.run_at < cur.run_at);
                 if (better) best = i;
             } else best = i;
@@ -539,7 +539,7 @@ test "a full queue refuses rather than writing over a row" {
     // And every one of the four is still there.
     try testing.expectEqual(@as(u64, 4), (try store.stats(&run)).queued);
 
-    try testing.expectError(error.PayloadTooLarge, store.push(&run, "a", "x" ** 65, .{ .run_at = 0 }));
+    try testing.expectError(error.PayloadTooLarge, store.push(&run, "a", &@as([65]u8, @splat('x')), .{ .run_at = 0 }));
 }
 
 test "retry, dead and retryDead move a row through its states" {

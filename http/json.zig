@@ -147,14 +147,14 @@ const FiniteJson = struct {
                         // Untagged is `std.json`'s own compile error.
                         if (info.tag_type == null) return self.inner.write(v);
                         try self.beginObject();
-                        inline for (info.fields) |f| {
-                            if (v == @field(info.tag_type.?, f.name)) {
-                                try self.objectField(f.name);
-                                if (f.type == void) {
+                        inline for (info.field_names, info.field_types) |f_name, f_type| {
+                            if (v == @field(info.tag_type.?, f_name)) {
+                                try self.objectField(f_name);
+                                if (f_type == void) {
                                     try self.beginObject();
                                     try self.endObject();
                                 } else {
-                                    try self.write(@field(v, f.name));
+                                    try self.write(@field(v, f_name));
                                 }
                                 break;
                             }
@@ -163,10 +163,10 @@ const FiniteJson = struct {
                     },
                     .@"struct" => |info| {
                         if (info.is_tuple) try self.beginArray() else try self.beginObject();
-                        inline for (info.fields) |f| {
-                            if (f.type == void) continue;
-                            if (!info.is_tuple) try self.objectField(f.name);
-                            try self.write(@field(v, f.name));
+                        inline for (info.field_names, info.field_types) |f_name, f_type| {
+                            if (f_type == void) continue;
+                            if (!info.is_tuple) try self.objectField(f_name);
+                            try self.write(@field(v, f_name));
                         }
                         return if (info.is_tuple) self.endArray() else self.endObject();
                     },
@@ -202,8 +202,8 @@ const FiniteJson = struct {
     /// The value's own `jsonStringify`, handed this writer unless it asks for a
     /// `std.json.Stringify` by name.
     fn own(self: *FiniteJson, v: anytype) Error!void {
-        const params = @typeInfo(@TypeOf(@TypeOf(v).jsonStringify)).@"fn".params;
-        if (params.len == 2 and params[1].type == *std.json.Stringify) {
+        const params = @typeInfo(@TypeOf(@TypeOf(v).jsonStringify)).@"fn".param_types;
+        if (params.len == 2 and params[1] == *std.json.Stringify) {
             return v.jsonStringify(&self.inner);
         }
         return v.jsonStringify(self);
@@ -374,7 +374,7 @@ pub fn innerRead(
             if (comptime s.is_tuple) {
                 if (.array_begin != try source.next()) return error.UnexpectedToken;
                 var r: T = undefined;
-                inline for (s.fields, 0..) |field, i| r[i] = try innerRead(field.type, gpa, source, options);
+                inline for (s.field_types, 0..) |f_type, i| r[i] = try innerRead(f_type, gpa, source, options);
                 if (.array_end != try source.next()) return error.UnexpectedToken;
                 return r;
             }
@@ -429,10 +429,10 @@ pub fn readFields(
     nested: std.json.ParseOptions,
 ) std.json.ParseError(@TypeOf(source.*))!T {
     const s = @typeInfo(T).@"struct";
-    comptime @setEvalBranchQuota(convert.budget(s.fields));
+    comptime @setEvalBranchQuota(convert.budget(s.field_names));
 
     var r: T = undefined;
-    var seen = [_]bool{false} ** s.fields.len;
+    var seen = @as([s.field_names.len]bool, @splat(false));
 
     while (true) {
         const name_token = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
@@ -442,19 +442,19 @@ pub fn readFields(
             else => return error.UnexpectedToken,
         };
 
-        inline for (s.fields, 0..) |field, i| {
-            if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
-            if (std.mem.eql(u8, field.name, name)) {
+        inline for (s.field_names, s.field_types, s.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
+            if (f_attrs.@"comptime") @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ f_name);
+            if (std.mem.eql(u8, f_name, name)) {
                 if (seen[i]) switch (options.duplicate_field_behavior) {
                     .use_first => {
                         // Read and dropped: the type check is the point.
-                        _ = try innerRead(field.type, gpa, source, nested);
+                        _ = try innerRead(f_type, gpa, source, nested);
                         break;
                     },
                     .@"error" => return error.DuplicateField,
                     .use_last => {},
                 };
-                @field(r, field.name) = try innerRead(field.type, gpa, source, nested);
+                @field(r, f_name) = try innerRead(f_type, gpa, source, nested);
                 seen[i] = true;
                 break;
             }
@@ -471,9 +471,9 @@ pub fn readFields(
             }
         }
     }
-    inline for (s.fields, 0..) |field, i| {
+    inline for (s.field_names, s.field_types, s.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
         if (!seen[i]) {
-            if (field.defaultValue()) |default| @field(r, field.name) = default else return error.MissingField;
+            if (f_attrs.defaultValue(f_type)) |default| @field(r, f_name) = default else return error.MissingField;
         }
     }
     return r;
@@ -689,12 +689,12 @@ fn coversWithin(comptime T: type, comptime depth: usize) bool {
             // Reading the marker is also what checks it, so a `.tag` on the
             // wrong shape is refused the moment the type reaches a response.
             const tagged = if (mark.of(T)) |m| m.tag != null else false;
-            for (u.fields) |f| {
-                if (f.type == void) {
+            for (u.field_types) |f_type| {
+                if (f_type == void) {
                     if (!tagged) break :covered false;
                     continue;
                 }
-                if (!coversWithin(f.type, depth + 1)) break :covered false;
+                if (!coversWithin(f_type, depth + 1)) break :covered false;
             }
             break :covered true;
         },
@@ -710,8 +710,8 @@ fn coversWithin(comptime T: type, comptime depth: usize) bool {
             // writes itself has the last word on how it looks.
             if (s.is_tuple) break :covered false;
             if (hasDecl(T, "jsonStringify")) break :covered false;
-            for (s.fields) |f| {
-                if (!coversWithin(f.type, depth + 1)) break :covered false;
+            for (s.field_types) |f_type| {
+                if (!coversWithin(f_type, depth + 1)) break :covered false;
             }
             break :covered true;
         },
@@ -746,7 +746,7 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
         // makes `rename_all` free: the spelling is settled while compiling, so
         // a renamed enum writes exactly as much as a plain one.
         .@"enum" => |e| {
-            if (e.is_exhaustive) switch (value) {
+            if (e.mode == .exhaustive) switch (value) {
                 inline else => |tag| return w.writeAll(
                     comptime "\"" ++ mark.wire(@tagName(tag), mark.of(T)) ++ "\"",
                 ),
@@ -756,10 +756,10 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
             // exactly that, and so can a database integer. A named value goes
             // out as its name and an unnamed one as its number, which is what
             // std.json writes and what reading it back expects.
-            inline for (e.fields) |f| {
-                if (@intFromEnum(value) == f.value) return w.writeAll(comptime "\"" ++ f.name ++ "\"");
+            inline for (e.field_names, e.field_values) |f_name, f_value| {
+                if (@backingInt(value) == f_value) return w.writeAll(comptime "\"" ++ f_name ++ "\"");
             }
-            return w.printInt(@intFromEnum(value), 10, .lower, .{});
+            return w.printInt(@backingInt(value), 10, .lower, .{});
         },
         .optional => return if (value) |payload|
             writeValue(@TypeOf(payload), w, payload)
@@ -798,9 +798,10 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
                         // together rename the variant but not its fields` holds
                         // (ADR 016, ADR 148).
                         const inner = comptime mark.of(Payload);
-                        inline for (@typeInfo(Payload).@"struct".fields) |f| {
-                            try w.writeAll(comptime ",\"" ++ mark.wire(f.name, inner) ++ "\":");
-                            try writeValue(f.type, w, @field(payload, f.name));
+                        const payload_info = @typeInfo(Payload).@"struct";
+                        inline for (payload_info.field_names, payload_info.field_types) |f_name, f_type| {
+                            try w.writeAll(comptime ",\"" ++ mark.wire(f_name, inner) ++ "\":");
+                            try writeValue(f_type, w, @field(payload, f_name));
                         }
                         return w.writeByte('}');
                     }
@@ -815,7 +816,7 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
         },
 
         .@"struct" => |s| {
-            if (s.fields.len == 0) return w.writeAll("{}");
+            if (s.field_names.len == 0) return w.writeAll("{}");
             // What the type said its keys are spelled as
             // ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
             // Null for the types that said nothing, which is nearly all of them
@@ -823,12 +824,12 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
             // compiling either way, so a renamed struct writes exactly as much
             // as a plain one.
             const m = comptime mark.of(T);
-            inline for (s.fields, 0..) |f, i| {
+            inline for (s.field_names, s.field_types, 0..) |f_name, f_type, i| {
                 // The brace or comma, the quoted name and the colon are one
                 // string settled while compiling.
                 try w.writeAll(comptime (if (i == 0) "{\"" else ",\"") ++
-                    mark.wire(f.name, m) ++ "\":");
-                try writeValue(f.type, w, @field(value, f.name));
+                    mark.wire(f_name, m) ++ "\":");
+                try writeValue(f_type, w, @field(value, f_name));
             }
             return w.writeByte('}');
         },
@@ -1071,7 +1072,7 @@ test "a float is spelled the same on every shape, covered or fallen back to std.
     try expectText("[1.0,2.5,1e-7]", .{ @as(f64, 1), @as(f32, 2.5), @as(f64, 1e-7) });
     try expectText("{\"c\":4.0,\"t\":[3.0,\"s\"]}", .{ .c = Custom{ .v = 4 }, .t = .{ @as(f64, 3), "s" } });
     var items = [_]std.json.Value{ .{ .float = 2 }, .{ .float = 1e16 }, .{ .integer = 3 }, .{ .float = 1.5 } };
-    try expectText("[2.0,1e+16,3,1.5]", std.json.Value{ .array = .{ .items = &items, .capacity = items.len, .allocator = testing.allocator } });
+    try expectText("[2.0,1e+16,3,1.5]", std.json.Value{ .array = .{ .items = &items, .capacity = items.len, .allocator = testing.allocator, .pointer_stability = .{} } });
     var map: std.json.ArrayHashMap(f64) = .{};
     defer map.deinit(testing.allocator);
     try map.map.put(testing.allocator, "a", 1);
@@ -1264,7 +1265,7 @@ test "a non-exhaustive enum holding a value no field names is written as its num
     // integer; echoing it back must not reach `@tagName` on an unnamed value.
     const Kind = enum(u8) { free, paid, _ };
     try expectSame(struct { kind: Kind }{ .kind = .paid });
-    try expectSame(struct { kind: Kind }{ .kind = @enumFromInt(7) });
+    try expectSame(struct { kind: Kind }{ .kind = @fromBackingInt(@intCast(7)) });
 }
 
 test "a sentinel-terminated string is a string, not a list of its bytes" {
@@ -1391,7 +1392,7 @@ test "lists" {
 }
 
 test "the primary metric's own payload" {
-    const bio = "A systems nerd who writes Zig before breakfast. " ** 19;
+    const bio = repeat("A systems nerd who writes Zig before breakfast. ", 19);
     try expectSame(struct {
         id: u32,
         name: []const u8,
@@ -1944,7 +1945,7 @@ test "a float that is not finite is null on every shape that falls back to std.j
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
         defer out.deinit();
         var items = [_]std.json.Value{ .{ .float = nan }, .{ .float = 2.5 }, .{ .float = -inf } };
-        try writtenAndParses(&out, std.json.Value{ .array = .{ .items = &items, .capacity = items.len, .allocator = testing.allocator } });
+        try writtenAndParses(&out, std.json.Value{ .array = .{ .items = &items, .capacity = items.len, .allocator = testing.allocator, .pointer_stability = .{} } });
         try testing.expectEqualStrings("[null,2.5,null]", out.written());
     }
     {
@@ -2021,4 +2022,19 @@ test "alloc hands back the bytes write would have written, and frees cleanly" {
     try write(&out.writer, row);
     try testing.expectEqualStrings(out.written(), owned);
     try testing.expectEqualStrings("{\"id\":7,\"ratio\":null,\"tags\":[\"a\",\"b\\n\"]}", owned);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

@@ -614,7 +614,7 @@ pub noinline fn serveRequest(
         // A target that is not a path asks the router nothing: `OPTIONS *` is
         // the server-wide question and is answered by `serverOptionsHandler`
         // from every route's method, and a CONNECT is a 404 (ADR 095).
-        const allowed = if (routable) self.router.allowedForOn(path, peer.listener) else router.MethodSet.initEmpty();
+        const allowed = if (routable) self.router.allowedForOn(path, peer.listener) else router.MethodSet.empty;
         if (allowed.count() > 0) {
             c._allowed = allowed;
             terminal = methodNotAllowedHandler;
@@ -1021,7 +1021,7 @@ fn methodNotAllowedHandler(c: *Ctx) anyerror!void {
 /// (RFC 9110 §9.3.7): what the server as a whole supports. OPTIONS is in it,
 /// because this is the answer to one.
 fn allowedAnywhere(self: *const App) router.MethodSet {
-    var all: router.MethodSet = .initEmpty();
+    var all: router.MethodSet = .empty;
     for (self.router.routes.items) |*route| all.insert(route.method);
     if (all.contains(.GET)) all.insert(.HEAD);
     all.insert(.OPTIONS);
@@ -1042,13 +1042,14 @@ fn serverOptionsHandler(c: *Ctx) anyerror!void {
 fn allowList(arena: std.mem.Allocator, allowed: router.MethodSet) ![]const u8 {
     var out: std.Io.Writer.Allocating = try .initCapacity(arena, 48);
     var first = true;
-    inline for (@typeInfo(http1.Method).@"enum".fields) |f| {
-        const method: http1.Method = @enumFromInt(f.value);
+    const info = @typeInfo(http1.Method).@"enum";
+    inline for (info.field_names, info.field_values) |name, value| {
+        const method: http1.Method = @fromBackingInt(@intCast(value));
         // `other` is not a method anybody can register, so it has no
         // business being offered as one.
         if (method != .other and allowed.contains(method)) {
             if (!first) try out.writer.writeAll(", ");
-            try out.writer.writeAll(f.name);
+            try out.writer.writeAll(name);
             first = false;
         }
     }
@@ -1516,7 +1517,7 @@ test "a head that does not fit is answered 431 and lingered on" {
     // A reader whose buffer is smaller than the head, the way a connection's
     // read buffer is: the head cannot be completed, so it is refused, and the
     // rest of it is still on the peer's side of the socket.
-    const head = "GET /ping HTTP/1.1\r\nHost: t\r\nCookie: " ++ ("x" ** 200) ++ "\r\n\r\n";
+    const head = "GET /ping HTTP/1.1\r\nHost: t\r\nCookie: " ++ (&@as([200]u8, @splat('x'))) ++ "\r\n\r\n";
     var underlying = std.Io.Reader.fixed(head);
     var small: [64]u8 = undefined;
     var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &small);

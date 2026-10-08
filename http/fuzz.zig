@@ -309,7 +309,7 @@ fn refApplyHeader(line: []const u8, r: *http1.Request) http1.ParseError!void {
         } else if (keep and r.minor_version == 0) {
             r.keep_alive = true;
         }
-        if (std.ascii.indexOfIgnoreCase(value, "upgrade") != null) r.upgrade = true;
+        if (std.ascii.findIgnoreCase(value, "upgrade") != null) r.upgrade = true;
     } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
         if (r.chunked) return error.BadHeader;
         if (value.len == 0) return error.BadHeader;
@@ -562,7 +562,7 @@ const corpus = [_][]const u8{
     seed("GET /aaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"),
     seed("GET /aaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"),
     seed("GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n\r\n"),
-    seed("GET / HTTP/1.1\r\nHost: h\r\nX: " ++ "a" ** 60 ++ "\r\n\r\n"),
+    seed("GET / HTTP/1.1\r\nHost: h\r\nX: " ++ &@as([60]u8, @splat('a')) ++ "\r\n\r\n"),
 
     // Request lines that are not.
     seed("GET/HTTP/1.1\r\n\r\n"),

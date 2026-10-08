@@ -246,8 +246,12 @@ pub fn main(init: std.process.Init) !void {
         , .{
             readers,
             base,
-            idle,       idle - base,          @divTrunc(idle - base, readers + 1),
-            warm,       warm - base,          @divTrunc(warm - base, readers + 1),
+            idle,
+            idle - base,
+            @divTrunc(idle - base, readers + 1),
+            warm,
+            warm - base,
+            @divTrunc(warm - base, readers + 1),
         });
     }
 

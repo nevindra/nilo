@@ -206,19 +206,19 @@ pub fn of(comptime T: type) ?Mark {
         );
 
         var mark = Mark{};
-        for (info.@"struct".fields) |f| {
-            if (std.mem.eql(u8, f.name, "tag")) {
+        for (info.@"struct".field_names) |f_name| {
+            if (std.mem.eql(u8, f_name, "tag")) {
                 mark.tag = said.tag;
-            } else if (std.mem.eql(u8, f.name, "rename_all")) {
+            } else if (std.mem.eql(u8, f_name, "rename_all")) {
                 mark.rename_all = caseOf(T, said.rename_all);
-            } else if (std.mem.eql(u8, f.name, "rename")) {
+            } else if (std.mem.eql(u8, f_name, "rename")) {
                 mark.renames = renamesOf(T, said.rename);
-            } else if (std.mem.eql(u8, f.name, "unknown_fields")) {
+            } else if (std.mem.eql(u8, f_name, "unknown_fields")) {
                 mark.ignores_unknown = unknownFieldsOf(T, said.unknown_fields);
-            } else if (std.mem.eql(u8, f.name, "misfit")) {
+            } else if (std.mem.eql(u8, f_name, "misfit")) {
                 mark.misfit = misfitOf(T, said.misfit);
             } else @compileError(
-                "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` has a field `" ++ f.name ++
+                "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` has a field `" ++ f_name ++
                     "`, which is not something it can say.\n" ++
                     "  A marker says five things: `tag`, the key the variant's name goes under; " ++
                     "`rename_all`, how every name is spelled on the wire; `rename`, the ones " ++
@@ -402,9 +402,9 @@ fn ignoringWithin(comptime T: type, comptime path: []const type) bool {
         switch (@typeInfo(T)) {
             .@"struct" => |s| {
                 if (ignoresUnknown(T)) return true;
-                for (s.fields) |f| if (ignoringWithin(f.type, deeper)) return true;
+                for (s.field_types) |f_type| if (ignoringWithin(f_type, deeper)) return true;
             },
-            .@"union" => |u| for (u.fields) |f| if (ignoringWithin(f.type, deeper)) return true,
+            .@"union" => |u| for (u.field_types) |f_type| if (ignoringWithin(f_type, deeper)) return true,
             .optional => |o| return ignoringWithin(o.child, deeper),
             .pointer => |p| return ignoringWithin(p.child, deeper),
             .array => |a| return ignoringWithin(a.child, deeper),
@@ -427,8 +427,8 @@ fn caseOf(comptime T: type, comptime said: anytype) Case {
         );
         if (!@hasField(Case, name)) {
             var known: []const u8 = "";
-            for (@typeInfo(Case).@"enum".fields, 0..) |f, i| {
-                known = known ++ (if (i == 0) "" else ", ") ++ "." ++ f.name;
+            for (@typeInfo(Case).@"enum".field_names, 0..) |f_name, i| {
+                known = known ++ (if (i == 0) "" else ", ") ++ "." ++ f_name;
             }
             @compileError(
                 "nilo: `" ++ naming.of(T) ++ "` asks for `.rename_all = ." ++ name ++
@@ -464,30 +464,30 @@ fn renamesOf(comptime T: type, comptime said: anytype) []const Rename {
             ),
         };
         var out: []const Rename = &.{};
-        for (@typeInfo(Said).@"struct".fields) |f| {
-            if (!@hasField(T, f.name)) @compileError(
-                "nilo: `" ++ naming.of(T) ++ "` renames a " ++ what ++ " `" ++ f.name ++ "` it does " ++
+        for (@typeInfo(Said).@"struct".field_names) |f_name| {
+            if (!@hasField(T, f_name)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` renames a " ++ what ++ " `" ++ f_name ++ "` it does " ++
                     "not have.\n" ++
                     "  `.rename` names this type's own " ++ what ++ "s, spelled as they are written: " ++
                     "`.{ .amount_minor = \"amountMinor\" }`.",
             );
-            const spelling = @field(said, f.name);
+            const spelling = @field(said, f_name);
             if (!isText(@TypeOf(spelling))) @compileError(
-                "nilo: `" ++ naming.of(T) ++ "` renames `" ++ f.name ++ "` to a " ++
+                "nilo: `" ++ naming.of(T) ++ "` renames `" ++ f_name ++ "` to a " ++
                     naming.of(@TypeOf(spelling)) ++ ", and a spelling is text.\n" ++
-                    "    .rename = .{ ." ++ f.name ++ " = \"amountMinor\" }",
+                    "    .rename = .{ ." ++ f_name ++ " = \"amountMinor\" }",
             );
             const wire_name: []const u8 = spelling;
             if (wire_name.len == 0) @compileError(
-                "nilo: `" ++ naming.of(T) ++ "` renames `" ++ f.name ++ "` to the empty string, " ++
+                "nilo: `" ++ naming.of(T) ++ "` renames `" ++ f_name ++ "` to the empty string, " ++
                     "so the value would go out under a key with no name.",
             );
-            if (std.mem.eql(u8, wire_name, f.name)) @compileError(
-                "nilo: `" ++ naming.of(T) ++ "` renames `" ++ f.name ++ "` to \"" ++ f.name ++
+            if (std.mem.eql(u8, wire_name, f_name)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` renames `" ++ f_name ++ "` to \"" ++ f_name ++
                     "\", which is what it is already called, so it would change nothing.\n" ++
                     "  Take the entry off, or spell it differently.",
             );
-            out = out ++ [_]Rename{.{ .field = f.name, .wire = wire_name }};
+            out = out ++ [_]Rename{.{ .field = f_name, .wire = wire_name }};
         }
         return out;
     }
@@ -527,26 +527,25 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
         // The one mistake that would corrupt the wire rather than fail: a
         // variant whose own struct already has a field by the tag's name emits
         // that key twice, and which one a reader takes is its business.
-        for (info.@"union".fields) |arm| {
-            const Payload = arm.type;
+        for (info.@"union".field_names, info.@"union".field_types) |arm_name, Payload| {
             if (Payload == void) continue;
             const payload = @typeInfo(Payload);
             if (payload != .@"struct") @compileError(
-                "nilo: `" ++ naming.of(T) ++ "`'s variant `" ++ arm.name ++ "` carries a " ++
+                "nilo: `" ++ naming.of(T) ++ "`'s variant `" ++ arm_name ++ "` carries a " ++
                     naming.of(Payload) ++ ", and an internally tagged union writes the variant's " ++
                     "fields beside the tag — so the variant has to have fields.\n" ++
-                    "  Give it a struct of its own, or leave the variant empty (`" ++ arm.name ++
-                    ",`) to send `{\"" ++ key ++ "\":\"" ++ arm.name ++ "\"}` on its own.",
+                    "  Give it a struct of its own, or leave the variant empty (`" ++ arm_name ++
+                    ",`) to send `{\"" ++ key ++ "\":\"" ++ arm_name ++ "\"}` on its own.",
             );
             // Compared against the name the field goes out under rather than
             // the one it is written as, because a payload struct may rename its
             // own fields (ADR 148) — and it is the wire spelling that would
             // land on the tag's key.
-            for (payload.@"struct".fields, wireNames(Payload)) |f, on_the_wire| {
+            for (payload.@"struct".field_names, wireNames(Payload)) |f_name, on_the_wire| {
                 if (std.mem.eql(u8, on_the_wire, key)) @compileError(
                     "nilo: `" ++ naming.of(T) ++ "`'s `.tag` is \"" ++ key ++ "\" and its variant `" ++
-                        arm.name ++ "` already has a field called `" ++ f.name ++ "`" ++
-                        (if (std.mem.eql(u8, f.name, on_the_wire)) "" else ", which goes out as \"" ++
+                        arm_name ++ "` already has a field called `" ++ f_name ++ "`" ++
+                        (if (std.mem.eql(u8, f_name, on_the_wire)) "" else ", which goes out as \"" ++
                             on_the_wire ++ "\"") ++ ", so that key would " ++
                         "be written twice and a reader would pick one of them.\n" ++
                         "  Rename the tag, or rename the field.",
@@ -588,40 +587,40 @@ fn checkTag(comptime T: type, comptime key: []const u8) void {
 /// must never be the thing that runs out.
 fn checkRenames(comptime T: type, comptime m: Mark) void {
     comptime {
-        const fields = switch (@typeInfo(T)) {
-            .@"enum" => |e| e.fields,
-            .@"union" => |u| u.fields,
+        const names = switch (@typeInfo(T)) {
+            .@"enum" => |e| e.field_names,
+            .@"union" => |u| u.field_names,
             // A struct renames its own fields and nothing else — the payload
             // struct of a renamed *variant* is still left alone, which is the
             // line `json.zig`'s own test names (ADR 148).
-            .@"struct" => |s| s.fields,
+            .@"struct" => |s| s.field_names,
             else => return,
         };
         var bytes: usize = 0;
         var longest: usize = 0;
-        for (fields) |f| {
-            bytes += f.name.len;
-            if (f.name.len > longest) longest = f.name.len;
+        for (names) |name| {
+            bytes += name.len;
+            if (name.len > longest) longest = name.len;
         }
-        @setEvalBranchQuota(10_000 + 4 * (bytes + fields.len * fields.len * (longest + 1) + m.renames.len * fields.len));
+        @setEvalBranchQuota(10_000 + 4 * (bytes + names.len * names.len * (longest + 1) + m.renames.len * names.len));
 
         const what = switch (@typeInfo(T)) {
             .@"enum" => "value",
             .@"union" => "variant",
             else => "field",
         };
-        var spelled: [fields.len][]const u8 = undefined;
-        for (fields, 0..) |f, i| spelled[i] = wire(f.name, m);
-        for (fields, 0..) |a, i| {
-            for (fields[i + 1 ..], i + 1..) |b, j| {
+        var spelled: [names.len][]const u8 = undefined;
+        for (names, 0..) |name, i| spelled[i] = wire(name, m);
+        for (names, 0..) |a, i| {
+            for (names[i + 1 ..], i + 1..) |b, j| {
                 if (!std.mem.eql(u8, spelled[i], spelled[j])) continue;
                 // Which of the two markers put them there decides the advice.
                 // A collision under `rename_all` alone is answered with the
                 // cases that keep names apart; one a `.rename` entry caused is
                 // answered by pointing at the entry.
-                if (renamedOnItsOwn(m, a.name) or renamedOnItsOwn(m, b.name)) @compileError(
-                    "nilo: `" ++ naming.of(T) ++ "` spells its " ++ what ++ "s `" ++ a.name ++
-                        "` and `" ++ b.name ++ "` both as \"" ++ spelled[i] ++ "\" — one of them by " ++
+                if (renamedOnItsOwn(m, a) or renamedOnItsOwn(m, b)) @compileError(
+                    "nilo: `" ++ naming.of(T) ++ "` spells its " ++ what ++ "s `" ++ a ++
+                        "` and `" ++ b ++ "` both as \"" ++ spelled[i] ++ "\" — one of them by " ++
                         "a `.rename` entry.\n" ++
                         "  Two of them under one name on the wire is not a spelling problem: a reader " ++
                         "takes whichever it meets first, which is declaration order, and nothing says so.\n" ++
@@ -629,7 +628,7 @@ fn checkRenames(comptime T: type, comptime m: Mark) void {
                 );
                 @compileError(
                     "nilo: `" ++ naming.of(T) ++ "` asks for `.rename_all = ." ++ @tagName(m.rename_all.?) ++
-                        "`, and its " ++ what ++ "s `" ++ a.name ++ "` and `" ++ b.name ++
+                        "`, and its " ++ what ++ "s `" ++ a ++ "` and `" ++ b ++
                         "` both come out as \"" ++ spelled[i] ++ "\".\n" ++
                         "  Two of them under one name on the wire is not a spelling problem: a reader " ++
                         "takes whichever it meets first, which is declaration order, and nothing says so.\n" ++
@@ -695,18 +694,18 @@ pub fn wireNames(comptime T: type) []const []const u8 {
     comptime {
         const mark = of(T);
         var names: []const []const u8 = &.{};
-        const fields = switch (@typeInfo(T)) {
-            .@"enum" => |e| e.fields,
-            .@"union" => |u| u.fields,
-            .@"struct" => |s| s.fields,
+        const field_names = switch (@typeInfo(T)) {
+            .@"enum" => |e| e.field_names,
+            .@"union" => |u| u.field_names,
+            .@"struct" => |s| s.field_names,
             else => @compileError("nilo: `" ++ naming.of(T) ++ "` has no fields to name."),
         };
         // One evaluation spelling every name, so the budget is the bytes of
         // all of them — sized here for the reason `checkRenames` gives.
         var bytes: usize = 0;
-        for (fields) |f| bytes += f.name.len;
-        @setEvalBranchQuota(10_000 + 4 * (bytes + fields.len));
-        for (fields) |f| names = names ++ [_][]const u8{wire(f.name, mark)};
+        for (field_names) |f_name| bytes += f_name.len;
+        @setEvalBranchQuota(10_000 + 4 * (bytes + field_names.len));
+        for (field_names) |f_name| names = names ++ [_][]const u8{wire(f_name, mark)};
         return names;
     }
 }
@@ -747,14 +746,14 @@ fn renamedWithin(comptime T: type, comptime depth: usize) ?type {
                 if (of(T)) |m| {
                     if (m.renamesFields()) return T;
                 }
-                for (s.fields) |f| {
-                    if (renamedWithin(f.type, depth + 1)) |found| return found;
+                for (s.field_types) |f_type| {
+                    if (renamedWithin(f_type, depth + 1)) |found| return found;
                 }
                 return null;
             },
             .@"union" => |u| {
-                for (u.fields) |f| {
-                    if (renamedWithin(f.type, depth + 1)) |found| return found;
+                for (u.field_types) |f_type| {
+                    if (renamedWithin(f_type, depth + 1)) |found| return found;
                 }
                 return null;
             },
@@ -800,14 +799,14 @@ fn unreadable(comptime T: type, comptime depth: usize) ?type {
         }
         switch (@typeInfo(T)) {
             .@"struct" => |s| {
-                for (s.fields) |f| {
-                    if (unreadable(f.type, depth + 1)) |found| return found;
+                for (s.field_types) |f_type| {
+                    if (unreadable(f_type, depth + 1)) |found| return found;
                 }
                 return null;
             },
             .@"union" => |u| {
-                for (u.fields) |f| {
-                    if (unreadable(f.type, depth + 1)) |found| return found;
+                for (u.field_types) |f_type| {
+                    if (unreadable(f_type, depth + 1)) |found| return found;
                 }
                 return null;
             },
@@ -987,12 +986,12 @@ fn Reader(comptime T: type) type {
             comptime {
                 const key = of(T).?.tag.?;
                 for (key) |ch| if (ch == '"' or ch == '\\' or ch < 0x20) return false;
-                for (@typeInfo(T).@"union".fields) |f| {
-                    if (f.type == void) continue;
-                    if (@typeInfo(f.type) != .@"struct") return false;
-                    if (@typeInfo(f.type).@"struct".is_tuple) return false;
-                    if (@import("json.zig").readsItself(f.type)) return false;
-                    if (@hasField(f.type, key)) return false;
+                for (@typeInfo(T).@"union".field_types) |f_type| {
+                    if (f_type == void) continue;
+                    if (@typeInfo(f_type) != .@"struct") return false;
+                    if (@typeInfo(f_type).@"struct".is_tuple) return false;
+                    if (@import("json.zig").readsItself(f_type)) return false;
+                    if (@hasField(f_type, key)) return false;
                 }
                 return true;
             }
@@ -1094,14 +1093,14 @@ fn Reader(comptime T: type) type {
             var inner = options;
             inner.ignore_unknown_fields = true;
 
-            inline for (@typeInfo(T).@"union".fields, comptime wireNames(T)) |f, on_the_wire| {
+            inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types, comptime wireNames(T)) |f_name, f_type, on_the_wire| {
                 if (std.mem.eql(u8, arm, on_the_wire)) {
-                    if (f.type == void) {
+                    if (f_type == void) {
                         while (true) {
                             const token = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
                             const name = switch (token) {
                                 inline .string, .allocated_string => |slice| slice,
-                                .object_end => return @unionInit(T, f.name, {}),
+                                .object_end => return @unionInit(T, f_name, {}),
                                 else => return error.UnexpectedToken,
                             };
                             if (std.mem.eql(u8, name, key)) {
@@ -1110,7 +1109,7 @@ fn Reader(comptime T: type) type {
                             try source.skipValue();
                         }
                     }
-                    return @unionInit(T, f.name, try @import("json.zig").readFields(f.type, key, first, gpa, source, options, inner));
+                    return @unionInit(T, f_name, try @import("json.zig").readFields(f_type, key, first, gpa, source, options, inner));
                 }
             }
             return error.InvalidEnumTag;
@@ -1187,19 +1186,19 @@ fn Reader(comptime T: type) type {
             var inner = options;
             inner.ignore_unknown_fields = true;
 
-            inline for (@typeInfo(T).@"union".fields, comptime wireNames(T)) |f, on_the_wire| {
+            inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types, comptime wireNames(T)) |f_name, f_type, on_the_wire| {
                 if (std.mem.eql(u8, arm, on_the_wire)) {
-                    if (f.type == void) {
+                    if (f_type == void) {
                         // A key beside a variant with no fields is a typo
                         // like any other, and was dropped in silence.
                         if (!options.ignore_unknown_fields) try refuseUnknown(void, gpa, span, options);
-                        return @unionInit(T, f.name, {});
+                        return @unionInit(T, f_name, {});
                     }
-                    const payload = try @import("json.zig").parseLeaky(f.type, gpa, span, inner);
-                    if (!options.ignore_unknown_fields and !comptime ignoresUnknown(f.type)) {
-                        try refuseUnknown(f.type, gpa, span, options);
+                    const payload = try @import("json.zig").parseLeaky(f_type, gpa, span, inner);
+                    if (!options.ignore_unknown_fields and !comptime ignoresUnknown(f_type)) {
+                        try refuseUnknown(f_type, gpa, span, options);
                     }
-                    return @unionInit(T, f.name, payload);
+                    return @unionInit(T, f_name, payload);
                 }
             }
             return error.InvalidEnumTag;
@@ -1224,10 +1223,10 @@ fn Reader(comptime T: type) type {
             var inner = options;
             inner.ignore_unknown_fields = true;
 
-            inline for (@typeInfo(T).@"union".fields, comptime wireNames(T)) |f, on_the_wire| {
+            inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types, comptime wireNames(T)) |f_name, f_type, on_the_wire| {
                 if (std.mem.eql(u8, arm, on_the_wire)) {
-                    if (f.type == void) return @unionInit(T, f.name, {});
-                    return @unionInit(T, f.name, try std.json.parseFromValueLeaky(f.type, gpa, held, inner));
+                    if (f_type == void) return @unionInit(T, f_name, {});
+                    return @unionInit(T, f_name, try std.json.parseFromValueLeaky(f_type, gpa, held, inner));
                 }
             }
             return error.InvalidEnumTag;
@@ -1261,8 +1260,8 @@ fn Reader(comptime T: type) type {
                 if (std.mem.eql(u8, name, key)) continue;
                 var known = false;
                 if (comptime Payload != void) {
-                    inline for (@typeInfo(Payload).@"struct".fields) |f| {
-                        if (std.mem.eql(u8, name, f.name)) known = true;
+                    inline for (@typeInfo(Payload).@"struct".field_names) |f_name| {
+                        if (std.mem.eql(u8, name, f_name)) known = true;
                     }
                 }
                 if (!known) return error.UnknownField;
@@ -1271,8 +1270,8 @@ fn Reader(comptime T: type) type {
 
         /// The variant `text` names, or null.
         fn named(text: []const u8) ?T {
-            inline for (@typeInfo(T).@"enum".fields, comptime wireNames(T)) |f, on_the_wire| {
-                if (std.mem.eql(u8, text, on_the_wire)) return @field(T, f.name);
+            inline for (@typeInfo(T).@"enum".field_names, comptime wireNames(T)) |f_name, on_the_wire| {
+                if (std.mem.eql(u8, text, on_the_wire)) return @field(T, f_name);
             }
             return null;
         }

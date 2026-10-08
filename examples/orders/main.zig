@@ -584,7 +584,7 @@ fn needs(comptime wanted: Scope) nilo.Middleware {
     return struct {
         fn check(c: *nilo.Ctx, next: nilo.Next) !void {
             const caller = try c.resolve(Caller);
-            if (@intFromEnum(caller.scope) < @intFromEnum(wanted)) {
+            if (@backingInt(caller.scope) < @backingInt(wanted)) {
                 return fail.forbidden(
                     "{s} is a {s}; this endpoint wants the {s} scope",
                     .{ caller.name, @tagName(caller.scope), @tagName(wanted) },

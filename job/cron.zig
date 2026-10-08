@@ -303,7 +303,7 @@ fn micros(comptime iso: []const u8) i64 {
     var y: u16 = 1970;
     while (y < year) : (y += 1) days += std.time.epoch.getDaysInYear(y);
     var m: u4 = 1;
-    while (m < month) : (m += 1) days += std.time.epoch.getDaysInMonth(year, @enumFromInt(m));
+    while (m < month) : (m += 1) days += std.time.epoch.getDaysInMonth(year, @fromBackingInt(@intCast(m)));
     days += day - 1;
     const secs = days * 86_400 + @as(u64, hour) * 3600 + @as(u64, minute) * 60;
     return @intCast(secs * std.time.us_per_s);

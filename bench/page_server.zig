@@ -29,12 +29,12 @@ pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;
 pub const panic = nilo.panic;
 
-const css_body = "/* a stylesheet */\n.a{color:#123;margin:0;padding:0}\n" ** 60;
-const js_body = "/* a script */\nwindow.__n=(window.__n||0)+1;\n" ** 200;
+const css_body = repeat("/* a stylesheet */\n.a{color:#123;margin:0;padding:0}\n", 60);
+const js_body = repeat("/* a script */\nwindow.__n=(window.__n||0)+1;\n", 200);
 const img_body =
     "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'>" ++
     "<rect width='64' height='64' fill='#369'/></svg>";
-const json_body = "{\"id\":42,\"name\":\"Routed Tester\",\"bio\":\"" ++ ("A systems nerd. " ** 60) ++ "\"}";
+const json_body = "{\"id\":42,\"name\":\"Routed Tester\",\"bio\":\"" ++ (repeat("A systems nerd. ", 60)) ++ "\"}";
 
 const page_head =
     "<!doctype html><meta charset=utf-8><title>page</title>" ++
@@ -122,4 +122,16 @@ pub fn main(init: std.process.Init) !void {
         .cert = "http/testdata/tls/localhost.pem",
         .key = "http/testdata/tls/localhost-key.pem",
     } });
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        return &final;
+    }
 }

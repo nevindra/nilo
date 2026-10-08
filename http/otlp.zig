@@ -137,7 +137,7 @@ pub const Exporter = struct {
             return false;
         };
         if (!res.ok()) {
-            self.warn("the trace receiver at {s} answered {d}; {d} span(s) dropped", .{ self.url, @intFromEnum(res.status), batch.len });
+            self.warn("the trace receiver at {s} answered {d}; {d} span(s) dropped", .{ self.url, @backingInt(res.status), batch.len });
             return false;
         }
         return true;
@@ -226,7 +226,7 @@ fn spanOf(arena: std.mem.Allocator, r: *const Record) !Span {
         .span_id = try arena.dupe(u8, &r.span_id),
         .parent_span_id = if (root) "" else try arena.dupe(u8, &r.parent),
         .name = name,
-        .kind = @enumFromInt(@intFromEnum(r.kind)),
+        .kind = @fromBackingInt(@intCast(@backingInt(r.kind))),
         .start_time_unix_nano = @as(u64, @intCast(@max(r.start_us, 0))) * std.time.ns_per_us,
         .end_time_unix_nano = @as(u64, @intCast(@max(r.end_us, 0))) * std.time.ns_per_us,
         .attributes = attrs.items,

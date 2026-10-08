@@ -62,7 +62,7 @@ pub const Uuid = struct {
 
     /// All sixteen zero. The one UUID that means *none*, for a column that
     /// is not nullable and still has to say so.
-    pub const nil: Uuid = .{ .bytes = [_]u8{0} ** byte_len };
+    pub const nil: Uuid = .{ .bytes = @as([byte_len]u8, @splat(0)) };
 
     pub fn isNil(self: Uuid) bool {
         return self.eql(nil);
@@ -546,7 +546,7 @@ test "a Uuid prints with {f}, which is what a refusal naming a record needs" {
 const Minting = struct {
     seed: u64,
 
-    fn entropy(self: *Minting, comptime n: usize) ![n]u8 {
+    pub fn entropy(self: *Minting, comptime n: usize) ![n]u8 {
         return seeded(n, self.seed);
     }
 };
@@ -577,7 +577,7 @@ test "a Scope that cannot mint says so rather than inventing a key" {
     // The error is the Scope's, passed through untouched: `v7Now` has nothing
     // to add to it and nothing to do without it.
     const Broken = struct {
-        fn entropy(_: *@This(), comptime n: usize) ![n]u8 {
+        pub fn entropy(_: *@This(), comptime n: usize) ![n]u8 {
             return error.NoIo;
         }
     };

@@ -1,15 +1,18 @@
 .{
     .name = .nilo,
     .version = "0.7.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0xa9fef7e1c22a71e4,
     .dependencies = .{
-        // A commit on zio's `main` rather than a tag: `spawnInto` (zio#761)
-        // and the fixes for zio#744 and zio#745 are in no release yet. Move
-        // to the tag that carries them when there is one.
+        // A commit on zio's `main` rather than a tag: `main` is where zio's
+        // `std.Io` is ported to Zig 0.17 (`af9af4b`), and every tag so far,
+        // v0.19.1 included, is the 0.16 line, which fails on 0.17's `Io`
+        // (`processReplacePath`, `net_send`). It carries `spawnInto`
+        // (zio#761) and the fixes for zio#744 and zio#745. Move to the first
+        // tag cut from it.
         .zio = .{
-            .url = "git+https://github.com/lalinsky/zio?ref=main#0299e5771b8c042ca42077af0748771fca27d38e",
-            .hash = "zio-0.18.0-xHbVVPtIKgBBABs3c3jDBGiEAQlZjJysiJg9ot-dIZ2e",
+            .url = "git+https://github.com/lalinsky/zio?ref=main#3bbd74d68a889e5d4da7274afdc7c7617ec614d6",
+            .hash = "zio-0.19.0-xHbVVMFBLACx1T0028HttNTseV6bDeL0AI4id51AHx57",
         },
         // The driver behind `nilo_sql`, and lazy on purpose: it brings four
         // transitive dependencies of its own (buffer, metrics, xsync, tls),
@@ -28,9 +31,16 @@
         // for: startup_parameters reach the server (`2907296`), and a cached
         // statement stops paying a second round trip (`2c7c6ca`,
         // `bench/result/sql.md` §16).
+        //
+        // **A fork's commit, for now**: that `master` (`7b4609c`) plus one
+        // commit that builds it on Zig 0.17, lalinsky/pg.zig#23. It ports the
+        // struct-of-arrays `@typeInfo`, moves metrics.zig to `ac16729`
+        // (`6de29b8` reads `b.args`, which 0.17 removed), and xsync to a
+        // commit whose mutexes lock uncancelably (lalinsky/xsync.zig#1). Once
+        // both are merged, the pin goes back to lalinsky's.
         .pg = .{
-            .url = "git+https://github.com/lalinsky/pg.zig#2bc34051c4af054c5134cbaef3bd152083b2fc96",
-            .hash = "pg-0.0.0-Wp_7geLTBgD4EYiBCcl3DuG6Hn6xcmtHtzsy_4f3M2WY",
+            .url = "git+https://github.com/nevindra/pg.zig#c205ebd42f9b127217bc2335a9305a37a2a65f43",
+            .hash = "pg-0.0.0-Wp_7ge3_BgBnXMGhh8vmjN-h6lvErBevna9ZZZXppMp4",
             .lazy = true,
         },
         // The other driver behind `nilo_sql`, and lazy for the same reason.
@@ -41,8 +51,8 @@
         // the answer to "what if it stops": `sql/wire.zig` is a seam, and one
         // file gets rewritten rather than every call site.
         .zqlite = .{
-            .url = "git+https://github.com/karlseguin/zqlite.zig#b519eea9b1a2b5fcad68af6d0629e717e8746684",
-            .hash = "zqlite-0.0.1-RWLaY8M8nAB4m0tlSpT9A5PGUwX_JfWC5VlPjLe7lG2Q",
+            .url = "git+https://github.com/karlseguin/zqlite.zig#865223b734a5113f731ab1eb1d7d81c8ac252913",
+            .hash = "zqlite-0.0.1-RWLaY4Y8nADz2l5aBE-JVyDyM3sZzHjq0agNykuVZKqQ",
             .lazy = true,
         },
         // The TLS 1.3 server behind `-Dtls` (ADR 212), and lazy for the
@@ -51,17 +61,18 @@
         // a tag, because it has no tags. The commit, not the branch, is the
         // pin.
         //
-        // **A fork's commit, for now**: upstream's `zig-0.16.x` plus two
-        // commits. One signs with the key's CRT form, which takes an RSA-2048
-        // handshake from 13.7 to 2.6 ms of server CPU; it is
-        // ianic/tls.zig#59 (bench/result/http.md, "What an RSA certificate
-        // costs a handshake"). The other adds the server's `offload` option,
-        // which the Engine uses to sign on the blocking pool (ADR 217). Once
-        // both are upstream, the pin goes back to it and the fork is not used
-        // again.
+        // **A fork's commit, for now**: upstream's `main` (the Zig 0.17 line)
+        // plus two commits. One signs with the key's CRT form, which takes an
+        // RSA-2048 handshake from 13.7 to 2.6 ms of server CPU
+        // (bench/result/http.md, "What an RSA certificate costs a
+        // handshake"); it is ianic/tls.zig#59 on `zig-0.16.x` and #61 on
+        // `main`. The other adds the server's `offload` option, which the
+        // Engine uses to sign on the blocking pool (ADR 217), and is #62.
+        // Once both are upstream, the pin goes back to it and the fork is not
+        // used again.
         .tls = .{
-            .url = "git+https://github.com/nevindra/tls.zig#73290ca7aa5a13c6c2131e5d35676109ac6a73cc",
-            .hash = "tls-0.1.0-ER2e0kvdBgABZ6SYdVWmbLYIb-42yDaDpz9nIzA2OXTB",
+            .url = "git+https://github.com/nevindra/tls.zig#1d1dda2eccec9ddb83d906b4628a3fa9c4c3112b",
+            .hash = "tls-0.1.0-ER2e0njeBgD84olLeuyJgyoY5eesJk9y1bD4UCzsEtSd",
             .lazy = true,
         },
         // libdeflate's compressor behind `-Dlibdeflate` (ADR 248), lazy and

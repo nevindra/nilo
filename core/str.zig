@@ -13,7 +13,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const trap_enabled = builtin.mode == .Debug;
+pub const trap_enabled = builtin.mode == .debug;
 
 /// Lifetime marker for one request arena. One per connection, bumped
 /// every time a request finishes; every Str from the old request goes
@@ -275,8 +275,8 @@ fn stampInner(value: anytype, by: anytype, comptime depth: u8) void {
         return;
     }
     switch (@typeInfo(T)) {
-        .@"struct" => |s| inline for (s.fields) |f| {
-            stampInner(&@field(value, f.name), by, depth - 1);
+        .@"struct" => |s| inline for (s.field_names) |name| {
+            stampInner(&@field(value, name), by, depth - 1);
         },
         .optional => if (value.*) |*payload| stampInner(payload, by, depth - 1),
         // Only the arm that is actually set: the others hold nothing.
@@ -285,7 +285,7 @@ fn stampInner(value: anytype, by: anytype, comptime depth: u8) void {
         },
         .array => for (value) |*item| stampInner(item, by, depth - 1),
         .pointer => |p| switch (p.size) {
-            .slice => if (!p.is_const) for (value.*) |*item| stampInner(item, by, depth - 1),
+            .slice => if (!p.attrs.@"const") for (value.*) |*item| stampInner(item, by, depth - 1),
             else => {},
         },
         else => {},
@@ -295,8 +295,8 @@ fn stampInner(value: anytype, by: anytype, comptime depth: u8) void {
 /// How many fields `T` has, which is what a walk over it is sized from.
 fn fieldCount(comptime T: type) usize {
     return switch (@typeInfo(T)) {
-        .@"struct" => |s| s.fields.len,
-        .@"union" => |u| u.fields.len,
+        .@"struct" => |s| s.field_names.len,
+        .@"union" => |u| u.field_names.len,
         else => 0,
     };
 }
@@ -307,15 +307,15 @@ fn containsStr(comptime T: type, comptime depth: u8) bool {
     if (depth == 0) return false;
     if (T == Str) return true;
     return switch (@typeInfo(T)) {
-        .@"struct" => |s| for (s.fields) |f| {
-            if (containsStr(f.type, depth - 1)) break true;
+        .@"struct" => |s| for (s.field_types) |F| {
+            if (containsStr(F, depth - 1)) break true;
         } else false,
         .optional => |o| containsStr(o.child, depth - 1),
-        .@"union" => |u| u.tag_type != null and for (u.fields) |f| {
-            if (containsStr(f.type, depth - 1)) break true;
+        .@"union" => |u| u.tag_type != null and for (u.field_types) |F| {
+            if (containsStr(F, depth - 1)) break true;
         } else false,
         .array => |a| containsStr(a.child, depth - 1),
-        .pointer => |p| p.size == .slice and !p.is_const and containsStr(p.child, depth - 1),
+        .pointer => |p| p.size == .slice and !p.attrs.@"const" and containsStr(p.child, depth - 1),
         else => false,
     };
 }

@@ -923,12 +923,12 @@ test "every type this module exports is named the way the import line names it" 
     // its signature, spelled with the files nilo declared `Ctx` and `Next` in.
     const cannot_be_named = [_][]const u8{ "panic", "Middleware", "CtxHandler", "Handler" };
     @setEvalBranchQuota(200_000);
-    inline for (comptime std.meta.declarations(@This())) |decl| {
+    inline for (comptime std.meta.declarations(@This())) |decl_name| {
         @setEvalBranchQuota(200_000);
-        const value = @field(@This(), decl.name);
+        const value = @field(@This(), decl_name);
         if (@TypeOf(value) != type) continue;
         if (comptime for (cannot_be_named) |skip| {
-            if (std.mem.eql(u8, skip, decl.name)) break true;
+            if (std.mem.eql(u8, skip, decl_name)) break true;
         } else false) continue;
         // An error set, an enum of somebody else's, a std type re-exported
         // under our name: only what `@typeName` spells with a nilo file in
@@ -938,9 +938,9 @@ test "every type this module exports is named the way the import line names it" 
         if (comptime std.mem.startsWith(u8, spelled, "std.")) continue;
         if (comptime !naming.covers(value)) {
             @compileError(
-                "nilo: `nilo." ++ decl.name ++ "` prints as `" ++ spelled ++
+                "nilo: `nilo." ++ decl_name ++ "` prints as `" ++ spelled ++
                     "` in a compile error, which names a file the reader never imported.\n" ++
-                    "  Give it `pub const nilo_type_name = \"nilo." ++ decl.name ++ "\";`.",
+                    "  Give it `pub const nilo_type_name = \"nilo." ++ decl_name ++ "\";`.",
             );
         }
     }

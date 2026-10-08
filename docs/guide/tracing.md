@@ -61,13 +61,18 @@ A server on the open internet may not want a stranger choosing its trace ids, or
 fn checkout(c: *nilo.Ctx) !void {
     var span = c.span("reserve stock");
     defer span.end();
-    errdefer |err| span.fail(err);
+    reserve(c) catch |err| {
+        span.fail(err);
+        return err;
+    };
+}
 
-    // …the work being measured…
+fn reserve(c: *nilo.Ctx) !void {
+    _ = c; // …the work being measured…
 }
 ```
 
-`defer span.end()` records it however the handler leaves. `errdefer |err| span.fail(err)` marks it failed with the error's name, so a trace view shows which step failed and why. While the span is open, a `nilo_fetch` call or another `c.span` inside it is its child.
+`defer span.end()` records it however the handler leaves. `span.fail(err)` in the `catch` marks it failed with the error's name, so a trace view shows which step failed and why. While the span is open, a `nilo_fetch` call or another `c.span` inside it is its child.
 
 **The name is a comptime string, and that is on purpose.** A trace view groups spans by name. A name with an id in it (`reserve stock for order 9123`) makes every span its own group, which is the most common way a tracing bill gets out of hand. A name that has to be known while compiling cannot carry one.
 

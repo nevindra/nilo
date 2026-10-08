@@ -65,18 +65,18 @@ fn ensureFlat(comptime V: type, comptime what: []const u8, comptime path: []cons
             // stopped at "evaluation exceeded 1000 backwards branches" at a
             // line in this file
             // ([ADR 126](../docs/adr/126-a-check-pays-for-its-own-branches.md)).
-            @setEvalBranchQuota(1_000 + 20 * @as(u32, @intCast(s.fields.len)));
-            for (s.fields) |f| ensureFlat(f.type, what, path ++ "." ++ f.name);
+            @setEvalBranchQuota(1_000 + 20 * @as(u32, @intCast(s.field_names.len)));
+            for (s.field_names, s.field_types) |name, FT| ensureFlat(FT, what, path ++ "." ++ name);
         },
         .@"union" => |u| {
-            @setEvalBranchQuota(1_000 + 20 * @as(u32, @intCast(u.fields.len)));
+            @setEvalBranchQuota(1_000 + 20 * @as(u32, @intCast(u.field_names.len)));
             if (u.tag_type == null) @compileError(
                 "nilo: a cached " ++ what ++ " cannot keep `" ++ path ++
                     "`, which is an untagged union.\n" ++
                     "  Reading one back means knowing which field was written, and an" ++
                     " untagged union does not carry that. Give it a tag.",
             );
-            for (u.fields) |f| ensureFlat(f.type, what, path ++ "." ++ f.name);
+            for (u.field_names, u.field_types) |name, FT| ensureFlat(FT, what, path ++ "." ++ name);
         },
         .pointer => @compileError(
             "nilo: a cached " ++ what ++ " cannot keep `" ++ path ++

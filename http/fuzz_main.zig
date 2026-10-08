@@ -130,7 +130,7 @@ fn usage() void {
 // ---- generating something worth checking ----
 
 const methods = [_][]const u8{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "get", "", "VERYLONGMETHODNAME", "GET\t" };
-const targets = [_][]const u8{ "/", "/users/42", "/a/b/c", "*", "http://x/y", "/%2e%2e/", "/x?a=1&b=2", "", "/" ** 40 };
+const targets = [_][]const u8{ "/", "/users/42", "/a/b/c", "*", "http://x/y", "/%2e%2e/", "/x?a=1&b=2", "", &@as([40]u8, @splat('/')) };
 const versions = [_][]const u8{ "HTTP/1.1", "HTTP/1.0", "HTTP/1.2", "HTTP/2.0", "http/1.1", "HTTP/1.1 ", "" };
 const header_names = [_][]const u8{
     "Host",            "Content-Length",    "Transfer-Encoding", "Connection",

@@ -178,7 +178,7 @@ test "a message written from a struct reads back as the same struct" {
         .inner = .{ .name = "one", .tags = &.{ "a", "bc" } },
         .inners = &.{ .{ .name = "x" }, .{ .name = "y", .tags = &.{"z"} } },
         .numbers = &.{ -1, 0, 1 << 40 },
-        .mood = @enumFromInt(7),
+        .mood = @fromBackingInt(@intCast(7)),
         .flag = true,
         .choice = .{ .number = -5 },
     };
@@ -197,7 +197,7 @@ test "a message written from a struct reads back as the same struct" {
     try testing.expectEqual(@as(usize, 2), back.inners.len);
     try testing.expectEqualStrings("z", back.inners[1].tags[0]);
     try testing.expectEqualSlices(i64, original.numbers, back.numbers);
-    try testing.expectEqual(@as(i32, 7), @intFromEnum(back.mood));
+    try testing.expectEqual(@as(i32, 7), @backingInt(back.mood));
     try testing.expect(back.flag);
     try testing.expectEqual(@as(i64, -5), back.choice.?.number);
 }
@@ -236,7 +236,7 @@ test "an unknown field is skipped, a group among them" {
     const bytes = [_]u8{
         0x98, 0x06, 0x01, // 99: varint 1
         0x93, 0x06, 0x08, 0x05, 0x94, 0x06, // 98: start group, field 1 = 5, end group
-        0x0a, 0x02, 'o', 'k',
+        0x0a, 0x02, 'o',  'k',
     };
     const v = try decode(Inner, arena_state.allocator(), &bytes);
     try testing.expectEqualStrings("ok", v.name);
@@ -465,9 +465,8 @@ test "a map is a repeated entry, and reads what another writer sent" {
     // map<string,string> {"k":"v"} then {"": ""} (an empty entry), as another
     // writer sends them; and map<uint32, sint64> {7: -3}.
     const bytes = [_]u8{
-        0x0a, 0x06, 0x0a, 0x01, 'k', 0x12, 0x01, 'v',
-        0x0a, 0x00,
-        0x12, 0x04, 0x08, 0x07, 0x10, 0x05,
+        0x0a, 0x06, 0x0a, 0x01, 'k',  0x12, 0x01, 'v',
+        0x0a, 0x00, 0x12, 0x04, 0x08, 0x07, 0x10, 0x05,
     };
     const v = try decode(Tags, a, &bytes);
     try testing.expectEqual(@as(usize, 2), v.labels.len);
@@ -504,7 +503,7 @@ test "an open enum keeps a number it does not name" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const v = try decode(Outer, arena_state.allocator(), &.{ 0x48, 0x2a });
-    try testing.expectEqual(@as(i32, 42), @intFromEnum(v.mood));
+    try testing.expectEqual(@as(i32, 42), @backingInt(v.mood));
 }
 
 test "nesting is allowed to 100 levels and refused at 101" {
@@ -536,7 +535,7 @@ test "a recursion bomb of groups is refused, not followed to the bottom" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     // 5,000 start-group keys for field 1 in a row, then nothing.
-    const bomb = [_]u8{0x0b} ** 5000;
+    const bomb = @as([5000]u8, @splat(0x0b));
     try testing.expectError(error.TooDeep, decode(Test0, arena_state.allocator(), &bomb));
 }
 
@@ -695,7 +694,7 @@ test "random bytes and damaged messages are refused or read, and never panic" {
         .inner = .{ .name = "inner", .tags = &.{ "a", "bb", "ccc" } },
         .inners = &.{ .{ .name = "x" }, .{ .name = "y", .tags = &.{"z"} } },
         .numbers = &.{ 1, -2, 300, 1 << 40 },
-        .mood = @enumFromInt(3),
+        .mood = @fromBackingInt(@intCast(3)),
         .flag = true,
         .choice = .{ .inner = .{ .name = "deep", .tags = &.{"t"} } },
     });

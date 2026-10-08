@@ -290,10 +290,10 @@ fn KeyedSlot(comptime o: Keyed) type {
     const count_bits = std.math.log2_int_ceil(u32, @as(u32, o.per_window) + 1);
     const spare = 64 - 2 * @as(u16, count_bits) - 16;
     return packed struct(u64) {
-        cur: std.meta.Int(.unsigned, count_bits),
-        prev: std.meta.Int(.unsigned, count_bits),
+        cur: @Int(.unsigned, count_bits),
+        prev: @Int(.unsigned, count_bits),
         window: u16,
-        _: std.meta.Int(.unsigned, spare) = 0,
+        _: @Int(.unsigned, spare) = 0,
     };
 }
 
@@ -412,7 +412,7 @@ fn checkKey(comptime key: anytype) void {
 
         if (info != .@"fn") @compileError(bad);
         const f = info.@"fn";
-        if (f.params.len != 1 or f.params[0].type != *Ctx) @compileError(bad);
+        if (f.param_types.len != 1 or f.param_types[0] != *Ctx) @compileError(bad);
         const ret = f.return_type orelse @compileError(bad);
         if (@typeInfo(ret) != .optional) @compileError(bad);
     }
@@ -430,10 +430,10 @@ fn Slot(comptime o: Options) type {
     const fp_bits = 64 - 2 * @as(u16, count_bits) - 16;
     return packed struct(u64) {
         /// Requests counted in `window`.
-        cur: std.meta.Int(.unsigned, count_bits),
+        cur: @Int(.unsigned, count_bits),
         /// Requests counted in the window before it, weighted by how far into
         /// this one we are.
-        prev: std.meta.Int(.unsigned, count_bits),
+        prev: @Int(.unsigned, count_bits),
         /// Which window `cur` counts, modulo 2^16. Wraps every 65,536 windows
         /// — 45 days at sixty seconds — and the eviction pass reads age as a
         /// wrapping subtraction, so what a wrap costs is one client returning
@@ -441,7 +441,7 @@ fn Slot(comptime o: Options) type {
         window: u16,
         /// Whose slot this is. Zero means empty, which is what `.bss` starts
         /// as.
-        fp: std.meta.Int(.unsigned, fp_bits),
+        fp: @Int(.unsigned, fp_bits),
     };
 }
 

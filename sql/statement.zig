@@ -627,7 +627,7 @@ pub fn afterOf(
     comptime {
         const A = @FieldType(O, "after");
         const example = "`.after = .{ .created_at = last.created_at, .id = last.id }`";
-        if (@typeInfo(A) != .@"struct" or @typeInfo(A).@"struct".fields.len == 0) @compileError(
+        if (@typeInfo(A) != .@"struct" or @typeInfo(A).@"struct".field_names.len == 0) @compileError(
             "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " was given an `.after` of " ++ @typeName(A) ++ ".\n" ++
                 "  A cursor is the last row seen, as the value of each column `.order` sorts by: " ++ example ++ ".",
         );
@@ -641,15 +641,15 @@ pub fn afterOf(
                 "  The comparison is settled while compiling, and a request can sort by other columns than the " ++
                 "cursor holds. Write `.order` out.",
         );
-        const sorted = @typeInfo(Order).@"struct".fields;
-        const held = @typeInfo(A).@"struct".fields;
-        var same = sorted.len == held.len;
-        if (same) for (sorted, held) |x, y| {
-            if (!std.mem.eql(u8, x.name, y.name)) same = false;
+        const sorted = @typeInfo(Order).@"struct";
+        const held = @typeInfo(A).@"struct";
+        var same = sorted.field_names.len == held.field_names.len;
+        if (same) for (sorted.field_names, held.field_names) |x_name, y_name| {
+            if (!std.mem.eql(u8, x_name, y_name)) same = false;
         };
         if (!same) @compileError(
-            "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " has an `.after` over " ++ fieldList(held) ++
-                " and an `.order` over " ++ fieldList(sorted) ++ ".\n" ++
+            "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " has an `.after` over " ++ fieldList(held.field_names) ++
+                " and an `.order` over " ++ fieldList(sorted.field_names) ++ ".\n" ++
                 "  A cursor holds the last row's value of each column the order sorts by, in the same order.",
         );
         const keys = row_mod.keysIfAnyOf(Row);
@@ -664,10 +664,10 @@ pub fn afterOf(
                 "Add `." ++ key ++ "` to the order and to `.after`, running the same way.",
         );
         var descending: ?bool = null;
-        for (sorted) |f| {
-            const direction: Direction = writtenValue(Order, f.name, Direction);
+        for (sorted.field_names) |f_name| {
+            const direction: Direction = writtenValue(Order, f_name, Direction);
             if (direction.placement() != null) @compileError(
-                "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " reads after a cursor, and `.order." ++ f.name ++
+                "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " reads after a cursor, and `.order." ++ f_name ++
                     "` says where NULLs go.\n" ++
                     "  A row comparison with a NULL in it is true of nothing, so a cursor over a column that may " ++
                     "be null loses those rows. Order by columns that are never null, with `.asc` or `.desc`.",
@@ -686,41 +686,41 @@ pub fn afterOf(
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
         const shaped = row_mod.isShaped(Row);
-        for (held, 0..) |f, i| {
+        for (held.field_names, held.field_types, 0..) |f_name, f_type, i| {
             const Column = if (shaped)
                 row_mod.ownerOf(Row)
-            else if (row_mod.hasColumn(Row, f.name))
+            else if (row_mod.hasColumn(Row, f_name))
                 Row
-            else if (row_mod.tableHasColumn(Row, f.name))
+            else if (row_mod.tableHasColumn(Row, f_name))
                 row_mod.ownerOf(Row)
             else
-                row_mod.noSuchColumn(Row, f.name, "`.after`");
-            const T = row_mod.ColumnType(Column, f.name);
+                row_mod.noSuchColumn(Row, f_name, "`.after`");
+            const T = row_mod.ColumnType(Column, f_name);
             // The cursor is a `<` or `>` over the column, so it is the text's
             // order on a Dialect that holds a number as text (ADR 049).
-            dialect_mod.assertDecimalCompares(D, Row, f.name, T, "`.after." ++ f.name ++ "`");
+            dialect_mod.assertDecimalCompares(D, Row, f_name, T, "`.after." ++ f_name ++ "`");
             if (@typeInfo(T) == .optional) @compileError(
-                "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " reads after a cursor over `" ++ f.name ++
+                "nilo: " ++ call ++ " on " ++ @typeName(Row) ++ " reads after a cursor over `" ++ f_name ++
                     "`, which may be null.\n" ++
                     "  A row comparison with a NULL in it is true of nothing, so the rows holding one never come " ++
                     "after any cursor. Order by columns that are never null.",
             );
-            if (f.type != T and !where_mod.comptimeOnly(f.type)) @compileError(
-                "nilo: `.after." ++ f.name ++ "` on " ++ @typeName(Row) ++ " is " ++ @typeName(f.type) ++
+            if (f_type != T and !where_mod.comptimeOnly(f_type)) @compileError(
+                "nilo: `.after." ++ f_name ++ "` on " ++ @typeName(Row) ++ " is " ++ @typeName(f_type) ++
                     ", and the column is " ++ @typeName(T) ++ ".\n" ++
                     "  A cursor holds the last row's own value: " ++ example ++ ".",
             );
-            lhs = lhs ++ (if (i == 0) "" else ", ") ++ prefix ++ D.quote(f.name);
+            lhs = lhs ++ (if (i == 0) "" else ", ") ++ prefix ++ D.quote(f_name);
             // `bindAs`, as every other condition binds: a `Date`, `Decimal`,
             // `Interval`, `Inet` or `Bytes` cursor is only bindable on
             // Postgres through its cast, so a feed over `due_date, id`
             // returned its first page and failed on its second.
             rhs = rhs ++ (if (i == 0) "" else ", ") ++ D.bindAs(D.placeholder(first + i), T, false);
-            paths = paths ++ &[_]where_mod.Path{&.{ "after", f.name }};
-            params = params ++ &[_]where_mod.Param{.{ .column = f.name, .of = if (Column == Row) null else Column }};
+            paths = paths ++ &[_]where_mod.Path{&.{ "after", f_name }};
+            params = params ++ &[_]where_mod.Param{.{ .column = f_name, .of = if (Column == Row) null else Column }};
         }
         // One column is a plain comparison; brackets are what make two a row.
-        const row = held.len > 1;
+        const row = held.field_names.len > 1;
         return .{
             .sql = (if (row) "(" ++ lhs ++ ")" else lhs) ++ (if (descending.?) " < " else " > ") ++
                 (if (row) "(" ++ rhs ++ ")" else rhs),
@@ -730,10 +730,10 @@ pub fn afterOf(
     }
 }
 
-fn fieldList(comptime fields: []const std.builtin.Type.StructField) []const u8 {
+fn fieldList(comptime names: []const [:0]const u8) []const u8 {
     comptime {
         var out: []const u8 = "";
-        for (fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ "`" ++ f.name ++ "`";
+        for (names, 0..) |name, i| out = out ++ (if (i == 0) "" else ", ") ++ "`" ++ name ++ "`";
         return out;
     }
 }
@@ -959,16 +959,16 @@ pub fn assertCompositeKey(
                 shape,
         );
 
-        for (info.fields) |f| {
-            if (!row_mod.isKey(Row, f.name)) {
-                if (row_mod.hasColumn(Row, f.name)) @compileError(
-                    "nilo: `db.find` on " ++ @typeName(Row) ++ " was given `." ++ f.name ++
+        for (info.field_names) |f_name| {
+            if (!row_mod.isKey(Row, f_name)) {
+                if (row_mod.hasColumn(Row, f_name)) @compileError(
+                    "nilo: `db.find` on " ++ @typeName(Row) ++ " was given `." ++ f_name ++
                         "`, which is a column but not part of its key " ++
                         row_mod.keyList(Row) ++ ".\n" ++
                         "  A find identifies one row by its key. Narrowing on another " ++
                         "column is `db.one`, which takes a whole condition.",
                 );
-                row_mod.noSuchColumn(Row, f.name, "`db.find`");
+                row_mod.noSuchColumn(Row, f_name, "`db.find`");
             }
         }
         for (keys) |key| {
@@ -1125,11 +1125,11 @@ fn assertNothingDroppable(
 /// the caller's whole evaluation, and a larger one set by them still wins.
 fn budget(comptime Row: type, comptime Written: type) void {
     const rows = switch (@typeInfo(Row)) {
-        .@"struct" => |s| s.fields.len,
+        .@"struct" => |s| s.field_names.len,
         else => 0,
     };
     const written = switch (@typeInfo(Written)) {
-        .@"struct" => |s| s.fields.len,
+        .@"struct" => |s| s.field_names.len,
         else => 0,
     };
     @setEvalBranchQuota(20_000 + 4_000 * (rows + written));
@@ -1142,15 +1142,15 @@ fn budget(comptime Row: type, comptime Written: type) void {
 /// for a column added in a later release was in production.
 fn refuseLeftOut(
     comptime Row: type,
-    comptime written: []const std.builtin.Type.StructField,
+    comptime written: []const [:0]const u8,
     comptime what: []const u8,
 ) void {
     comptime {
         var missing: []const u8 = "";
         var left_out: usize = 0;
         for (table_mod.requiredOf(Row)) |column| {
-            const found = for (written) |f| {
-                if (std.mem.eql(u8, f.name, column)) break true;
+            const found = for (written) |name| {
+                if (std.mem.eql(u8, name, column)) break true;
             } else false;
             if (found) continue;
             missing = missing ++ (if (left_out == 0) "" else ", ") ++ "`" ++ column ++ "`";
@@ -1199,7 +1199,7 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
                     "  Write it out where it is used: `.{ .email = \"…\", .age = 30 }`.",
             ),
         };
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: an insert into " ++ @typeName(Row) ++ " with no columns.\n" ++
                 "  A row of nothing but defaults is `db.raw` with `DEFAULT VALUES`; " ++
                 "written this way it is much more likely that the values were left out " ++
@@ -1213,27 +1213,27 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
 
         // A name that is not a column first: a typo leaves the column it
         // meant out, and the typo is the thing to say.
-        for (info.fields) |f| {
-            if (!row_mod.hasColumn(Row, f.name)) row_mod.noSuchColumn(Row, f.name, "an insert");
+        for (info.field_names) |f_name| {
+            if (!row_mod.hasColumn(Row, f_name)) row_mod.noSuchColumn(Row, f_name, "an insert");
         }
-        refuseLeftOut(Row, info.fields, "an insert");
+        refuseLeftOut(Row, info.field_names, "an insert");
 
-        for (info.fields, 0..) |f, i| {
-            if (!row_mod.hasColumn(Row, f.name)) {
-                row_mod.noSuchColumn(Row, f.name, "an insert");
+        for (info.field_names, 0..) |f_name, i| {
+            if (!row_mod.hasColumn(Row, f_name)) {
+                row_mod.noSuchColumn(Row, f_name, "an insert");
             }
             if (i > 0) {
                 names = names ++ ", ";
                 places = places ++ ", ";
             }
-            names = names ++ D.quote(f.name);
+            names = names ++ D.quote(f_name);
             places = places ++ D.bindAs(
                 D.placeholder(i + 1),
-                row_mod.ColumnType(Row, f.name),
+                row_mod.ColumnType(Row, f_name),
                 false,
             );
-            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
-            params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f_name}};
+            params = params ++ &[_]where_mod.Param{.{ .column = f_name }};
         }
 
         break :blk .{
@@ -1282,7 +1282,7 @@ pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statem
                     "qty: i32 };` and pass a `[]const Line`.",
             ),
         };
-        if (info.fields.len == 0) @compileError(
+        if (info.field_names.len == 0) @compileError(
             "nilo: a batch insert into " ++ @typeName(Row) ++ " with no columns.\n" ++
                 "  Every row would be nothing but defaults, and there would be no " ++
                 "array to say how many of them there are.",
@@ -1295,29 +1295,29 @@ pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statem
 
         // A name that is not a column first: a typo leaves the column it
         // meant out, and the typo is the thing to say.
-        for (info.fields) |f| {
-            if (!row_mod.hasColumn(Row, f.name)) row_mod.noSuchColumn(Row, f.name, "a batch insert");
+        for (info.field_names) |f_name| {
+            if (!row_mod.hasColumn(Row, f_name)) row_mod.noSuchColumn(Row, f_name, "a batch insert");
         }
-        refuseLeftOut(Row, info.fields, "a batch insert");
+        refuseLeftOut(Row, info.field_names, "a batch insert");
 
-        for (info.fields, 0..) |f, i| {
-            if (!row_mod.hasColumn(Row, f.name)) {
-                row_mod.noSuchColumn(Row, f.name, "a batch insert");
+        for (info.field_names, 0..) |f_name, i| {
+            if (!row_mod.hasColumn(Row, f_name)) {
+                row_mod.noSuchColumn(Row, f_name, "a batch insert");
             }
-            const F = row_mod.ColumnType(Row, f.name);
-            const cast = D.arrayOf(F) orelse noArrayForm(D, Row, f.name, F, "a batch insert into");
+            const F = row_mod.ColumnType(Row, f_name);
+            const cast = D.arrayOf(F) orelse noArrayForm(D, Row, f_name, F, "a batch insert into");
             if (i > 0) {
                 names = names ++ ", ";
                 arrays = arrays ++ ", ";
             }
-            names = names ++ D.quote(f.name);
+            names = names ++ D.quote(f_name);
             arrays = arrays ++ D.placeholder(i + 1) ++ "::" ++ cast;
-            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f_name}};
             // `.list` is what `Values` in `db.zig` reads to make the tuple
             // field a slice of the column's type rather than one of it. It is
             // the same field `.in` sets, because it is the same question:
             // does this placeholder hold one value or many?
-            params = params ++ &[_]where_mod.Param{.{ .column = f.name, .list = true }};
+            params = params ++ &[_]where_mod.Param{.{ .column = f_name, .list = true }};
         }
 
         break :blk .{
@@ -1379,8 +1379,8 @@ pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statem
         const keys = row_mod.keysOf(Row);
         for (keys) |key| {
             var has_key = false;
-            for (info.fields) |f| {
-                if (std.mem.eql(u8, f.name, key)) has_key = true;
+            for (info.field_names) |f_name| {
+                if (std.mem.eql(u8, f_name, key)) has_key = true;
             }
             // The key list is named only when there is more than one column in
             // it. On the ordinary Row it would repeat the column the sentence
@@ -1395,7 +1395,7 @@ pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statem
                     "` to the struct the rows are written as.",
             );
         }
-        if (info.fields.len < keys.len + 1) @compileError(
+        if (info.field_names.len < keys.len + 1) @compileError(
             "nilo: a batch update of " ++ @typeName(Row) ++ " has nothing to set.\n" ++
                 "  It carries " ++ row_mod.keyList(Row) ++ " and no other column, so every " ++
                 "row would be found and then left alone.",
@@ -1408,31 +1408,31 @@ pub fn updateMany(comptime D: type, comptime Row: type, comptime V: type) Statem
         var paths: []const where_mod.Path = &.{};
         var params: []const where_mod.Param = &.{};
 
-        for (info.fields, 0..) |f, i| {
-            if (!row_mod.hasColumn(Row, f.name)) {
-                row_mod.noSuchColumn(Row, f.name, "a batch update");
+        for (info.field_names, 0..) |f_name, i| {
+            if (!row_mod.hasColumn(Row, f_name)) {
+                row_mod.noSuchColumn(Row, f_name, "a batch update");
             }
-            const F = row_mod.ColumnType(Row, f.name);
-            const cast = D.arrayOf(F) orelse noArrayForm(D, Row, f.name, F, "a batch update of");
+            const F = row_mod.ColumnType(Row, f_name);
+            const cast = D.arrayOf(F) orelse noArrayForm(D, Row, f_name, F, "a batch update of");
             if (i > 0) {
                 arrays = arrays ++ ", ";
                 aliases = aliases ++ ", ";
             }
             arrays = arrays ++ D.placeholder(i + 1) ++ "::" ++ cast;
-            aliases = aliases ++ D.quote(f.name);
+            aliases = aliases ++ D.quote(f_name);
 
             // The key joins rather than being written. Postgres would take
             // `SET "id" = v."id"` without complaint and renumber nothing,
             // but it is a column in the SET list that can never change and
             // reads as though it might — the same argument `upserting` makes.
-            if (!row_mod.isKey(Row, f.name)) {
+            if (!row_mod.isKey(Row, f_name)) {
                 if (written > 0) sets = sets ++ ", ";
-                sets = sets ++ D.quote(f.name) ++ " = " ++ batch_source ++ "." ++ D.quote(f.name);
+                sets = sets ++ D.quote(f_name) ++ " = " ++ batch_source ++ "." ++ D.quote(f_name);
                 written += 1;
             }
 
-            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f.name}};
-            params = params ++ &[_]where_mod.Param{.{ .column = f.name, .list = true }};
+            paths = paths ++ &[_]where_mod.Path{&[_][]const u8{f_name}};
+            params = params ++ &[_]where_mod.Param{.{ .column = f_name, .list = true }};
         }
 
         // One `AND` per key column, which is the whole of what a composite key
@@ -1589,15 +1589,15 @@ fn conflictColumns(comptime Row: type, comptime on: anytype) []const []const u8 
         } else switch (@typeInfo(On)) {
             .@"struct" => |s| {
                 if (!s.is_tuple) notAConflictTarget(Row, On);
-                if (s.fields.len == 0) @compileError(
+                if (s.field_names.len == 0) @compileError(
                     "nilo: an upsert on " ++ @typeName(Row) ++ " was given an empty conflict " ++
                         "target.\n" ++
                         "  Name the column the unique constraint is on: " ++
                         "`db.insertOrIgnore(Row, c, values, .email)` — or `." ++ key_target ++
                         "` for the Row's own key, which is " ++ row_mod.keyList(Row) ++ ".",
                 );
-                for (s.fields) |f| {
-                    const value = @field(on, f.name);
+                for (s.field_names) |f_name| {
+                    const value = @field(on, f_name);
                     if (@TypeOf(value) != @TypeOf(.enum_literal)) notAConflictTarget(Row, On);
                     names = names ++ &[_][]const u8{@tagName(value)};
                 }
@@ -1775,22 +1775,23 @@ fn upserting(
         const keys: []const []const u8 = if (action == .update) row_mod.keysOf(Row) else &.{};
         var sets: []const u8 = "";
         var written: usize = 0;
-        for (@typeInfo(V).@"struct".fields) |f| {
+        const v_info = @typeInfo(V).@"struct";
+        for (v_info.field_names) |f_name| {
             var is_key = false;
             for (keys) |key| {
-                if (std.mem.eql(u8, key, f.name)) is_key = true;
+                if (std.mem.eql(u8, key, f_name)) is_key = true;
             }
             if (is_key) continue;
             var is_target = false;
             for (targets) |name| {
-                if (std.mem.eql(u8, name, f.name)) is_target = true;
+                if (std.mem.eql(u8, name, f_name)) is_target = true;
             }
             if (is_target) continue;
             if (written > 0) sets = sets ++ ", ";
             // `EXCLUDED` is the row the insert proposed, so the update writes
             // the values the caller passed without binding them a second time
             // — the parameter tuple is `insert`'s, unchanged.
-            sets = sets ++ D.quote(f.name) ++ " = EXCLUDED." ++ D.quote(f.name);
+            sets = sets ++ D.quote(f_name) ++ " = EXCLUDED." ++ D.quote(f_name);
             written += 1;
         }
 
@@ -1878,12 +1879,12 @@ fn setOperator(
             .@"struct" => |s| s,
             else => return null,
         };
-        if (info.is_tuple or info.fields.len == 0) return null;
+        if (info.is_tuple or info.field_names.len == 0) return null;
 
         var found: ?SetOp = null;
-        for (info.fields) |f| {
+        for (info.field_names) |f_name| {
             for (set_ops) |op| {
-                if (std.mem.eql(u8, f.name, op.name)) {
+                if (std.mem.eql(u8, f_name, op.name)) {
                     // Two operators on one column would have to compose, and
                     // `views + 1 - 2` is a sum somebody wrote as two thoughts.
                     // The message is worth more than the composition.
@@ -1915,12 +1916,18 @@ fn setOperator(
 ///
 /// A column whose own type is an enum with a `now` in it is that enum's
 /// value, which is what `.now` meant there before this word existed.
-fn setsClock(comptime D: type, comptime Row: type, comptime f: std.builtin.Type.StructField) ?[]const u8 {
+fn setsClock(
+    comptime D: type,
+    comptime Row: type,
+    comptime name: []const u8,
+    comptime T: type,
+    comptime attrs: std.lang.Type.Struct.FieldAttributes,
+) ?[]const u8 {
     comptime {
-        if (f.type != @TypeOf(.enum_literal)) return null;
-        const ptr = f.default_value_ptr orelse return null;
-        const word = @as(*const f.type, @ptrCast(@alignCast(ptr))).*;
-        return where_mod.clockWord(D, Row, f.name, word, "`.set = .{ ." ++ f.name ++ " = ." ++ @tagName(word) ++ " }`");
+        if (T != @TypeOf(.enum_literal)) return null;
+        const ptr = attrs.default_value_ptr orelse return null;
+        const word = @as(*const T, @ptrCast(@alignCast(ptr))).*;
+        return where_mod.clockWord(D, Row, name, word, "`.set = .{ ." ++ name ++ " = ." ++ @tagName(word) ++ " }`");
     }
 }
 
@@ -2110,7 +2117,7 @@ fn updating(
                     "  Write `.set = .{ .age = 31 }`, one column per field.",
             ),
         };
-        if (set_info.fields.len == 0) @compileError(
+        if (set_info.field_names.len == 0) @compileError(
             "nilo: `.set` on " ++ @typeName(Row) ++ " is empty.\n" ++
                 "  An update that changes no column is not a statement worth sending.",
         );
@@ -2120,43 +2127,43 @@ fn updating(
         var params: []const where_mod.Param = &.{};
         var next: usize = 1;
 
-        for (set_info.fields, 0..) |f, i| {
-            if (!row_mod.hasColumn(Row, f.name)) {
-                row_mod.noSuchColumn(Row, f.name, "`.set`");
+        for (set_info.field_names, set_info.field_types, set_info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
+            if (!row_mod.hasColumn(Row, f_name)) {
+                row_mod.noSuchColumn(Row, f_name, "`.set`");
             }
             if (i > 0) sql = sql ++ ", ";
-            const quoted = D.quote(f.name);
+            const quoted = D.quote(f_name);
             const bound = D.bindAs(
                 D.placeholder(next),
-                row_mod.ColumnType(Row, f.name),
+                row_mod.ColumnType(Row, f_name),
                 false,
             );
             // The moment the statement runs, written by the database: no
             // parameter, so nothing to bind and no clock read on this side.
-            if (setsClock(D, Row, f)) |clock| {
+            if (setsClock(D, Row, f_name, f_type, f_attrs)) |clock| {
                 sql = sql ++ quoted ++ " = " ++ clock;
                 continue;
             }
             // Arithmetic on the column's own value, or a new value for it.
             // The column name goes into the fragment and only the operand is
             // bound, so the statement is the same constant either way.
-            if (where_mod.givenValue(f.type) != null) {
-                assertKeepable(Row, f.name);
+            if (where_mod.givenValue(f_type) != null) {
+                assertKeepable(Row, f_name);
                 sql = sql ++ quoted ++ " = COALESCE(" ++ bound ++ ", " ++ quoted ++ ")";
-                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name, "value" }};
-                params = params ++ &[_]where_mod.Param{.{ .column = f.name, .nullable = true }};
+                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f_name, "value" }};
+                params = params ++ &[_]where_mod.Param{.{ .column = f_name, .nullable = true }};
                 next += 1;
                 continue;
             }
-            if (setOperator(Row, f.name, f.type)) |op| {
-                assertCountable(Row, f.name, op);
+            if (setOperator(Row, f_name, f_type)) |op| {
+                assertCountable(Row, f_name, op);
                 sql = sql ++ quoted ++ " = " ++ quoted ++ " " ++ op.spelling ++ " " ++ bound;
-                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name, op.name }};
+                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f_name, op.name }};
             } else {
                 sql = sql ++ quoted ++ " = " ++ bound;
-                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f.name }};
+                paths = paths ++ &[_]where_mod.Path{&[_][]const u8{ "set", f_name }};
             }
-            params = params ++ &[_]where_mod.Param{.{ .column = f.name }};
+            params = params ++ &[_]where_mod.Param{.{ .column = f_name }};
             next += 1;
         }
 
@@ -2300,11 +2307,12 @@ pub fn tiebreak(comptime D: type, comptime Row: type, comptime Order: type, comp
 /// ascending. A nested term (a parent's column) is read at its own leaf.
 pub fn lastDescending(comptime Order: type) bool {
     comptime {
-        const fields = @typeInfo(Order).@"struct".fields;
-        if (fields.len == 0) return false;
-        const last = fields[fields.len - 1];
-        if (@typeInfo(last.type) == .@"struct") return lastDescending(last.type);
-        return writtenValue(Order, last.name, Direction).descending();
+        const info = @typeInfo(Order).@"struct";
+        if (info.field_names.len == 0) return false;
+        const last_name = info.field_names[info.field_names.len - 1];
+        const last_type = info.field_types[info.field_names.len - 1];
+        if (@typeInfo(last_type) == .@"struct") return lastDescending(last_type);
+        return writtenValue(Order, last_name, Direction).descending();
     }
 }
 
@@ -2348,37 +2356,37 @@ fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
                     "  Write `.order = .{ .created_at = .desc }`, one column per field.",
             ),
         };
-        if (info.fields.len == 0) return "";
+        if (info.field_names.len == 0) return "";
 
         var out: []const u8 = " ORDER BY ";
-        for (info.fields, 0..) |f, i| {
+        for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
             // A narrower Row may order by a column of its table it does not
             // carry: a tiebreak the response has no reason to show.
-            if (!row_mod.hasColumn(Row, f.name) and !row_mod.tableHasColumn(Row, f.name)) {
-                row_mod.noSuchColumn(Row, f.name, "`.order`");
+            if (!row_mod.hasColumn(Row, f_name) and !row_mod.tableHasColumn(Row, f_name)) {
+                row_mod.noSuchColumn(Row, f_name, "`.order`");
             }
             dialect_mod.assertDecimalCompares(
                 D,
                 Row,
-                f.name,
-                if (row_mod.hasColumn(Row, f.name)) row_mod.ColumnType(Row, f.name) else row_mod.ColumnType(row_mod.ownerOf(Row), f.name),
-                "`.order." ++ f.name ++ "`",
+                f_name,
+                if (row_mod.hasColumn(Row, f_name)) row_mod.ColumnType(Row, f_name) else row_mod.ColumnType(row_mod.ownerOf(Row), f_name),
+                "`.order." ++ f_name ++ "`",
             );
-            if (f.type != Direction and f.type != @TypeOf(.enum_literal)) @compileError(
-                "nilo: `.order` on column `" ++ f.name ++ "` was given a " ++
-                    @typeName(f.type) ++ ".\n" ++
+            if (f_type != Direction and f_type != @TypeOf(.enum_literal)) @compileError(
+                "nilo: `.order` on column `" ++ f_name ++ "` was given a " ++
+                    @typeName(f_type) ++ ".\n" ++
                     "  A direction is `.asc` or `.desc` — or one of the four that also " ++
                     "say where NULLs go, `.asc_nulls_last` and its three siblings. It is " ++
                     "settled while compiling: a sort chosen at run time is two statements.",
             );
-            const direction: Direction = writtenValue(T, f.name, Direction);
+            const direction: Direction = writtenValue(T, f_name, Direction);
             if (i > 0) out = out ++ ", ";
-            out = out ++ D.quote(f.name) ++ (if (direction.descending()) " DESC" else " ASC");
+            out = out ++ D.quote(f_name) ++ (if (direction.descending()) " DESC" else " ASC");
             // Written only when the caller asked, so an order term that says
             // nothing about NULLs compiles to exactly the text it always did.
             if (direction.placement()) |where_nulls| {
                 out = out ++ (D.nulls(where_nulls) orelse
-                    dialect_mod.noNullsOrder(D, Row, f.name));
+                    dialect_mod.noNullsOrder(D, Row, f_name));
             }
         }
         return out;
@@ -2395,14 +2403,15 @@ fn orderBy(comptime D: type, comptime Row: type, comptime T: type) []const u8 {
 /// of rule nobody could have guessed.
 pub fn writtenValue(comptime T: type, comptime field: []const u8, comptime As: type) As {
     comptime {
-        for (@typeInfo(T).@"struct".fields) |f| {
-            if (!std.mem.eql(u8, f.name, field)) continue;
-            const written = f.default_value_ptr orelse @compileError(
+        const t_info = @typeInfo(T).@"struct";
+        for (t_info.field_names, t_info.field_types, t_info.field_attrs) |f_name, f_type, f_attrs| {
+            if (!std.mem.eql(u8, f_name, field)) continue;
+            const written = f_attrs.default_value_ptr orelse @compileError(
                 "nilo: `." ++ field ++ "` has no value written out where it is used.\n" ++
                     "  It is settled while compiling, so it has to be a literal " ++
                     "rather than something worked out at run time.",
             );
-            return @as(*const f.type, @ptrCast(@alignCast(written))).*;
+            return @as(*const f_type, @ptrCast(@alignCast(written))).*;
         }
         unreachable;
     }
@@ -2464,9 +2473,10 @@ pub fn assertOptions(
                 @typeName(O) ++ ".\n" ++
                 "  Write it out where it is used: `.{ .where = .{ … } }`.",
         );
-        fields: for (@typeInfo(O).@"struct".fields) |f| {
+        const o_info = @typeInfo(O).@"struct";
+        fields: for (o_info.field_names) |f_name| {
             for (allowed) |name| {
-                if (std.mem.eql(u8, f.name, name)) continue :fields;
+                if (std.mem.eql(u8, f_name, name)) continue :fields;
             }
             var list: []const u8 = "";
             for (allowed, 0..) |name, i| {
@@ -2474,7 +2484,7 @@ pub fn assertOptions(
             }
             @compileError(
                 "nilo: " ++ what ++ " on " ++ @typeName(Row) ++ " was given `." ++
-                    f.name ++ "`, which is not one of its options.\n" ++
+                    f_name ++ "`, which is not one of its options.\n" ++
                     "  It takes " ++ list ++ ".",
             );
         }

@@ -153,7 +153,7 @@ fn entryOptions(comptime owner: []const u8, comptime name: []const u8, comptime 
 /// Whether an enum is closed: declared exhaustive, so a number it does not
 /// name is not one of its values (proto2's enum). Open is the proto3 rule.
 pub fn isClosedScalar(comptime Z: type) bool {
-    return @typeInfo(Z) == .@"enum" and @typeInfo(Z).@"enum".is_exhaustive;
+    return @typeInfo(Z) == .@"enum" and @typeInfo(Z).@"enum".mode == .exhaustive;
 }
 
 /// The scalar a Zig type and an encoding make, or a sentence saying why not.
@@ -211,10 +211,10 @@ fn scalarOf(comptime owner: []const u8, comptime name: []const u8, comptime T: t
             if (e.tag_type != i32) wrong("is an enum whose tag is not i32, and a protobuf enum is an int32. " ++
                 "Declare it `enum(i32)`.");
             if (enc != .default) wrong("is an enum, which travels as a varint and takes no encoding.");
-            if (e.is_exhaustive and e.fields.len == 0) wrong("is an enum with no values.");
+            if (e.mode == .exhaustive and e.field_names.len == 0) wrong("is an enum with no values.");
             return .enumeration;
         },
-        .pointer => |p| if (p.size == .slice and p.child == u8 and !p.is_const)
+        .pointer => |p| if (p.size == .slice and p.child == u8 and !p.attrs.@"const")
             wrong("is `[]u8`; a decoded string borrows the input, so write `[]const u8`."),
         else => {},
     }
@@ -237,81 +237,81 @@ pub fn specsOf(comptime T: type) []const Spec {
         const table = T.wire;
         var specs: []const Spec = &.{};
 
-        for (std.meta.fieldNames(@TypeOf(table))) |listed| {
+        for (@typeInfo(@TypeOf(table)).@"struct".field_names) |listed| {
             if (!@hasField(T, listed)) @compileError("nilo: `" ++ owner ++ ".wire` numbers `" ++ listed ++
                 "`, and `" ++ owner ++ "` has no field of that name.");
         }
 
-        for (info.fields) |f| {
-            if (isOneof(f.type)) {
-                if (@typeInfo(f.type) != .optional) @compileError("nilo: make `" ++ owner ++ "." ++ f.name ++
-                    "` optional (`?" ++ @typeName(f.type) ++ "`): a oneof that is not on the wire is none of its members.");
-                if (@hasField(@TypeOf(table), f.name)) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
-                    "` is a oneof, so its numbers belong on its members in `" ++ @typeName(Unwrapped(f.type)) ++
+        for (info.field_names, info.field_types) |fname, FT| {
+            if (isOneof(FT)) {
+                if (@typeInfo(FT) != .optional) @compileError("nilo: make `" ++ owner ++ "." ++ fname ++
+                    "` optional (`?" ++ @typeName(FT) ++ "`): a oneof that is not on the wire is none of its members.");
+                if (@hasField(@TypeOf(table), fname)) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
+                    "` is a oneof, so its numbers belong on its members in `" ++ @typeName(Unwrapped(FT)) ++
                     ".wire`, not in `" ++ owner ++ ".wire`.");
-                const U = Unwrapped(f.type);
+                const U = Unwrapped(FT);
                 const utable = U.wire;
-                for (std.meta.fieldNames(@TypeOf(utable))) |listed| {
+                for (@typeInfo(@TypeOf(utable)).@"struct".field_names) |listed| {
                     if (!@hasField(U, listed)) @compileError("nilo: `" ++ @typeName(U) ++ ".wire` numbers `" ++
                         listed ++ "`, and the union has no member of that name.");
                 }
-                for (@typeInfo(U).@"union".fields) |m| {
-                    if (!@hasField(@TypeOf(utable), m.name)) @compileError("nilo: oneof member `" ++ @typeName(U) ++
-                        "." ++ m.name ++ "` has no field number. Add it to `" ++ @typeName(U) ++ ".wire`, like `." ++
-                        m.name ++ " = 1`.");
-                    const e = @field(utable, m.name);
-                    const n = entryNumber(@typeName(U), m.name, e);
-                    const opts = entryOptions(@typeName(U), m.name, e);
-                    if (opts.unpacked) @compileError("nilo: oneof member `" ++ @typeName(U) ++ "." ++ m.name ++
+                for (@typeInfo(U).@"union".field_names, @typeInfo(U).@"union".field_types) |mname, MT| {
+                    if (!@hasField(@TypeOf(utable), mname)) @compileError("nilo: oneof member `" ++ @typeName(U) ++
+                        "." ++ mname ++ "` has no field number. Add it to `" ++ @typeName(U) ++ ".wire`, like `." ++
+                        mname ++ " = 1`.");
+                    const e = @field(utable, mname);
+                    const n = entryNumber(@typeName(U), mname, e);
+                    const opts = entryOptions(@typeName(U), mname, e);
+                    if (opts.unpacked) @compileError("nilo: oneof member `" ++ @typeName(U) ++ "." ++ mname ++
                         "` says `.unpacked`, which is for a repeated number, and a oneof member is never repeated.");
-                    if (isMessage(m.type)) {
+                    if (isMessage(MT)) {
                         if (opts.encoding != .default) @compileError("nilo: oneof member `" ++ @typeName(U) ++ "." ++
-                            m.name ++ "` is a message, which takes no encoding.");
-                        specs = specs ++ &[_]Spec{.{ .field = f.name, .number = n, .kind = .message, .member = m.name }};
+                            mname ++ "` is a message, which takes no encoding.");
+                        specs = specs ++ &[_]Spec{.{ .field = fname, .number = n, .kind = .message, .member = mname }};
                     } else {
-                        if (isRepeated(m.type)) @compileError("nilo: oneof member `" ++ @typeName(U) ++ "." ++ m.name ++
+                        if (isRepeated(MT)) @compileError("nilo: oneof member `" ++ @typeName(U) ++ "." ++ mname ++
                             "` is repeated, and protobuf does not allow a repeated field in a oneof.");
-                        const s = scalarOf(@typeName(U), m.name, m.type, opts.encoding);
-                        specs = specs ++ &[_]Spec{.{ .field = f.name, .number = n, .kind = .scalar, .scalar = s, .member = m.name }};
+                        const s = scalarOf(@typeName(U), mname, MT, opts.encoding);
+                        specs = specs ++ &[_]Spec{.{ .field = fname, .number = n, .kind = .scalar, .scalar = s, .member = mname }};
                     }
                 }
                 continue;
             }
-            if (!@hasField(@TypeOf(table), f.name)) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
-                "` has no field number. Add it to `" ++ owner ++ ".wire`, like `." ++ f.name ++ " = 1`.");
-            const e = @field(table, f.name);
-            const n = entryNumber(owner, f.name, e);
-            const opts = entryOptions(owner, f.name, e);
+            if (!@hasField(@TypeOf(table), fname)) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
+                "` has no field number. Add it to `" ++ owner ++ ".wire`, like `." ++ fname ++ " = 1`.");
+            const e = @field(table, fname);
+            const n = entryNumber(owner, fname, e);
+            const opts = entryOptions(owner, fname, e);
             const enc = opts.encoding;
-            if (@typeInfo(f.type) == .optional and isRepeated(Unwrapped(f.type))) @compileError("nilo: `" ++ owner ++
-                "." ++ f.name ++ "` is an optional slice, and a repeated field is never absent, only empty. Drop the `?`.");
-            if (isRepeated(f.type)) {
-                const C = @typeInfo(f.type).pointer.child;
+            if (@typeInfo(FT) == .optional and isRepeated(Unwrapped(FT))) @compileError("nilo: `" ++ owner ++
+                "." ++ fname ++ "` is an optional slice, and a repeated field is never absent, only empty. Drop the `?`.");
+            if (isRepeated(FT)) {
+                const C = @typeInfo(FT).pointer.child;
                 if (isMessage(C)) {
-                    if (enc != .default) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
+                    if (enc != .default) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
                         "` is a repeated message, which takes no encoding.");
-                    if (opts.unpacked) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
+                    if (opts.unpacked) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
                         "` says `.unpacked`, which is for a repeated number; a repeated message is never packed.");
-                    specs = specs ++ &[_]Spec{.{ .field = f.name, .number = n, .kind = .repeated, .elem_message = true }};
+                    specs = specs ++ &[_]Spec{.{ .field = fname, .number = n, .kind = .repeated, .elem_message = true }};
                 } else {
-                    if (@typeInfo(C) == .optional) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
+                    if (@typeInfo(C) == .optional) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
                         "` is a slice of optionals, and a repeated field has no holes. Drop the `?`.");
-                    const s = scalarOf(owner, f.name, C, enc);
+                    const s = scalarOf(owner, fname, C, enc);
                     if (opts.unpacked and (s == .string or s == .bytes)) @compileError("nilo: `" ++ owner ++ "." ++
-                        f.name ++ "` says `.unpacked`, which is for a repeated number; repeated text is never packed.");
-                    specs = specs ++ &[_]Spec{.{ .field = f.name, .number = n, .kind = .repeated, .scalar = s, .packed_run = !opts.unpacked }};
+                        fname ++ "` says `.unpacked`, which is for a repeated number; repeated text is never packed.");
+                    specs = specs ++ &[_]Spec{.{ .field = fname, .number = n, .kind = .repeated, .scalar = s, .packed_run = !opts.unpacked }};
                 }
             } else {
-                if (opts.unpacked) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
+                if (opts.unpacked) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
                     "` says `.unpacked`, which is for a repeated number, and this field is not repeated.");
-                const U = Unwrapped(f.type);
+                const U = Unwrapped(FT);
                 if (isMessage(U)) {
-                    if (enc != .default) @compileError("nilo: `" ++ owner ++ "." ++ f.name ++
+                    if (enc != .default) @compileError("nilo: `" ++ owner ++ "." ++ fname ++
                         "` is a message, which takes no encoding.");
-                    specs = specs ++ &[_]Spec{.{ .field = f.name, .number = n, .kind = .message }};
+                    specs = specs ++ &[_]Spec{.{ .field = fname, .number = n, .kind = .message }};
                 } else {
-                    const s = scalarOf(owner, f.name, U, enc);
-                    specs = specs ++ &[_]Spec{.{ .field = f.name, .number = n, .kind = .scalar, .scalar = s, .optional = @typeInfo(f.type) == .optional }};
+                    const s = scalarOf(owner, fname, U, enc);
+                    specs = specs ++ &[_]Spec{.{ .field = fname, .number = n, .kind = .scalar, .scalar = s, .optional = @typeInfo(FT) == .optional }};
                 }
             }
         }
@@ -405,7 +405,7 @@ pub fn FastTable(comptime T: type) type {
             for (actions, 0..) |a, ai| {
                 const s = specsOf(T)[a.spec];
                 const w = specWire(s, a.packed_run and s.packable());
-                t[(s.number << 3) | @intFromEnum(w)] = ai;
+                t[(s.number << 3) | @backingInt(w)] = ai;
             }
             break :blk t;
         };
@@ -418,8 +418,8 @@ pub fn FastTable(comptime T: type) type {
                 if (s.number >= 16 or s.kind != .repeated) continue;
                 const ri = repeatedIndex(T, i);
                 const w = specWire(s, false);
-                t[(s.number << 3) | @intFromEnum(w)] = 1 + ri * 2;
-                if (s.packable()) t[(s.number << 3) | @intFromEnum(WireType.len)] = 1 + ri * 2 + 1;
+                t[(s.number << 3) | @backingInt(w)] = 1 + ri * 2;
+                if (s.packable()) t[(s.number << 3) | @backingInt(WireType.len)] = 1 + ri * 2 + 1;
             }
             break :blk t;
         };
@@ -431,11 +431,12 @@ pub fn FastTable(comptime T: type) type {
 pub fn defaults(comptime T: type) T {
     comptime _ = specsOf(T);
     var v: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        if (f.defaultValue()) |d| {
-            @field(v, f.name) = d;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types, info.field_attrs) |name, FT, attrs| {
+        if (attrs.defaultValue(FT)) |d| {
+            @field(v, name) = d;
         } else {
-            @field(v, f.name) = zero(f.type);
+            @field(v, name) = zero(FT);
         }
     }
     return v;
@@ -445,7 +446,7 @@ pub fn zero(comptime T: type) T {
     return switch (@typeInfo(T)) {
         .bool => false,
         .int, .float => 0,
-        .@"enum" => |e| if (e.is_exhaustive) @enumFromInt(e.fields[0].value) else @enumFromInt(0),
+        .@"enum" => |e| if (e.mode == .exhaustive) @fromBackingInt(@intCast(e.field_values[0])) else @fromBackingInt(@intCast(0)),
         .optional => null,
         .pointer => if (T == []const u8) "" else &.{},
         .@"struct" => defaults(T),

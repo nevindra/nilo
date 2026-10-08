@@ -1024,7 +1024,7 @@ test "a truncated page with an empty or over-long continuation token fails" {
             ));
             // One past the ceiling `list` itself refuses to send back.
             const long = "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>" ++
-                "c" ** 1025 ++ "</NextContinuationToken></ListBucketResult>";
+                &@as([1025]u8, @splat('c')) ++ "</NextContinuationToken></ListBucketResult>";
             try testing.expectError(error.Failed, listAnswered(io, &scope, long));
         }
     }.run);
@@ -1070,9 +1070,9 @@ test "a list asking for more than a page, or a prefix longer than a key, is refu
 
             try testing.expectError(error.Rejected, files.list(&scope, .{ .max_keys = 1001 }));
             try testing.expectError(error.Rejected, files.list(&scope, .{ .max_keys = 0 }));
-            const long = "k" ** 513;
+            const long = &@as([513]u8, @splat('k'));
             try testing.expectError(error.Rejected, files.list(&scope, .{ .prefix = long }));
-            const cursor = "c" ** 1025;
+            const cursor = &@as([1025]u8, @splat('c'));
             try testing.expectError(error.Rejected, files.list(&scope, .{ .cursor = cursor }));
         }
     }.run);
@@ -1177,7 +1177,7 @@ test "a streamed get that is slower than the call timeout but never goes quiet c
             var out: [32]u8 = undefined;
             var w = std.Io.Writer.fixed(&out);
             try testing.expectEqual(@as(u64, 24), try reading.pipe(&w));
-            try testing.expectEqualStrings("x" ** 24, w.buffered());
+            try testing.expectEqualStrings(&@as([24]u8, @splat('x')), w.buffered());
         }
     }.run);
 }
@@ -1270,7 +1270,7 @@ test "a streamed put that keeps moving outlasts the call timeout, and one that g
                 .len = @as(u64, 24),
                 .content_type = "application/octet-stream",
             });
-            try testing.expectEqualStrings("y" ** 24, canned.seen.bodyText());
+            try testing.expectEqualStrings(&@as([24]u8, @splat('y')), canned.seen.bodyText());
         }
     }.run);
 }
@@ -2268,7 +2268,7 @@ test "a presign with the largest token a bucket may declare fits its buffer" {
             defer canned.close();
 
             // `+` is the worst case: three bytes once percent-encoded.
-            const token = "+" ** sign.token_max;
+            const token = &@as([sign.token_max]u8, @splat('+'));
             var buf: [64]u8 = undefined;
             var store = try Store.open(testing.allocator, .{
                 .endpoint = try canned.endpoint(&buf),
@@ -2940,14 +2940,14 @@ test "a name the bucket's style cannot carry is BadBucketName, and opening it al
             const before = counting.allocs;
             try testing.expectError(error.BadBucketName, Files.openAs(&store, ""));
             try testing.expectError(error.BadBucketName, Files.openAs(&store, "ab"));
-            try testing.expectError(error.BadBucketName, Files.openAs(&store, "a" ** 64));
+            try testing.expectError(error.BadBucketName, Files.openAs(&store, &@as([64]u8, @splat('a'))));
             try testing.expectError(error.BadBucketName, Files.openAs(&store, "has/slash"));
             try testing.expectError(error.BadBucketName, Files.openAs(&store, "has space"));
             try testing.expectError(error.BadBucketName, Files.openAs(&store, "q?x=1"));
             // Refused before anything is built: no allocation to give back.
             try testing.expectEqual(before, counting.allocs);
 
-            var ok = try Files.openAs(&store, "a" ** 63);
+            var ok = try Files.openAs(&store, &@as([63]u8, @splat('a')));
             defer ok.deinit();
             try testing.expectEqual(before + 1, counting.allocs);
         }

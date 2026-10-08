@@ -21,7 +21,7 @@ const std = @import("std");
 fn niloFor(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) []const std.Build.Module.Import {
     // `.sql = true` is what fetches pg.zig and zqlite, and leaving it out is
     // what stops them being fetched — which is the fix for item 16 in `DX.md`
@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // Both optimize modes, because a lifetime bug passes in Debug and
     // segfaults in the mode people deploy in (CLAUDE.md, Conventions).
     const test_step = b.step("test", "Run the tests in Debug and ReleaseSafe");
-    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseSafe }) |mode| {
+    for ([_]std.lang.Optimize{ .debug, .safe }) |mode| {
         const t = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),

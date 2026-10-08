@@ -128,13 +128,13 @@ pub const Answer = struct {
 
     pub fn goaway(self: *const Answer) ?h2.ErrorCode {
         for (self.frames.items) |f| if (f.head.type == .goaway)
-            return @enumFromInt(std.mem.readInt(u32, f.payload[4..8], .big));
+            return @fromBackingInt(@intCast(std.mem.readInt(u32, f.payload[4..8], .big)));
         return null;
     }
 
     pub fn rst(self: *const Answer, stream: u31) ?h2.ErrorCode {
         for (self.frames.items) |f| if (f.head.type == .rst_stream and f.head.stream == stream)
-            return @enumFromInt(std.mem.readInt(u32, f.payload[0..4], .big));
+            return @fromBackingInt(@intCast(std.mem.readInt(u32, f.payload[0..4], .big)));
         return null;
     }
 };
@@ -164,7 +164,6 @@ pub fn answerOf(written: []const u8) !Answer {
     }
     return answer_;
 }
-
 
 /// One ordinary request, as a client writes it.
 pub const Request = struct {

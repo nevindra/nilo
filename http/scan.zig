@@ -196,7 +196,7 @@ test "counting agrees with std.mem.count on every length" {
 }
 
 test "positionsOf reads the same bytes as a plain loop, on mixed content" {
-    const text = "GET /a?x=1&y=2 HTTP/1.1\r\nHost: a:b\r\nX: y\r\n\r\n" ** 3;
+    const text = repeat("GET /a?x=1&y=2 HTTP/1.1\r\nHost: a:b\r\nX: y\r\n\r\n", 3);
     for ([_]u8{ '\n', ':', '&', '=', 'z' }) |byte| {
         var i: usize = 0;
         while (i < text.len) : (i += lanes) {
@@ -256,4 +256,19 @@ test "every byte a name is tested for first is a token byte, and the rest are lo
     }
     // 62 letters and digits and 15 symbols.
     try testing.expectEqual(@as(usize, 77), tokens);
+}
+
+/// `s` written `n` times over, at compile time: what `s ** n` said before
+/// Zig 0.17 took the operator away.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    // A comptime-known constant, so that `&built` is a pointer into the
+    // binary and the call is as good at runtime as `**` was.
+    const built = comptime blk: {
+        @setEvalBranchQuota(10 * n + 1000);
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const final = out;
+        break :blk final;
+    };
+    return &built;
 }

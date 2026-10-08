@@ -68,7 +68,7 @@ pub fn Table(comptime Db: type) type {
                 // a rolling deploy: an older binary's INSERT does not name
                 // the column, and a sibling binary's — ADR 215's own case —
                 // never will. The default answers both.
-                .default = .{ .priority = @as(i16, @intFromEnum(contract.Priority.normal)) },
+                .default = .{ .priority = @as(i16, @backingInt(contract.Priority.normal)) },
             };
 
             id: i64,
@@ -139,7 +139,7 @@ pub fn Table(comptime Db: type) type {
                 .run_at = at.run_at,
                 .lease_until = @as(i64, 0),
                 .attempts = @as(i32, 0),
-                .priority = @intFromEnum(at.priority),
+                .priority = @backingInt(at.priority),
                 .unique_key = at.unique,
                 .last_error = @as(?[]const u8, null),
                 .created_at = now,
@@ -194,7 +194,7 @@ pub fn Table(comptime Db: type) type {
         /// `now`, `lease_until`, then the kinds: one array on Postgres, one
         /// parameter each on SQLite.
         fn ClaimArgs(comptime n: usize) type {
-            return if (on_postgres) struct { i64, i64, []const []const u8 } else std.meta.Tuple(&([_]type{ i64, i64 } ++ [_]type{[]const u8} ** n));
+            return if (on_postgres) struct { i64, i64, []const []const u8 } else @Tuple(&([_]type{ i64, i64 } ++ @as([n]type, @splat([]const u8))));
         }
 
         pub fn claim(self: *Self, scope: anytype, comptime kinds: []const []const u8, now: i64, lease_until: i64) !?contract.Claimed {
