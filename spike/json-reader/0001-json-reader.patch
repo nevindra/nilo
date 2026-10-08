@@ -1,0 +1,659 @@
+--- a/http/json.zig
++++ b/http/json.zig
+@@ -234,6 +234,21 @@
+     input: []const u8,
+     options: std.json.ParseOptions,
+ ) std.json.ParseError(std.json.Scanner)!T {
++    if (comptime @import("jsonread.zig").supported(T)) {
++        return @import("jsonread.zig").parse(T, gpa, input, options) catch |err| {
++            if (err == error.DuplicateField) saySecondKey(gpa, input);
++            return err;
++        };
++    }
++    return parseLeakyStd(T, gpa, input, options);
++}
++
++pub fn parseLeakyStd(
++    comptime T: type,
++    gpa: std.mem.Allocator,
++    input: []const u8,
++    options: std.json.ParseOptions,
++) std.json.ParseError(std.json.Scanner)!T {
+     const Body = struct {
+         value: T,
+ 
+--- a/http/profile.zig
++++ b/http/profile.zig
+@@ -256,6 +256,7 @@
+     try serviceScale(gpa);
+     headerLookups();
+     contentTypeLookups();
++    try @import("jsonread.zig").differential(gpa);
+     try messageRoutes(gpa);
+     try taggedReads(gpa);
+     // A call is answered through the framing only a `-Dhttp2` build has
+--- /dev/null
++++ b/http/jsonread.zig
+@@ -0,0 +1,622 @@
++//! PROTOTYPE: one reader per type, bytes straight to the caller's struct.
++//!
++//! No `std.json.Scanner` on the hot path: the input is a slice, a value is
++//! read where the cursor is, and the type decides what comes next, so the code
++//! for a type is straight-line compare-and-store. A string with an escape in
++//! it is the one thing handed to `std.json.Scanner`, for that token alone, so
++//! the decoding (surrogate pairs and the rest) is std's and is not rewritten.
++
++const std = @import("std");
++const Str = @import("nilo_core").Str;
++const convert = @import("convert.zig");
++const mark = @import("jsonmark.zig");
++
++pub const Error = std.json.ParseError(std.json.Scanner);
++
++/// Whether this reader handles `T` whole. Anything else is `std.json`'s.
++pub fn supported(comptime T: type) bool {
++    return comptime supportedWithin(T, 0);
++}
++
++fn supportedWithin(comptime T: type, comptime depth: usize) bool {
++    if (depth > 6) return false;
++    if (T == Str) return true;
++    return switch (@typeInfo(T)) {
++        .bool, .int, .float => true,
++        .optional => |o| supportedWithin(o.child, depth + 1),
++        .pointer => |p| p.size == .slice and p.is_const and
++            (p.child == u8 or supportedWithin(p.child, depth + 1)),
++        .@"enum" => !std.meta.hasFn(T, "jsonParse"),
++        .@"struct" => |s| blk: {
++            if (s.is_tuple or std.meta.hasFn(T, "jsonParse") or @hasDecl(T, mark.parse_marker)) break :blk false;
++            for (s.fields) |f| if (f.is_comptime or !supportedWithin(f.type, depth + 1)) break :blk false;
++            break :blk true;
++        },
++        .@"union" => |u| blk: {
++            const m = mark.of(T) orelse break :blk false;
++            if (m.tag == null or u.tag_type == null) break :blk false;
++            for (m.tag.?) |ch| if (ch == '"' or ch == '\\' or ch < 0x20) break :blk false;
++            for (u.fields) |f| {
++                if (f.type == void) continue;
++                if (@typeInfo(f.type) != .@"struct" or !supportedWithin(f.type, depth + 1)) break :blk false;
++                if (@hasField(f.type, m.tag.?)) break :blk false;
++            }
++            break :blk true;
++        },
++        else => false,
++    };
++}
++
++pub fn parse(comptime T: type, arena: std.mem.Allocator, input: []const u8, options: std.json.ParseOptions) Error!T {
++    var r: Reader = .{ .in = input, .arena = arena, .options = options };
++    r.ws();
++    const value = try r.value(T, null, false);
++    r.ws();
++    if (r.i != r.in.len) return error.SyntaxError;
++    return value;
++}
++
++const Reader = struct {
++    in: []const u8,
++    i: usize = 0,
++    arena: std.mem.Allocator,
++    options: std.json.ParseOptions,
++
++    inline fn ws(r: *Reader) void {
++        while (r.i < r.in.len) switch (r.in[r.i]) {
++            ' ', '\t', '\r', '\n' => r.i += 1,
++            else => return,
++        };
++    }
++
++    inline fn peek(r: *Reader) Error!u8 {
++        if (r.i >= r.in.len) return error.UnexpectedEndOfInput;
++        return r.in[r.i];
++    }
++
++    inline fn expect(r: *Reader, ch: u8) Error!void {
++        if (r.i >= r.in.len) return error.UnexpectedEndOfInput;
++        if (r.in[r.i] != ch) return error.SyntaxError;
++        r.i += 1;
++    }
++
++    fn literal(r: *Reader, comptime word: []const u8) Error!void {
++        if (r.in.len - r.i < word.len) return error.UnexpectedEndOfInput;
++        if (!std.mem.eql(u8, r.in[r.i..][0..word.len], word)) return error.SyntaxError;
++        r.i += word.len;
++    }
++
++    fn value(r: *Reader, comptime T: type, comptime tag: ?[]const u8, comptime tag_again: bool) Error!T {
++        if (comptime T == Str) return Str.static(try r.readString());
++        switch (@typeInfo(T)) {
++            .bool => {
++                return switch (try r.peek()) {
++                    't' => blk: {
++                        try r.literal("true");
++                        break :blk true;
++                    },
++                    'f' => blk: {
++                        try r.literal("false");
++                        break :blk false;
++                    },
++                    else => error.UnexpectedToken,
++                };
++            },
++            .int => |i| {
++                const text = try r.numberText();
++                if (!convert.spelledAsNumber(text, i.signedness == .signed, false)) return error.InvalidNumber;
++                return std.fmt.parseInt(T, text, 10);
++            },
++            .float => {
++                const text = try r.numberText();
++                if (!convert.spelledAsNumber(text, true, true)) return error.InvalidNumber;
++                const parsed = try std.fmt.parseFloat(T, text);
++                if (!std.math.isFinite(parsed)) return error.Overflow;
++                return parsed;
++            },
++            .optional => |o| {
++                if (try r.peek() == 'n') {
++                    try r.literal("null");
++                    return null;
++                }
++                return try r.value(o.child, null, false);
++            },
++            .pointer => |p| {
++                if (comptime p.child == u8) return try r.readString();
++                try r.expect('[');
++                var list: std.ArrayList(p.child) = .empty;
++                r.ws();
++                if (try r.peek() == ']') {
++                    r.i += 1;
++                    return list.items;
++                }
++                while (true) {
++                    r.ws();
++                    try list.ensureUnusedCapacity(r.arena, 1);
++                    list.appendAssumeCapacity(try r.value(p.child, null, false));
++                    r.ws();
++                    switch (try r.peek()) {
++                        ',' => r.i += 1,
++                        ']' => {
++                            r.i += 1;
++                            return try list.toOwnedSlice(r.arena);
++                        },
++                        else => return error.SyntaxError,
++                    }
++                }
++            },
++            .@"enum" => |e| {
++                @setEvalBranchQuota(1000 + 20 * e.fields.len);
++                const name = try r.readString();
++                inline for (e.fields) |f| if (std.mem.eql(u8, name, f.name)) return @field(T, f.name);
++                return error.InvalidEnumTag;
++            },
++            .@"struct" => {
++                try r.expect('{');
++                return r.fields(T, tag, tag_again);
++            },
++            .@"union" => return r.union_(T),
++            else => comptime unreachable,
++        }
++    }
++
++    /// The fields of an object whose `{` is taken.
++    fn fields(r: *Reader, comptime T: type, comptime tag: ?[]const u8, comptime tag_again: bool) Error!T {
++        const s = @typeInfo(T).@"struct";
++        var out: T = undefined;
++        var seen = [_]bool{false} ** s.fields.len;
++
++        r.ws();
++        if (try r.peek() == '}') {
++            r.i += 1;
++        } else while (true) {
++            r.ws();
++            const key = try r.readKey();
++            r.ws();
++            try r.expect(':');
++            r.ws();
++            inline for (s.fields, 0..) |f, k| {
++                if (key.len == f.name.len and std.mem.eql(u8, key, f.name)) {
++                    if (seen[k]) return error.DuplicateField;
++                    @field(out, f.name) = try r.value(f.type, null, false);
++                    seen[k] = true;
++                    break;
++                }
++            } else {
++                if (comptime tag) |t| if (std.mem.eql(u8, key, t)) {
++                    if (comptime tag_again) return error.DuplicateField;
++                    try r.skip();
++                    r.ws();
++                    switch (try r.peek()) {
++                        ',' => {
++                            r.i += 1;
++                            continue;
++                        },
++                        '}' => {
++                            r.i += 1;
++                            break;
++                        },
++                        else => return error.SyntaxError,
++                    }
++                };
++                if (r.options.ignore_unknown_fields or comptime mark.ignoresUnknown(T)) {
++                    try r.skip();
++                } else return error.UnknownField;
++            }
++            r.ws();
++            switch (try r.peek()) {
++                ',' => r.i += 1,
++                '}' => {
++                    r.i += 1;
++                    break;
++                },
++                else => return error.SyntaxError,
++            }
++        }
++        inline for (s.fields, 0..) |f, k| {
++            if (!seen[k]) {
++                if (f.defaultValue()) |d| @field(out, f.name) = d else return error.MissingField;
++            }
++        }
++        return out;
++    }
++
++    fn union_(r: *Reader, comptime T: type) Error!T {
++        const key = comptime mark.of(T).?.tag.?;
++        const quoted = comptime "\"" ++ key ++ "\"";
++        const start = r.i;
++        try r.expect('{');
++        r.ws();
++        // The discriminator first, which is how it is written nearly always:
++        // the variant is known before a field of it is read.
++        if (std.mem.startsWith(u8, r.in[r.i..], quoted)) {
++            const save = r.i;
++            r.i += quoted.len;
++            r.ws();
++            if (r.i < r.in.len and r.in[r.i] == ':') {
++                r.i += 1;
++                r.ws();
++                const arm = try r.readString();
++                r.ws();
++                switch (try r.peek()) {
++                    ',' => {
++                        r.i += 1;
++                        r.ws();
++                        if (try r.peek() != '"') return error.SyntaxError;
++                    },
++                    '}' => {},
++                    else => return error.SyntaxError,
++                }
++                return r.variant(T, arm, true);
++            }
++            r.i = save;
++        }
++        // Anywhere else: one cheap pass for it, then the fields.
++        r.i = start;
++        const arm = try r.findTag(key);
++        r.i = start;
++        try r.expect('{');
++        return r.variant(T, arm, false);
++    }
++
++    /// Reads the variant `arm` names from the fields at the cursor. When
++    /// `first` the discriminator and its comma are already taken.
++    fn variant(r: *Reader, comptime T: type, arm: []const u8, comptime first: bool) Error!T {
++        const key = comptime mark.of(T).?.tag.?;
++        inline for (@typeInfo(T).@"union".fields, comptime mark.wireNames(T)) |f, wire| {
++            if (std.mem.eql(u8, arm, wire)) {
++                if (f.type == void) {
++                    // Anything beside the tag is unknown to a variant with no fields.
++                    try r.voidRest(key, first);
++                    return @unionInit(T, f.name, {});
++                }
++                return @unionInit(T, f.name, try r.fields(f.type, key, first));
++            }
++        }
++        return error.InvalidEnumTag;
++    }
++
++    fn voidRest(r: *Reader, comptime key: []const u8, comptime first: bool) Error!void {
++        r.ws();
++        if (try r.peek() == '}') {
++            r.i += 1;
++            return;
++        }
++        while (true) {
++            r.ws();
++            const name = try r.readKey();
++            r.ws();
++            try r.expect(':');
++            r.ws();
++            if (std.mem.eql(u8, name, key)) {
++                if (first) return error.DuplicateField;
++            } else if (!r.options.ignore_unknown_fields) return error.UnknownField;
++            try r.skip();
++            r.ws();
++            switch (try r.peek()) {
++                ',' => r.i += 1,
++                '}' => {
++                    r.i += 1;
++                    return;
++                },
++                else => return error.SyntaxError,
++            }
++        }
++    }
++
++    /// The value of the discriminator in the object at the cursor (its `{`
++    /// taken or not), refusing a second one.
++    fn findTag(r: *Reader, comptime key: []const u8) Error![]const u8 {
++        try r.expect('{');
++        var found: ?[]const u8 = null;
++        r.ws();
++        if (try r.peek() == '}') {
++            return error.MissingField;
++        }
++        while (true) {
++            r.ws();
++            const name = try r.readKey();
++            r.ws();
++            try r.expect(':');
++            r.ws();
++            if (std.mem.eql(u8, name, key)) {
++                if (found != null) return error.DuplicateField;
++                found = try r.readString();
++            } else try r.skip();
++            r.ws();
++            switch (try r.peek()) {
++                ',' => r.i += 1,
++                '}' => {
++                    r.i += 1;
++                    break;
++                },
++                else => return error.SyntaxError,
++            }
++        }
++        return found orelse error.MissingField;
++    }
++
++    /// A value passed over, checked to be well formed. Containers are kept
++    /// on a 64-bit stack, one bit a level, so it never recurses and never
++    /// allocates; a body nested deeper than 64 inside a skipped value is
++    /// refused.
++    fn skip(r: *Reader) Error!void {
++        var stack: u64 = 0;
++        var depth: u7 = 0;
++        while (true) {
++            r.ws();
++            switch (try r.peek()) {
++                '{' => {
++                    r.i += 1;
++                    r.ws();
++                    if (try r.peek() == '}') {
++                        r.i += 1;
++                    } else {
++                        if (depth == 64) return error.SyntaxError;
++                        stack |= @as(u64, 1) << @intCast(depth);
++                        depth += 1;
++                        _ = try r.string(false);
++                        r.ws();
++                        try r.expect(':');
++                        continue;
++                    }
++                },
++                '[' => {
++                    r.i += 1;
++                    r.ws();
++                    if (try r.peek() == ']') {
++                        r.i += 1;
++                    } else {
++                        if (depth == 64) return error.SyntaxError;
++                        stack &= ~(@as(u64, 1) << @intCast(depth));
++                        depth += 1;
++                        continue;
++                    }
++                },
++                '"' => _ = try r.string(false),
++                't' => try r.literal("true"),
++                'f' => try r.literal("false"),
++                'n' => try r.literal("null"),
++                else => _ = try r.numberText(),
++            }
++            while (true) {
++                if (depth == 0) return;
++                r.ws();
++                const in_object = (stack >> @intCast(depth - 1)) & 1 == 1;
++                switch (try r.peek()) {
++                    ',' => {
++                        r.i += 1;
++                        if (in_object) {
++                            r.ws();
++                            _ = try r.string(false);
++                            r.ws();
++                            try r.expect(':');
++                        }
++                        break;
++                    },
++                    '}' => {
++                        if (!in_object) return error.SyntaxError;
++                        r.i += 1;
++                        depth -= 1;
++                    },
++                    ']' => {
++                        if (in_object) return error.SyntaxError;
++                        r.i += 1;
++                        depth -= 1;
++                    },
++                    else => return error.SyntaxError,
++                }
++            }
++        }
++    }
++
++    /// An object key: borrowed from the input, never copied.
++    inline fn readKey(r: *Reader) Error![]const u8 {
++        return r.string(false);
++    }
++
++    /// A string value: copied into the arena, as `std.json` copies.
++    inline fn readString(r: *Reader) Error![]const u8 {
++        return r.string(true);
++    }
++
++    /// A JSON number's text, or a string's contents, which is what an integer
++    /// or a float is read from (ADR 084).
++    fn numberText(r: *Reader) Error![]const u8 {
++        const c = try r.peek();
++        if (c == '"') return r.readString();
++        const start = r.i;
++        var j = r.i;
++        if (j < r.in.len and r.in[j] == '-') j += 1;
++        if (j >= r.in.len) return error.UnexpectedEndOfInput;
++        if (r.in[j] == '0') {
++            j += 1;
++        } else if (r.in[j] >= '1' and r.in[j] <= '9') {
++            while (j < r.in.len and r.in[j] >= '0' and r.in[j] <= '9') j += 1;
++        } else return error.UnexpectedToken;
++        if (j < r.in.len and r.in[j] == '.') {
++            j += 1;
++            const from = j;
++            while (j < r.in.len and r.in[j] >= '0' and r.in[j] <= '9') j += 1;
++            if (j == from) return error.SyntaxError;
++        }
++        if (j < r.in.len and (r.in[j] == 'e' or r.in[j] == 'E')) {
++            j += 1;
++            if (j < r.in.len and (r.in[j] == '+' or r.in[j] == '-')) j += 1;
++            const from = j;
++            while (j < r.in.len and r.in[j] >= '0' and r.in[j] <= '9') j += 1;
++            if (j == from) return error.SyntaxError;
++        }
++        r.i = j;
++        return r.in[start..j];
++    }
++
++    /// A string's contents, copied into the arena when `copy`.
++    fn string(r: *Reader, comptime copy: bool) Error![]const u8 {
++        if (try r.peek() != '"') return error.UnexpectedToken;
++        const open = r.i + 1;
++        var j = open;
++        const V = @Vector(16, u8);
++        var high = false;
++        scan: while (true) {
++            if (j + 16 <= r.in.len) {
++                const block: V = r.in[j..][0..16].*;
++                const stop = (block == @as(V, @splat('"'))) | (block == @as(V, @splat('\\'))) | (block < @as(V, @splat(0x20)));
++                const bits: u16 = @bitCast(stop);
++                if (bits == 0) {
++                    high = high or @reduce(.Or, block >= @as(V, @splat(0x80)));
++                    j += 16;
++                    continue :scan;
++                }
++                const n = @ctz(bits);
++                if (n > 0) high = high or @reduce(.Or, (block >= @as(V, @splat(0x80))) & (std.simd.iota(u8, 16) < @as(V, @splat(@intCast(n)))));
++                j += n;
++                break :scan;
++            }
++            while (j < r.in.len and r.in[j] != '"' and r.in[j] != '\\' and r.in[j] >= 0x20) : (j += 1) {
++                high = high or r.in[j] >= 0x80;
++            }
++            break :scan;
++        }
++        if (j >= r.in.len) return error.UnexpectedEndOfInput;
++        switch (r.in[j]) {
++            '"' => {
++                const text = r.in[open..j];
++                if (high and !std.unicode.utf8ValidateSlice(text)) return error.SyntaxError;
++                r.i = j + 1;
++                if (comptime !copy) return text;
++                const owned = try r.arena.alloc(u8, text.len);
++                @memcpy(owned, text);
++                return owned;
++            },
++            '\\' => {
++                // The std scanner decodes this one token.
++                var scan = std.json.Scanner.initCompleteInput(r.arena, r.in[r.i..]);
++                const token = try scan.nextAllocMax(r.arena, .alloc_always, (r.options.max_value_len orelse r.in.len));
++                r.i += scan.cursor;
++                return switch (token) {
++                    .allocated_string => |s| s,
++                    else => error.UnexpectedToken,
++                };
++            },
++            else => return error.SyntaxError,
++        }
++    }
++};
++
++// ---- differential test against the std.json-based reader ----
++
++const Inner = struct { n: u8, tags: []const []const u8 = &.{}, ok: ?bool = null };
++const Shape = enum { round, square };
++const Shot = union(enum) {
++    pub const nilo_json = .{ .tag = "kind" };
++    pub const jsonParse = mark.parseFor(@This());
++    click: struct { id: u32, x: i32, label: []const u8 = "" },
++    key: struct { code: u16, inner: ?Inner = null },
++    idle,
++};
++const Doc = struct {
++    id: u32,
++    name: []const u8,
++    ratio: f64 = 1.5,
++    shape: Shape = .round,
++    inner: Inner = .{ .n = 0 },
++    list: []const Shot = &.{},
++    maybe: ?i64 = null,
++    s: Str = Str.static("x"),
++};
++
++const seeds = [_][]const u8{
++    \\{"id":7,"name":"a\u00e9b","ratio":2.5e1,"shape":"square","inner":{"n":3,"tags":["x","y\n"],"ok":true},"list":[{"kind":"click","id":1,"x":-2,"label":"hi"},{"kind":"key","code":65,"inner":{"n":1}},{"kind":"idle"},{"id":4,"x":5,"kind":"click"}],"maybe":-9,"s":"zz"}
++    ,
++    \\{ "id" : 12 , "name" : "plain" , "list" : [ ] , "maybe" : null }
++    ,
++    \\{"id":"10","name":"q","ratio":"3","inner":{"n":255}}
++    ,
++    \\{"name":"héllo wörld","id":1,"list":[{"kind":"idle","extra":1}]}
++    ,
++};
++
++var pairs: [64][2]u16 = undefined;
++var npairs: usize = 0;
++
++fn same(comptime T: type, a: Error!T, b: Error!T, stats: *[4]usize) !void {
++    if (a) |x| {
++        if (b) |y| {
++            stats[0] += 1;
++            try std.testing.expectEqualDeep(x, y);
++        } else |e| {
++            std.debug.print("std refused what direct read: {s}\n", .{@errorName(e)});
++            return error.Mismatch;
++        }
++    } else |ea| {
++        if (b) |_| {
++            std.debug.print("direct refused what std read: {s}\n", .{@errorName(ea)});
++            return error.Mismatch;
++        } else |eb| {
++            stats[1] += 1;
++            if (ea != eb) {
++                stats[2] += 1;
++                var known = false;
++                for (pairs[0..npairs]) |pr| if (pr[0] == @intFromError(ea) and pr[1] == @intFromError(eb)) {
++                    known = true;
++                };
++                if (!known and npairs < pairs.len) {
++                    pairs[npairs] = .{ @intFromError(ea), @intFromError(eb) };
++                    npairs += 1;
++                    std.debug.print("  direct {s} / std {s}\n", .{ @errorName(ea), @errorName(eb) });
++                }
++            }
++        }
++    }
++}
++
++pub fn differential(gpa: std.mem.Allocator) !void {
++    var prng = std.Random.DefaultPrng.init(0x5eed);
++    const rnd = prng.random();
++    var stats = [_]usize{0} ** 4;
++    var arena = std.heap.ArenaAllocator.init(gpa);
++    defer arena.deinit();
++    var buf: [1024]u8 = undefined;
++    const json = @import("json.zig");
++    var n: usize = 0;
++    const alphabet = "{}[]\",:0123456789-+.eE tfnul\\/ux\x00\xff";
++    while (n < 400_000) : (n += 1) {
++        const seed = seeds[n % seeds.len];
++        @memcpy(buf[0..seed.len], seed);
++        var len = seed.len;
++        const edits = rnd.uintLessThan(usize, 4);
++        for (0..edits) |_| {
++            if (len == 0) break;
++            const at = rnd.uintLessThan(usize, len);
++            switch (rnd.uintLessThan(usize, 4)) {
++                0 => buf[at] = alphabet[rnd.uintLessThan(usize, alphabet.len)],
++                1 => {
++                    std.mem.copyForwards(u8, buf[at .. len - 1], buf[at + 1 .. len]);
++                    len -= 1;
++                },
++                2 => if (len < buf.len) {
++                    std.mem.copyBackwards(u8, buf[at + 1 .. len + 1], buf[at..len]);
++                    buf[at] = alphabet[rnd.uintLessThan(usize, alphabet.len)];
++                    len += 1;
++                },
++                else => len = at,
++            }
++        }
++        const input = buf[0..len];
++        const a = json.parseLeakyStd(Doc, arena.allocator(), input, .{});
++        const b = @import("jsonread.zig").parse(Doc, arena.allocator(), input, .{});
++        same(Doc, b, a, &stats) catch |e| {
++            std.debug.print("input: {s}\n", .{input});
++            return e;
++        };
++        const c = json.parseLeakyStd(Shot, arena.allocator(), input, .{});
++        const d = parse(Shot, arena.allocator(), input, .{});
++        same(Shot, d, c, &stats) catch |e| {
++            std.debug.print("input (Shot): {s}\n", .{input});
++            return e;
++        };
++        _ = arena.reset(.{ .retain_with_limit = 1 << 20 });
++    }
++    std.debug.print("differential: {d} equal reads, {d} refusals by both ({d} named differently)\n", .{ stats[0], stats[1], stats[2] });
++}
