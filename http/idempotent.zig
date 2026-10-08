@@ -7,6 +7,11 @@
 //! fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder, db: *sql.Db, c: *nilo.Ctx) !nilo.Status(201, Order)
 //! ```
 //!
+//! **The answers are as shared as the Space that keeps them.** A `cache.Space`
+//! is one process's, so a retry the balancer sends to a second instance runs
+//! the handler again; a rolling deploy is two instances while it lasts (ADR
+//! 110). Once across instances needs a store they share.
+//!
 //! The client sends `Idempotency-Key: <something it made up>` and retries
 //! with the same key until it gets an answer. The first request runs the
 //! handler and keeps what it answered; every later one with that key gets

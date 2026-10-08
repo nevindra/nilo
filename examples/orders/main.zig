@@ -806,7 +806,7 @@ fn auditTrail(audit: *Audit, arena: Allocator) ![]const Audit.Entry {
 /// This handler takes a `*Ctx` because there is no argument that means "the
 /// body, in pieces" — and taking one has a price this example is the right
 /// place to name: **a route that drops to `*Ctx` drops out of the generated
-/// document.** Nothing at startup says so.
+/// document.** `listen()` counts the routes in that state, and says how many.
 fn attachInvoice(c: *nilo.Ctx, orders: *Orders, arena: Allocator, id: u32) !void {
     if (try orders.get(arena, id) == null) return fail.notFound("no order {d}", .{id});
 

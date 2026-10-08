@@ -225,6 +225,8 @@ try app.useOn("/api", nilo.allowance.keyed(account, .{
 
 Two behaviours are deliberate, and both make the same trade ([ADR 092](../adr/092-an-allowance-is-a-table-sized-while-compiling.md)). When the table is full, it **forgets the address that has been quiet longest** rather than making two addresses share one allowance. And when two requests reach the same slot at the same instant, it **lets both through**. Being loose for one window is a smaller mistake than rejecting somebody who has made no requests at all.
 
+**The table belongs to one process.** Two instances keep two tables, so `.per_window = 100` admits 200, and a rolling deploy is two instances while it lasts ([ADR 110](../adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). A limit that has to hold across instances is not something `allowance` can give yet.
+
 **It is not a defence against a flood.** A rejected request is still read, parsed, matched and answered: cheaply, but not for free. Somebody opening ten thousand sockets is stopped by `max_connections` on `listen`, which counts per process rather than per address.
 
 ## Resolved values

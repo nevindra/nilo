@@ -186,7 +186,7 @@ It takes the same arguments and returns the same value, errors included. It allo
 |---|---|
 | a database driver: `libpq`, SQLite, a socket you opened yourself | `nilo.blocking` |
 | `std.fs`: reading or writing a file | `nilo.blocking` |
-| `std.http.Client`, or any call out to another service | `nilo.blocking` |
+| a call out to another service | [`nilo_fetch`](./fetch.md), which parks; `std.http.Client` parks too when it is given `c.io()` ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)), and needs `nilo.blocking` only when it is given an `Io` of its own |
 | a `std.Thread.Mutex`, semaphore, or channel from `std` | `nilo.Mutex` |
 | sleeping, backing off, waiting out a rate limit | `try nilo.sleep(ms)` |
 

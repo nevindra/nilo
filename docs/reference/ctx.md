@@ -212,7 +212,7 @@ The cookie is named `__Host-session` (`nilo.session.host_cookie_name`) when it i
 | `fail.tooLarge(…)` | 413 |
 | `fail.unprocessable(…)` | 422 |
 | `fail.tooManyRequests(…)` | 429 |
-| `fail.internal(…)` | 500: logged, not sent |
+| `fail.internal(…)` | 500; the message is sent to the client like every other fail function's |
 | `fail.status(code, fmt, args)` | any status |
 
 **All of them return `error.Failed`.** The message goes into a 240-byte slot with no allocation, and is sent as `{"error": "…", "status": 404}`, the same shape for every failure whatever the endpoint returns when it succeeds, or as the struct `app.failures(T)` named, filled from the same status and message ([ADR 024](../adr/024-every-failure-answers-as-json.md)). The guide page is [Errors](../guide/errors.md).

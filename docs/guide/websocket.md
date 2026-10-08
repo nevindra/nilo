@@ -148,6 +148,8 @@ That loop is the same one an echo server writes. Nothing in it mentions the othe
 
 So `say` does not write. It rings a bell on each seat, and each connection's own fiber does the writing. That is why one client that stops reading affects only that client, and why a full backlog is handled by a policy set on the room (`.drop_oldest` by default, or `.drop_newest`, with `room.missed(&socket)` reporting how many were dropped) rather than by disconnecting ([ADR 035](../adr/035-a-broadcast-rings-a-bell-it-does-not-write.md)). It adds 4 measured bytes per idle connection. The earlier design needed a second fiber per connection, costing 8,673 bytes against a per-connection budget that was 8,767 at the time, which is what kept this feature off the list for two stages ([ADR 028](../adr/028-a-spawned-fiber-belongs-to-the-server.md)).
 
+**A room belongs to one process.** A message said on one instance reaches only the sockets joined on that instance, so a chat served from two instances is two chats, and nothing says so at run time ([ADR 110](../adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). Serve a room from one instance until a bridge between instances exists.
+
 That work also produced [`nilo.spawn`](../reference/app.md#concurrency), for work that is not a request at all.
 
 ## Reaching one user on every tab (`nilo.Rooms`)

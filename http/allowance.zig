@@ -5,6 +5,10 @@
 //! try app.useOn("/api", allowance.with(.{ .per_window = 100, .window_s = 60 }));
 //! ```
 //!
+//! **One process's table.** Two instances keep two, so a limit of 100
+//! admits 200: it holds per instance, not per deployment, and a rolling
+//! deploy is two instances while it lasts (ADR 110).
+//!
 //! **The shape is decided by the budget rather than by the algorithm.** Every
 //! other framework keys a map by the client's address, which is a hash and an
 //! allocation on the path of every request it guards — and one allocation per

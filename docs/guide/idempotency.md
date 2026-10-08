@@ -62,6 +62,8 @@ It is a cache Space rather than a table of nilo's own because a saved answer is 
 
 **nilo needs the Space's methods, not `nilo_cache` itself.** `nilo_http` names no cache. What it asks of `Replays` is `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held`, which a `nilo_cache` bytes Space has. `putIfAbsentFor(key, value, ttl_s)` is the claim with a lifetime of its own, which is how the in-flight marker expires after two minutes even when the Space keeps answers for a day. A type of your own over Redis could have them too, for a key that has to survive a restart or be shared between instances.
 
+**A `cache.Space` belongs to one process, and so does the answer it keeps.** A retry that the balancer sends to a second instance finds nothing there and runs the handler again, and a rolling deploy is two instances while it lasts ([ADR 110](../adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). A route that must answer once across instances needs a `Replays` type whose store they share.
+
 ## Keys per caller (`.by`)
 
 **`.by` says whose key it is, because the header alone cannot.** Two clients that both pick `1` as their first key are two different clients, and a key saved without saying whose would hand the second client the first one's order. So `.by` is a function of one `*Ctx` returning `?Str` (the account, the tenant, the API key, whatever tells callers apart), and the saved answer is filed under both. A [resolved value](./middleware.md#resolved-values) is the usual source:

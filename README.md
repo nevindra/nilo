@@ -296,6 +296,7 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 - **Templates.** If your app is mostly HTML, [jetzig](https://www.jetzig.dev/) is built for it.
 - **HTTP/2 in the default build.** It is behind `.http2 = true`, and a browser reaches it only over TLS, which is `.tls = true` or a proxy in front ([deploying guide](./docs/guide/deploying.md#tls-and-a-reverse-proxy)). With both flags a TLS listener offers `h2` and `http/1.1` and serves every route on either; gRPC rides it, unary calls only ([gRPC guide](./docs/guide/grpc.md)).
 - **Revoking a session.** Sessions are sealed into the cookie, so there's no session table to delete from.
+- **State shared between instances.** The cache, rate limits, idempotency keys and WebSocket rooms live in the process. At two instances, which a rolling deploy always is for a while, each keeps its own: a limit of 100 admits 200, a retried request that reaches the other instance runs again, and a room message reaches only that instance's sockets ([ADR 110](./docs/adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)).
 
 Each of these was decided on purpose; [`docs/decided.md`](./docs/decided.md) says why.
 

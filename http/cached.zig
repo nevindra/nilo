@@ -7,6 +7,10 @@
 //! fn frontPage(page: nilo.Cached(Pages, .{ .ttl_s = 60 }), db: *sql.Db, c: *nilo.Ctx) !Front
 //! ```
 //!
+//! **The cache is as shared as the Space that holds it.** A `cache.Space` is
+//! one process's, so two instances keep two copies and can answer the same
+//! path differently inside `ttl_s` (ADR 110).
+//!
 //! The first request runs the handler and keeps what it returned under the
 //! path and the query; every request for the same path and query inside
 //! `ttl_s` gets that back, byte for byte, with `Cache-Status: nilo; hit` on

@@ -133,7 +133,7 @@ fn placeOrder(b: nilo.Bound(NewOrder)) !nilo.Status(201, Order) {
 
 `b.fail()` is a 422 naming each one, and `b.failures()` is there when the answer needs a shape of its own. `b.must("total", order.total > 0, "has to be more than nothing")` adds a rule of your own to the same answer, so an endpoint does not end up rejecting requests in two different shapes. `Bound(Query(T))` does the same for the query string. The full explanation, including the three cases that stay a plain 400, is under [Forms](./forms.md#collecting-every-field-error-bound), where it matters most. The type is [`Bound(W)`](../reference/handlers.md#boundw) in the reference.
 
-One difference to know: in JSON a quoted value **is** text, so `{"quantity":"12"}` fails as `"quantity" has to be a whole number, not text`, not as a number that would not parse. A form has only text to work with; a JSON body says what kind each value is.
+A number field in a JSON body also takes the number quoted, so `{"quantity":"12"}` is twelve, held to the same spelling rule as an unquoted one and as a form field's text.
 
 **A number in a body is read by the same rule a query's is** ([ADR 084](../adr/084-a-number-in-a-request-is-not-a-zig-literal.md)). Digits, a `-` where the type has one, and for a real number a fraction and an exponent, so a quoted `"10"` is still ten and `"1_0"`, `"+7"` and `"nan"` are refused. A whole number is digits: `5.0` and `1e2` are not read as 5 and 100, and `1e999` is not read as infinity. A number that is the right kind and does not fit its field says so and quotes the number, as a query does:
 
