@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**nilo is a toolkit for Zig 0.16: twelve modules, of which the largest is an HTTP server.** What they share is one idea: **your types are the contract, and the compiler is the check.** A plain Zig function is a route, and its argument list produces routing, typed input, a 400 for anything that does not fit, and an OpenAPI document. A plain struct is a table, and its fields produce the SQL before the program starts. Nothing is annotated.
+**nilo is an HTTP framework for Zig 0.16, and the toolkit it is built from: twelve modules, of which the largest is the framework.** The repository is the Toolkit and `nilo_http` is the Framework (`CONTEXT.md` has both words). What they share is one idea: **your types are the contract, and the compiler is the check.** A plain Zig function is a route, and its argument list produces routing, typed input, a 400 for anything that does not fit, and an OpenAPI document. A plain struct is a table, and its fields produce the SQL before the program starts. Nothing is annotated.
 
 **A module gets built because the job is common, not because it is interesting**, and it gets in only if it is expressible as a type the caller already wrote, checked while compiling, with its cost written down (ADR 017). The README's three words, helpful, quick, cheerful, are the order the trades are made in.
 
@@ -14,6 +14,16 @@ Four places carry context this one does not repeat:
 - **`docs/adr/`**: the binding decisions, each naming the alternative it rejected, and each the rule in force: a change to a decision edits its ADR in place, and a new number is for a new decision (ADR 221). Every ADR names its topic; a topic with a page in `docs/design/` is where to start reading it. Check here before proposing a design change; "why not X?" usually has an answer on file. The ADRs were renumbered once to three digits, so a four-digit number is an old one: `docs/adr/renumbered.md` translates it, and `zig build adr-check` refuses it anywhere else. **ADR 038 decides which module new work goes in and what that module may import**; read it before adding a file anywhere but `http/`, and ADR 039 and 063 before adding a module.
 - **`docs/reference/`**: the whole public API, one page a module.
 - **`docs/README.md`**: the map, one row per topic with its guide, reference and design page. Every doc page's line 3 says what it is and line 5 links its other two layers, so `head -5` over a folder is its table of contents (ADR 236).
+
+## Guiding principles
+
+These come before everything below, and a proposal that breaks one says which and why.
+
+1. **Developer experience comes first, and performance comes with it, not after it.** When the two pull apart, DX wins, within ADR 017's budget: below 10% of throughput and p99, and never a byte of the two hard axes (allocations per request, memory per idle connection). Fast and small are numbers on the record, not adjectives: a run in `bench/result/` behind each figure.
+2. **The best developer experience the language allows, and the user's code kept safe while giving it.** The type they already wrote is the API, a mistake is a compile error naming it (a refusal) before it is a runtime one, and nothing gets easier by getting less safe: a convenience that would need undefined behaviour in ReleaseFast, a panic a request can reach, or a lifetime the compiler cannot see does not ship.
+3. **Build the clean, proper and beautiful solution, not the quick one.** nilo is growing, and a bad design that gets improved instead of replaced keeps producing more of itself. The edge of a young project is that things are expected to break: a breaking change that buys the cleaner design is paid now, with a `CHANGELOG.md` entry saying what a user changes, rather than carried for ever. What this does not license is shipping in a worse shape to ship sooner; a design that cannot fit the four axes waits for one that does.
+4. **Be objective.** A claim rests on code read or a number measured, and says which. Say where a proposal is weak, the user's and your own included, recommend against it when the evidence does, and report a result that went the wrong way as plainly as one that went the right way.
+5. **A recommendation is tested before it is given, and again after.** Put it against the real cases (the clients, proxies, protocols and other frameworks that meet it), against every stage the roadmap says comes later, and against what it closes off; then give it, with what it fails at. Never "this now, that later" when the later thing is one many others depend on: that is the design deferred, not simplified. Design it whole and build it in stages.
 
 ## Who works here
 
@@ -48,8 +58,8 @@ A request: `readHead` → `parseHead` → the head is *borrowed* from the read b
 | flag | brings | ADR |
 |---|---|---|
 | `.sql = true` (`-Dsql`) | pg.zig (with buffer, metrics, xsync, tls) and zqlite (the SQLite amalgamation, compiled `ReleaseFast` by `zqliteFor` whatever the program's mode; zqlite's Zig keeps the program's) | 066, 249 |
-| `.tls = true` (`-Dtls`) | tls.zig; without it there is no `tls` module and the Engine's every use is under `@import("nilo_build").tls` | 212 |
-| `.grpc = true` (`-Dgrpc`) | nothing: HTTP/2, HPACK and gRPC are `http/h2.zig`, `hpack.zig`, `grpc.zig`. A call becomes an in-memory HTTP/1.1 `POST` to `App.handleRequest`, so a gRPC method is an ordinary route | 220 |
+| `.tls = true` (`-Dtls`) | tls.zig; without it there is no `tls` module and the Engine's every use is under `@import("nilo_build").tls`. With `.http2` as well, a TLS listener offers `h2` and `http/1.1` by ALPN and serves what was chosen | 212, 259 |
+| `.http2 = true` (`-Dhttp2`) | nothing: HTTP/2 and gRPC are `http/h2.zig`, `hpack.zig`, `h2conn.zig` (the connection) and `grpc.zig` (the envelope). A call reaches the App as its fields and its message through `serve.serveRequest` (`Arrival.call`), held to every rule an HTTP/1.1 head is (RFC 9113 §8 for any method), so a gRPC method is an ordinary route and any other request is served as HTTP, on a plain listener by its first bytes and on a TLS one by ALPN. A WebSocket stays HTTP/1.1 | 220, 259 |
 | `.libdeflate = true` (`-Dlibdeflate`) | libdeflate's compressor, from its release tarball, compiled `ReleaseFast` and `FREESTANDING` by `libdeflateFor` in `build.zig`, never with `lib/utils.c` (whose weak `memcpy` would win the link for the whole program). `compress.backend` picks it for the pool and for static gzip | 248 |
 
 It is the flag, not `.lazy = true`, that keeps a dependency out: `b.lazyDependency` is a request, and called unconditionally it ran for every dependent. This repository's own http test root is built with TLS and gRPC whatever the flags say, and links libdeflate so `compress.zig`'s tests hold both pools; its App keeps the default backend, so `zig build test -Dlibdeflate` is the run of the App through libdeflate. `zig build fetch-check -Dnetwork` builds `bench/dependent/` against two cold caches and fails on anything but zio landing; it needs the internet, so it is not on `test`.
@@ -67,10 +77,13 @@ zig build test-fetch-engine  # an outbound deadline firing against a real port; 
 zig build test-sql     # nilo_sql, with test-job-sql and refusals-sql; Postgres if DATABASE_URL reaches one,
                        #   and a failure without one where $CI is set (-Ddatabase-required=false)
 zig build layering     # no module imports upward or sideways
+zig build park-check   # a plain idle connection holds one page of stack (two on -Dtls), never a second or third; on test.
+                       #   Linux x86-64 host and target only: anywhere else the step is named "skipped" and succeeds (ADR 062)
 zig build two-modes    # configure a dependent asking for nilo in Debug and ReleaseSafe; on test
 zig build adr-check    # ADR files, their Topic lines, and every ADR cited exists; on test
-zig build docs-check   # every doc page's head, prose, links and anchors, the map, the reference's heading list; on test
-zig build docs-index   # rewrite the reference's list of every heading after renaming or adding one
+zig build docs-check   # every doc page's head, prose, links and anchors, the map, the reference's heading list,
+                       #   the roadmap's lists of todo entries, and the todo list ranked at this version; on test
+zig build docs-index   # rewrite the reference's list of every heading, and the roadmap's lists of todo entries
 zig build refusals     # the framework's table only; refusals-{sql,config,pw,cache,s3,job,fetch,proto} for the others
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build every example; run-{hello,rest,orders,forms,spa,embedded,stream,chat,scheduled,outbound,sqlite}
@@ -160,20 +173,21 @@ The habits, each of which caught something here (the cases are under *Measuring*
 | how a topic's decisions fit together | its page in `docs/design/`, linked from each ADR's `**Topic:**` line |
 | a lesson: a number measured, a premise that turned out false, a design tried and lost | `docs/history.md`, as one paragraph under the theme it teaches (its header has the rules) |
 | what a user has to change | `CHANGELOG.md`, under `## Unreleased` |
-| what is still open | `docs/roadmap.md` (its own rules are under [How this file is written](docs/roadmap.md#how-this-file-is-written)) |
+| a direction the framework is heading, larger than one change | `docs/roadmap.md` (its rules are under [How this file is written](docs/roadmap.md#how-this-file-is-written)) |
+| a concrete item still open: a defect, a decision, a question, a measurement, an upstream fix | `docs/todo.md`, in the tier P0 to P3 its evidence puts it (its own rules are under [How this file is written](docs/todo.md#how-this-file-is-written)) |
 | a question answered, a gap kept as the rule, a feature refused with its reason | `docs/decided.md` |
 | a risk with no mechanism under it yet | `docs/risks.md`, under `## Open` |
 | a benchmark run | `bench/result/` |
 | a new guide page | `docs/guide/`, with the five-line head and a row in `docs/README.md` (`docs-check` refuses either missing), plus a line in `nav:` in `mkdocs.yml` or CI's `docs` job fails |
 | a new reference or design page, or a renamed heading on one | the five-line head, a link in `docs/README.md`, and `zig build docs-index` for the reference's heading list |
 
-**The roadmap holds nothing built and nothing decided.** When something ships its entry leaves entirely, no strikethrough; what was learned moves to `docs/history.md`. Every entry opens with its whole claim in bold and closes with a `Needs:` or `What would settle it:` line, which is what makes a blocker that has quietly stopped being one findable. **`docs/history.md` stays short**: a lesson, not an account of what shipped, and a lesson learned again extends its entry rather than adding one.
+**The roadmap and the todo list hold nothing built and nothing decided.** The roadmap is a few directions grouped by when (Now, Alongside, Next, Later); the todo list is every concrete item, ranked P0 to P3 by the evidence that it matters and never by who has asked. A todo entry that serves a direction says so on a `**Direction:**` line, `zig build docs-index` writes each direction's list from those lines, and `docs-check` refuses a stale one. A release bumps `build.zig.zon`, and `docs-check` then refuses the todo list until its `Ranked at` line is brought up to it by ranking it again. When something ships its entry leaves entirely, no strikethrough; what was learned moves to `docs/history.md`. Every entry opens with its whole claim in bold and closes with a `Needs:` or `What would settle it:` line, which is what makes a blocker that has quietly stopped being one findable. **`docs/history.md` stays short**: a lesson, not an account of what shipped, and a lesson learned again extends its entry rather than adding one.
 
 Cutting a release (the version bumps, the pinned `?ref=#commit`, the release page) is [`docs/releasing.md`](docs/releasing.md).
 
 ## Refused on the record
 
-Templates and HTTP/2 for ordinary routes are decisions, not gaps (README "What it won't do", ADR 027); propose a change to the ADR instead of adding them. gRPC moved the same way: behind `-Dgrpc`, unary only, on a listener of its own (ADR 220), with streaming and h1 plus h2c on one port waiting for a caller. TLS is the precedent for moving one: an option behind a build flag, the default build unchanged on the memory axis and 2.8 KB on the size one, and every number on the record before it shipped (ADR 212).
+Templates are a decision, not a gap (README "What it won't do"); propose a change to the ADR instead of adding them. HTTP/2 moved: it is behind `-Dhttp2`, never in the default build, and in that build every listener answers it beside HTTP/1.1, a plain one by the client's first bytes and a TLS one by ALPN (ADR 259, ADR 027, ADR 220); a WebSocket stays HTTP/1.1 (ADR 260), gRPC is unary only, and streaming is on the roadmap. TLS is the precedent for moving one: an option behind a build flag, the default build unchanged on the memory axis and 2.8 KB on the size one, and every number on the record before it shipped (ADR 212).
 
 <!-- devrun:begin -->
 ## Running this project's services

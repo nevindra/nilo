@@ -1,14 +1,18 @@
 # nilo
 
-A toolkit for Zig — twelve modules for the ordinary jobs, of which the largest is an HTTP server. It puts the comfort of writing code first, with performance as a consequence rather than the other way round. It is aimed at people who are used to Go or Node and are giving Zig a try.
+An HTTP framework for Zig, and the toolkit it is built from: twelve modules for the ordinary jobs, of which the largest is the framework. It puts the comfort of writing code first, and keeps performance alongside it rather than after it. It is aimed at people who are used to Go or Node and are giving Zig a try.
 
 ## Language
 
 ### Layers
 
 **Toolkit**:
-What the repository is: a set of modules held together by one idea — your types are the contract and the compiler is the check — rather than by an event loop. The server is the largest module and not the centre. A module earns its place by the job being common, and the ones a program does not import cost it nothing.
-_Avoid_: framework, library, suite, batteries-included, ecosystem
+What the repository is: a set of modules held together by one idea — your types are the contract and the compiler is the check — rather than by an event loop. The Framework is the largest module and not the centre: it is built from the same modules a program without a server imports. A module earns its place by the job being common, and the ones a program does not import cost it nothing.
+_Avoid_: library, suite, batteries-included, ecosystem; framework, for the repository as a whole
+
+**Framework**:
+What `nilo_http` is: it calls the code you wrote, where a module of the Toolkit is called by it. A route is a function nilo calls, and nilo owns what is around the call: the connection, the routing, the request's memory, the answer. The word names `nilo_http` and nothing else; the repository is the Toolkit, and "an HTTP framework for Zig, and the toolkit it is built from" is the two together.
+_Avoid_: library
 
 **Layer**:
 Where a module sits, decided by one question — does it need the event loop? Core needs none, an App owns one, a Service needs one and does not own it. A module imports downward only and never a sibling, which is what makes two modules two separate pieces of work. Core is the layer that holds more than one module, and the vocabulary sits under the rest of it.
@@ -108,6 +112,14 @@ _Avoid_: wildcard route, splat, glob
 A response written in pieces because its length is not known when the head goes out. Held by the handler, not returned by it. Nothing is allocated per piece, and `finish` is what says where the body ends.
 _Avoid_: chunked response, writer, body writer
 
+**Trailer**:
+A field sent after the body, for what is known only once the body is. Set with `c.setTrailer` until the body ends; HTTP/2 sends it after the body, a chunked HTTP/1.1 stream as its trailer section, and a whole HTTP/1.1 answer only when the client sent `TE: trailers`.
+_Avoid_: footer, late header, trailing header
+
+**Held answer**:
+An answer a middleware kept back with `next.hold(c)`, so it can read and change it before the chain unwinds and it is written. A body sent under a hold is copied into the request arena.
+_Avoid_: buffered response, deferred response, post-processing
+
 **Body reader**:
 A request body taken in pieces rather than held whole, for the ones too big for the request arena. Bounded by the buffer the handler passes in, and allocates nothing. A body left half-read is finished off by nilo, so the connection stays usable.
 _Avoid_: upload stream, multipart, file handle
@@ -129,6 +141,10 @@ _Avoid_: Server, Router, Engine
 **Service**:
 A long-lived thing registered once when the App is built — a database connection, config, a logger — then asked for by handlers according to its type. Shared across every request being served at once, so one that gets written to needs a `nilo.Mutex`.
 _Avoid_: dependency, state, context value, DI container
+
+**RPC service**:
+A struct of typed functions given to `app.rpc`, served as the service its `nilo_service` names: each `pub fn` is a method at `/<package>.<Service>/<Method>`, reached by gRPC, Connect or plain JSON alike. Called a service only with "RPC" in front, because a Service alone is the thing `app.provide` registers.
+_Avoid_: service (alone), controller, handler group
 
 **Config**:
 A struct of the caller's own, one field per setting, filled from a Source before the socket opens. Field names are the variable names upper-cased, a field's default is what "not set" means, and reading one either answers the struct or names every setting that could not be read. It is text and numbers and nothing else: a Config opens no files, and what it cannot become is a compile error rather than a startup one.

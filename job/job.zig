@@ -65,7 +65,7 @@
 //! ## What it is not
 //!
 //! Not a workflow engine, not a rate limiter for a job kind — `nilo.Gate`
-//! inside `run` is that — and not exactly-once. `docs/roadmap.md` carries
+//! inside `run` is that — and not exactly-once. `docs/todo.md` carries
 //! each of those with what it is waiting for. A kind does say how urgent it
 //! is, and the claim takes the most urgent due row (ADR 214), which is as
 //! far towards a priority queue as this goes: three levels, no ageing, no

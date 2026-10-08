@@ -53,10 +53,11 @@ This page covers reading a request, answering it, its cookies, session and uploa
 | `c.service(*Db)` | `?*Db` |
 | `c.resolve(V)` | `!V`: a resolved value, worked out once per request |
 | `c.keepAlive()` | whether the connection will carry another request |
-| `c.connection()` | the same as the `Connection` line the response will carry: `.implied` (HTTP/1.1, staying open, no line), `.keep_alive` (HTTP/1.0, kept), `.close` |
 | `c.io()` | `std.Io`: the server's loop, for a `std.Io.Queue`, `Event` or `Select`. Nothing is held per connection. With no server (a `testing.Client`) it is a process-wide `std.Io.Threaded` ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)) |
 | `c.arena()` | `std.mem.Allocator`: memory that lasts exactly this request. Never freed by hand. Several threads may allocate from it at once, so a handler can give it to threads it starts inside `nilo.blocking` and return a value that borrows from it, once they are joined |
 | `c.str(bytes)` | `Str`: text you allocated from `c.arena()`, stamped with this request's lifetime |
+
+**Both read the same on HTTP/1.1 and on HTTP/2** (`-Dhttp2`). On HTTP/2 the handler starts when the headers are in, `body` waits for the whole of the body and hands it over where it arrived, and `bodyStream` reads it in pieces while the client's window is given back as the handler reads, so an upload faster than its handler holds the connection to one window and no more ([ADR 260](../adr/260-a-request-on-http2-runs-from-its-headers.md)).
 
 ### Answering
 
@@ -64,10 +65,12 @@ This page covers reading a request, answering it, its cookies, session and uploa
 |---|---|
 | `c.setHeader(name, value)` | copied into the request arena |
 | `c.setStaticHeader(name, value)` | not copied: for text that already outlives the request |
+| `c.setTrailer(name, value)` | `!void`: a field sent after the body, for what is known only once the body is. Copied into the request arena. See [Trailers](#trailers) |
 | `c.setCookie(cookie)` | a `Set-Cookie`. Calling it twice sets two, not one |
 | `c.clearCookie(.{ .name = …, .path = …, .domain = … })` | delete one. Path and domain have to match |
 | `c.redirect(status, location)` | a `Location` and no body |
 | `c.send(status, content_type, bytes)` | **a second answer is `error.AlreadyAnswered`**, and the first stands; gzipped on the way out when `app.compress` is on and the body, the type and the client all qualify ([ADR 211](../adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md)); so are the two below |
+| `c.sendKept(status, content_type, bytes)` | `send` for a body that already outlives the middleware chain (one in the request arena, or one a typed handler returned). Not copied when a middleware holds the answer, which `send` does copy ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
 | `c.sendText(status, text)` | `text/plain` |
 | `c.sendJson(status, value)` | `application/json` |
 | `c.sendEmpty(status)` | no body and no `Content-Type`: a 204, usually |
@@ -82,9 +85,28 @@ This page covers reading a request, answering it, its cookies, session and uploa
 
 ### Response headers
 
-**nilo writes some headers itself, and refuses to let `setHeader` write the ones that frame the response.** Every response carries a `Date` written by nilo; set one yourself and yours is sent instead ([ADR 197](../adr/197-a-response-says-when-it-was-sent.md)). `setHeader` refuses `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection`. It also refuses a name that is not a valid token, and a value containing a control byte, because a newline in a value would start a second header, and two newlines would start a second response ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). All three cases are a 500 naming the header. Set headers before sending.
+**nilo writes some headers itself, and refuses to let `setHeader` write the ones that frame the response.** Every response carries a `Date` written by nilo; set one yourself and yours is sent instead ([ADR 197](../adr/197-a-response-says-when-it-was-sent.md)). `setHeader` refuses `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection`. It also refuses a name that is not a valid token, and a value containing a control byte, because a newline in a value would start a second header, and two newlines would start a second response ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). All three cases are a 500 naming the header. It also refuses `grpc-status` and `grpc-message`, which are trailers: use `setTrailer`. **A header set after the answer's head was written is refused with a sentence saying so, where it used to be lost without a word.** Set headers before sending, or hold the answer from a middleware with `next.hold(c)`, which keeps the head back until the chain has unwound ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md), [Middleware](middleware.md#holding-the-answer-with-nexthold)).
 
 Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, which a response may carry more than once. `Set-Cookie` because two cookies cannot be folded into one line; `Vary` because two layers can each name their own axis, and replacing one would drop the other ([ADR 029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md)). Setting either with a name and value that are already present adds nothing.
+
+### A stream and an event stream on HTTP/2
+
+**`c.stream()` and `c.events()` work the same on HTTP/2** (`-Dhttp2`): a write goes to the connection's fiber, which frames it as the client's windows allow, so a write waits when the client's window is full and fails when the stream is reset, the write deadline passes (the stream is reset with `CANCEL`) or the connection closes. A piece allocates nothing, a connection takes turns between its streams, and the buffers a connection's file calls hold are held to 1 MiB (a file past it reads through a smaller buffer, never under 4 KiB). **`c.eventsFrom` works on HTTP/2 too, and hands the stream to the connection**: the Rooms ring the connection's bell, the connection writes their posts as `DATA` under both windows in turn with its other streams, and the handler's fiber has ended. History, `Last-Event-ID`, `.retry_ms` and `.keepalive_ms` are as on HTTP/1.1; a client that stops reading is held to the Room's backlog (the Room's `.full` policy decides what is dropped) and reset with `CANCEL` after the write limit; a handed-over stream counts against `max_concurrent_streams`; and a reset, a GOAWAY, a closed connection or a stopping server ends it and gives its seats back. **`c.upgrade` is refused on HTTP/2 with a 500 that says so**, because a WebSocket is HTTP/1.1.
+
+### Trailers
+
+**A trailer is a field sent after the body, for what is known only once the body is** (a `Server-Timing` for work the body did, a checksum, a gRPC status) ([ADR 254](../adr/254-an-answer-can-carry-trailers.md)).
+
+| | |
+|---|---|
+| `c.setTrailer(name, value)` | `!void`. Settable until the body ends, on every framing alike: before `send` for a whole answer, before `finish` for a stream, and after `next` from a middleware that called `next.hold(c)`. The last one set under a name wins |
+| `c.trailers()` | the trailers set so far, in the order they were set |
+| `c.clientReadsTrailers()` | `bool`: whether the request said so with a `TE` naming `trailers` (RFC 9110 §10.1.4) |
+| `Ctx.checkTrailer(entry)` | `!void`: the checks `setTrailer` makes, on their own, for a caller that keeps an answer to send again and has to know first |
+
+**How each framing carries them.** HTTP/2 sends them after the body. A chunked HTTP/1.1 stream sends them as the trailer section. **A whole HTTP/1.1 answer is chunked to carry them only when the request was HTTP/1.1, not a HEAD, had `TE: trailers`, and the status has a body; otherwise they are left off**, because a client that never asked could not have read them (RFC 9110 §6.5.1).
+
+**Refused, with a sentence naming the field:** the names RFC 9110 §6.5.1 keeps out of trailers (the framing, the route, authentication, a cache rule, the content's type and encoding), a name that is not a token, and a value with a control byte. Copied into the request arena, so an answer with none costs nothing.
 
 ### `c.host` and `c.scheme`
 
@@ -105,6 +127,8 @@ Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, w
 **`c.url` is checked while compiling.** A param with no value, a value with no param, a value a path segment cannot carry, and a `*` catch-all are all compile errors naming the field. Values are matched by name, so `.{ .slug = t, .id = 42 }` and `.{ .id = 42, .slug = t }` give the same URL. `nilo.url.into(buf, pattern, args)` is the same call with your own buffer and no allocation, for code with no request in flight. A text value that is empty, `.` or `..` is `error.BadValue`, because a browser follows `/u/../settings` to `/settings` and reads `%2E` as a dot ([ADR 100](../adr/100-a-route-pattern-is-the-name-of-its-url.md)).
 
 ### `c.sendFile`
+
+**On HTTP/2** (`-Dhttp2`) a file is read into `DATA` frames a buffer at a time, because frame headers go between the pieces and `sendfile` cannot: 3.2 GB/s against `sendfile`'s 6.7 to 7.3 on HTTP/1.1, loopback, one stream ([`bench/result/http.md`](../../bench/result/http.md#what-a-request-on-http2-costs-when-its-answer-is-a-pipe)). `Range`, `If-Range`, `If-None-Match` and `HEAD` answer as on HTTP/1.1.
 
 `sendFile` also takes `size` (null asks the file), `etag` and `cache_control`, and uses them to answer `Range`, `If-Range`, `If-None-Match` and `HEAD`. A handler that knows before it runs that it will answer with a file returns [`FileBody`](./handlers.md#handler-returns) instead, which the API description can see.
 

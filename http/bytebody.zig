@@ -77,7 +77,9 @@ pub fn isBytes(comptime T: type) bool {
 /// is the one thing a `FileBody` cannot take and this can.
 pub fn send(c: *Ctx, status: u16, value: Bytes) !void {
     for (value.headers.view()) |h| try c.setHeader(h.name, h.value);
-    return c.send(status, value.content_type, value.body);
+    // What the handler returned, which outlived its frame already: not copied
+    // when a middleware holds the answer (ADR 008).
+    return c.sendKept(status, value.content_type, value.body);
 }
 
 // ---- tests ----

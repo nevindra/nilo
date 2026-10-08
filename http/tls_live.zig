@@ -117,7 +117,7 @@ const Client = struct {
     writer: std.Io.net.Stream.Writer,
     in_buf: [std.crypto.tls.Client.min_buffer_len]u8 = undefined,
     out_buf: [std.crypto.tls.max_ciphertext_record_len]u8 = undefined,
-    tls_in: [8192]u8 = undefined,
+    tls_in: [2 * std.crypto.tls.max_ciphertext_record_len]u8 = undefined,
     tls_out: [1024]u8 = undefined,
     client: std.crypto.tls.Client = undefined,
 
@@ -502,4 +502,83 @@ test "a TLS listener and a cleartext one answer in one process, over the same ro
     app.shutdown();
     thread.join();
     stopped = true;
+}
+
+// ---- large answers: the record buffer holds several records, and a drain keeps a byte back ----
+
+/// Bytes that say where they are, so a record sealed in the wrong order or
+/// dropped is a different byte rather than the same filler.
+fn pattern(i: usize) u8 {
+    return @truncate((i *% 2654435761) >> 7);
+}
+
+const big_len = 300 * 1000 + 17;
+
+var big_body: [big_len]u8 = undefined;
+
+fn bigBody(c: *nilo.Ctx) !void {
+    try c.send(200, "application/octet-stream", &big_body);
+}
+
+const Spilled = struct {
+    tmp: nilo.testing.TmpDir,
+    dir: nilo.Dir,
+};
+
+fn bigFile(files: *Spilled) !nilo.FileBody {
+    return .{ .dir = files.dir, .name = "big.bin", .content_type = "application/octet-stream" };
+}
+
+test "a body of 300 KB, a file and a small answer after them cross a TLS connection whole and in order" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+    for (&big_body, 0..) |*b, i| b.* = pattern(i);
+
+    var files: Spilled = .{ .tmp = nilo.testing.tmpDir(), .dir = undefined };
+    defer files.tmp.cleanup();
+    try files.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "big.bin", .data = &big_body });
+    var path_buf: [128]u8 = undefined;
+    files.dir = try nilo.Dir.open(try files.tmp.path(&path_buf, ""));
+    defer files.dir.close();
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.provide(&files);
+    try app.get("/", hello);
+    try app.get("/big", bigBody);
+    try app.get("/file", bigFile);
+
+    var serving: ServingTls = .{ .app = &app };
+    const thread = try std.Thread.spawn(.{}, ServingTls.run, .{&serving});
+    const port = try waitForPort(gpa, &serving);
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const stream = try connect(io, port);
+    var client: Client = undefined;
+    try client.handshake(io, stream);
+
+    // One connection, in a row: each answer is whole before the next is
+    // asked for, so a byte held back in the cleartext buffer and not sent
+    // by the flush would stall the next read for the whole of its wait.
+    for ([_][]const u8{ "/big", "/file", "/", "/big", "/file" }) |path| {
+        var request: [96]u8 = undefined;
+        const text = try std.fmt.bufPrint(&request, "GET {s} HTTP/1.1\r\nHost: localhost\r\n\r\n", .{path});
+        const answer = try client.ask(gpa, text);
+        defer gpa.free(answer);
+        try testing.expect(std.mem.startsWith(u8, answer, "HTTP/1.1 200 "));
+        const at = std.mem.indexOf(u8, answer, "\r\n\r\n").? + 4;
+        if (std.mem.eql(u8, path, "/")) {
+            try testing.expectEqualStrings("hello over tls\n", answer[at..]);
+        } else {
+            try testing.expectEqual(@as(usize, big_len), answer.len - at);
+            try testing.expect(std.mem.eql(u8, &big_body, answer[at..]));
+        }
+    }
+    stream.close(io);
+
+    app.shutdown();
+    thread.join();
 }

@@ -29,7 +29,7 @@
 
 ---
 
-Zig gives you a fast compiler and leaves the rest to you: routing, settings, password hashing, tables, Postgres. **nilo is that rest**, as twelve small modules you import one at a time.
+Zig gives you a fast compiler and leaves the rest to you: routing, settings, password hashing, tables, Postgres. **nilo is that rest: an HTTP framework for Zig, and the toolkit it is built from**, twelve small modules you import one at a time.
 
 Every module runs on the same idea. **A plain function is a route. A plain struct is a table.** nilo reads your types while the program compiles, so there is nothing to annotate and nothing to keep in sync.
 
@@ -278,7 +278,7 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 
 | Module | What it does | Left out |
 |---|---|---|
-| **`nilo_http`** | Routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, rooms that broadcast to sockets and event streams and reach one user by key, OpenAPI, metrics, OpenTelemetry tracing ([guide](./docs/guide/tracing.md)), rate limiting, CSRF, security headers, gzip (libdeflate behind `.libdeflate = true`, [guide](./docs/guide/responses.md#compression)), optional TLS 1.3, and optional unary gRPC over HTTP/2 ([guide](./docs/guide/grpc.md)) | Templates, HTTP/2 for ordinary routes, streaming gRPC |
+| **`nilo_http`** | Routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, rooms that broadcast to sockets and event streams and reach one user by key, OpenAPI, metrics, OpenTelemetry tracing ([guide](./docs/guide/tracing.md)), rate limiting, CSRF, security headers, gzip (libdeflate behind `.libdeflate = true`, [guide](./docs/guide/responses.md#compression)), optional TLS 1.3, and optional HTTP/2 beside HTTP/1.1 for every route ([guide](./docs/guide/deploying.md#http2-for-a-browser)) with unary gRPC on it ([guide](./docs/guide/grpc.md)) | Templates, HTTP/2 in the default build, WebSocket over HTTP/2, streaming gRPC |
 | **`nilo_sql`** | Postgres and SQLite: reads, writes, transactions, streaming, schema and migrations. Window functions, CTEs and any other join go through `db.raw`, which still fills your struct, counts its columns while compiling and checks their types the first time it runs ([guide](./docs/guide/sql/raw.md)) | Window functions and CTEs written in Zig rather than SQL, `down` migrations |
 | **`nilo_s3`** | S3, MinIO and R2: get, put, multipart upload, range, stream, list, presigned URLs | `COPY` |
 | **`nilo_fetch`** | Calling another HTTP API from inside a request | Retries, circuit breaker |
@@ -294,7 +294,7 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 ## 🚫 What it won't do
 
 - **Templates.** If your app is mostly HTML, [jetzig](https://www.jetzig.dev/) is built for it.
-- **HTTP/2 for your routes.** Put a proxy in front if you need it. TLS 1.3 is built in behind `.tls = true`, or a proxy can terminate it ([deploying guide](./docs/guide/deploying.md#tls-and-a-reverse-proxy)). gRPC is served, unary calls on a listener of its own, behind `.grpc = true` ([gRPC guide](./docs/guide/grpc.md)).
+- **HTTP/2 in the default build.** It is behind `.http2 = true`, and a browser reaches it only over TLS, which is `.tls = true` or a proxy in front ([deploying guide](./docs/guide/deploying.md#tls-and-a-reverse-proxy)). With both flags a TLS listener offers `h2` and `http/1.1` and serves every route on either; gRPC rides it, unary calls only ([gRPC guide](./docs/guide/grpc.md)).
 - **Revoking a session.** Sessions are sealed into the cookie, so there's no session table to delete from.
 
 Each of these was decided on purpose; [`docs/decided.md`](./docs/decided.md) says why.
@@ -333,7 +333,7 @@ Nilo was my cat. She was quick, the kind of quick you notice from across a room,
 
 ## 🤝 Contributing
 
-Questions, issues and "why on earth is it like this?" are all welcome. [CONTRIBUTING.md](./CONTRIBUTING.md) covers where to start, and [the roadmap](./docs/roadmap.md) has what's open. Mail is the most useful module nobody has written yet.
+Questions, issues and "why on earth is it like this?" are all welcome. [CONTRIBUTING.md](./CONTRIBUTING.md) covers where to start, and [the roadmap](./docs/roadmap.md) says where it is going and [the todo list](./docs/todo.md) has what's open. Mail is the most useful module nobody has written yet.
 
 nilo borrows from FastAPI, Elysia, Elm and Drizzle; [ADR 014](./docs/adr/014-what-nilo-borrows-and-from-whom.md) says what came from where.
 

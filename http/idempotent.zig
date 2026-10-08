@@ -107,21 +107,38 @@ pub const Record = struct {
     }
 
     pub fn eachHeader(self: Record) HeaderIterator {
-        return .{ .rest = self.headers };
+        return .{ .rest = self.headers, .trailers = false };
+    }
+
+    pub fn eachTrailer(self: Record) HeaderIterator {
+        return .{ .rest = self.headers, .trailers = true };
     }
 };
 
+/// A trailer is kept among the headers under its name with a `:` in front,
+/// which no header name can start with (a name is a token), so a record kept
+/// before trailers existed reads the same and has none (ADR 254).
+const trailer_mark = ':';
+
 pub const HeaderIterator = struct {
     rest: []const u8,
+    /// Which of the two this walks: the headers, or the trailers kept
+    /// beside them.
+    trailers: bool,
 
     pub fn next(self: *HeaderIterator) ?http1.Header {
-        if (self.rest.len < 4) return null;
-        const nlen = std.mem.readInt(u16, self.rest[0..2], .little);
-        const vlen = std.mem.readInt(u16, self.rest[2..4], .little);
-        if (self.rest.len < 4 + nlen + vlen) return null;
-        const h: http1.Header = .{ .name = self.rest[4..][0..nlen], .value = self.rest[4 + nlen ..][0..vlen] };
-        self.rest = self.rest[4 + nlen + vlen ..];
-        return h;
+        while (true) {
+            if (self.rest.len < 4) return null;
+            const nlen = std.mem.readInt(u16, self.rest[0..2], .little);
+            const vlen = std.mem.readInt(u16, self.rest[2..4], .little);
+            if (self.rest.len < 4 + nlen + vlen) return null;
+            const name = self.rest[4..][0..nlen];
+            const h: http1.Header = .{ .name = name, .value = self.rest[4 + nlen ..][0..vlen] };
+            self.rest = self.rest[4 + nlen + vlen ..];
+            const marked = name.len > 0 and name[0] == trailer_mark;
+            if (marked != self.trailers) continue;
+            return if (marked) .{ .name = name[1..], .value = h.value } else h;
+        }
     }
 };
 
@@ -139,19 +156,22 @@ pub fn marker(fingerprint: u64) [prefix]u8 {
     return out;
 }
 
-/// Encode a kept answer into `arena`. `headers` are the handler's own, and
-/// `content_type` is read only for `.own` — the other kinds imply theirs.
+/// Encode a kept answer into `arena`. `headers` and `trailers` are the
+/// handler's own, and `content_type` is read only for `.own` — the other
+/// kinds imply theirs.
 pub fn encode(
     arena: std.mem.Allocator,
     kind: Kind,
     status: u16,
     fingerprint: u64,
     headers: []const http1.Header,
+    trailers: []const http1.Header,
     content_type: []const u8,
     body: []const u8,
 ) ![]const u8 {
     var hlen: usize = 0;
     for (headers) |h| hlen += 4 + h.name.len + h.value.len;
+    for (trailers) |t| hlen += 4 + 1 + t.name.len + t.value.len;
     if (hlen > std.math.maxInt(u16)) return error.TooLarge;
     // An `.own` answer keeps its label as one more length-prefixed string
     // ahead of the body; a label longer than a header value is refused the
@@ -172,6 +192,14 @@ pub fn encode(
         @memcpy(out[at + 4 ..][0..h.name.len], h.name);
         @memcpy(out[at + 4 + h.name.len ..][0..h.value.len], h.value);
         at += 4 + h.name.len + h.value.len;
+    }
+    for (trailers) |t| {
+        std.mem.writeInt(u16, out[at..][0..2], @intCast(1 + t.name.len), .little);
+        std.mem.writeInt(u16, out[at + 2 ..][0..2], @intCast(t.value.len), .little);
+        out[at + 4] = trailer_mark;
+        @memcpy(out[at + 5 ..][0..t.name.len], t.name);
+        @memcpy(out[at + 5 + t.name.len ..][0..t.value.len], t.value);
+        at += 4 + 1 + t.name.len + t.value.len;
     }
     if (labelled) {
         std.mem.writeInt(u16, out[at..][0..2], @intCast(content_type.len), .little);
@@ -265,7 +293,7 @@ test "a kept answer comes back with its status, its headers and its body" {
     defer arena.deinit();
 
     const headers = [_]http1.Header{.{ .name = "Location", .value = "/orders/7" }};
-    const bytes = try encode(arena.allocator(), .json, 201, 0xabc, &headers, "", "{\"id\":7}");
+    const bytes = try encode(arena.allocator(), .json, 201, 0xabc, &headers, &.{}, "", "{\"id\":7}");
     const back = decode(bytes).?;
     try testing.expectEqual(Kind.json, back.kind);
     try testing.expectEqual(@as(u16, 201), back.status);
@@ -282,14 +310,14 @@ test "an answer a type wrote itself keeps its label, and every other kind keeps 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const own = try encode(arena.allocator(), .own, 200, 1, &.{}, "application/xml", "<a/>");
+    const own = try encode(arena.allocator(), .own, 200, 1, &.{}, &.{}, "application/xml", "<a/>");
     const back = decode(own).?;
     try testing.expectEqual(Kind.own, back.kind);
     try testing.expectEqualStrings("application/xml", back.contentType());
     try testing.expectEqualStrings("<a/>", back.body);
 
     // The label given to a JSON answer is not kept: its kind already says.
-    const json = try encode(arena.allocator(), .json, 200, 1, &.{}, "ignored", "{}");
+    const json = try encode(arena.allocator(), .json, 200, 1, &.{}, &.{}, "ignored", "{}");
     try testing.expectEqualStrings("application/json", decode(json).?.contentType());
     try testing.expectEqualStrings("{}", decode(json).?.body);
 
@@ -318,4 +346,25 @@ test "the fingerprint changes with any of the four things it reads" {
     try testing.expect(base != fingerprintOf("POST", "/orders", "dry=1", "{}"));
     try testing.expect(base != fingerprintOf("POST", "/orders", "", "{ }"));
     try testing.expectEqual(base, fingerprintOf("POST", "/orders", "", "{}"));
+}
+
+test "a kept answer keeps its trailers beside its headers, and an old record reads as having none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const headers = [_]http1.Header{.{ .name = "Location", .value = "/orders/7" }};
+    const trailers = [_]http1.Header{.{ .name = "Server-Timing", .value = "db;dur=3" }};
+    const bytes = try encode(arena.allocator(), .json, 201, 0xabc, &headers, &trailers, "", "{}");
+    const record = decode(bytes).?;
+    var hs = record.eachHeader();
+    try std.testing.expectEqualStrings("Location", hs.next().?.name);
+    try std.testing.expect(hs.next() == null);
+    var ts = record.eachTrailer();
+    const t = ts.next().?;
+    try std.testing.expectEqualStrings("Server-Timing", t.name);
+    try std.testing.expectEqualStrings("db;dur=3", t.value);
+    try std.testing.expect(ts.next() == null);
+
+    const old = try encode(arena.allocator(), .json, 200, 1, &headers, &.{}, "", "{}");
+    var none = decode(old).?.eachTrailer();
+    try std.testing.expect(none.next() == null);
 }

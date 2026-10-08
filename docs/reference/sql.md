@@ -220,7 +220,7 @@ try app.provide(&db);
 | `.{ .hop = nilo }` | hand each statement to the Engine's thread pool and park the fiber, on a worker of its own (`nilo.blockingReserved`) so a statement holding its connection never queues behind a slow call. Costs a few microseconds per statement; **no statement can stall an executor thread**. The value is `nilo` itself, passed in because `sql/` may not import `nilo_http` |
 | `.in_fiber` | run it on the fiber that asked. Faster when every statement is a cached lookup; a slow one holds a thread that serves other connections |
 
-Which is the better default has not been measured, and it is an open question in [`docs/roadmap.md`](../roadmap.md) for this module. When in doubt, use `.hop`: its bad case is a few microseconds, and `.in_fiber`'s is a stalled thread.
+Which is the better default has not been measured, and it is an open question in [`docs/todo.md`](../todo.md) for this module. When in doubt, use `.hop`: its bad case is a few microseconds, and `.in_fiber`'s is a stalled thread.
 
 #### `sqlite.Options`
 

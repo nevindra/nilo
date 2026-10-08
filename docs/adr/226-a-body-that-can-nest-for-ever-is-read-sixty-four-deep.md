@@ -33,4 +33,4 @@ For most types that is no bound worth having, because the type bounds it: a stru
 
 - **Allocations per request:** none added. **Memory per idle connection:** none added; the stack a request can touch is bounded where it was not. **Throughput:** nothing for a type that cannot nest; one pass over the body for one that can. **Binary size:** the scan, once per program that reads such a type.
 - Test: `test "a body whose type holds itself is refused past the nesting it may have, before it is parsed"` in `http/behaviour.zig`, which also checks that a bracket inside a string is text.
-- `std.json` still panics on a `u128` field posted as `2e38`, inside `@intFromFloat`. That is std's, and on [the roadmap](../roadmap.md) with the other numbers a body can reach.
+- `std.json` still panics on a `u128` field posted as `2e38`, inside `@intFromFloat`. That is std's, and on [the todo list](../todo.md) with the other numbers a body can reach.

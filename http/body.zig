@@ -16,12 +16,15 @@
 //! stream takes, because a body reader has somewhere to put bytes already.
 //!
 //! Content-Length and chunked look the same from here, the same way they do
-//! to `Ctx.body`. The handler asks for the body, not for the way it arrived.
+//! to `Ctx.body`, and so does a body on HTTP/2, which ends where its stream
+//! does (ADR 260). The handler asks for the body, not for the way it arrived.
 
 const std = @import("std");
 
 const http1 = @import("http1.zig");
 const watchdog = @import("watchdog.zig");
+const framing = @import("framing.zig");
+const inbound = @import("inbound.zig");
 
 pub const Options = struct {
     /// The most a body may be. A `Content-Length` past this is refused
@@ -62,6 +65,12 @@ pub const Progress = struct {
     /// still answers — the first version worked it out from what was left,
     /// and went null the moment there was nothing left.
     announced: ?u64,
+    /// The transport ends the body: a request on HTTP/2, read until its stream
+    /// does, and held to `max_bytes` as a chunked body is. It is `between`
+    /// until the stream ends. A flag and not a `State`, and absent from a build
+    /// without HTTP/2, so that build's `Progress` and every switch on its
+    /// state are what they were before there was one.
+    transport: if (framing.http2_built) bool else void = if (framing.http2_built) false else {},
 
     pub const State = union(enum) {
         /// Bytes still to come in a Content-Length body.
@@ -86,12 +95,18 @@ pub const Progress = struct {
         return .{
             .state = if (request.chunked)
                 .between
+            else if (framing.http2_built and request.ends_with_stream)
+                .between
             else if (request.content_length == 0)
                 .done
             else
                 .{ .sized = request.content_length },
             .max_bytes = max_bytes,
-            .announced = if (request.chunked) null else request.content_length,
+            .announced = if (request.chunked or (framing.http2_built and request.ends_with_stream and !request.has_content_length))
+                null
+            else
+                request.content_length,
+            .transport = if (framing.http2_built) request.ends_with_stream else {},
         };
     }
 
@@ -217,6 +232,9 @@ pub const Body = struct {
     /// advancing past chunk framing as needed. Zero means the body is over.
     fn runLength(self: *Body) error{ReadFailed}!u64 {
         const p = self._progress;
+        // One byte past the ceiling is asked for, so a body that goes on past
+        // it is told from one that ends there; `streamFn` stops it.
+        if (self.transported()) return p.max_bytes -| p.seen +| 1;
         while (true) switch (p.state) {
             .sized => |left| return left,
             .chunk => |left| {
@@ -243,6 +261,37 @@ pub const Body = struct {
             .done => return 0,
             .broken, .cut => return error.ReadFailed,
         };
+    }
+
+    /// Whether this body is the transport's, and still being read.
+    inline fn transported(self: *const Body) bool {
+        if (comptime !framing.http2_built) return false;
+        return self._progress.transport and self._progress.state == .between;
+    }
+
+    /// A read of the transport's body ended in failure. What it was is in the
+    /// pipe: a client that stopped sending is a timeout and says no more, and
+    /// a stream that was reset or did not add up is a body that ended short.
+    fn openFailed(self: *Body) error{ReadFailed} {
+        if (comptime framing.http2_built) {
+            if (inbound.Inbox.of(self._in).cause()) |why| switch (why) {
+                .gone, .length => self._progress.state = .cut,
+                .slow, .deadline => {},
+            };
+        }
+        return error.ReadFailed;
+    }
+
+    /// What a read of the transport's body that ended says: the end of the
+    /// stream is the end of the body, and the rest is as for any other.
+    fn openEnded(self: *Body, err: std.Io.Reader.Error) std.Io.Reader.Error {
+        switch (err) {
+            error.EndOfStream => {
+                self._progress.state = .done;
+                return error.EndOfStream;
+            },
+            error.ReadFailed => return self.openFailed(),
+        }
     }
 
     /// The connection ran out while `run` bytes of body were still owed. The
@@ -287,12 +336,14 @@ pub const Body = struct {
 
         const run = try self.runLength();
         if (run == 0) return error.EndOfStream;
+        const open = self.transported();
         const n = self._in.stream(w, limit.min(.limited64(run))) catch |err| switch (err) {
             // The writer's own failure is not the connection's end.
             error.WriteFailed => return error.WriteFailed,
-            else => |e| return self.cutShort(e),
+            else => |e| return if (open) self.openEnded(e) else self.cutShort(e),
         };
         self.advance(n);
+        if (open and self._progress.seen > self._progress.max_bytes) return self.breakOff();
         return n;
     }
 
@@ -303,8 +354,10 @@ pub const Body = struct {
 
         const run = try self.runLength();
         if (run == 0) return error.EndOfStream;
-        const n = self._in.discard(limit.min(.limited64(run))) catch |err| return self.cutShort(err);
+        const open = self.transported();
+        const n = self._in.discard(limit.min(.limited64(run))) catch |err| return if (open) self.openEnded(err) else self.cutShort(err);
         self.advance(n);
+        if (open and self._progress.seen > self._progress.max_bytes) return self.breakOff();
         return n;
     }
 };

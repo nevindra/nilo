@@ -662,6 +662,9 @@ pub const Patch = @import("patch.zig").Patch;
 
 pub const Middleware = @import("middleware.zig").Middleware;
 pub const Next = @import("middleware.zig").Next;
+/// The answer a middleware holds after `next.hold(c)`, to read and change
+/// before it is written (ADR 008).
+pub const Answer = @import("middleware.zig").Answer;
 
 /// A monotonic clock reading in nanoseconds, for measuring how long
 /// something took.
@@ -943,7 +946,6 @@ test "every type this module exports is named the way the import line names it" 
     }
 }
 
-
 test "json can be written outside a request by the rules a response is written by" {
     const Alert = struct {
         name: []const u8,
@@ -972,6 +974,10 @@ test {
     _ = @import("names.zig");
     _ = @import("patch.zig");
     _ = @import("convert.zig");
+    _ = @import("message.zig");
+    _ = @import("code.zig");
+    _ = @import("connect.zig");
+    _ = @import("rpc.zig");
     _ = @import("cookie.zig");
     _ = @import("session.zig");
     _ = @import("password.zig");
@@ -1005,6 +1011,7 @@ test {
     _ = @import("resolve.zig");
     _ = @import("openapi.zig");
     _ = @import("stream.zig");
+    _ = @import("framing.zig");
     _ = @import("body.zig");
     _ = @import("range.zig");
     _ = @import("sendfile.zig");
@@ -1039,6 +1046,9 @@ test {
     _ = @import("hpack.zig");
     _ = @import("h2.zig");
     _ = @import("grpc.zig");
+    _ = @import("h2conn.zig");
+    _ = @import("inbound.zig");
+    _ = @import("h2test.zig");
     _ = @import("fuzz_frames.zig");
     _ = @import("serve.zig");
     _ = @import("wiring.zig");
@@ -1055,6 +1065,7 @@ test {
     // build without `-Dtls` does not have; the repository's own test root
     // always does (see `wireTls` in build.zig).
     if (@import("nilo_build").tls) _ = @import("tls_live.zig");
-    if (@import("nilo_build").grpc) _ = @import("grpc_live.zig");
-    if (@import("nilo_build").grpc and @import("nilo_build").tls) _ = @import("grpc_tls_live.zig");
+    if (@import("nilo_build").http2) _ = @import("grpc_live.zig");
+    if (@import("nilo_build").http2) _ = @import("h2pipe_live.zig");
+    if (@import("nilo_build").http2 and @import("nilo_build").tls) _ = @import("grpc_tls_live.zig");
 }

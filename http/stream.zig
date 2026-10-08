@@ -24,7 +24,10 @@
 const std = @import("std");
 
 const bulkhead = @import("bulkhead.zig");
+const framing_mod = @import("framing.zig");
+const Framing = framing_mod.Framing;
 const http1 = @import("http1.zig");
+const inbound = @import("inbound.zig");
 const json_mod = @import("json.zig");
 const room_mod = @import("room.zig");
 const watchdog = @import("watchdog.zig");
@@ -82,7 +85,39 @@ pub const Open = struct {
     /// inferred, because the buffer means the writer and the wire are never
     /// at the same place.
     written: u64 = 0,
+    /// `finish` was called while a middleware held the answer: the body is
+    /// over as far as the handler is concerned, and its end, with the
+    /// trailers, is written when the chain has unwound (ADR 008).
+    finished: bool = false,
 };
+
+/// End a body: the promise checked, then the marker and the trailers where
+/// the framing has them. What `finish` does, and what App does for a stream
+/// whose end a middleware held.
+pub fn close(framing: *Framing, open: Open, trailers: framing_mod.Trailers, force_close: ?*bool) !void {
+    // A promise that was not met. The head has gone out saying how many
+    // bytes are coming, so there is no correcting it: what is left is to
+    // stop the client waiting for the rest, and to stop the next response
+    // on this connection being read as the tail of this one. A HEAD is not
+    // this case — nothing was going to be written (ADR 101).
+    if (open.promised) |promised| {
+        if (!open.drop and open.written < promised) {
+            // A warning rather than an error, because in this project
+            // `std.log.err` means the server is refusing to start — every
+            // other one is a `listen()` that returns rather than binds.
+            // A handler that mis-counted its own body is one request going
+            // wrong, which is what `warn` is for here and in `App`.
+            std.log.warn(
+                "nilo: a stream promised {d} bytes and wrote {d} — the response is short, " ++
+                    "so the connection is being closed rather than left half-answered",
+                .{ promised, open.written },
+            );
+            if (force_close) |flag| flag.* = true;
+        }
+    }
+
+    try framing.end(open.chunked and !open.drop, trailers);
+}
 
 /// A response being written in pieces.
 ///
@@ -97,9 +132,9 @@ pub const Stream = struct {
     /// Write here. Everything that lands in this buffer leaves as one chunk.
     writer: std.Io.Writer,
 
-    /// The connection. Chunk framing is written straight to it, around
-    /// whatever the buffer above collected.
-    _out: *std.Io.Writer,
+    /// Where the pieces go. How each is framed, and how the body ends, is
+    /// the framing's (ADR 253).
+    _framing: *Framing,
     /// The server's "please stop" flag, or null when nothing can stop —
     /// App driven straight from a test.
     _stopping: ?*const std.atomic.Value(bool),
@@ -115,6 +150,15 @@ pub const Stream = struct {
     /// handler time ends at every write, which is what lets a stream be
     /// watched rather than excused (ADR 013).
     _watch: ?*watchdog.Watch = null,
+    /// The `Ctx`'s trailers, written after the last chunk (ADR 254). Null
+    /// for a Stream a test built, which ends with none.
+    _trailers: ?*const framing_mod.Trailing = null,
+    /// The `Ctx`'s "a middleware holds this answer" flag: `finish` then
+    /// leaves the end to App, after the chain (ADR 008).
+    _hold: ?*const bool = null,
+    /// The `Ctx`'s "the body has ended" flag, set once the end is written,
+    /// after which a trailer has nowhere to go.
+    _ended: ?*bool = null,
 
     /// Write `bytes` into the stream. Nothing leaves until the buffer fills
     /// or something flushes.
@@ -142,7 +186,7 @@ pub const Stream = struct {
     /// one after them.
     pub fn flush(self: *Stream) !void {
         try self.writer.flush();
-        try self._out.flush();
+        try self._framing.flush();
     }
 
     /// Whether it is still worth carrying on: false once the server has been
@@ -161,38 +205,25 @@ pub const Stream = struct {
 
     /// End the body. Required, and safe to call twice.
     pub fn finish(self: *Stream) !void {
-        if (self._open.* == null) return;
+        const before = self._open.* orelse return;
+        if (before.finished) return;
         // Flushed before the record is cleared, not after: `drain` reads it
         // to know how to frame what it is writing, and a null one means the
         // body has already ended. Re-read afterwards, because the flush is
         // what moves `written`.
         try self.writer.flush();
-        const open = self._open.*.?;
-        self._open.* = null;
-
-        // A promise that was not met. The head has gone out saying how many
-        // bytes are coming, so there is no correcting it: what is left is to
-        // stop the client waiting for the rest, and to stop the next response
-        // on this connection being read as the tail of this one. A HEAD is not
-        // this case — nothing was going to be written (ADR 101).
-        if (open.promised) |promised| {
-            if (!open.drop and open.written < promised) {
-                // A warning rather than an error, because in this project
-                // `std.log.err` means the server is refusing to start — every
-                // other one is a `listen()` that returns rather than binds.
-                // A handler that mis-counted its own body is one request going
-                // wrong, which is what `warn` is for here and in `App`.
-                std.log.warn(
-                    "nilo: a stream promised {d} bytes and wrote {d} — the response is short, " ++
-                        "so the connection is being closed rather than left half-answered",
-                    .{ promised, open.written },
-                );
-                if (self._force_close) |flag| flag.* = true;
-            }
+        const held = if (self._hold) |flag| flag.* else false;
+        if (held) {
+            // The end waits for the chain, so a middleware holding the answer
+            // can still add a trailer. The record stays, marked, so App knows
+            // the body was finished rather than abandoned.
+            self._open.*.?.finished = true;
+        } else {
+            const open = self._open.*.?;
+            self._open.* = null;
+            try close(self._framing, open, if (self._trailers) |t| t.out(false) else .{}, self._force_close);
+            if (self._ended) |flag| flag.* = true;
         }
-
-        if (open.chunked and !open.drop) try http1.writeLastChunk(self._out);
-        try self._out.flush();
 
         // Take the buffer away, so that anything written from here on has
         // nowhere to sit and goes straight to `drain` — which is where the
@@ -233,7 +264,8 @@ pub const Stream = struct {
         // finished body — but silently dropping what a handler wrote is how
         // somebody spends an afternoon looking for the missing half of a
         // report, so it says so once.
-        const open = self._open.* orelse {
+        const current: ?Open = if (self._open.*) |o| (if (o.finished) null else o) else null;
+        const open = current orelse {
             if (total > 0) std.log.warn(
                 "nilo: {d} bytes were written to a stream after finish() — " ++
                     "the body had already ended, so they were dropped",
@@ -271,11 +303,7 @@ pub const Stream = struct {
             self._open.*.?.written = open.written + total;
         }
 
-        if (open.chunked) http1.writeChunkHeader(self._out, total) catch return error.WriteFailed;
-        if (buffered.len > 0) self._out.writeAll(buffered) catch return error.WriteFailed;
-        for (data[0 .. data.len - 1]) |slice| self._out.writeAll(slice) catch return error.WriteFailed;
-        for (0..splat) |_| self._out.writeAll(pattern) catch return error.WriteFailed;
-        if (open.chunked) http1.endChunk(self._out) catch return error.WriteFailed;
+        self._framing.piece(open.chunked, buffered, data, splat) catch return error.WriteFailed;
 
         w.end = 0;
         return from_data;
@@ -284,13 +312,13 @@ pub const Stream = struct {
     /// nilo's own: `Ctx.stream` builds one of these once the head is out.
     pub fn init(
         buffer: []u8,
-        out: *std.Io.Writer,
+        framing: *Framing,
         stopping: ?*const std.atomic.Value(bool),
         open: *?Open,
     ) Stream {
         return .{
             .writer = .{ .buffer = buffer, .vtable = &.{ .drain = drain } },
-            ._out = out,
+            ._framing = framing,
             ._stopping = stopping,
             ._open = open,
         };
@@ -300,12 +328,12 @@ pub const Stream = struct {
     /// flag — which is `Ctx` and nobody else.
     pub fn initClosing(
         buffer: []u8,
-        out: *std.Io.Writer,
+        framing: *Framing,
         stopping: ?*const std.atomic.Value(bool),
         open: *?Open,
         force_close: *bool,
     ) Stream {
-        var self = init(buffer, out, stopping, open);
+        var self = init(buffer, framing, stopping, open);
         self._force_close = force_close;
         return self;
     }
@@ -452,7 +480,7 @@ pub const FromRooms = struct {
 /// ends. Either way the stream ends. It is the one place nilo learns a client
 /// left without writing to it, and the reason it can be learned here is the
 /// same reason it cannot on an ordinary request: an ordinary response ends,
-/// and a client that half-closed may be waiting for it (`docs/roadmap.md`).
+/// and a client that half-closed may be waiting for it (`docs/todo.md`).
 pub const RoomEvents = struct {
     _in: *std.Io.Reader,
     _out: *std.Io.Writer,
@@ -506,7 +534,10 @@ pub const RoomEvents = struct {
     }
 
     /// Write out everything waiting in every seat, as events. Flushed by
-    /// `park`, so a burst is one syscall.
+    /// `park`, so a burst is one syscall. **The same walk as `deliverSeats`,
+    /// written out again on purpose**: calling the shared one through a sink
+    /// cost every program that calls `eventsFrom` 16 bytes of its HTTP/1.1
+    /// path, which ADR 017 does not let a framing it never uses spend.
     fn deliver(self: *RoomEvents) !void {
         var at = self._seated;
         while (at.room) |in_room| {
@@ -592,6 +623,253 @@ pub const RoomEvents = struct {
     }
 };
 
+/// **The walk over a stream's seats**, post by post in order, handing each to
+/// `sink.event(room, post)` before releasing it (ADR 227). HTTP/2's sink is
+/// `Http2Events`, which may stop the walk with an error, having kept what it
+/// needs of the post. HTTP/1.1's `RoomEvents.deliver` is the same walk with
+/// its chunk writer in place of the sink, written out beside it and not
+/// calling this: through the sink it cost every program that calls
+/// `eventsFrom` 16 bytes. The wait is only HTTP/1.1's (`RoomEvents.run`):
+/// HTTP/2's connection waits for all its streams at once.
+pub fn deliverSeats(seated: room_mod.Seating, sink: anytype) !void {
+    var at = seated;
+    while (at.room) |in_room| {
+        while (in_room.take(at.ticket)) |post| {
+            defer in_room.release(post);
+            try sink.event(in_room, post);
+        }
+        at = in_room.after(at.ticket);
+    }
+}
+
+/// The posts one room kept for a client coming back, each holding a
+/// reference until the stream writes it (ADR 229).
+pub const Replay = struct {
+    room: ?*room_mod.Room = null,
+    posts: []*room_mod.Post = &.{},
+
+    pub fn release(self: *Replay) void {
+        const in_room = self.room orelse return;
+        for (self.posts) |post| in_room.release(post);
+        self.posts = &.{};
+    }
+};
+
+/// An event stream handed to an HTTP/2 connection, which writes what its
+/// rooms post as `DATA` when it wakes, and whose handler has returned (ADR 227,
+/// ADR 260).
+///
+/// ```zig
+/// fn feed(c: *nilo.Ctx, lobby: *nilo.Room) !void {
+///     return c.eventsFrom(lobby, .{});   // the same call on either framing
+/// }
+/// ```
+///
+/// **What it holds, per stream:** the chain of its seats (16 bytes), the link
+/// to wake the connection by, the bell, the event it has begun and not
+/// finished with how far it got, and whatever a returning client is owed
+/// first (`retry:` and the history, ADR 229). It lives in the request arena,
+/// so nothing of it outlasts the stream.
+///
+/// **What a client that stops reading costs is the room's bound and one
+/// event.** A post is taken from its seat only when the stream is about to
+/// write it, so what a stream that is not read holds is its seat's ring,
+/// `Options.backlog` references to posts the room made once for everybody,
+/// under the policy that room names (`Full`), and the one event it is
+/// partway through, as a reference of its own. Nothing is copied per stream.
+///
+/// **A Room never rings what is gone.** The bell is in the seat; the seat
+/// is given up (`leave`) before the stream's memory is, and a seat is given up
+/// under the lock a post is pushed under (`Room.giveUp`).
+pub const Http2Events = struct {
+    /// The rooms this stream sits in.
+    seated: room_mod.Seating = .{},
+    /// What wakes the connection when a Room rings.
+    link: inbound.Link,
+    /// A post may be waiting. Set by the bell, cleared by `step` before it
+    /// looks, so a post that lands during the walk is found by the next.
+    rung: std.atomic.Value(bool) = .init(true),
+    /// Sent first, once.
+    retry_ms: ?u32 = null,
+    /// What each room kept for a client coming back, written before anything
+    /// new; each post is released as it is written.
+    replays: []Replay = &.{},
+    /// The event begun and not finished, and how many of its bytes are out.
+    held: ?Held = null,
+    /// What is left of the held event once some of it has gone, formatted
+    /// once and kept (from `kept_by`, freed when it is all out or on leave),
+    /// so that a client that gives its window back a byte at a time costs a
+    /// frame a byte and not an event formatted again for each.
+    pending: []u8 = &.{},
+    pending_at: usize = 0,
+    kept_by: ?std.mem.Allocator = null,
+
+    const Held = union(enum) {
+        retry: u32,
+        post: struct { room: *room_mod.Room, post: *room_mod.Post },
+    };
+
+    /// The bell a Room rings for this stream's seats.
+    pub fn bell(self: *Http2Events) bulkhead.Waker {
+        return .{ .target = self, .vtable = &bell_table };
+    }
+
+    const bell_table: bulkhead.Waker.VTable = .{
+        .wait = struct {
+            fn f(_: ?*anyopaque, _: u32) bulkhead.Woken {
+                return .readable;
+            }
+        }.f,
+        .post = ring,
+        .release_stack = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
+        .half_close = struct {
+            fn f(_: ?*anyopaque) void {}
+        }.f,
+    };
+
+    /// Called by a Room, on whatever thread said something, inside the seat's
+    /// lock: say so, and wake the connection, which is told nothing if it
+    /// has gone (`inbound.Link.poke`).
+    fn ring(target: ?*anyopaque) void {
+        const self: *Http2Events = @ptrCast(@alignCast(target.?));
+        // Already rung and not yet looked at: the connection has been woken
+        // for it, or is about to be, and `step` clears the flag before it
+        // looks, so a post that lands after that look rings again. Most
+        // posts of a burst take no lock and wake nobody.
+        if (self.rung.swap(true, .acq_rel)) return;
+        self.link.poke(self.link.ctx);
+    }
+
+    /// Write what is posted, as far as the windows and the turn allow
+    /// (`framing.EventSource.step`).
+    pub fn step(self: *Http2Events, wire: *framing_mod.EventWire) framing_mod.EventError!framing_mod.Stepped {
+        // Cleared before anything is looked at, so a post that lands while
+        // this walks is found by the next call and never lost.
+        const rung = self.rung.swap(false, .acq_rel);
+        if (!rung and self.held == null) return .drained;
+
+        if (self.held) |item| {
+            if (!try self.write(item, wire)) return .blocked;
+            self.held = null;
+            release(item);
+        }
+        while (self.nextOwed()) |item| {
+            // Held while it is written, so that a connection that fails
+            // under it, or a reset, still releases it.
+            self.held = item;
+            if (!try self.write(item, wire)) return .blocked;
+            self.held = null;
+            release(item);
+        }
+        deliverSeats(self.seated, Sink{ .events = self, .wire = wire }) catch |err| switch (err) {
+            error.Blocked => return .blocked,
+            else => |e| return e,
+        };
+        return .drained;
+    }
+
+    /// One event for `deliverSeats`: written if the windows allow, and kept
+    /// by a reference of its own if only some of it went.
+    const Sink = struct {
+        events: *Http2Events,
+        wire: *framing_mod.EventWire,
+
+        fn event(self: Sink, in_room: *room_mod.Room, post: *room_mod.Post) error{ Blocked, WriteFailed, OutOfMemory }!void {
+            const item: Held = .{ .post = .{ .room = in_room, .post = post } };
+            if (try self.events.write(item, self.wire)) return;
+            _ = post.refs.fetchAdd(1, .acq_rel);
+            self.events.held = item;
+            return error.Blocked;
+        }
+    };
+
+    /// `retry:`, then the history, in the order they are owed.
+    fn nextOwed(self: *Http2Events) ?Held {
+        if (self.retry_ms) |millis| {
+            self.retry_ms = null;
+            return .{ .retry = millis };
+        }
+        for (self.replays) |*kept| {
+            if (kept.posts.len == 0) continue;
+            const post = kept.posts[0];
+            kept.posts = kept.posts[1..];
+            return .{ .post = .{ .room = kept.room.?, .post = post } };
+        }
+        return null;
+    }
+
+    /// Count of events formatted, for the test that holds a held event to
+    /// being formatted once.
+    pub var formatted: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {};
+
+    /// Format `item` and write what the windows take of it. True when it is
+    /// all out. An event no window has room for is not formatted at all, and
+    /// one that went only in part keeps its remainder (`pending`), so it is
+    /// formatted once however many turns it takes.
+    fn write(self: *Http2Events, item: Held, wire: *framing_mod.EventWire) framing_mod.EventError!bool {
+        if (wire.room(wire) == 0) return false;
+        if (self.pending.len == 0) {
+            wire.scratch.clearRetainingCapacity();
+            const w = &wire.scratch.writer;
+            if (comptime @import("builtin").is_test) formatted += 1;
+            switch (item) {
+                .retry => |millis| w.print("retry: {d}\n\n", .{millis}) catch return error.OutOfMemory,
+                .post => |p| writeEvent(w, p.room.eventOf(p.post)) catch return error.OutOfMemory,
+            }
+            const bytes = wire.scratch.written();
+            const sent = wire.put(wire, bytes) catch return error.WriteFailed;
+            if (sent == bytes.len) return true;
+            self.pending = wire.gpa.dupe(u8, bytes[sent..]) catch return error.OutOfMemory;
+            self.pending_at = 0;
+            self.kept_by = wire.gpa;
+            return false;
+        }
+        const sent = wire.put(wire, self.pending[self.pending_at..]) catch return error.WriteFailed;
+        self.pending_at += sent;
+        if (self.pending_at < self.pending.len) return false;
+        self.dropPending();
+        return true;
+    }
+
+    fn dropPending(self: *Http2Events) void {
+        if (self.kept_by) |gpa| gpa.free(self.pending);
+        self.pending = &.{};
+        self.pending_at = 0;
+        self.kept_by = null;
+    }
+
+    fn release(item: Held) void {
+        switch (item) {
+            .retry => {},
+            .post => |p| p.room.release(p.post),
+        }
+    }
+
+    /// Give up every seat and release what is still held. The last thing done
+    /// with the stream: from the connection's fiber, or from the thread of a
+    /// call that outlived its connection, and never while `step` runs.
+    pub fn leave(self: *Http2Events) void {
+        while (self.seated.room) |in_room| in_room.stand(&self.seated);
+        if (self.held) |item| release(item);
+        self.held = null;
+        self.dropPending();
+        for (self.replays) |*kept| kept.release();
+    }
+
+    /// `step` and `leave` as the connection holds them (`framing.EventSource`).
+    pub fn stepErased(state: *anyopaque, wire: *framing_mod.EventWire) framing_mod.EventError!framing_mod.Stepped {
+        const self: *Http2Events = @ptrCast(@alignCast(state));
+        return self.step(wire);
+    }
+
+    pub fn leaveErased(state: *anyopaque) void {
+        const self: *Http2Events = @ptrCast(@alignCast(state));
+        self.leave();
+    }
+};
+
 /// One event's lines: `event:` and `id:` when it has them, `data:` for each
 /// line of the data, and the blank line that ends it. The caller has checked
 /// `name` and `id` for line breaks.
@@ -652,23 +930,26 @@ const testing = std.testing;
 const Wire = struct {
     buf: [4096]u8 = undefined,
     out: std.Io.Writer = undefined,
+    in: std.Io.Reader = .fixed(""),
+    framing: Framing = undefined,
     stream_buf: [64]u8 = undefined,
     open: ?Open = null,
 
     fn init(self: *Wire) void {
         self.out = .fixed(&self.buf);
+        self.framing = .{ .http1 = .{ .in = &self.in, .out = &self.out, .minor_version = 1 } };
     }
 
     fn stream(self: *Wire, chunked: bool, drop: bool) Stream {
         self.open = .{ .chunked = chunked, .drop = drop };
-        return .init(&self.stream_buf, &self.out, null, &self.open);
+        return .init(&self.stream_buf, &self.framing, null, &self.open);
     }
 
     /// A stream whose head promised `length` bytes: no chunk framing, and a
     /// close flag for the one failure that cannot be taken back.
     fn promising(self: *Wire, length: u64, closing: *bool) Stream {
         self.open = .{ .chunked = false, .drop = false, .promised = length };
-        return .initClosing(&self.stream_buf, &self.out, null, &self.open, closing);
+        return .initClosing(&self.stream_buf, &self.framing, null, &self.open, closing);
     }
 
     fn written(self: *const Wire) []const u8 {
@@ -961,7 +1242,7 @@ test "a HEAD that promised a length writes nothing and closes nothing" {
     wire.init();
     var closing = false;
     wire.open = .{ .chunked = false, .drop = true, .promised = 100 };
-    var body: Stream = .initClosing(&wire.stream_buf, &wire.out, null, &wire.open, &closing);
+    var body: Stream = .initClosing(&wire.stream_buf, &wire.framing, null, &wire.open, &closing);
 
     // The head said a hundred bytes, because that is what a GET would have
     // said. Nothing follows it, and nothing about that is short.
@@ -978,7 +1259,7 @@ test "live follows the server's stopping flag" {
     var stopping = std.atomic.Value(bool).init(false);
 
     wire.open = .{ .chunked = true, .drop = false };
-    var body: Stream = .init(&wire.stream_buf, &wire.out, &stopping, &wire.open);
+    var body: Stream = .init(&wire.stream_buf, &wire.framing, &stopping, &wire.open);
     try testing.expect(body.live());
     stopping.store(true, .release);
     try testing.expect(!body.live());

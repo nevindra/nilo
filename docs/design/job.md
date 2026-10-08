@@ -58,9 +58,9 @@ Related topics: why `app.spawn`/`nilo.sleep` alone were rejected for recurring w
 
 ## Open questions
 
-- **Whether a job kind can limit how many of it run at once.** A per-kind limit enforced by the claim itself, instead of a `nilo.Gate` inside `run` that still ties up a worker while it waits. In [the roadmap](../roadmap.md).
-- **Whether a job has a result.** `status(id)` says `done` and nothing about the outcome. A `pub const Result = T` plus a `result` column is sketched, not built. [The roadmap](../roadmap.md).
-- **Schedules are UTC only.** Time zones would be a dependency this module has not taken on. [The roadmap](../roadmap.md).
-- **A worker started with `app.start(io)` and never `listen()`ed has nothing to stop it.** This module installs no signal handler; a worker binary is expected to write the four lines that catch `SIGTERM` itself. [The roadmap](../roadmap.md).
-- **`stats` is three numbers for the whole queue**, not the per-kind counts or queue age an operator's dashboard would want. [The roadmap](../roadmap.md).
-- **`job.Memory` scans its slots under a spin lock**, 3 to 6 microseconds per claim. Fine for tests; not measured at a size anyone would notice. [The roadmap](../roadmap.md).
+- **Whether a job kind can limit how many of it run at once.** A per-kind limit enforced by the claim itself, instead of a `nilo.Gate` inside `run` that still ties up a worker while it waits. In [the todo list](../todo.md).
+- **Whether a job has a result.** `status(id)` says `done` and nothing about the outcome. A `pub const Result = T` plus a `result` column is sketched, not built. [The todo list](../todo.md).
+- **Schedules are UTC only.** Time zones would be a dependency this module has not taken on. [The todo list](../todo.md).
+- **A worker started with `app.start(io)` and never `listen()`ed has nothing to stop it.** This module installs no signal handler; a worker binary is expected to write the four lines that catch `SIGTERM` itself. [The todo list](../todo.md).
+- **`stats` is three numbers for the whole queue**, not the per-kind counts or queue age an operator's dashboard would want. [The todo list](../todo.md).
+- **`job.Memory` scans its slots under a spin lock**, 3 to 6 microseconds per claim. Fine for tests; not measured at a size anyone would notice. [The todo list](../todo.md).

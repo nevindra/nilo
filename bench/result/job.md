@@ -40,7 +40,7 @@ weigh against.
 (SELECT … FOR UPDATE SKIP LOCKED) RETURNING` shape costs a round trip per
 row; the alternative — claim a batch of ten and run them in turn — would cut
 the per-row cost by most of the Postgres figure, at the price of ten rows held
-by one worker that may die. That is a Next entry in `docs/roadmap.md` rather
+by one worker that may die. That is a Next entry in `docs/todo.md` rather
 than the default, because the number that decides it is a busy queue's
 throughput under several workers, which one connection cannot measure.
 

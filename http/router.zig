@@ -1188,27 +1188,27 @@ test "the tree agrees with the scan it replaced, on a table under one prefix" {
     // The shape that decided the tree: everything under `/api`, several
     // methods per resource, literals beside params at the same depth.
     const table = [_]struct { http1.Method, []const u8 }{
-        .{ .GET, "/" },                                .{ .GET, "/health" },
-        .{ .GET, "/api/deals" },                       .{ .POST, "/api/deals" },
-        .{ .GET, "/api/deals/:id" },                   .{ .PATCH, "/api/deals/:id" },
-        .{ .DELETE, "/api/deals/:id" },                .{ .GET, "/api/deals/pipeline" },
-        .{ .GET, "/api/deals/:id/lines" },             .{ .POST, "/api/deals/:id/lines" },
-        .{ .POST, "/api/deals/:id/won" },              .{ .GET, "/api/work-items/mine" },
-        .{ .GET, "/api/work-items/:id" },              .{ .POST, "/api/work-items/:id/target-date" },
+        .{ .GET, "/" },                                 .{ .GET, "/health" },
+        .{ .GET, "/api/deals" },                        .{ .POST, "/api/deals" },
+        .{ .GET, "/api/deals/:id" },                    .{ .PATCH, "/api/deals/:id" },
+        .{ .DELETE, "/api/deals/:id" },                 .{ .GET, "/api/deals/pipeline" },
+        .{ .GET, "/api/deals/:id/lines" },              .{ .POST, "/api/deals/:id/lines" },
+        .{ .POST, "/api/deals/:id/won" },               .{ .GET, "/api/work-items/mine" },
+        .{ .GET, "/api/work-items/:id" },               .{ .POST, "/api/work-items/:id/target-date" },
         .{ .PATCH, "/api/work-items/:id/target-date" }, .{ .GET, "/api/:tenant/settings" },
-        .{ .PUT, "/api/:tenant/settings" },            .{ .GET, "/api/deals/:id/lines/:line" },
+        .{ .PUT, "/api/:tenant/settings" },             .{ .GET, "/api/deals/:id/lines/:line" },
     };
     for (table) |route| try r.add(route[0], route[1], testHandler);
 
     const paths = [_][]const u8{
-        "/",                          "",                             "/health",
-        "/health/",                   "/api",                         "/api/deals",
-        "/api/deals/",                "/api/deals/7",                 "/api/deals/pipeline",
-        "/api/deals/settings",        "/api/deals/7/lines",           "/api/deals/7/lines/3",
-        "/api/deals//lines",          "/api/deals/7/won",             "/api/work-items/mine",
-        "/api/work-items/7",          "/api/work-items/7/target-date", "/api/work-items/settings",
-        "/api/acme/settings",         "/api//settings",               "/api/nope/7",
-        "/api/deals/7/lines/3/more",  "//",                           "/api/deals/pipeline/lines",
+        "/",                         "",                              "/health",
+        "/health/",                  "/api",                          "/api/deals",
+        "/api/deals/",               "/api/deals/7",                  "/api/deals/pipeline",
+        "/api/deals/settings",       "/api/deals/7/lines",            "/api/deals/7/lines/3",
+        "/api/deals//lines",         "/api/deals/7/won",              "/api/work-items/mine",
+        "/api/work-items/7",         "/api/work-items/7/target-date", "/api/work-items/settings",
+        "/api/acme/settings",        "/api//settings",                "/api/nope/7",
+        "/api/deals/7/lines/3/more", "//",                            "/api/deals/pipeline/lines",
     };
     for ([_]http1.Method{ .GET, .POST, .PUT, .PATCH, .DELETE, .HEAD, .OPTIONS }) |method| {
         for (paths) |path| {

@@ -875,7 +875,7 @@ arena is cheaper than the stack, on this path as on the others.
 
 ### What the logger costs a held stream: nothing, and the fix was already free
 
-`roadmap.md` carried **"the logger puts a kilobyte on a frame that is live while
+`todo.md` carried **"the logger puts a kilobyte on a frame that is live while
 the handler waits"**, waiting on a number. `logger.with`'s inner `log` declares
 `var buf: [1024]u8` and was a plain `fn`, so it was a candidate for inlining
 into `run`, whose frame is live across `next.run(c)` — which is exactly the
@@ -939,7 +939,7 @@ Asked when `nilo.Rooms` began lending Rooms to keys ([ADR 228](../../docs/adr/22
 
 ## The WebSocket against Autobahn
 
-`roadmap.md` carried **"nothing runs the Autobahn suite against the
+`todo.md` carried **"nothing runs the Autobahn suite against the
 WebSocket"**, and by
 [ADR 032](../../docs/adr/032-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md)'s
 reading that made every close-code and UTF-8 rule in
@@ -3182,7 +3182,7 @@ On 1 MB, `std.flate` 6 is 106,428 bytes in 21.8 ms, libdeflate 6 is 80,635 in 10
 - **22% of `std.flate`'s time on an arena body is a memset nobody needs**: `toks.* = .empty` in `writeBlock` (`Compress.zig` lines 987 and 1055) rebuilds the 96 KB token buffer from its constant after every block. A scratch copy assigning the fields one by one gave byte-identical output 18% to 44% faster, about 50 µs a body here. That is a one-line change to the standard library, not to nilo.
 - Two lines above were wrong and are corrected: the reset clears the hash table's 64 KB `head` (32,768 two-byte entries), not 128 KB.
 
-**The decision it moved.** Nothing shipped. brotli and zstd are refused on these numbers ([`docs/decided.md`](../../docs/decided.md)). libdeflate behind a build flag, the way `-Dtls` brings tls.zig (ADR 212), is the candidate, and its open questions are on [`docs/roadmap.md`](../../docs/roadmap.md). Under HttpArena's score, `rps × (min_bytes / my_bytes)²`, with compression about 0.78 of a `json-comp` request's CPU (230 µs a request on the board against 49 µs for `json-tls`), libdeflate 6 scores about 1.95 times today's entry and brotli 5 about 1.10. That model has not been checked against the board.
+**The decision it moved.** Nothing shipped. brotli and zstd are refused on these numbers ([`docs/decided.md`](../../docs/decided.md)). libdeflate behind a build flag, the way `-Dtls` brings tls.zig (ADR 212), is the candidate, and its open questions are on [`docs/todo.md`](../../docs/todo.md). Under HttpArena's score, `rps × (min_bytes / my_bytes)²`, with compression about 0.78 of a `json-comp` request's CPU (230 µs a request on the board against 49 µs for `json-tls`), libdeflate 6 scores about 1.95 times today's entry and brotli 5 about 1.10. That model has not been checked against the board.
 
 **Can it be pushed further.** Yes, three ways. Run it again on a quiet machine and on a Zen 5, since the ratios have been measured only on this one. Measure the RSS libdeflate actually touches on a small body, which is bounded by the 668 KB above and not yet known. And the memset fix goes upstream to Zig, which every nilo build would get for nothing.
 
@@ -3435,3 +3435,959 @@ Asked by the photon port, whose WAL writer's `pwritev` and `fdatasync` (2 ms of 
 **The stall is the rule, not chance.** The short call waits exactly as long as the long one runs, every time, and starts at once with the threshold at 0. **A burst is unchanged**: 512 callers fill the pool to its ceiling either way, because the default rule also starts workers once the queue is twice what runs. **Steady concurrent calls are where it costs**: as many workers as callers instead of seven, 6% more CPU and 2.2 MB more RSS, for a wall time 38% shorter. Every one of those workers exits after zio's idle timeout of 60 s, as before.
 
 The decision: `serve` runs the pool at `scale_threshold = 0` ([ADR 013](../../docs/adr/013-handlers-must-not-block-the-thread.md#how-the-pool-grows)). **Can it be pushed further?** Not by this knob: the ceiling is what bounds the threads now, and a caller that must never queue even at the ceiling is what `blockingReserved` is for.
+
+## An answer handed to the framing
+
+Taken for [ADR 253](../../docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md), the go or no-go on putting every write `Ctx` makes behind `Framing`, a tagged union whose HTTP/2 arm exists only under `-Dgrpc`. **The rule it was held to: the HTTP/1.1 path unchanged on the two hard axes, and inside the spread on the other two.**
+
+**Machine and builds.** AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`. Before is `6a914dd` exported with `git archive HEAD` into a scratch tree; after is the same commit with the seam. Both sides built the same afternoon, `ReleaseFast`, in the default build and with `-Dgrpc`, so the four binaries are one-arm before, one-arm after (the tag is known while compiling), and the same pair with the HTTP/2 arm present.
+
+**Allocations per request: unchanged.** The four budget tests in `http/behaviour.zig` (the routed GET with CORS at exactly one allocation and no resize, traced, with metrics, with an allowance) pass unchanged, and so does every test that reads raw HTTP/1.1 back: 2,604 passed, 30 skipped, in Debug.
+
+**Memory per idle connection: unchanged to the byte.** `bench/mem.py --path /health --steps 1000,5000,10000`, two rounds each, interleaved:
+
+| build | 1,000 | 5,000 | 10,000 |
+|---|---|---|---|
+| default, before and after | 5,247 B | 5,197 B | 5,190 B |
+| `-Dgrpc`, before and after | 5,313 B | 5,210 B | 5,197 B |
+
+The marginal figure is the same on both sides of each pair in both rounds, as expected: `serveRequest` is `noinline`, so the `Ctx` that grew is unwound before the connection parks (ADR 062).
+
+**Binary size: under a kilobyte either way.** `nilo-hello` (the benchmark server) stripped `ReleaseFast`: 1,017,512 to 1,017,112 bytes in the default build (400 smaller, the duplicate of `Ctx.send` in `serve.zig` gone), 1,140,296 to 1,141,128 with `-Dgrpc` (832 larger, the collecting arm).
+
+**Throughput and p99, end to end: inside the spread.** A keep-alive load generator written for this (64 connections, one request in flight on each, 2 s warm-up and 8 s counted, plain Go over raw sockets because the machine has no wrk or oha), `GET /users/42` against `nilo-hello` over loopback, server on cores 0 to 3 and client on 4 to 7 and 12 to 15 so no physical core is shared. Five rounds, the four builds interleaved in each:
+
+| build | requests a second, five rounds | median | p99 |
+|---|---|---|---|
+| default, before | 1.49, 1.46, 1.38, 1.62, 1.62 M | 1.49 M | 60 to 69 µs |
+| default, after | 1.48, 1.45, 1.49, 1.45, 1.61 M | 1.48 M | 61 to 70 µs |
+| `-Dgrpc`, before | 1.49, 1.32, 1.49, 1.49, 1.60 M | 1.49 M | 62 to 71 µs |
+| `-Dgrpc`, after | 1.47, 1.33, 1.53, 1.48, 1.61 M | 1.48 M | 61 to 69 µs |
+
+A margin of 0.6% against a spread of 17% is "unchanged".
+
+**In process: the one number that moved, and why it is not the seam.** `zig build profile` (which had stopped compiling, see below), each binary pinned to core 6, eight interleaved rounds:
+
+| build | the routed GET, end to end | a unary gRPC call |
+|---|---|---|
+| default, before | 394 to 406 ns | 1,099 to 1,114 ns |
+| default, after | 418 to 426 ns | 1,111 to 1,140 ns |
+| `-Dgrpc`, before | 397 to 433 ns | 1,101 to 1,153 ns |
+| `-Dgrpc`, after | 400 to 423 ns | 1,131 to 1,143 ns |
+
+The default build is about 20 ns slower in process, outside its spread, and the build with the second arm, the one that pays a compare, is not. The per-piece rows say where it went: "serialise the body", which is `json.zig` writing into a buffer and touches nothing the seam changed, went from 85 to 94 ns in the default build and to 91 in the other. A row the change cannot reach moving by half the difference is code placement, not the dispatch. End to end it is inside the spread above, about 0.7% of the 2.7 µs of CPU a request costs on four cores at 1.49 M a second. The gRPC call is about 2% slower in both builds, the same order, and it is not explained here: the call still goes through the HTTP/1.1 arm of the translation, so it pays what a routed GET pays and no more, and stage 2 of [the framing page](../../docs/design/framing.md#how-the-direction-is-built) removes that path along with the HTTP/1.1 text it parses back.
+
+**Found on the way.** `zig build profile` did not compile at `6a914dd`: its module was never given `nilo_build`, which `compress.zig` has asked for since ADR 248, and nothing builds the profile on `zig build test`. It is now wired like every other instance of the App's files and compiled, not run, on every `test`.
+
+**The decision it moved:** go. Every answer `Ctx` makes leaves through `Framing`, and stage 2 can build on it.
+
+**Can it be pushed further:** (1) the 20 ns of placement in the default build, by finding which function's alignment moved (`perf` is not on this machine); it is not on any path the end-to-end run can see. (2) The gRPC call's text round trip, which stage 2 and 3 remove outright.
+
+## Holding every answer until the chain unwinds
+
+Taken for the open question on [the framing page](../../docs/design/framing.md#open-questions), whether a middleware may change an answer after `next()`. **The question: what it costs to hold every whole answer until the middleware chain has unwound, as Axum and Hono do, rather than only where a middleware asks for it.** Holding means `send` keeps the answer and the connection writes it after the chain, and a body the request does not own (anything handed to `c.send`) has to be copied into the arena first: the handler's frame is gone by then, and so is anything its `defer` released, a cache entry included.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`. Base is `372b766` exported with `git archive`; the spike is the same tree with `Ctx.send` holding the answer, copying the body unless it came from the typed layer or `sendJson` (already in the arena), and `serveRequest` writing it after the chain. Both serve `nilo-hello` plus four routes answering `c.send(200, "application/octet-stream", blob[0..n])` from a global buffer, and an allocator under the App that counts what the arenas ask of it. Spike not kept.
+
+**Method.** The Go load generator from the section above, 64 keep-alive connections, server on cores 0 to 3 and client on 4 to 7 and 12 to 15, 1 s warm-up and 5 s counted, five rounds with the order of the two builds swapped each round. Peak memory is the server's `VmHWM` at the end of each run. Backing allocations are a separate 2 s run with no warm-up, divided by the requests in it.
+
+| route | base: req/s, p99 | spike: req/s, p99 | backing allocations a request, spike | peak RSS, base → spike |
+|---|---|---|---|---|
+| `/users/42` (typed JSON, not copied) | 1,641 k, 57.3 µs | 1,644 k, 57.5 µs | 0 | 6.9 → 6.9 MB |
+| `/b/1k` | 1,759 k, 57.5 µs | 1,758 k, 57.8 µs | 0 | 6.6 → 6.8 MB |
+| `/b/16k` | 1,029 k, 82.8 µs | 1,009 k, 85.6 µs | 0 | 6.6 → 7.9 MB |
+| `/b/64k` | 388 k, 225 µs | 143 k, 620 µs | 1.0 | 6.6 → 9.8 MB |
+| `/b/1m` | 67 k, 2.9 ms | 9 k, 8.1 ms | 1.0 | 6.6 → 56.8 MB |
+
+Medians of five rounds; the base never asked its allocator for anything after warm-up on any route. **Holding itself costs nothing measurable** (`/users/42`, where nothing is copied, is level). **The copy is free while it fits in what the arena keeps and ruinous once it does not**: at 16 KiB it is 2% of throughput and 3% of p99, at the edge of the spread, and at 64 KiB every request grows its arena past `arena_keep` and gives it back, which cost 63% of throughput and nearly tripled p99. At 1 MiB it is 87% of throughput and 8.6 times the peak memory. Why the growth costs that much was not taken apart (no `perf` on this machine); the large blocks go to the page allocator, so a map and an unmap a request across four threads is the likely reading, not a measured one.
+
+**The hypothesis it replaced was too kind.** Before the run the estimate for a 16 KiB to 1 MiB body was "a few microseconds" a request; it was 400 µs of p99 at 64 KiB. ADR 017 calls allocations a hard axis because one is "fine a million times and then it is a `mmap`"; here it is the `mmap` every time.
+
+**The decision it moved:** holding every answer is refused. Holding where a middleware asks for it (`next.hold`, built in the next section) stays the recommendation, and it carries the same copy: a route behind such a middleware that sends a large body through `c.send` pays these numbers, which its documentation has to say. Idle memory per connection was not measured; nothing in the spike lives past `serveRequest`.
+
+**Can it be pushed further:** the copy could be skipped for a body that provably outlives the chain, but nothing can prove that about a slice: a global, an arena and a cache entry released by the handler's `defer` look the same. Raising `arena_keep` moves the 64 KiB cost from throughput to memory a connection holds.
+
+## Trailers, a held answer, and gRPC answered from what it collected
+
+The cost of the framing's second stage ([ADR 254](../../docs/adr/254-an-answer-can-carry-trailers.md), [ADR 008](../../docs/adr/008-middleware-is-an-onion-of-ctx-functions.md), [ADR 220](../../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)): `c.setTrailer`, `next.hold(c)`, a header after the head refused, and a gRPC call answered from a `framing.Collected` instead of from HTTP/1.1 text it parsed back. **The question: what each axis pays, in a build with `-Dgrpc` and one without.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`. Before is `372b766` exported with `git archive`; after is the working tree on top of it, same afternoon, same flags, each built default and with `-Dgrpc`.
+
+**Size**, stripped `nilo-hello`:
+
+| build | before | after | |
+|---|---|---|---|
+| default | 1,017,104 | 1,020,800 | +3,696 |
+| `-Dgrpc` | 1,141,120 | 1,094,112 | −47,008 |
+
+The default build pays for the held answer, the trailer list on `Ctx` and the late-header check; the trailer writers are behind a pointer the first `setTrailer` sets (the ADR 246 move), which took 2,656 bytes out of the first cut. The `-Dgrpc` build loses the HTTP/1.1 response parser, the chunked decoder and the reframing copy that the call used to go through.
+
+**The profile** (`zig build profile`, pinned to one core, four rounds interleaved, best of five inside each): a routed GET end to end 407 to 409 ns before and 403 to 405 ns after in the default build. **The first cut of the `-Dgrpc` build was a regression and is not what ships**: the same GET went from 392 to 395 ns to 464 to 469 ns, +18%, past ADR 017's 10%. Every row the profile breaks out was level, so it was in the remainder; a build with the HTTP/2 arm forced off came back to 402 to 403 ns, and with `Collected.whole` and `Collected.head` made `noinline` the GET is 411 to 412 ns (+4%, inside the 15 ns the two builds already differed by before). No `perf` on this machine, so the reading that inlining the collecting code into `Framing.whole` is what cost it is the experiment's, not a profile's. A unary gRPC call over h2c went from 1,083 to 1,118 ns to 902 to 910 ns, −17%: the parse it no longer does.
+
+**End to end**, `/users/42` under the Go load generator, 64 keep-alive connections, server on cores 0 to 3 and client on 4 to 7 and 12 to 15, 2 s warm-up and 8 s counted, five rounds interleaved, medians:
+
+| build | before: req/s, p99 | after: req/s, p99 |
+|---|---|---|
+| default | 1,633 k, 59.5 µs | 1,611 k, 59.5 µs |
+| `-Dgrpc` | 1,610 k, 60.3 µs | 1,608 k, 60.3 µs |
+
+The default build's −1.3% is small and is in every round, not inside the spread: after was below before in all five. It is the per-answer bookkeeping a hold needs (`_head_written`, the check `setHeader` makes against it, the trailer list's emptiness), and it is inside the budget.
+
+**Idle memory** (`bench/mem.py`, 1,000, 5,000 and 10,000 idle connections, two rounds): 5,165, 5,181 and 5,182 bytes a connection before and after in the default build; 5,165, 5,181, 5,182 before and 5,161, 5,180, 5,182 after with `-Dgrpc`. Unchanged. Nothing new lives past `serveRequest`, and `endStream` stays `noinline` off the connection loop.
+
+**Allocations.** The request path's budget test (`http/behaviour.zig`) passes unchanged: a route that does not hold or set a trailer pays nothing. A gRPC call's arena, counted with `budget.Counting` in a scratch build over the suite's three services:
+
+| call | before: allocations, bytes | after: allocations, bytes |
+|---|---|---|
+| `/test.Echo/Say` | 4, 615 | 4, 495 |
+| `/test.Meta/Who` | 9, 978 | 10, 697 |
+| `/test.Orders/Get` | 8, 1,082 | 8, 824 |
+
+The first cut was one more allocation on every call (5, 11 and 9): the body and the content type were copied separately. They are now one block, with the five bytes of the gRPC prefix in front of the body so the frame is written without a second copy. `Meta/Who` keeps one more, the copy of the headers it sets, which the old path paid as part of a larger text. Heap allocations from the second call on stay zero.
+
+**The decision it moved:** the stage ships with `noinline` on the collecting methods, and the default build's 1.3% is the price of the hold. **Can it be pushed further:** the 1.3% could come back if the late-header check moved off `setHeader` into Debug only, which would turn a refusal into a silent loss in ReleaseFast; refused, for the reason ADR 008 gives.
+
+## A call handed to the App as it was read
+
+The cost of the framing's third stage ([ADR 253](../../docs/adr/253-an-answer-is-handed-to-the-framing-that-carried-its-request.md), [ADR 220](../../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)): a gRPC call handed to `serve.serveRequest` as a `framing.Call` (its method, path, a field block and its message) where it was written as HTTP/1.1 text and parsed back, its fields held to `parseHead`'s rules by `parseHead`'s own loop (`http1.parseFields`). **The question: does the read half of the translation pay for itself, and what does a second way in cost the HTTP/1.1 path.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`. Before is `3b76ed2` exported with `git archive`; after is the working tree on top of it, same afternoon, same flags, each built default and with `-Dgrpc`. The profile pinned to one core (`taskset -c 2`), four rounds interleaved, best of five inside each.
+
+**The first cut was a regression and is not what ships.** It had two entries, `serveRequest` and a `serveCall`, over one `inline` core, so that each would keep a frame of its own. In the `-Dgrpc` build the routed GET went from 414 to 417 ns to 440 to 442 (+6%) and stripped `example-hello` grew 9,920 bytes, for a call that went from 912 to 914 ns to 900 to 911 (−1%). The default build was level on time and 1,232 bytes larger. The core compiled once per entry, and every function it calls had a second call site; the reading that the compiler stopped inlining them into the HTTP/1.1 path is the experiment's, not a profile's (no `perf` here), and the shape that fixed it is consistent with it: one `serveRequest` told how its request arrived by a `framing.Arrival`, `.wire` or `.call`, branching only to read and parse the head, with the `.call` arm `noreturn` without `-Dgrpc`.
+
+**What ships**, the profile:
+
+| row | before | after |
+|---|---|---|
+| routed GET, default build | 404 to 405 ns | 404 ns |
+| routed GET, `-Dgrpc` build | 414 to 416 ns | 417 to 422 ns |
+| unary gRPC call over h2c, end to end | 913 to 921 ns | 876 to 887 ns |
+| of which HPACK decode | 246 to 251 ns | 244 to 247 ns |
+
+The call is 4% faster. The `-Dgrpc` build's GET is about 1% slower, a margin the size of its spread: the compare on the arrival, which that build cannot fold. The App's row is not in the table because it measured different things on the two sides: before, the App handed HTTP/1.1 text and writing HTTP/1.1 bytes (270 to 273 ns), not counting what `asRequest` spent writing the text, which no row timed; after, the App handed the call and collecting its answer (213 to 216 ns). **Most of the 229 ns the roadmap called the translation was never the translation**: it was the App, the field parse and the route, which a call still runs and should. What went is the request line, the copy of the message into the text, finding the end of a head this side had just written, and the copy of that head into the arena.
+
+**Size**, stripped `ReleaseFast`:
+
+| binary | build | before | after | |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,248 | 1,013,248 | 0 |
+| `example-hello` | `-Dgrpc` | 1,086,616 | 1,087,864 | +1,248 |
+| `nilo-hello` (`bench/main.zig`) | `-Dgrpc` | 1,094,120 | 1,095,384 | +1,264 |
+
+The default build is the same binary to the byte. The `-Dgrpc` build carries the second arm of the head: `applyTarget`, the field loop's instance with no request line, and the checks on a `Call`.
+
+**Allocations.** The request path's budget test (`http/behaviour.zig`) passes unchanged, and heap allocations from a connection's second call on stay zero (`grpc.zig`'s budget test). A gRPC call's arena, counted with `budget.Counting` around it in a scratch build of each side, over the suite's three services with a forty-byte message:
+
+| call | before: allocations, bytes | after: allocations, bytes |
+|---|---|---|
+| `/test.Echo/Say` | 4, 495 | 3, 269 |
+| `/test.Meta/Who` | 10, 697 | 9, 471 |
+| `/test.Orders/Get` | 8, 824 | 7, 598 |
+
+The before column is the after column of the stage 2 entry above, to the byte. The allocation that went is the copy of the head into the arena, which a request with a body pays on HTTP/1.1 because the next read overwrites its buffer, and which a call's head, already in the call's arena, never needed; the bytes are that copy and `asRequest`'s 256 bytes of slack, the field block being sized exactly.
+
+**Idle memory** (`bench/mem.py`, `nilo-hello` built with `-Dgrpc`, `/users/1`, server on cores 0 to 3, 1,000, 5,000 and 10,000 idle connections, two rounds interleaved): 9,253 to 9,257, 9,276 and 9,278 bytes a connection before; 9,253, 9,275 to 9,276 and 9,277 to 9,278 after. Unchanged. The default build is the same binary, so its figure is unchanged by construction.
+
+**The decision it moved:** the stage ships with one entry and an `Arrival`, and ADR 253's rejected list carries the two-entry shape with these numbers. **Can it be pushed further:** (1) the route's `c.body()` copies the message once more into the arena it already lies in; handing the `Call`'s body to `Ctx` as already read would take a copy of every message off a call, at the cost of a second way for a body to be read. (2) HPACK decode is now the largest single row of a call, 28%, with a table advertised at 0, so every field is a Huffman-coded literal decoded afresh.
+
+## Two Huffman symbols a lookup
+
+The HPACK row of a unary gRPC call, 28% of it with the table advertised at 0 ([ADR 220](../../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)), taken apart and the larger half rebuilt. **The question: how much of the decode is Huffman, and how much of that a wider lookup buys back without a byte of idle memory.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, pinned to one core (`taskset -c 2`). Before is `40e9f45` exported with `git archive`; after is the working tree on top of it, same afternoon, same flags.
+
+**Huffman is most of the decode.** h2load's 89-byte block carries eight fields, five of them Huffman-coded strings, 68 bytes in all. Timed standalone against `hpack.zig` (best of 30 runs of 1,000): the whole block 209 to 210 ns, those five strings alone 163 to 164. The rest is the integers, the static table and the arena.
+
+**Candidates**, each checked first against the decoder in the tree on about five million inputs (every byte, random strings whole, truncated and with a bit flipped, and random bytes), all agreeing on the bytes and on every refusal; then timed on h2load's five strings and on nine a Collector-like call carries (its path, authority, user agent, content and accepted codings, `grpc-timeout`, `traceparent`):
+
+| decoder | table | h2load's five | a Collector-like call |
+|---|---|---|---|
+| one symbol a lookup, 9 bits (`40e9f45`) | 1 KB | 162 to 165 ns | 352 ns |
+| the same, its input a word at a time at the top of a register | 1 KB | 133 to 134 ns | 300 to 305 ns |
+| two symbols a lookup, 10 bits | 4 KB | 133 to 135 ns | 290 to 293 ns |
+| two symbols a lookup, 11 bits | 8 KB | 94 to 97 ns | 209 to 212 ns |
+| two symbols a lookup, 12 bits | 16 KB | 79 to 84 ns | 184 to 186 ns |
+| two symbols a lookup, 13 bits | 32 KB | 77 ns | 173 ns |
+
+Twelve bits is where a pair of the 5- and 6-bit codes that lowercase letters, digits and `/.-:` have fits, which is most of what a header is made of; thirteen buys 3 to 8% more for twice the table.
+
+**What ships**, `zig build profile -Dgrpc`, four rounds interleaved:
+
+| row | before | after |
+|---|---|---|
+| routed GET, `-Dgrpc` build | 419 to 430 ns | 419 to 424 ns |
+| unary gRPC call over h2c, end to end | 865 to 879 ns | 767 to 773 ns |
+| of which HPACK decode | 244 to 245 ns | 123 to 125 ns |
+| the App, handed the call | 196 to 200 ns | 197 to 199 ns |
+| the rest: frames, the call, answer | 422 to 437 ns | 445 to 451 ns |
+
+The call is 11 to 12% faster, and the HPACK row is half what it was. **The call saved about 100 ns where the row saved 120**, and the difference landed in the rest, which is what is left of the call once the two timed rows are taken off it. It is not the table's size: an 11-bit build, half the table, run in the same three rounds (calls of 787 to 795 ns, its HPACK row 137 to 140) moved the rest by the same 30 ns. What it is was not found; the reading that the rows timed in a loop of their own are warmer than they are inside a call is consistent with it and not shown. The end-to-end row is the one to quote.
+
+**Size**, stripped `ReleaseFast`: `example-hello` built with `-Dgrpc` 1,087,864 to 1,103,160 bytes, +15,296, the table less the one it replaces; the default build 1,013,248 both sides, since nothing without gRPC reaches `hpack.zig`. **Allocations and idle memory** are unchanged by construction: the decoder writes into the capacity it reserved before, and no connection holds anything new.
+
+**The decision it moved:** the decoder takes two symbols a lookup at 12 bits, and the todo entry that asked for it narrows to the table it was weighed against. **Can it be pushed further:** HPACK is now 16% of a call. What is left of it is mostly the five strings decoded afresh every call, and only a table of the client's own keeps them, which is idle memory: the Collector's measured in ADR 220 fills one. Three symbols a lookup would need a 16-bit table, 256 KB, past where a lookup stays in the first cache.
+
+## A body read as what its type says
+
+The first piece of the framing's fourth stage ([ADR 256](../../docs/adr/256-a-body-is-read-as-what-its-type-says.md)): a struct with a `wire` table read as JSON or as protobuf by the request's `Content-Type` and answered in the same, and `nilo_decode` for a type that reads its own bytes. **The questions: what a message costs in each spelling, what everything that is not a message pays for it, and where the `Content-Type` is read.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, pinned to one core (`taskset -c 2`). Before is `40e9f45` exported with `git archive`, with this entry's `http/profile.zig` copied in so both binaries time the same three requests; after is the working tree on top of it, which also carries [two Huffman symbols a lookup](#two-huffman-symbols-a-lookup), a change to the gRPC build only.
+
+**The rows** (`zig build profile`, "one POST whose body is two numbers"): a plain struct read from JSON and answered as JSON, the control; the same two numbers into a message read from JSON; and from protobuf. At `40e9f45` the message is an ordinary struct and the protobuf request is a 400, so only its first two rows mean anything.
+
+**Where the `Content-Type` is read was the design question, and three places were built and measured.**
+
+| where | message as JSON | protobuf | what every program pays |
+|---|---|---|---|
+| `Ctx.header`, read twice (body, then answer) | 454 to 466 ns | 371 to 384 ns | nothing |
+| a byte on the `Ctx`, read once | 421 to 428 ns | 297 to 310 ns | 81 bytes of `serve.serveRequest` |
+| classed by the head parser into a byte `http1.Request` packs | 381 to 386 ns | 274 to 276 ns | 1.6 KB of request parsing, after it was cut from 5.2 KB |
+| the handler's wrapper, read once by a scan of its own (**ships**) | 410 to 418 ns | 282 to 284 ns | nothing |
+
+The control was 359 to 377 ns across these runs. A read of the head through `Ctx.header` is 27 ns in a loop of its own and about 40 inside a request, and classing the value 13 more until `application/json` was given a path of its own. The head parser's place was the fastest, and it put code on every program's request path, which [ADR 017](../../docs/adr/017-the-trade-budget-has-four-axes.md) does not allow for a feature at any size: the classing function alone was 4 KB written with `eqlIgnoreCase` and 969 bytes rewritten as a switch on the length. The `Ctx` byte sat in padding, `@sizeOf(Ctx)` 992 either way, and still cost `serveRequest` 81 bytes to initialise. What ships keeps the spelling on the stack of a handler's own wrapper, a byte where a message is in the signature and a zero-sized `void` everywhere else.
+
+**What ships**, four rounds interleaved:
+
+| row | before | after |
+|---|---|---|
+| routed GET | 402 to 403 ns | 410 to 414 ns |
+| a plain struct, as JSON (the control) | 360 to 361 ns | 341 to 342 ns |
+| a message, as JSON | 358 to 360 ns | 410 to 418 ns |
+| a message, as protobuf | (a 400) | 282 to 284 ns |
+
+**A message read as JSON is 52 to 58 ns slower than the same route was**, the read of its `Content-Type`, 15%; read as protobuf it is 21% faster than the same message as JSON was. The GET and the control moved 2 to 3% and −5% in opposite directions with `serve.serveRequest`, the router and the JSON reader the same bytes on both sides (`nm`), so those two are the layout of the profile binary, and a band of 5% is what a margin here has to clear.
+
+**Size**, stripped `ReleaseFast`: `example-hello` 1,013,248 to 1,013,312 bytes in the default build and 1,103,160 to 1,103,224 with `-Dgrpc`, +64 each, and by symbol it is `openapi.write` (+175), the route table it is built from (−112 in `main`) and its rows: the document's content types became a list decided while compiling, where the first cut branched on a body kind at runtime and cost 496. Nothing on the request path changed size.
+
+**Allocations** (`behaviour.zig`, held by a test): the same message is four allocations a request as JSON and three as protobuf, the head copied for a request with a body, the body and the answer; a message with no repeated field decodes in place. **Idle memory** (`bench/mem.py`, `nilo-hello`, `/users/1`, server on cores 0 to 3, two rounds): 9,351, 9,295 and 9,287 bytes a connection at 1,000, 5,000 and 10,000 before, and 9,347 to 9,351, 9,294 to 9,295 and 9,287 after.
+
+**The decision it moved:** the codec follows the request's `Content-Type`, read only by a handler with a message in its signature, and the parser's faster place is in ADR 256's rejected list with its 1.6 KB. **Can it be pushed further:** the 52 to 58 ns are a read of the head that the parser has already done once; a cheaper `Ctx.header` takes it down for every caller of it at once, forms included, and is in [`todo.md`](../../docs/todo.md).
+
+## A header is looked for by the lines that can hold it
+
+The todo entry that [a body read as what its type says](#a-body-read-as-what-its-type-says) left: `Ctx.header` split the head into lines and trimmed each until a name matched, 27 ns for the third line of a short head in a loop of its own and about 40 inside a request, and every `c.header`, every form's `Content-Type` and a message read as JSON paid it. **The questions: how cheap can one lookup be with no allocation and no byte on the request path, and how much of a message row's gap to a plain struct was the lookup.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, `taskset -c 2` for the in-process rows and `0-3,8-11` for the loops, under the shared bench lock. Before is `04a2e10` with this entry's `http/profile.zig` (its new rows included) so both binaries time the same requests; after is `04a2e10` with this change applied, the commit that adds this entry. The two `nilo-profile` binaries were built one after the other and run in turn, four rounds each.
+
+**What was built.** `http1.findHeader(head, name)`: sixteen bytes at a time (one `pcmpeqb` and one `pmovmskb` a mask on the baseline target, where 32 lanes are two of each joined), the mask of `\n` and the mask of the name's first letter in either case, read one byte on, `and`ed, so only a line that starts with that letter is looked at; of those, one whose byte `name.len` in is not `:` is thrown out without a compare; the survivor is compared byte by byte, stopping at the first difference, and its value is read out of line by `valueAfter`. `Ctx.header` and `message.fieldIn` (so `contentTypeIn` and Connect's version header) call it. `message.fieldIn`'s own byte-at-a-time scan, `Ctx.header`'s iterator walk and its `eqlIgnoreCase` are gone from those two.
+
+**A lookup in a loop of its own** (`zig build profile`, "one header read out of a head", best of five, `unseen` heads):
+
+| name asked | head | iterator (was `Ctx.header`) | `findHeader` |
+|---|---|---|---|
+| `Content-Type`, 3rd of 4 lines | 90 bytes | 21 ns | 6 ns |
+| `Host`, 1st of 4 | 90 bytes | 8 ns | 4 ns |
+| `Cookie`, last of a browser's 15 | 682 bytes | 120 to 122 ns | 34 ns |
+| `Accept-Language`, 14th of 15 | 682 bytes | 116 to 118 ns | 36 ns |
+| `X-Request-Id`, not there | 682 bytes | 116 to 120 ns | 32 ns |
+
+`Content-Type` to a codec (`codecOf` on the value, as a message route does) is 15 ns with the scan ADR 256 shipped and 9 with this.
+
+**Variants that lost**, each measured the same way on the third line: `std.ascii.eqlIgnoreCase` for the compare, 15 ns against 9 for a byte loop that stops at the first difference; 32 lanes, 9 to 12 against 6 to 8 for 16; the value's end found by `indexOfScalarPos` (36 ns on `Cookie`) and by a byte loop (43 to 48), against a sixteen-byte mask loop (34); the value inlined into the loop, which took an absent name from 32 ns to 66 because the loop lost its registers to a path it takes once, and `noinline` on `valueAfter` gave 32 back. Reading the end of the line from the block's own `\n` mask, to save the second search, measured the same as the search.
+
+**In a request** (`zig build profile`, "one POST whose body is two numbers", `taskset -c 2`, four rounds interleaved, before then after):
+
+| row | before | after |
+|---|---|---|
+| a plain struct, as JSON (the control) | 366 to 371 ns | 364 to 367 ns |
+| a message, as JSON | 441 to 445 ns | 408 to 413 ns |
+| a form, urlencoded | 379 to 387 ns | 359 to 362 ns |
+| a message, as protobuf | 284 to 287 ns | 263 to 268 ns |
+
+**A message read as JSON is 72 to 77 ns above the control before and 41 to 47 after**, and a form went from 10 to 20 ns above it to 5 below. A message as protobuf is 21 ns faster. **The lookup is not all of the message's gap.** With `contentTypeIn` returning a string the compiler cannot see through and doing no scan, the message row is 26 to 30 ns above the control, so about 14 of the remaining 41 to 47 is the lookup and about 30 is the cost of choosing a spelling (`codecOf`, the `Codec` in the wrapper, `readBody` and `protoAnswer`'s branches). With the string a constant the compiler can see (the first thing tried) the gap was 9 ns, which is the compiler folding the choice away and not a figure for anything that ships.
+
+**Size**, stripped `ReleaseFast`, before then after: `example-hello` 1,013,328 to 1,013,808 (+480), `example-forms` 1,122,232 to 1,122,840 (+608), `example-rest` 1,221,240 to 1,221,704 (+464), `example-orders` 1,392,168 to 1,392,648 (+480), and with `-Dhttp2` `example-hello` 1,147,680 to 1,148,144 (+464). By symbol in `example-hello` it is `ctx.Ctx.header` 618 to 783 and the new `http1.valueAfter` 232. A program with a message route also loses the byte scan `message.fieldIn` had (the profile binary, which has one, is 7,952 bytes smaller). **Allocations:** none; `behaviour.zig`'s budget test holds. **Idle memory** (`bench/mem.py`, `example-hello`, `/`, server on cores 0 to 3, two rounds each): 5,247, 5,197 and 5,190 bytes a connection at 1,000, 5,000 and 10,000 before and the same three after.
+
+**Held by:** the h1 fuzzer in ReleaseSafe on a new seed (`zig build fuzz -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -- --iterations 1000000 --seed 0xb7e4a91d33c5`, every property held), and a test in `http1.zig` that builds 4,000 heads the parser accepts, with and without a request line and with CRLF or bare LF, and asks `findHeader` and the iterator for sixteen names, comparing the answer and the address.
+
+**The decision it moved:** `Ctx.header` stays a read of the head with no list built, and is that lookup; the todo entry became the 30 ns that is not the read. **Can it be pushed further:** a head of a browser's size is 34 ns, about 0.8 ns a sixteen-byte load, and a build for a target with AVX2 (`-Dcpu`) was not tried, where a load would be 32 bytes; the lookup for a short head is 6 ns and what is left in it was not taken apart. The next gain on the message row is in the spelling's own cost, in [`todo.md`](../../docs/todo.md).
+
+## A message is told from JSON by sixteen bytes
+
+The todo entry that [a header is looked for by the lines that can hold it](#a-header-is-looked-for-by-the-lines-that-can-hold-it) left: a message read as JSON was 39 to 46 ns above a plain struct of the same shape, 14 of which that entry put on the lookup and about 30 on "choosing a spelling". **The questions: which of the pieces the 30 ns is, and what makes it cheaper without adding code to a program that has no message route.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, every binary copied to one fixed path and run as `env -i PATH=/usr/bin taskset -c 2 ./nilo-profile` under the shared bench lock, three to four rounds interleaved. Before is `514e8c1` with this entry's `http/profile.zig`; each variant below is `514e8c1` with one edit to `typed.zig`'s `codecOf`. The gap is read inside one binary (message row minus control row), because the control row moves 355 to 370 ns from build to build with the layout.
+
+**Taking the choice out one piece at a time** (the message row, "one POST whose body is two numbers"):
+
+| variant | message minus control |
+|---|---|
+| shipped (`findHeader`, `mediaType`, `codecOf`, the branches) | 39 to 46 ns |
+| `codecOf` returns a constant `.json`, nothing looked up | 8 ns |
+| the header is found and the result thrown away | 36 to 41 ns |
+| the header is found twice | about 75 ns |
+| no lookup, `codecOf` on a slice of the head at a fixed place | 17 to 18 ns |
+
+**So the branches in `readBody` and `protoAnswer`, and the `Codec` in the wrapper, cost 8 ns, and the other 30 to 38 is the lookup and the classification, each of which costs three to four times what its loop row says** (`findHeader` 7 ns in a loop, 35 to 41 a call in a request; `codecOf` 4 ns, 17). A request is one pass through a few thousand other branches, where a loop repeats one head and every branch is predicted.
+
+**What was built.** `message.codecIn(head)`: `http1.findHeaderColon` (`findHeader` is it followed by `valueAfter`, the same code), then the first bytes of the value, spaces skipped, compared against `application/json` in one sixteen-byte vector compare with the letters folded; a match is `.json` whatever follows, since a media type that starts with those sixteen bytes can be none of protobuf's names, and any other value takes `codecOf(valueAfter(…))` as before. A test holds `codecIn` to `codecOf(contentTypeIn(…))` for nineteen values, three head shapes each.
+
+| row, best of five, three rounds | before | after |
+|---|---|---|
+| a plain struct, as JSON (the control) | 375 to 382 ns | 366 to 373 ns |
+| a message, as JSON | 414 to 421 ns | 383 to 395 ns |
+| gap | 39 ns | 10 to 27 ns |
+
+**Size**, stripped `ReleaseFast`, before then after: `example-hello` 1,013,872 to 1,013,872 (no change), `example-rest` 1,221,752 to 1,221,832 (+80), `example-orders` 1,392,696 to 1,392,872 (+176); the default build is byte-identical, and the message code stays absent from it (`codecIn` is reached only from a handler with a message in its signature). **Allocations:** none; `behaviour.zig`'s budget test holds. **Idle memory:** no connection or `Ctx` field changed, and `example-hello` is the same size to the byte; `bench/mem.py` was not run.
+
+**Held by:** `zig build test` and `test-all` (exit 0), the h1 fuzzer in ReleaseSafe on a new seed (`zig build fuzz -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -- --iterations 1000000 --seed 0x2c9d17e4a6b3`, every property held).
+
+**The decision it moved:** the message row's gap to the control is 10 to 27 ns, down from 39. **Can it be pushed further:** 8 ns is the branches, so the floor of this design is about 10; the rest is the lookup of a line in a head, which a head parser that noted the `Content-Type` as it went past would make free, at the 1.6 KB in every program ADR 256 turned down. A variant that gates that on a message route being registered was not tried, and would need `serve.zig`.
+
+## A tagged union is read once when its tag comes first
+
+`jsonmark.zig`'s header said an internally tagged union costs nothing per request, true of the write half and never measured for the read. `Reader.fromSpan` passed over each tagged object four times: `skipValue` to find its end, a scan for the discriminator, the variant's fields by `json.parseLeaky`, and a scan for unknown keys, two of them with a `std.json.Scanner` of their own. **The question: what a tagged value costs against the same fields untagged, and how much of that is passes.**
+
+**Machine and builds.** As above. A new `zig build profile` section, "one array of 1000 objects read as a body", reads an array of a thousand objects of four fields (`id`, `x`, `y`, `label`) with `json.parseLeaky`, no request around it: untagged, tagged with the tag first, tagged with the tag last, and three variants (a click, a key with two fields, one with none) with the tag first. Before is `514e8c1` with that profile; after has the change. Four rounds interleaved.
+
+| row | before | after |
+|---|---|---|
+| untagged, the control | 123 to 126 ns an object | 119 to 125 |
+| tagged, the tag first | 493 to 523 | 145 to 152 |
+| tagged, the tag last | 496 to 520 | 278 to 290 |
+| tagged, three variants, the tag first | 314 to 331 | 94 to 97 |
+
+**A tagged object was 4 times its untagged self and is 1.2 times it with the tag first**, a 3.3-fold cut, and 1.8-fold with the tag last. The mixed row, which includes variants with fewer fields, is 3.4-fold.
+
+**What was built.** When every variant that carries fields is a plain struct with no field of the tag's name (decided while compiling, `Reader.singlePass`), a byte look at the start of the object asks whether it opens with `"tag":"`. If it does, `readOpening` takes the `{`, the key and the value off the scanner and hands the rest of the object to `json.readFields` with the variant the value names: one pass, the struct reader `innerRead` already used, taught that a key by the discriminator's name is the discriminator twice (`DuplicateField`). If it does not, `readAnywhere` finds the discriminator in one pass that also takes the object off the source (a second one is `DuplicateField`, none is `MissingField`) and reads the variant's fields from a second scanner over the same bytes, the discriminator skipped. A type whose variant is anything else (its own `jsonParse`, a tuple) keeps `fromSpan`. **Unknown keys are refused at the variant's top and ignored below it, as before**, and the thing the guess is wrong about costs nothing because the scanner reads the bytes properly after it.
+
+**Commands:** `zig build profile -Dtarget=x86_64-linux-gnu`, the "one array of 1000 objects" rows, each binary copied to a fixed path and run as `env -i PATH=/usr/bin taskset -c 2 ./nilo-profile` under the bench lock, before and after interleaved.
+
+**Refusals:** the same bodies are refused and a body with one mistake gets the same message. A body with two mistakes may now name the other first (the first in field order, where the old reader named the first of its passes): in 127,000 mutated bodies the error named differed, `MissingField` for `UnknownField` and, where `DuplicateField` or `SyntaxError` changed, the 400 sentence with it.
+
+**Held by:** a test that sends twelve mistakes each with the tag first and with the tag last (unknown key, void variant with a key, a variant that does not exist, a field missing, the tag missing, the tag twice in both orders, a field twice, the tag not a string, a field the wrong kind, `"1_0"` in a count, a body that is not an object), a union in a list in a struct, and a nested unknown key; `zig build test` and `test-all` exit 0.
+
+**Size:** `example-rest` +80 and `example-orders` +176 together with the change above (no tagged union in `hello`); allocations none beyond the scanner's, which allocates only for a string with an escape.
+
+**The decision it moved:** the header's claim is corrected with the number, and the todo entry is closed. **Can it be pushed further:** the tag-first row is 25 ns above its untagged control, which is the scanner `std.json` tokenizes with. A reader that leaves it was prototyped in a scratch copy (2.2 to 2.8 times faster on these rows, +3.4 KB) and is not on the record until it has a harness in the repository and the user's approval.
+
+## A Connect client told its failure
+
+The second piece of the framing's fourth stage ([ADR 257](../../docs/adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)): a request carrying `Connect-Protocol-Version: 1` that fails is answered in Connect's error shape, in a program with a message route. **The question: what every program pays for a choice on the failure path that only some programs use, and where to put it so that is least.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped for sizes and unstripped for `nm -S`. Before is the working tree of [a body read as what its type says](#a-body-read-as-what-its-type-says), copied aside; after is the same tree with this change.
+
+**Three placements of the choice were built**, measured by `serve.sendFailure` in `example-hello`, which has no message route:
+
+| what `sendFailure` does | `sendFailure` |
+|---|---|
+| a `Connect` writer that returns whether it wrote, its error handled in place | +157 bytes |
+| a `Pick` from the head, and the error handed to the shape as a fourth argument of `Write` | +182 bytes |
+| a `Pick` from the head and the error, returning a writer already knowing the code the error names (**ships**) | +84 bytes |
+
+Of the 84, 20 are the App handed to `sendFailure` in place of its shape, which `serveRequest` pays 6 bytes less for, and the rest is the null check, the call and the registers it moves. **The error kept live across the shape's call was most of the second row**: the instructions added were a dozen, and the rest was every register below it chosen again.
+
+**Size**, stripped:
+
+| program | build | before | after | |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,312 | 1,013,408 | +96 |
+| `example-hello` | `-Dgrpc` | 1,103,224 | 1,103,352 | +128 |
+| `example-rest` | default | 1,221,224 | 1,221,320 | +96 |
+| `example-orders` | default | 1,392,136 | 1,392,248 | +112 |
+
+A program with a message route pays Connect's own code on top, by symbol in `nilo-profile`: `connect.pick` 825 bytes (the header scan inlined), `writeBody` 588, the writer whose code comes from the status 220 and the two whose code the error named 12 and 15. The two specialised writers were 556 bytes each before they shared `writeBody`.
+
+**Not measured:** time. Nothing on a request that succeeds changed (`serveRequest` is 6 bytes smaller, by `nm`), and a failure in a program with a message route reads the head once more for the version header, the scan the message row of the entry above times inside its 52 to 58 ns.
+
+**The decision it moved:** the choice is a pointer the first message route sets, handed the head and the error, and in ADR 017's running total at +96 bytes. **Can it be pushed further:** to zero only by knowing while compiling that an App has no message route, which an App registered at run time does not.
+
+
+## What splitting the HTTP/2 connection from the gRPC envelope costs
+
+**Question.** `grpc.zig` became `h2conn.zig`, the connection, and `grpc.zig`, the envelope, and the flag `-Dgrpc` became `-Dhttp2` ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md), stage 5.1 of [framing](../../docs/design/framing.md)). No behaviour changed, so the plan held it to the `-Dgrpc` build's size within the names.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped for sizes and unstripped for `nm -S`. Before is `8c64019` from `git archive` built with `-Dgrpc=true`; after is the working tree built with `-Dhttp2=true`, the same afternoon.
+
+**Size**, stripped:
+
+| program | build | before | after | |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 (`cmp` equal) |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 (`cmp` equal) |
+| `example-hello` | flag | 1,103,352 | 1,103,960 | +608 |
+| `example-rest` | flag | 1,292,744 | 1,293,336 | +592 |
+
+**It missed the plan's bar, by code and not names.** By `nm -S` the envelope's rules handed back as values cost what the connection used to do in place: `runCall` +172 (the answer returned as a `grpc.Reply` and copied onto the stream), `grpc.envelope` 232 against 107 that left `Conn.dispatch`, and `grpc.untilNs` 360 where `timeoutNanos` was 346. A one-line `refuse` helper was a function of 161 bytes of its own until it was made `inline`, which took the first measurement of +864 and +848 to the figures above.
+
+**The decision it moved:** none; the split ships at this cost, because it lives only in a build that asked for HTTP/2 and stage 5.2 rewrites `Conn.dispatch` for every request. **Can it be pushed further:** yes, by writing the reply straight onto the stream; stage 5.2's own size measurement is taken against `8c64019` so the two are read together.
+
+## What one port for HTTP/1.1 and HTTP/2 costs
+
+**Question.** Stage 5.2 of [framing](../../docs/design/framing.md) makes every plain listener of a `-Dhttp2` build read the client's first bytes and serve HTTP/2 on the preface and HTTP/1.1 on anything else ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md)). The bar the ADR set: an HTTP/1.1 connection in that build holds the idle figure it held before, the routed `GET` stays inside its spread, and a build without the flag is byte-identical. The ADR named two ways to build it, a tail call from the choosing into the loop chosen, and, where the ABI refuses that, the choice inside `serve.handleConnection`'s first wait with a `noinline` hand-on, and said `bench/mem.py` decides.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `45459d1` and, for the size, `8c64019` (`-Dgrpc=true`), each from `git archive`; after is the working tree on `45459d1`. Everything the same afternoon, interleaved. Memory: `bench/mem.py --port 8787 --path /health` against `nilo-hello` (`bench/main.zig`), `ulimit -n 65536`. Throughput: wrk 4.2.0 `-t2 -c64`, 5 s of warm-up then 15 s, `/users/42`, the server on `taskset -c 0-3` and wrk on `-c 4,5` (four physical cores and two, SMT siblings idle), five rounds alternating the two builds.
+
+**Size**, stripped:
+
+| program | build | `45459d1` | `8c64019` | after | against `45459d1` | against `8c64019` |
+|---|---|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 1,013,408 | 0 (`cmp` equal) | 0 |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 1,221,320 | 0 (`cmp` equal) | 0 |
+| `nilo-hello` | default | 1,020,968 | | 1,020,968 | 0 (`cmp` equal) | |
+| `example-hello` | flag | 1,103,960 | 1,103,352 | 1,103,496 | -464 | +144 |
+| `example-rest` | flag | 1,293,336 | 1,292,744 | 1,292,856 | -480 | +112 |
+
+The flag build is smaller than stage 5.1's because a plain listener no longer has a fiber function of its own for the HTTP/2 loop (`Entry(grpc_handler)` is gone); it is 112 to 144 bytes over the `-Dgrpc` build it replaces, from the sniff and the hand-on.
+
+**Idle HTTP/1.1 connection**, bytes a connection after one request, `mem.py` at 1,000 and 10,000, two interleaved rounds (a range is the two rounds):
+
+| build | 1,000 | 10,000 |
+|---|---|---|
+| default, `45459d1` | 5,251 to 5,255 | 5,191 |
+| default, after | 5,251 to 5,255 | 5,191 |
+| `-Dhttp2`, `45459d1` | 5,317 to 5,321 | 5,197 to 5,198 |
+| `-Dhttp2`, after | 5,321 | 5,197 to 5,199 |
+
+A connection that never says a word (10,000 sockets opened and left, the RSS read after the first wait has given its pages back): default 5,184 to 5,206, `-Dhttp2` before 5,198 to 5,325, after 5,192 to 5,267.
+
+An idle HTTP/2 connection on the shared port, after one unary call (`mem.py --grpc`, a method no route answers, so a trailers-only call): 10,334 at 1,000, 10,092 at 5,000, 9,946 at 10,000. Plain and no call in flight is stage 5.3's to measure; this is the figure for the record.
+
+**Routed `GET`**, `-Dhttp2` build, requests a second, five rounds each:
+
+| build | rounds | mean | p99 |
+|---|---|---|---|
+| `45459d1` | 936,504; 946,841; 944,073; 939,836; 942,328 | 941,916 | 69 to 70 µs (122 µs once) |
+| after | 941,053; 942,020; 941,199; 947,026; 940,870 | 942,434 | 69 to 72 µs |
+
+Inside the spread of either, so unchanged.
+
+**What the first attempts cost, and why the third ships.** The tail call compiles (`@call(.always_tail, serve.handleConnection, …)` from a chooser whose signature is the loops'; `noinline` on the chooser is refused, since the callee's type must match) and an HTTP/1.1 connection then cost **9,417 at 1,000 and 9,293 at 10,000, one page more**. Moving the choice to the first wait with a `noinline` hand-on taking pointers cost the same 9,417. Neither was the choosing's frame. `waitForRequest` had gained a second caller (the sniff's) and so stopped being inlined into the loop: the park sat one call frame deeper, and the plain park sits under 300 bytes short of a page ([ADR 212](../../docs/adr/212-tls-is-an-option-a-build-asks-for.md)). Naming it `@call(.always_inline)` in `handleConnection` under `-Dhttp2` gave 5,197. The tail call was not measured again after that, so it is not shown to be worse; what ships is the choice inlined into the Engine's entry, with the HTTP/2 loop run by the entry itself once the choosing has returned `.http2`, through a `noinline` function whose arguments are pointers to what the entry already keeps live (`bulkhead.Hand`, `Bridge.runPlain`, `Bridge.handOn`). That keeps the HTTP/1.1 frame the frame it was and puts no outgoing-argument area in it, the 272 bytes a by-value `Peer` costs ([ADR 212](../../docs/adr/212-tls-is-an-option-a-build-asks-for.md)).
+
+**A connection that has said nothing is a second figure, and was a page more.** With `sniffFraming` out of line the first wait parked in its frame and a silent connection cost 9,363 at 1,000 and 9,288 at 10,000. Inlined, with `waitForRequest` named inline inside it, 5,263 and 5,192. A listener's health check or a browser's pre-connect is that connection.
+
+**Outside the suite**, `example-hello -Dhttp2` on one port: `curl` gets the 200 and `wati`; `curl --http2` (an `Upgrade: h2c` offer) is answered as HTTP/1.1; `curl --http2-prior-knowledge` to a plain route is reset `PROTOCOL_ERROR`, which is what the HTTP/2 connection says of anything that is not a call until stage 5.3; a gRPC `POST` to the same port with prior knowledge is answered `grpc-status: 12`, no route; `printf 'GET /\r\n\r\n' | nc` is answered at once, a 400, never waited on.
+
+**The decision it moved:** the choice ships as an inlined chooser with a hand-on from the entry, where the ADR's first preference was a tail call, because that is the one the idle figure held for and measured; ADR 259's text says so. **Can it be pushed further:** the tail call is the open question, and is worth one more measurement with `waitForRequest` inlined as above; nothing in a figure here asks for it. A TLS listener still runs `handleConnection` unchanged and is measured by stage 7.
+
+## What any request on HTTP/2 costs
+
+**Question.** Stage 5.3 of [framing](../../docs/design/framing.md) makes HTTP/2 serve every method but `CONNECT` through the router, middleware and handler on a fiber of its own, held to RFC 9113 §8, with `Ctx.connection()` removed and what waits for stage 6 refused by name ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md)). The bar the ADR set: a build without the flag byte-identical, an HTTP/1.1 connection in a `-Dhttp2` build at the idle figure it held, a request on HTTP/2 allocating no more than the same one on HTTP/1.1 from the second on a connection, and its time and idle figure on record.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `1e7d905` from `git archive`, after is the working tree on it, built the same afternoon. Server on cores 0 to 3, the client on 4 and 5.
+
+**Size**, stripped:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 |
+| `example-hello` | `-Dhttp2` | 1,103,496 | 1,116,168 | +12,672 |
+| `example-rest` | `-Dhttp2` | 1,292,856 | 1,305,544 | +12,688 |
+
+The 12.7 KB is the §8 checks, the `HTTP` answer and its head, and the stage-6 refusals. It is paid only by a build that asked for HTTP/2.
+
+**Idle HTTP/1.1 connection**, `mem.py` at 1,000 and 10,000, two interleaved rounds: `-Dhttp2` before 5,317 to 5,321 and 5,197 to 5,198, after 5,317 to 5,321 and 5,197 to 5,198. A silent connection: 5,192 before and after at 10,000.
+
+**Idle HTTP/2 connection**, `mem.py --h2` (the preface, a `GET /users/42` with the stream left to finish, then idle), the same two rounds: 9,462 at 1,000, 9,365 at 5,000, 9,355 at 10,000, before and after to within 4 bytes. With `--get`, the stream left open after the request with its answer read: 11,186 at 1,000, 10,736 at 5,000, 10,686 at 10,000. A browser opens one such connection where it opened six HTTP/1.1 ones (6 x 5,197 is 31,182).
+
+**Routed `GET` over HTTP/1.1**, `-Dhttp2` build, wrk, 64 connections, five rounds each: before 967,168; 957,109; 959,555; 960,715; 961,044 (p99 67 to 68 µs), after 964,223; 964,639; 956,436; 958,093; 966,061 (p99 67 to 69 µs). Inside the spread of either, so unchanged.
+
+**In process**, `zig build profile -Dhttp2`, one core, three runs: a routed `GET` over HTTP/1.1 412 to 414 ns, a unary gRPC call 866 to 869 ns, and the same routed `GET` over HTTP/2 963 to 971 ns on one connection's fiber, answered inline: HPACK decode 34 ns (3.5%), the App 370 ns (38%), frames, head and answer 558 ns (58%). No Engine runs there, so the fiber spawn a request costs in a server is not in it.
+
+**Through a real server**, `h2load -n 1000000 -c 64 -m 10 -t 2` (nghttp2 1.12.0, Docker, host network) on `nilo-hello` with `-Dhttp2`, three runs: 1,015,573; 946,846; 1,013,072 requests a second, every one a 200. For the record: one fiber per stream, no reuse yet.
+
+**Allocations.** `test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 from the second on a connection"` in `http/behaviour.zig`, counting at the allocator under the arena: 0 on both framings from the second request, a 100 byte body included.
+
+**Outside the suite.** `curl --http2-prior-knowledge` against `example-hello` and `example-rest -Dhttp2`: a GET, a POST with a JSON body, a `HEAD` (no `DATA`), a 404 and a route's own headers all answer as on HTTP/1.1. h2spec 2.6.0 over the same port fails 67 of 146 as shipped. Nearly all of them are one thing: the suite sends the first header block without a dynamic table size update after our `SETTINGS_HEADER_TABLE_SIZE` of 0, which RFC 7541 §4.2 requires of the client, so the connection answers a compression error where the suite expected the stream to work. On a scratch copy with the table at 4096 the suite's own blocks decode, and what it then showed that was a real violation is fixed here: a stream depending on itself (§5.3.1), a `WINDOW_UPDATE` or `DATA` on a stream that is not open (§5.1), a window past 2^31-1 (`max_window` was one bit short), and a `GOAWAY` that dropped the frames already read. Run again on the tree as committed, with only the table widened to 4096 in a scratch copy (`example-hello`, `ReleaseSafe`): **142 of 146 pass**. The four left are choices, not defects: §3.5/2 sends a preface that differs from HTTP/2's, which one port serves as HTTP/1.1 by design (ADR 259) rather than answering `GOAWAY`; §5.1/8 and §5.1/11 send `DATA` on a stream the client reset or ended, which the connection counts against its window and ignores, because a reset for every such frame is a client making the server write uncounted (ADR 220); §5.4.1/1 sees the connection closed by a reset rather than a FIN after the `GOAWAY`, because the client's unread bytes are still in the socket when it closes. As shipped, with the table at 0, h2spec cannot test the rest: its encoder never sends the size update, which curl does (its requests above decode); a browser is put to it in stage 7.
+
+**The decision it moved:** none. `Ctx.connection()` goes (ADR 253's open question), a `Collected` answer carries its length and a pre-written field block so HTTP is framed without a second copy, and the frame fuzzer holds the answer's block against the same properties. Whether a request on HTTP/2 can be made cheaper than 963 ns is the optimisation session's: reusing a finished call's fiber for the next stream is the first thing it tries ([`todo.md`](../../docs/todo.md)).
+
+## What a request on HTTP/2 costs when its body is a pipe
+
+**Question.** Stage 6.1 of [framing](../../docs/design/framing.md) runs a request on HTTP/2 when its header block is whole and reads what the client sends after it through a pipe the connection fills, the gRPC envelope and `c.body()` included, where the connection used to collect a call whole before it ran ([ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md)). The bars it set: a build without the flag byte-identical, the idle figures unchanged, the HTTP/1.1 path unchanged, the message rows of `zig build profile` within one wait of collected, `c.body()` on a body that arrived whole allocating nothing, and an upload faster than its handler holding the connection to its budget.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `ab11878` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved. Server on cores 0 to 3, the client on 4 and 5 (Docker, host network, `arena-wrk` and `arena-h2load`).
+
+**Size**, stripped, `ReleaseFast`:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 (`cmp` identical) |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 (`cmp` identical) |
+| `example-hello` | `-Dhttp2` | 1,116,152 | 1,130,800 | +14,648 |
+| `example-rest` | `-Dhttp2` | 1,305,528 | 1,321,376 | +15,848 |
+
+The 14.6 KB is the pipe, the wait, the budget moved onto the call's fiber and the `bodyStream` path on HTTP/2. It is paid only by a build that asked for HTTP/2. **The default build was not identical at first**: `Request.ends_with_stream` as a `bool` and a sixth and seventh variant on `Body`'s `Progress.State` shrank `serve.serveRequest` by 217 bytes and moved a jump table, with no HTTP/2 in the program. The field is `void` and the transport's body a flag beside the state, both absent without the flag, and the two programs are the same bytes.
+
+**Idle connection**, `mem.py` against `nilo-hello -Dhttp2` (HTTP/1.1 after one `GET /health`, HTTP/2 after one `GET /users/42`, as the entries above), three interleaved rounds, bytes a connection:
+
+| connection | at | before | after |
+|---|---|---|---|
+| HTTP/1.1 | 1,000 | 5,313 | 5,313 |
+| HTTP/1.1 | 10,000 | 5,197 | 5,197 |
+| HTTP/2, `--h2` | 1,000 | 9,429 | 9,560 to 9,568 |
+| HTTP/2, `--h2` | 10,000 | 9,352 to 9,353 | 9,423 to 9,424 |
+| HTTP/2, `--h2 --get` | 1,000 | 10,375 | 10,199 |
+| HTTP/2, `--h2 --get` | 10,000 | 9,853 to 9,955 | 9,641 to 9,657 |
+
+**The HTTP/1.1 figure is unchanged and the HTTP/2 one is not**: +131 to +139 bytes at 1,000 and +70 to +72 at 10,000 after one `GET`, 176 bytes fewer at 1,000 and 196 to 314 fewer at 10,000 with the stream left open. The first is real and is what the pipe weighs: `Shared` went from 64 to 80 bytes, `Conn` from 408 to 432, and a `Stream` from 392 to 608 with its 208-byte `Inbox`, the spare one a connection keeps for the next call. The second the pipe made smaller by taking the message out of a state of the connection's. An HTTP/2 connection is still 1.8 times an HTTP/1.1 one.
+
+**Routed `GET` over HTTP/1.1**, `-Dhttp2` build, wrk, 64 connections, 8 s, five interleaved rounds each: before 864,194; 878,745; 893,978; 899,211; 895,174, after 890,982; 895,442; 897,818; 895,040; 902,401 requests a second (p99 103 to 1,220 µs before, 107 to 555 after; the high ones are the first round, a cold server). Inside the spread, so unchanged.
+
+**In process**, `zig build profile -Dhttp2`, one core, six interleaved runs, ns a call, answered inline because no Engine runs there, so what a wait costs is not in them:
+
+| row | before | after | difference |
+|---|---|---|---|
+| a routed `GET` over HTTP/1.1 | 421 to 426 | 417 to 421 | none |
+| a unary gRPC call | 850 to 860 | 912 to 918 | +62 (+7%) |
+| the same `GET` over HTTP/2 | 960 to 977 | 992 to 1,008 | +30 (+3%) |
+| a JSON `POST` over HTTP/2, 13 byte body (new row) | 811 to 827 | 897 to 906 | +85 (+10%) |
+
+**The pipe costs 30 to 85 ns a request in process, and this is the number that went the wrong way**: the message rows are 7 and 10% slower, where ADR 260 asked for within one wait. A wait is not in the rows, so what they pay is the pipe's bookkeeping with nothing to wait for: a buffer kept, a monitor taken at every step (a try-lock first, which took about 15 ns back), the grant of the window, a request that starts twice where it is deferred until its stream has ended. Whether it is within one wait is the next row's to say.
+
+**Through a real server**, `h2load -n 2,000,000 -c 64 -m 10 -t 2 -d <1 KiB>` (nghttp2 1.59.0) on `nilo-bench-body-server -Dhttp2`, `POST /echo` (`c.body()`), five interleaved runs each: before 1,781,458; 1,898,028; 1,906,623; 1,908,785; 1,914,009 requests a second, after 1,728,244; 1,761,981; 1,921,359; 1,948,752; 1,948,868, every one a 2xx. **The two spreads overlap**: a handler that starts at the HEADERS and parks for the DATA, a real wait through the Engine on every request, is not resolved from the collected one by this load. A request is about 2.1 µs of server CPU at this rate, and the spread of either is 4 to 8% of it, so a wait that costs more than about 100 ns would have shown. `POST /stream` (`c.bodyStream()`, which HTTP/2 refused before): 1,769,168; 1,881,579; 1,862,499, every one a 2xx.
+
+**An upload faster than its handler**, `http/h2pipe_live.zig`, a client that obeys the server's WINDOW_UPDATEs against a handler that does not read for 400 ms and then reads 4 KiB at a time, a counting allocator under the server: the client could send the window, 65,535 bytes, and then had to stop; the stream was given no credit while the handler read nothing; **68,425 bytes** were held above idle while it stalled, and **98,890** at the peak of the whole 8 MiB, which then completed with every byte counted by the handler (Debug build, `NILO_UPLOAD_REPORT=1`). The bound is the window and one buffer growing into it, and it does not depend on how long the upload is: the test asserts a peak of three windows. Before the buffer was capped at the window by the doubling it held 130,890 bytes while stalled, two windows.
+
+**Allocations.** `test "a body that arrived whole before the handler read it costs the request no allocation of its own"` in `http/h2conn.zig`, counting at the allocator under the arena: 0 a request from the second on a connection for a 3,000 byte body, and `test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1…"` unchanged at 0. `Inbox.whole` returns the bytes where they lie, by a test that compares the pointer.
+
+**Correctness.** h2spec 2.6.0 against `example-hello -Dhttp2` on a scratch copy with the table at 4096: 142 of 146, the four it failed before (3.5 invalid preface, 5.1 closed-stream DATA twice, 7 GOAWAY with an unknown code), no new one. `zig build fuzz -- --frames` with calls on threads, 200,000 connections under three seeds and `--iterations 200000` for the parser, every property held, in `ReleaseSafe`.
+
+**A bug in the tool, found by this run.** `zig build profile -Dhttp2` crashed with a segmentation fault when pinned to one core, in the tree before this change as well: its two HPACK rows decoded into an `ArrayList` with the scratch arena and freed it with the general-purpose allocator, which `SmpAllocator` turns into a corrupted free list once it has one arena and anything allocates after. Fixed in `profile.zig`; the figures above are from the fixed tool, and the earlier entries' were not affected, because nothing allocated after those rows.
+
+**The decision it moved:** none. The pipe's cost per request in process is on the record for the session that tries to make it cheaper: a connection that keeps its `Inbox` out of the stream (one per connection, not per stream) and a start that does not happen twice where no Engine runs.
+
+## What a request on HTTP/2 costs when its answer is a pipe
+
+**Question.** Stage 6.2 of [framing](../../docs/design/framing.md) lets a call write its answer in pieces on HTTP/2 (`c.stream()`, `c.events()`, `c.sendFile`, range requests, `HEAD` without `DATA`) through a pipe the connection empties into frames as both windows allow, where the stream and the file were refused by name ([ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md)). The bars it set: a build without the flag byte-identical, no allocation per piece, the HTTP/1.1 path and its `sendfile` unchanged, the rows of `zig build profile` unchanged, the idle figure of an HTTP/2 connection unchanged, a client that stops reading cut off at the write deadline, and streams that take turns.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `2cd425d` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved. Server pinned to cores 2 and 3, the client (`arena-h2load`, nghttp2 1.59.0, Docker, host network) to 4 and 5, one connection and one stream at a time.
+
+**Size**, stripped, `ReleaseFast`:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 (`cmp` identical) |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 (`cmp` identical) |
+| `example-hello` | `-Dhttp2` | 1,131,424 | 1,142,624 | +11,200 |
+| `example-rest` | `-Dhttp2` | 1,321,840 | 1,332,848 | +11,008 |
+
+The 11 KB is the outbound pipe, the connection's turns and the file read into frames, paid only by a build that asked for HTTP/2.
+
+**Pieces and a file**, a scratch dependent (`-Dhttp2`, two threads) with `GET /pieces` (50,000 calls of `writeAll` with 64 bytes, then `finish`) and `GET /file` (64 MiB, `c.sendFile`), `h2load -n 300 -c 1 -m 1` for pieces and `-n 20` for the file, three interleaved rounds each in two sessions, the same `--h1` against the same port for HTTP/1.1:
+
+| route | HTTP/1.1 before | HTTP/1.1 after | HTTP/2 after |
+|---|---|---|---|
+| 50,000 pieces of 64 bytes, requests a second | 597 to 608 | 596 to 603 | 313 to 316 |
+| the same in pieces a second | 29.9 to 30.4 million | 29.8 to 30.1 million | 15.6 to 15.8 million |
+| 64 MiB file, GB/s | 6.6 to 8.1 | 6.7 to 7.3 | 3.17 to 3.19 |
+
+HTTP/1.1 is inside its spread. **HTTP/2 writes a piece at half the rate of HTTP/1.1 and a file at 45% of `sendfile`'s**, and that is the price of the frames: each `DATA` frame is a header and a copy where HTTP/1.1 chunks into a buffer or hands the file to the kernel. Before this change HTTP/2 answered both with a 500 naming the refusal. **A file's buffer set the rate**: read 16 KiB at a time (one frame a hand-over to the connection's fiber) the file went at 2.20 to 2.28 GB/s, at 64 KiB (a connection's turn, `pump_quantum`) at 3.17 to 3.19, and at 256 KiB, past the client's 64 KiB window, at 0.56. It is 64 KiB, which is what a streaming file call holds in its arena while it runs.
+
+**Allocations.** `test "a piece costs no allocation: a stream of two hundred allocates what a stream of one does"` in `http/h2conn.zig` counts at the allocator under the connection: the same number for a stream of 200 pieces as for one of 1, so a piece allocates nothing and the pipe and its head are made once. The 5.3 test (a request on HTTP/2 allocates no more than the same on HTTP/1.1 from the second on a connection) is unchanged at 0.
+
+**In process**, `zig build profile -Dhttp2`, one core, three runs each, ns a call: the routed `GET` end to end 409 to 419 before and 393 to 399 after, `stream: 200 pieces` 1,012 to 1,026 and 997 to 1,020, `sse: 200 events` 3,521 to 3,666 and 3,569 to 3,624, `body: 1 MiB, chunked 8 KiB` 12,176 to 12,395 and 12,301 to 12,899. **One row moved the wrong way**: `write the response` 49 to 52 before and 55 to 59 after (+6 ns, 12%), in a path this change does not touch; the end-to-end row beside it went the other way, so it reads as the layout of the function and not as work, and it is not isolated.
+
+**An idle connection**, `mem.py --h2` against `example-hello -Dhttp2`, two rounds each, bytes a connection at 500, 1,000 and 10,000: 9,708, 9,560 and 9,423 before and after, to the byte (`Conn` grew by a few words, which the allocator's size classes absorbed).
+
+**What a stalled stream holds.** A stream whose client stopped reading holds, at most, its `Stream`, one `Outbox` (184 bytes) and the head's block in the request arena, one piece the call lent (the call's own buffer, not copied: a file's is the 64 KiB above) and the call's parked fiber. `test "a client that stops reading is cut off at the write deadline…"` in `http/h2pipe_live.zig` (400 ms limit): 65,535 bytes written, the window; the stream reset with `CANCEL` after 300 to 3,000 ms (asserted); the call's next write failed; a second stream on the same connection answered meanwhile, and a `PING` after it.
+
+**Fairness**, `http/h2pipe_live.zig`, an 8 MiB piece and a 5 byte answer on one connection with the windows wide open: the small answer ended after **131,072 of the 8,388,608 bytes** of the large one, two turns of 64 KiB, and a test asserts less than half.
+
+**Correctness.** h2spec 2.6.0 against `example-hello -Dhttp2 ReleaseSafe` on a scratch copy with the table at 4096 (the header table setting and the acknowledgement's `allow`): **141 of 146, and 140 on a run in four where §3.8/1 or §7/1 sees a reset instead of a close, as the tree before this change does** (five runs on each, 141 four times and 140 once, one connection refused each). The five it fails, 3.5/2, 5.1/8, 5.1/9, 5.1/11 and 5.4.1/1, are the five `2cd425d` fails, so nothing new; the brief's 142 to 144 was a figure from an earlier tree. `zig build fuzz -- --frames` 200,000 connections under five seeds (1, 0x77, 0xabc, 0xc0ffee, 0x5eed5) and `--iterations 200000` for the parser, every property held, in `ReleaseSafe`.
+
+**The fuzzer found three bugs of the outbound pipe**, in the first run, each of which a test now holds as a corpus line: a reset by a client that sent a `WINDOW_UPDATE` of 0 or past 2^31-1, or `DATA` after its own end, reached a stream whose answer was already written, and was written after the `END_STREAM`; a reset that came before the call had begun to answer was not seen by the call, which then answered on a stream that was gone; and its checker took the `SETTINGS_MAX_FRAME_SIZE` of a client as 16,384 whatever it said, where a server may fill a frame to it.
+
+**Two bugs found in the way.** A client that gave back its window one frame at a time stopped a server writing an 8 MiB answer: the connection read nothing while a stream had more to write, so the client's updates went unread until its own socket's buffer was full and it blocked in a write, with the server blocked in a write to it. The connection now looks at the socket between rounds (see the review below), and the test client gives the window back in batches as clients do. And `Wire.pump` of `http/h2pipe_live.zig` freed a list its decoder had grown in an arena with the general-purpose allocator, which `SmpAllocator` turned into a corrupted free list that failed an unrelated test further on in the run: the same mistake as the profile's two rows above.
+
+**The decision it moved:** the file buffer of 64 KiB, not a frame's worth. A file over HTTP/2 stays at 45% of `sendfile`; `sendfile` between frames on plain TCP is in [`todo.md`](../../docs/todo.md) for the session that measures it. What would push it further: a longer turn than 64 KiB where the window allows, which needs the window to be larger than the client's default to matter.
+
+### Review of the first version
+
+A review of the first version found seven defects, each fixed with a test that was seen failing without the fix (the three behavioural ones by reverting the fix and rerunning).
+
+- **A fixed walk starved the later streams, and whole answers.** `pumpOutputs` always began at the first stream of the table, so with a connection window shorter than the streams' demand the first took every WINDOW_UPDATE, and the whole answers were pumped after the streamed ones had taken the window. It now begins where the last round stopped (the stream that used the window goes last), and whole answers are written first. `test "three streamed answers and a whole one share a connection window of the default size, and all of them finish"` (`http/h2pipe_live.zig`: three 4 MiB lends and a `pong`, the connection window left at 65,535 and given back as the client reads): the whole answer ends before any streamed one, none is reset, and when the first streamed one ends each of the others has delivered more than half. Without the fix it fails.
+- **A late call could park for ever.** A call that opened or waited on its pipe after `abortOutbound` had walked the table had its wake dropped. `Shared.dead` is set under the monitor before the walk, and `Outbox.open`, `lend` and `finish` read it under the same monitor (`Link.dead`), so a late pipe fails at once. `test "a pipe on a connection that has stopped writing fails at its first lend and its end, and never parks"` in `http/outbound.zig`; without the fix the first lend would park for ever. It is reached only when the end of a connection is cut short by a cancel, which an in-process test cannot cause, so the test is of the pipe.
+- **A lend that kept moving was cut at the write limit.** `stuck_since` was set by the first round to end on its quantum and cleared only when the piece was written whole. It now restarts whenever bytes went in the round, and is set only when nothing could be written. `test "a large lend that keeps moving is not cut at the write limit, however long it takes"`: a 300 ms limit, a client that takes 4 MiB at 4 ms a frame (more than 900 ms): complete, not reset. Without the fix it is reset.
+- **The 1 ms look at the socket capped a big lend at about 0.5 GB/s.** A new `Waker.poll` (`Wake.lookNow`, `CompletionQueue.next` after a `yield`) asks whether the socket is readable or the connection posted, without waiting, and the connection asks it every round that has more to write. `wait(0)` is no limit, so this is its own call. The reviewer's reading of the stale-poll worry holds: the look sits inside `if (c.in.bufferedLen() == 0)`, arms through the same `arm()` as `wait`, and `poll_armed` clears only when the poll fires, so nothing is submitted twice. **One 64 MiB lend over HTTP/2: 0.455 GB/s with the 1 ms look every eighth round, 4.85 to 4.92 GB/s with the non-blocking one** (`h2load -n 10 -c 1 -m 1`, two interleaved sessions of three, the same tree except for that call). The 64 MiB file is 3.16 to 3.19 GB/s against 3.07 to 3.17, and 50,000 pieces 315.6 to 317.5 against 313.4 to 315.4: unchanged inside the spread. HTTP/1.1 on the same route 9.1 to 12.5 GB/s. Because the round no longer waits, `overdue` is called from it, at most once a millisecond, or a stuck stream's deadline would never be looked at while another stream kept the connection busy.
+- **A file buffer was flat and uncharged.** It is `min(len, 64 KiB)` now, charged to a per-connection budget of 1 MiB (`file_budget`, `Shared.file_held`) and given back when the file call returns. **A file past the budget is not failed and does not wait: it reads through a smaller buffer, never under 4 KiB**, slower and correct, so a connection's stalled downloads hold at most 1 MiB and 4 KiB a stream (100 streams: 1 MiB and 400 KB, where the first version held 6.4 MB). `test "a file's buffer is its size when it is small…"` in `http/framing.zig`.
+- **A frame of one byte earned flood credit.** Credit is now earned by bytes: two updates (the connection's and the stream's) for each KiB of DATA written, however many frames it took. A client with a window of one byte that answers each byte with two updates is counted by `max_control_run` and sent `ENHANCE_YOUR_CALM` after a few hundred bytes, while a frame of one byte is still sent when the window is one (h2spec 6.9.1 sees its byte). `test "a client with a window of one byte that answers each byte with two updates is a flood…"`; without the fix the client is sent data for ever.
+- **The default build ran a line of the HTTP/2 arm.** `shape.bodyless = …` is under `if (comptime framing_mod.http2_built)`, and `Waker.poll` is a field of the vtable only in a `-Dhttp2` build, so the default build is `cmp`-identical again (a first version of the call made `example-hello` 496 bytes larger).
+
+**The second round's gates.** The frame fuzzer under three seeds that were not used before and the parser fuzzer, 200,000 each in `ReleaseSafe`, every property held. h2spec on the widened scratch copy (the table setting and the acknowledgement's `allow`, both): 140 to 141 of 146 over nine runs, the tree before the stage 139 to 142 over eight, so the same distribution, with 3.5/2, 5.1/8, 5.1/9, 5.1/11 and 5.4.1/1 failing in all and 3.8/1 and 7/1 in some. `zig build profile -Dhttp2`, three runs: the routed `GET` 405 to 418 ns, `write the response` 50 to 55, `stream: 200 pieces` 999 to 1,013, `sse: 200 events` 3,502 to 3,521: the same as before, the +6 ns of the first version's `write the response` is gone.
+
+## What an event stream handed to the HTTP/2 connection costs
+
+**Question.** Stage 6.3 of [framing](../../docs/design/framing.md) lets `c.eventsFrom` work on HTTP/2: the Rooms ring the connection's bell, the connection writes their posts as `DATA` under both windows in turn with every other stream, and the handler's fiber ends ([ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md), [ADR 227](../../docs/adr/227-an-event-stream-fed-by-rooms-waits-where-a-connection-waits.md)). The bars it set: a build without the flag byte-identical, the HTTP/1.1 handed-over figure and the idle HTTP/2 connection unchanged, the rows of `zig build profile` unchanged, and a handed-over stream's idle figure on record against a parked fiber's at 1,000 and 10,000 streams.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `96232b2` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved. Server pinned to cores 2 and 3, the client (`bench/mem.py`, `bench/fanout.py`) to 4 and 5. For the figures that need a route that feeds from a Room, `bench/stream_server.zig` (the same source for both trees, which gained a `/blast` route and a `BACKLOG` variable for this) built with and without `-Dhttp2`. Figures below are after a review of the first version (see the end), with the first version's where they differ.
+
+**Size**, stripped, `ReleaseFast`:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,408 | 0 (`cmp` identical) |
+| `example-rest` | default | 1,221,320 | 1,221,320 | 0 (`cmp` identical) |
+| `example-chat` | default | 1,062,816 | 1,062,816 | 0 (`cmp` identical) |
+| `example-hello` | `-Dhttp2` | 1,142,624 | 1,147,760 | +5,136 |
+| `example-rest` | `-Dhttp2` | 1,332,848 | 1,337,984 | +5,136 |
+| `example-chat` | `-Dhttp2` | 1,194,416 | 1,199,536 | +5,120 |
+| `bench-stream-server` (calls `eventsFrom`) | default | 1,208,176 | 1,208,176 | 0 (`.text` identical; 53 bytes of `.eh_frame` and its index differ) |
+| `bench-stream-server` (calls `eventsFrom`) | `-Dhttp2` | 1,345,976 | 1,360,912 | +14,936 |
+
+The 5.1 KB is the connection's half of the hand-over (the step and the heartbeat, the turn in the rotation, the end, the shielded end at a stop), paid by any `-Dhttp2` build; the further 9.8 KB is the stream's half (`Http2Events`, the replay, the event formatting) and is paid only by a program that calls `eventsFrom`, because the connection reaches it through two function pointers (ADR 227). **A program that calls `eventsFrom` pays nothing on HTTP/1.1.** The first version paid 112 bytes there and the review found why: the HTTP/1.1 walk over a stream's seats called the shared walk through a sink, 16 of them, and the seat helpers took two arguments more. The walk is written out again in `RoomEvents.deliver` (the shared one is HTTP/2's), and the helpers take the stream whole, so the HTTP/1.1 instantiation is what it was.
+
+**Idle bytes a stream**, `bench/mem.py --hold` (HTTP/1.1) and `--h2 --streams-per-conn N` (HTTP/2, a stream counted, not a connection), against `bench-stream-server` with the logger installed, two rounds each:
+
+| held stream | 1,000 | 10,000 |
+|---|---|---|
+| HTTP/1.1, handed to the connection, before and after | 5,263 | 5,192 |
+| HTTP/1.1, parked in its handler (`c.events()`) | 21,627 | 21,574 |
+| HTTP/2, handed to the connection, 100 to a connection, opened 1,000 at a time | 6,820 to 6,889 | 6,190 to 6,253 |
+| HTTP/2, the same in one step from 1,000 | 6,533 to 10,224 | 11,976 to 12,153 |
+| HTTP/2, handed to the connection, **one to a connection, as a browser opens one** | 14,430 | 14,288 |
+| HTTP/2, parked in its handler, 100 to a connection | 19,747 | 19,605 |
+| HTTP/2, parked in its handler, one to a connection | 37,405 | 37,264 |
+| HTTP/2 connection, nothing in flight (`--h2`), before and after | 9,560 | 9,423 |
+
+**HTTP/1.1 is unchanged to the byte and so is an idle HTTP/2 connection.** A browser's stream, one to a connection, weighs 14.3 KB, of which 9.4 is the connection: **a handed-over stream costs 4.9 KB on top of it, against 27.8 KB for a parked one**. With 100 streams to a connection a handed-over stream weighs 6.2 KB opened a thousand at a time and 12.0 to 12.2 KB opened in one step, against 19.6 KB parked. **The spread between the last two is a number this section could not explain, and [the subsection after the review](#the-spread-of-a-handed-over-stream-is-the-engines-stack-pool) does**: the same server, streams and client give 6.2 or 12.1 KB depending on whether the 9,000 are opened between two reads or all at once, the progressive series is not monotonic (8.6 KB at 4,000 in both rounds), and the parked figure and the HTTP/1.1 ones do not move with it. The figures are also 0.5 KB (progressive) and 1.3 KB (in one step) above what the first version measured (5.6 to 5.8 and 10.3 to 10.9 KB), which the review's changes (a held event's remainder, the failure flags) do not account for by their size, 40 bytes a stream, and which I have not separated from the allocator's behaviour. What a stream holds that a test can see is about 3.4 KB: `Stream` 680 bytes, the arena 1,428, the lists and the pipe.
+
+**Fan-out**, `bench/fanout.py`: 100 subscribers on one Room (`BACKLOG=64`), `/blast` posting as fast as it can for 2 s, events written to the subscribers a second, three interleaved rounds (HTTP/2 over two connections of 50 streams, HTTP/1.1 over 100 connections):
+
+| | events written a second |
+|---|---|
+| HTTP/1.1, default build, before | 18.1 to 18.2 million |
+| HTTP/1.1, default build, after | 18.1 to 18.2 million |
+| HTTP/1.1 in a `-Dhttp2` build, after | 18.2 to 18.4 million |
+| HTTP/2 in a `-Dhttp2` build | 15.1 to 17.4 million (13.9 to 15.0 before the review) |
+
+HTTP/1.1 is inside its spread. **HTTP/2 writes 83 to 96% of HTTP/1.1's rate** (it was 76 to 82%): the review gated the bell (a post that finds the stream already rung takes no lock and wakes nobody) and the figure rose by about a tenth. The comparison still flatters neither side: its 100 streams are two connections, so two fibers write what 100 fibers did on two threads, and the poster posts 35% more events in the same time (514,000 to 564,000 against 375,000 to 382,000), so it also drops more at the ring. A slow reader is held to the room's ring either way. The poke's lock stays: `Shared.poke` posts the waker under the lock that guards `closed`, because the waker lives on the connection's frame and the same lock is what stops a late post reaching a frame that has gone; moving the post out of it would need the waker to outlive the connection.
+
+**Correctness.** `http/h2conn.zig` has the behaviours as tests on a stepped connection (posts as events in order with no handler running, `retry` first and then history and `Last-Event-ID`, the keep-alive comment and its bound on the wait, a client reset leaving the room, a slow reader bounded by the ring and reset with `CANCEL` at the write limit while another stream is answered, six 20,000-byte streams taking turns with a whole answer, GOAWAY, the connection ending and the server stopping each ending the streams and giving the seats back, the cap refusing the 201st stream, no allocation for 1 or for 100 posts, and `c.upgrade` still refused by name); `http/h2pipe_live.zig` has two on a real Engine (a poster thread of 150 events to three streams with one reset between the halves and every seat given back, and a quiet stream that hears its comments, hears a post after its pages went back and is ended by `app.shutdown()`); `http/behaviour.zig` has the head of a feed as a `HEAD` in the two-framing table (a `GET` never ends); `http/fuzz_frames.zig` has a `/v` route with a thread posting while the frames are read, in the generator and the corpus. h2spec 2.6.0 against `example-hello -Dhttp2` `ReleaseSafe` on a scratch copy with the table at 4096 (the header table setting and the acknowledgement's `allow`): 141, 141, 142 and 141 of 146 over four runs after the review (139, 141 and 141 before it); the five constant failures are 3.5/2, 5.1/8, 5.1/9, 5.1/11 and 5.4.1/1, as in the tree before.
+
+**In process**, `zig build profile -Dhttp2`, three interleaved runs each on core 2, ns a call, before then after: routed `GET` 410 to 411 and 387 to 388, `write the response` 50 to 52 and 49 to 51, `stream: 200 pieces` 1,007 to 1,024 and 1,009 to 1,013, `sse: 200 events` 3,550 to 3,607 and 3,546 to 3,641, `the App, handed the request` 374 to 378 and 350 to 356. **Two rows moved the wrong way**: `a plain struct, as JSON (the control)` 361 and 374 to 378 (+4%), which is code this change does not touch, and `the rest: frames, head, answer` 553 to 562 and 599 to 606 (+8%), which shares the frames and the head with it; the first version had the second at +3% and the first at +3.5%. They read as the layout of the program (the rows beside them went the other way) and are not isolated.
+
+### The review of the first version
+
+A read-only review found no use-after-free, deadlock or lost event, and these defects, each fixed with a test that was seen failing without the fix (the fix reverted for the run).
+
+- **A held event was formatted again at every turn, even with no window.** Every wake cleared the connection's scratch and formatted the whole event before `put` found the window shut, so a client giving its window back a byte at a time cost a full format and copy for each 13-byte frame. An event no window has room for is no longer formatted, and one that went only in part keeps its remainder (`Http2Events.pending`, from the connection's allocator, freed when it is out or on leave): it is formatted once however many turns it takes. `test "a client that gives its window back a byte at a time does not make a held event be formatted again, and is a flood"` counts formats (none while the window is shut, one in all) and sees `ENHANCE_YOUR_CALM` after `max_control_run` updates. Without the room check the test fails at the first count, and without the kept remainder at the second.
+- **The 250 ms stop poll is gone.** It cost about 40,000 timer wakes a second at 10,000 idle connections holding a stream and put back the stack pages `releaseStack` had given away. A stop cannot wake a wait; the Engine's main fiber finishes `drain` (which waits for `Stop.in_flight`, counted by `serveRequest` for the length of a request, so a handed-over stream, whose handler has returned, is not waited for) and cancels the group, and the connection's wait comes back `.closed`. A connection that finds `app.stop` requested then ends its streams under a cancellation shield (`bulkhead.beginShield` and `endShield`, new in the Bulkhead contract, zio's own): GOAWAY with `NO_ERROR`, each event stream's end, one flush. `test "an event stream handed to an HTTP/2 connection is sent comments while it is quiet, hears a post after its pages went back, and is ended when the server stops"` (live, `app.shutdown()`) fails without it and passed five runs of five with it. The HTTP/1.1 event stream does not get a wake for a stop either, which is not this change's.
+- **Every post poked the connection.** `Http2Events.ring` takes `Shared`'s lock and posts the waker on each; it now returns when the stream is already rung (`rung.swap(true)`), which is safe because `step` clears the flag before it looks, so a post after the look finds it clear and pokes, and `handOver` wakes the connection on its own. The fan-out row above is the measurement.
+- **A server stop on a busy stream ended with a reset.** `endEvents` read `stuck_since != 0`, which `pumpEvents` also sets after a turn with more to write. It now pumps the stream until a turn is not cut short (at most 64) and resets only if an event is left unfinished for want of window. `test "a server that stops ends a busy event stream with its end and everything posted, and a stuck one with a reset"` (twelve 20,000-byte events and open windows end with `END_STREAM` and all of them; a 100-byte window and one 5,000-byte event end with `CANCEL` after 100 bytes) fails without it.
+- **No memory to format an event killed the connection.** `pumpEvents` returned the error; the stream is now reset with `INTERNAL_ERROR` and forgotten after the round, and the others go on. `test "an event that cannot be kept for want of memory resets its stream and nothing else"` (a failing allocator under the connection) fails without it.
+- **The upload test took minutes.** `Wire.pump` of `http/h2pipe_live.zig` returns only after a quiet stretch of `wait_ms` once any frame has come, and the test waited 1,000 ms after each window update, and 3,000 ms after the end. `pumpSome` waits for one frame and takes what came with it. `an upload faster than its handler is held to its window, stalls, and then completes` took 3 min 32 s before and 0.6 s after, asserting what it did (68,497 bytes held while stalled, 98,962 at the peak).
+
+**The decision it moved:** the stream's `Room` bell is a value a framing hands to the seating, so a Room rings the HTTP/2 connection or the HTTP/1.1 request's waker through the same call, and the HTTP/2 walk over a stream's seats is `deliverSeats` while HTTP/1.1's stays written out in `RoomEvents.deliver`. What would push the HTTP/2 figure further: the idle bytes of a stream are the arena and the `Stream` (about 2.1 KB of the 3.4 that can be counted), which the hand-over could give back down to the `Http2Events` the stream keeps, and a stream's per-round share of the connection's fiber is the fan-out's limit, which more than one fiber a connection would change and nilo does not do (ADR 260).
+
+### The spread of a handed-over stream is the Engine's stack pool
+
+**Question.** [The section above](#what-an-event-stream-handed-to-the-http2-connection-costs) could not say why the same server, streams and client weigh 6.2 KB opened a thousand at a time and 12 KB opened in one step, and named the allocator's count as what would settle it.
+
+**Machine and builds.** As that section, the working tree against `04a2e10`, `bench-stream-server -Dhttp2`, `ReleaseFast`, stripped; `bench/mem.py --h2 --streams-per-conn 100 --path /events/room --steps 1000,10000` (one step) and `--steps 1000,2000,...,10000` (a thousand at a time), the server on two cores (4 and 5) or one (4), the client on 6 and 7; the rows marked so ran in a network namespace of their own, because another process on the host's 8787 or 8790 would otherwise be the one measured. `/proc/<pid>/smaps` taken after the last reading.
+
+**The spread is not the allocator's, and the allocator's count was not needed.** The server's heap does not differ between the two readings, because the streams are the same; what differs is the number of fibers that were alive at once. Each call runs on a fiber of its own (`spawnLocal`, on the connection's thread already, so that was not the cause either) that returns as soon as it has handed the stream over, and a fiber's stack goes to zio's stack pool with every page it touched still resident. The pool keeps what a burst needed (`Config.shrink_interval`, 60 s, halving its target each interval), so **what is resident after a burst is the most fibers that were ever alive together**, and that depends on whether the handlers got to run between the connection fiber's reads. The committed part of a stack is a 256 KiB region of its own in `smaps`, and each of those that a handler used holds 15 to 16 KiB:
+
+| reading of the same binary and client | stacks pooled | resident in them | `mem.py` bytes a stream at 10,000 |
+|---|---|---|---|
+| quiet (server on two cores, early in the day) | a few hundred mappings in all | | 4,831 to 4,887 |
+| burst, one core (namespace) | 5,259 to 6,066 | 83.6 to 96.2 MB | 13,421 to 14,781, then 14,872 to 15,123 |
+| burst, two cores (namespace) | not counted | | 13,145 to 13,741 |
+| burst, two cores | 2,788 to 4,062 | 45.1 to 66.0 MB | 9,258 to 11,406 |
+
+**The 6 KB to 12 KB spread of the section above is the pool's, and a stream that stays costs 4.8 KB** (the Stream, its arena and its lists are the 3.4 KB a test can count). The 15 KiB a fiber touches is the route's own depth: the call, `Ctx`, the typed layer.
+
+**What changed.** `runCall` of `http/h2conn.zig` calls `bulkhead.releaseEndingFiberStack()` (the Engine's `releaseIdleStack`, one `madvise(MADV_DONTNEED)` below the running frame) when its call handed an event stream over, just before the fiber ends. A stream that lives on pays one syscall, once; an ordinary request pays nothing. A pooled stack then holds 8.2 KiB (the frames at its top) instead of 15 to 16.
+
+| burst, `mem.py` bytes a stream at 10,000 | before | after |
+|---|---|---|
+| one core, six rounds (namespace) | 14,872 to 15,123 | 10,198 to 10,413 (-31%) |
+| two cores, six rounds (namespace) | 13,145 to 13,741 | 9,667 to 9,897 (-27%) |
+| two cores, five rounds | 9,258 to 11,406 | 9,597 to 9,828 (-10% of the mean) |
+| pooled stacks, resident each (two cores) | 2,788 to 4,062, 15.8 KiB | 5,724 to 5,991, 8.2 KiB |
+
+**It does not make the burst stable, and the third row says why:** the `madvise` takes the fiber longer to end, more of them are alive together (5,700 to 6,000 pooled stacks where there were 2,800 to 4,100), and 8 KiB a stack for more stacks is a smaller saving than 8 KiB for the same number. The quiet reading, where the fibers end before the next is spawned, does not move (4,831 to 4,887 before and 4,798 to 5,146 after, six rounds each, in the runs before the host got busy). The idle HTTP/2 connection, the HTTP/1.1 stream and the parked stream are untouched code.
+
+**What did not work, and what is open.** A `yield` after every eighth spawn in `Conn.start` left the pool where it was (6,076 to 6,240 regions on one core): the fibers spawned on the connection's thread are not run first by zio's queue, so the burst cannot be cut from the connection's side without a placement the scheduler does not offer. **Giving back the arena and the `Stream` was not done**: the arena holds the `Http2Events`, the `Replay` list, the `Outbox` the connection still reads `out` through, the head block and the decoded fields, so it can be reset only once all of those have moved to the connection's allocator, which is a restructuring of `Stream` that the HTTP/2 request path is being changed around, and it is worth at most the 1.4 KB the arena holds of the 4.8. What is left of a burst is two pages of a pooled stack for as many fibers as were alive together, until the pool's own timer lets them go; `stack_pool.shrink_interval` is zio's option and is not changed here. What would settle the rest: the pool's retained stacks counted as the handlers run (`smaps` over time), with the same burst at a `shrink_interval` of 5 s.
+
+## What offering h2 to a browser costs
+
+**Question.** Stage 7 of [framing](../../docs/design/framing.md) makes a TLS listener of a `-Dtls -Dhttp2` build offer `h2` and `http/1.1` by ALPN and serve what the handshake chose, through one call after it, and removes the listener option `.grpc` ([ADR 259](../../docs/adr/259-http2-is-a-framing-of-every-request.md), revising [ADR 027](../../docs/adr/027-tls-is-terminated-in-front.md) in place). The bar the ADR set: an HTTP/1.1 connection over TLS holds the idle figure of the same build before, the figure of an HTTP/2 connection over TLS on record before a browser is offered `h2`, a page load in Chromium over both protocols, a static file over TLS on both, h2spec over TLS, and a build without the flags unchanged.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `4e2644a` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved, two rounds. The server on cores 0 to 3, the client on 4 to 7 (physical cores, SMT siblings idle). Memory: `bench/mem.py --tls` (`--h2 --get` for HTTP/2, which now negotiates `h2` and refuses to go on if it is not what was chosen) against `nilo-bench-tls-server`, `ulimit -n 65536`. The page: `bench/page_server.zig` and `bench/page_load.mjs`, a fresh Chromium and profile each run, the cache off. Files: `h2load` (nghttp2 1.59.0, Docker, host network) against the same server built `-Dcpu=native`.
+
+**Where the choice is made.** The handshake's ALPN list is `h2` then `http/1.1` in a `-Dhttp2` build and `http/1.1` alone in any other; tls.zig picks the first of the server's list the client also offered (server preference) and reports it in `conn.alpn_protocol`. The Engine's one TLS entry reads it after the handshake: `h2` runs `hand_on`, the `noinline` function a plain listener's HTTP/2 connection already runs from the entry's frame (ADR 062), and anything else runs the HTTP/1.1 handler as it did. `runTlsGrpc`, the second instantiation of the entry, is gone, and so is `.grpc`.
+
+**A stall it found, and fixed.** The first `mem.py --tls --h2 --get` stopped with a read timeout at 946, 1, and 1,328 connections in three of four runs: a client that sends the preface and SETTINGS in one TLS record and its `HEADERS` in the next, back to back, has both records in the server's first read, the server decrypts one, finds its cleartext buffer empty and parks on the socket, which the kernel has already emptied. `Wake.wait` now answers `.readable` while the record layer holds ciphertext or decrypted bytes (`Wake.held`), and a poll that fired meanwhile is checked against the socket once (`believe`). `test "a second TLS record that arrived with the first is answered, not waited for on an emptied socket"` puts both records in one socket write, twenty times, and was seen to fail without the fix (so did the ordinary `GET` test beside it, which sends its two records one after the other). It is the question [`todo.md`](../../docs/todo.md) carried for a WebSocket over TLS, answered from the code before and by this now; the fix is in `Wake.wait`, which a WebSocket parks in too. After it, two runs of `mem.py --h2` to 10,000 connections each and every Chromium load completed.
+
+**A review's refinement: only a whole record counts.** `Wake.held` first answered for any ciphertext in the record layer's buffer, but tls.zig peeks a record's five-byte header and takes its payload, so the buffer can hold a header or half a payload behind a record already decrypted. Answering `.readable` for that sends the caller into a read that blocks on the socket until the rest arrives or the read deadline runs out, deaf meanwhile to a handler's post, to the other streams' answers on an HTTP/2 connection and to a WebSocket broadcast, and `lookNow` (the `out_more` probe) would have answered it every round. `held` now answers for decrypted leftover, or for `buffered >= 5` and `buffered >= 5 + length` from the header, peeked and not consumed; a partial record falls through to the poll, which fires when the rest arrives because the socket is drained. A whole record that is not application data (a ticket, a KeyUpdate) cannot be told apart cheaply: every record after the handshake is type 23 on the wire and only decrypting says what it holds, so it is answered like any whole one and the read after it waits for the next record. Four tests send a whole record (a PING frame, or a masked WebSocket text frame the loop says to its room) and 3 or 12 bytes of a second in one socket write, then post into the room, and the client has five seconds to receive the post: HTTP/2 and WebSocket, header only and half a payload. All four, and the two before them, failed with the whole-record test replaced by "any buffered byte" and pass with it. Not tested: `lookNow` (the HTTP/2 `out_more` probe) with a partial record; it shares `held`. Re-measured after it: `-Dtls -Dhttp2` HTTP/1.1 at 10,000 connections 9,341 and 9,370 against 9,335 and 9,335 before (6 to 35 bytes, inside the 30-byte jitter two runs of one binary showed), `-Dtls` 9,364 and 9,335 against 9,364 and 9,364, HTTP/2 after a `GET` 9,589 and 9,550 (9,564 to 9,581 earlier).
+
+**Size**, stripped:
+
+| program | build | before | after | difference |
+|---|---|---|---|---|
+| `example-hello` | default | 1,013,408 | 1,013,328 | -80 |
+| `example-rest` | default | 1,221,320 | 1,221,240 | -80 |
+| `example-hello` | `-Dtls` | 1,614,640 | 1,615,008 | +368 |
+| `example-rest` | `-Dtls` | 1,822,248 | 1,822,456 | +208 |
+| `example-hello` | `-Dhttp2` | 1,147,760 | 1,147,680 | -80 |
+| `example-rest` | `-Dhttp2` | 1,337,984 | 1,337,888 | -96 |
+| `example-hello` | `-Dtls -Dhttp2` | 1,753,504 | 1,751,104 | -2,400 |
+| `example-rest` | `-Dtls -Dhttp2` | 1,943,920 | 1,941,296 | -2,624 |
+
+No build is `cmp` equal, so the bar of a byte-identical default build is not met to the letter: the 80 to 96 bytes under the default and `-Dhttp2` builds are `.grpc` going from `Options`, `Listener` and the Engine's per-listener state, and its refusal's text. The 208 to 368 over a `-Dtls` build is `Wake.held` and `believe`, which only a build with TLS in it compiles (gated on `nilo_build.tls`, so the default build pays none of it; without the gate the default build was 336 bytes over). The `-Dtls -Dhttp2` build is 2.4 to 2.6 KB smaller because one entry is instantiated where two were.
+
+**Idle HTTP/1.1 connection over TLS**, bytes a connection after one request, `mem.py --tls`, `http/1.1` offered, two interleaved rounds (a range is the rounds):
+
+| build | 1,000 | 5,000 | 10,000 |
+|---|---|---|---|
+| `-Dtls`, `4e2644a` | 9,826 to 10,441 | 9,448 to 9,513 | 9,364 to 9,628 |
+| `-Dtls`, after | 9,826 | 9,390 to 9,447 | 9,363 to 9,364 |
+| `-Dtls -Dhttp2`, `4e2644a` | 9,826 to 10,117 | 9,390 to 9,448 | 9,364 |
+| `-Dtls -Dhttp2`, after | 9,892 to 10,183 | 9,403 to 9,461 | 9,370 |
+
+The 1,000 column is noisy in every build, run to run, by 600 bytes. At 10,000 the `-Dtls -Dhttp2` build holds **6 bytes more**, and the marginal cost from 1,000 to 10,000 is the same to the byte (9,312 before and after in the first round): the 6 bytes are about 64 KB of resident memory that does not grow with the connections, the size of the code the TLS entry now touches, and not a page a connection. The page ADR 212 measured is unchanged: a `-Dtls` build is 9.4 KB against 5.2 KB on a plain listener, with and without `-Dhttp2`. A plain listener, `example-hello`, two rounds: default 5,247 and 5,190, `-Dhttp2` 5,378 and 5,204, at 1,000 and 10,000, before and after to the byte.
+
+**Idle HTTP/2 connection over TLS**, after one `GET /health` (the stream finished, nothing in flight), `mem.py --tls --h2 --get`, after only (before there was no `h2` on a TLS listener):
+
+| connections | round 1 | round 2 |
+|---|---|---|
+| 1,000 | 10,215 | 10,224 |
+| 5,000 | 9,705 | 9,608 |
+| 10,000 | 9,581 | 9,564 |
+
+That is 194 to 211 bytes over an HTTP/1.1 connection on the same listener at 10,000, where on a plain listener it is 4,158 over (9,355 against 5,197): the TLS page is the cost both pay, and the HTTP/2 connection's own state fits beside it. **One browser opens one such connection where it opened six HTTP/1.1 ones**: about 9.6 KB against 6 x 9.37 = 56.2 KB.
+
+**A page load in Chromium** (Chromium 152.0.7977.82, headless, `--ignore-certificate-errors`, a page of nineteen subresources: four stylesheets, four scripts, eight images, a `fetch` of JSON, an `EventSource` and a WebSocket, `page_load.mjs`), `loadEventEnd` in ms, median and range of five runs a batch, three batches interleaved:
+
+| | HTTP/2 (`h2` offered) | HTTP/1.1 (`--disable-http2`) |
+|---|---|---|
+| loopback | 47.7 (40.8 to 51.6); 46.8 (40.9 to 52.7); 48.5 (40.7 to 59.6) | 49.4 (42.3 to 58.5); 46.3 (39.1 to 51.8); 49.8 (48.2 to 56.2) |
+| connections for the page | 1 | 4 to 6 |
+| `nextHopProtocol` | `h2` | `http/1.1` |
+| +20 ms on every request (`Network.emulateNetworkConditions`), two batches | 80.4 (77.0 to 83.8); 76.5 (73.1 to 84.7) | 120.8 (115.8 to 122.4); 117.4 (111.7 to 118.4) |
+
+On loopback there is nothing to wait for and the protocols are the same inside their spread. With 20 ms added, six connections serialise nineteen requests and one does not: 77 to 80 ms against 117 to 121. The `-Dtls` server (no `h2` in the handshake) gives 48.6 (39.2 to 63.3) over six connections, the same as `--disable-http2` against the `-Dhttp2` one. **Chromium works with `SETTINGS_HEADER_TABLE_SIZE` of 0**: every request of every run was answered, on the one connection, so it sends the size update the server's decoder requires. The `fetch`, the `EventSource` (`eventsFrom` in a Room, a message after the page poked it) and the WebSocket all completed in every run. **The WebSocket is on a connection of its own**: its handshake is the 101 of HTTP/1.1, and the server holds two sockets for the page, the HTTP/2 connection and the WebSocket's (nilo sends no `SETTINGS_ENABLE_CONNECT_PROTOCOL`).
+
+**A static file over TLS**, `h2load -c 1 -m 1`, one stream, `-Dcpu=native` (AES instructions; at the baseline target the cipher is 59 MB/s for either protocol and the framing does not show), no `sendfile` on either ([ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md)):
+
+| file | HTTP/1.1 | HTTP/2 |
+|---|---|---|
+| 1 MiB, held in memory (1,000 requests, three rounds) | 2.70, 2.71, 2.71 GB/s (359 µs a request) | 1.66, 1.76, 1.65 GB/s (553 to 589 µs) |
+| 64 MiB, opened per request (12 requests, three rounds) | 599, 603, 593 MB/s | 1.57, 1.57, 1.58 GB/s |
+
+**Both went a way worth saying.** A held 1 MiB file is **35 to 40% slower over HTTP/2** than over HTTP/1.1 on TLS; and a spilled 64 MiB file is **2.6 times slower over HTTP/1.1**, which is the odd one: the same file read the same way is 600 MB/s on one framing and 1.6 GB/s on the other, so the HTTP/1.1 spilled path over TLS is leaving something on the table. Neither is traced here; [the section after](#what-a-tls-write-is-sealed-in) traces and fixes both.
+
+**h2spec over TLS** (`summerwind/h2spec -t -k -P /`, a scratch copy with the HPACK table widened to 4,096 in both places, since h2spec's encoder never sends a size update, three runs): **142 of 146 every time**, failing 3.5/2, 5.1/8, 5.1/9 and 5.1/11, the constant four of the plain baseline (139 to 142 of 146); 5.4.1/1 passed, which it does not on a plain port, and 3.8/1 and 7/1 did not flake.
+
+**Routed `GET` over TLS**, `h2load --h1 -c 64 -t 2`, `/users/42`, `-Dtls -Dhttp2` build at the baseline CPU target, three rounds interleaved: before 183,901; 185,254; 184,975 requests a second, after 192,610; 188,447; 190,067. Not slower; the sign is the same in all three pairs and no cause is claimed. **`curl --http2 -k`** negotiates `h2` and is answered, `curl --http1.1 -k` negotiates `http/1.1` and is answered, `openssl s_client` with no ALPN and with `-alpn http/1.1` is answered HTTP/1.1, and with `-alpn spdy/3` alone fails with alert 120, `no_application_protocol`: RFC 7301 §3.2 says a server that supports none of the protocols offered SHALL answer that alert, and tls.zig does; every browser and client library offers `http/1.1`, so this is a client offering nothing the listener speaks. A client with no ALPN is served, since the library selects nothing when it is not asked.
+
+**The decision it moved:** ALPN is offered `h2` first in a `-Dhttp2` build, the choice is read in the one TLS entry and HTTP/2 is run from its frame through the `noinline` hand-on a plain listener already uses; `.grpc` goes, with Zig's own "no field named" error as its refusal; and `Wake.wait` answers from bytes the record layer holds. **Can it be pushed further:** the 6 bytes at 10,000 and the 64 KB under them are worth tracing only if a dependent asks; a held 1 MiB file over HTTP/2 and a spilled one over HTTP/1.1 on TLS are the two numbers that went the wrong way, and the second one is likely a buffer size.
+
+## What a request on HTTP/2 costs once its clocks, copies and passes are counted
+
+**Question.** A routed `GET` over HTTP/2 was 974 to 1,032 ns in process and a unary gRPC call 958 to 1,003, against 386 to 390 for the same route over HTTP/1.1. Where does the difference go, and how much of it can be taken out without spending an idle byte, an allocation or a line of ADR 253's refusals? The bar set was a 2x cut on the `GET`.
+
+**Machine and builds.** AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, stripped. Before is `04a2e10` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved. Builds on cores 4-7 and 12-15; the in-process profile pinned to core 2; for a server, `taskset -c 0-1` with `h2load` (Docker, `--network host`) on cores 2-3 and `wrk` the same way, under one lock so nothing else ran.
+
+**Method.** `zig build profile -Dhttp2`, the tree at `04a2e10` beside the working tree, four to five interleaved runs of each. The breakdown is rdtsc probes plus a `SIGPROF` sampler at 2 kHz with frame-pointer unwinding in a scratch build, and the same sampler inside `nilo-hello` under `h2load -c 64 -m 10 -t 2` for what the in-process profile cannot see. Real server: `h2load -n 1,000,000 -m 10` and `-n 400,000 -m 1`, CPU read from `/proc/<pid>/stat`.
+
+**What the cost was made of** (a `GET`, in process, about 1,000 ns): two clock reads per request (the monotonic stamp at every frame read and the realtime clock for `Date`), a header block copied three times (decode, `Collected.fields`, the answer's headers), five separate validation passes, a linear scan of the 61-entry static table for each answer header, the standard arena's atomic operations on every allocation, a monitor taken to end a stream nothing else reads, and a 616-byte `Stream` rebuilt at each recycle. Decoding the HPACK block was 34 ns of the `GET` and 125 to 137 of the gRPC call (Huffman on h2load's strings); it was never the large part.
+
+**What was changed, each measured on the message rows** (ns, interleaved runs, before at `04a2e10` / after):
+
+| row | before | after | HTTP/1.1 on the same runs |
+|---|---|---|---|
+| routed `GET` over HTTP/2 | 974 to 1,032 | 784 to 807 | 386 to 388 before, 408 to 428 after |
+| unary gRPC call | 958 to 1,003 | 774 to 793 | |
+| `POST` of 13 bytes as JSON | 898 to 943 | 739 to 761 | |
+
+The `GET` is 2.0 times HTTP/1.1 where it was 2.5. The HTTP/1.1 row is 20 ns higher in this build than in the tree before, in every run and also with `date.zig` and the profiler's changes taken out, though no code on that path changed; `wrk` through a server does not show it (898k to 908k requests a second before, 885k to 933k after, p99 86 to 105 us against 79 to 100 and one 343 us), and it is code layout, which a later run showed. With the three optimisation changes of this afternoon together (this one, [the header lookup](#a-header-is-looked-for-by-the-lines-that-can-hold-it) and [the TLS sealing](#what-a-tls-write-is-sealed-in)) the routed HTTP/1.1 `GET` of a default build read 406 to 415 ns against 394 to 397, every binary copied to one path and run with an empty environment, four interleaved rounds. Two controls settle what that is. The tree before with nothing but an unused exported function of 16, 48, 80 or 112 `nop`s added read 408 to 426, as far from the tree before as the change is; and the same binary run from two paths of different length read 394 against 402 to 406 until the path was made the same, because the path and the environment move the stack. So a margin under about 20 ns on this row is not a result in either direction, and a run that compares two builds copies each to the same path first. Through a server it is not there: `wrk -t2 -c64 -d8s` on the default build's `example-hello` (`/users/7`), server on cores 0-1 and client on 2-3, three interleaved rounds, read 343k to 350k requests a second at 2,737 to 2,760 ns of server CPU each before and 350k to 356k at 2,687 to 2,716 after.
+
+The changes: the monotonic stamp is taken when bytes had to come off the socket for a frame, and once more after a frame whose payload was waited for, so the next head (usually in the same read) is not stamped with the time an upload began; `fields` capacity is reserved from the block's size before decoding; the five validation passes are one SWAR scan that skips the name check for a name that is in the static table (a differential test holds it to the old functions over 20,000 random cases, with names from the table, copies of them and literals); `fieldHead` builds the head in one arena allocation; the head block for a streamed answer is written straight from the route's headers with the static indices known at compile time (no `Collected.headers` copy, no 61-entry scan); `staticNameIndex` is a comptime `StaticStringMap`; a stream that opened with nothing to read ends its `Inbox` without the monitor.
+
+**A stamp that was too stale.** The first version stamped only when a frame's head had to be waited for. Behind a long upload the next head is already buffered when the payload's read ends, so it was stamped with the time the payload began, and a `grpc-timeout`, the body limit and the silence limit all counted from it (`test "a call that arrives behind a slow upload is stamped when its bytes came, not when the upload began"` fails on that version: an 80 ms stall leaves the stamp 80 ms old). Stamping again after a frame whose payload was waited for costs a clock read only on a frame that was not already whole in the buffer, which the `h2load` runs below include.
+
+**The coarse clock for `Date` bought nothing and was taken out.** `CLOCK_REALTIME_COARSE` against the precise clock, `zig build profile -Dhttp2`, five interleaved runs each: the HTTP/1.1 row 407 to 414 ns coarse and 408 to 410 precise, the HTTP/2 `GET` 787 to 791 against 785 to 797. `Date` reads the clock once a response and the read is not where the time goes, so the header keeps its precise second and never lags (ADR 197 unchanged).
+
+**Through a server** (`h2load -c 64 -t 2`, two interleaved passes of two rounds each, the final tree): `-m 10` 1,053k to 1,089k requests a second and 1,610 to 1,640 ns of server CPU a request before, 1,161k to 1,187k and 1,450 to 1,470 after, **8 to 10% more throughput and 9 to 11% less CPU**; `-m 1` 575k to 591k before and 600k to 616k after with CPU 2,725 to 2,800 against 2,575 to 2,600, 4 to 6% on both. The spawn of a fiber for each stream, which the in-process profile cannot see, is about 9.5% of the server's CPU (near 140 ns a request) by sampling; running the request on the stream's own fiber in an experiment bought nothing measurable, so it was not kept.
+
+**The four axes.** Allocations a request: the budget test holds (not re-counted per row). Idle memory: `bench/mem.py --h2` at 10,000 connections 9,423 B before and after; `--h2 --get` 9,521 B before, 9,513 B after. Throughput and p99: above. Size, stripped `ReleaseFast` `nilo-hello`: default build 1,020,872 bytes before and after (`cmp`-identical), `-Dhttp2` 1,155,184 to 1,156,944 (+1,760).
+
+**Correctness.** `zig build test` and `zig build test-all` exit 0 (no Postgres in this environment, so `test-sql` ran without it); the frame fuzzer in `ReleaseSafe`, 1,000,000 connections, seeds `0x7a3c91e5d2b84f06` (first version) and `0x1b5e77c3a9d04f82` (final), and the HTTP/1.1 parser fuzzer, 1,000,000 inputs, seed `0x4c2f90e1b7a35d68`, every property held; h2spec 2.6.0 on the scratch copy with the table at 4096, three runs each: 140, 142, 141 of 146 before and 141, 141, 142 after, and the set of failing cases after is inside the set before (3.5/2, 5.1/8, 5.1/9, 5.1/11 constant, 5.4.1/1, 3.8/1 and 7/1 flaking).
+
+**The decision it moved:** none, apart from a row in the running total of [ADR 017](../../docs/adr/017-the-trade-budget-has-four-axes.md). The App still receives an HTTP/2 request as a head and parses it with the same parser as HTTP/1.1.
+
+**Can it be pushed further:** about 80 ns is the second parse of the head the App does on an HTTP/2 request, which skipping would split the refusals of the two protocols (ADR 253), so it was not done. A single-threaded arena for a `Stream` (an estimated 30 to 60 ns) and a fiber kept for the next stream (the 9.5%) are the two left; the second raises head-of-line blocking within a connection and needs its own argument. The HPACK dynamic table is not worth its idle bytes at this share. The 2x bar was not reached on the `GET` in process (2.5 to 2.0 times HTTP/1.1) and a call through a server costs 8 to 10% less CPU.
+
+## What a TLS write is sealed in
+
+**Question.** [The section above](#what-offering-h2-to-a-browser-costs) left two numbers going the wrong way on a TLS listener with AES in the target: a held 1 MiB file 35 to 40% slower over HTTP/2 than over HTTP/1.1 (1.65 to 1.76 GB/s against 2.70), and a spilled 64 MiB file 2.6 times slower over HTTP/1.1 than over HTTP/2 (593 to 603 MB/s against 1.57). The bar: each at least up to the other protocol's figure, with idle memory not a byte more on any listener and the default build unchanged.
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `-Doptimize=ReleaseFast -Dcpu=native -Dstrip=true` (AES instructions in the target), `bench-page-server -Dtls -Dhttp2`. Before is `04a2e10` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved, five rounds. Server on cores 0 to 3 (and their siblings), `h2load` (nghttp2, the `arena-h2load` image, `--network host`) on 4 to 7, under the shared bench lock. `STATIC_DIR` holds `1m.bin` and `64m.bin` of random bytes; `h2load -c 1 -m 1 -n 1000 https://127.0.0.1:8443/files/1m.bin`, `-n 12` for the 64 MiB file, `--h1` for HTTP/1.1.
+
+**No tracer was on this host** (`strace`, `perf` and `bpftrace` are not installed), so the causes were read from the code and then tested by changing one thing at a time, each build measured:
+
+| build | h1 1 MiB | h2 1 MiB | h1 64 MiB | h2 64 MiB |
+|---|---|---|---|---|
+| before | 2.60 | 1.70 | 0.58 | 1.55 |
+| record buffer out holds 4 records, one write per drain | 3.3 | 2.05 | 2.4 | 1.83 |
+| ...and the last byte of a drain held back, so the write waits for the flush | 3.3 | 2.34 | 2.4 | 2.26 |
+| ...and a body already in the arena not copied on HTTP/2 | 3.2 | 3.1 | 2.4 | 2.3 |
+
+GB/s, one round each, so read to a tenth. What the code showed. **The library writes a record to the socket the moment it has sealed it** (`Connection.encryptWrite` ends in `output.flush()`), and the record buffer out was one record, so a write that reached the record layer cost a write per 16 KB, and, since a cleartext writer drains what it holds before the data it was handed, **an HTTP/2 frame's nine-byte head was a record and a write of its own** before each 16 KiB of payload. **A file on HTTP/1.1 is read through the cleartext writer's buffer** (`sendFileReading`, because a record layer has no `sendfile`), which is the connection's 4 KiB write buffer: a `pread` of 4 KiB, a record of 4 KiB and a write of 4 KiB, sixteen thousand times for 64 MiB, where HTTP/2's file call reads through 64 KiB. And **HTTP/2 copied a held body into the request arena** before it was written (`Collected.whole`): a megabyte past what the arena keeps, a page fault for each page and a `memcpy`, 110 µs of the 529 to 558 µs; HTTP/1.1 writes it from where it lies. The third row leaves that copy out for a body the framework owns (`Ctx.sendOwned`: a static file the App holds, and what is written into the arena, a value's JSON, a `nilo_write`, a message, gzip output). **A first form borrowed every `sendKept` body, which includes a slice a handler returned and a `Bytes.body`, and a route returning bytes a service frees could then be written after they were gone; it was withdrawn**, and those keep the copy (`h2conn.zig` has a test that overwrites the handler's buffer once the route has returned and the client has been sent 1,000 bytes of 20,000; it fails with the borrow on `sendKept`).
+
+**What changed.** `http/engine/zio.zig`: the TLS entry's cleartext writer is `Sealer`, which holds the library's flush for the length of one drain and writes what was sealed in one go, keeps the last byte of a drain that carried data in the cleartext buffer (so that a caller that flushes only a writer with something in it finds something, and a drain never leaves bytes behind a writer that reads as empty), and reads a file 64 KiB at a time into a buffer that lives for the file alone; the record buffer out is two records (4 gave the same figures within 5%, 3 inside one spread). `http/framing.zig` and `http/ctx.zig`: `Framing.whole` takes `kept` (it means owned), and HTTP/2 does not copy a body of 16 KiB or more that is. `Ctx.sendOwned` is new, used by `serve.zig`'s held files and by `typed.zig`'s written, message and JSON bodies. `http/bulkhead.zig` and `http/h2conn.zig` carry the event stream's part (below). Tests: `tls_live.zig` sends a 300 KB body, a 300 KB file and a small answer in a row on one connection and compares every byte; `framing.zig` has the borrow and its three exceptions, and `h2conn.zig` sends 20,000 bytes of each owner kind under a 1,000-byte window.
+
+**Final numbers**, five interleaved rounds (a range is the rounds), GB/s unless MB/s, mean request time in brackets:
+
+| | before | after |
+|---|---|---|
+| held 1 MiB, HTTP/1.1 | 2.55 to 2.63 (353 to 359 µs) | 3.13 to 3.21 (295 to 300 µs) |
+| held 1 MiB, HTTP/2 | 1.61 to 1.77 (529 to 558 µs) | 3.03 to 3.09 (303 to 307 µs) |
+| spilled 64 MiB, HTTP/1.1 | 579 to 606 MB/s (100 to 106 ms) | 2.33 to 2.39 (25.7 to 26.3 ms) |
+| spilled 64 MiB, HTTP/2 | 1.52 to 1.58 (38.3 to 40.2 ms) | 2.21 to 2.25 (26.8 to 28.0 ms) |
+
+**Both inversions are closed**: HTTP/2 holds 96% of HTTP/1.1 on the held file (it held 63 to 68%), and HTTP/1.1 is 4.0 times what it was on the spilled one and now ahead of HTTP/2. Routed small answers over TLS (`h2load --h1 -c 64 -t 2 -D 3 /api/data`, and `-c 64 -m 10` for HTTP/2, three interleaved rounds): HTTP/1.1 547,120; 549,338; 544,790 requests a second before against 547,464; 538,683; 543,193 after (inside the spread), HTTP/2 1.47 to 1.49 million against 1.60 to 1.62 (+8%, the head and the payload leave in one write).
+
+**The four axes.** Allocations per request: none added on the ordinary path (the 64 KiB read buffer of a file over TLS is one allocation per file answer, freed at its end; `test "the request path stays inside its allocation budget"` passes). Idle memory, `bench/mem.py` at 10,000 connections in a network namespace of its own, before then after: plain 5,190 and 5,190, plain HTTP/2 10,201 and 10,202, `-Dtls` 9,365 and 9,365, `-Dtls -Dhttp2` HTTP/1.1 9,371 and 9,370, HTTP/2 10,315 and 10,267 (the 1,000 column moves by 600 in either build, as above). The second record's pages are touched only by an answer larger than one record, and stay resident until the connection's next idle release, as the first's do. `sendFileAll` with a limit past the end of the file no longer takes a second buffer: `Sealer.sendFile` answers `EndOfStream` before allocating once the file reader is at its end. Stripped `ReleaseFast` `example-hello`: default 1,013,328 to 1,013,392 (+64, the `owned` argument and `sendOwned`), `-Dhttp2` 1,147,680 to 1,148,832 (+1,152), `-Dtls` 1,615,008 to 1,616,864 (+1,856), `-Dtls -Dhttp2` 1,751,104 to 1,754,000 (+2,896); `example-rest` +48, +1,040, +1,840 and +2,784 in the same builds. Throughput of the routed `GET` is the row above. The fuzzers, 1,000,000 inputs each in `ReleaseSafe` on new seeds (`--frames` 0xC0DEC5EED5, the parser 0xC0FFEE5EEDC): every property held.
+
+**What did not work, and what was weighed.** Writing the last record of a drain at once, the first form, reached 2.05 GB/s on HTTP/2 where the form that waits for the flush reaches 3.0. Leaving the sealed records in the record buffer with nothing in the cleartext one was faster still and **unsafe**: `Socket.park` and `RoomEvents.park` flush a writer only `if (end != 0)`, so a message that left the cleartext buffer empty with records waiting would have sat there until the next write; keeping a byte is what makes `end` tell the truth. A bigger cleartext write buffer on every TLS connection was not taken (idle memory), and a frame size that fills a record does not help an arbitrary alignment. `sendfile` is still not used on TLS, which a record layer cannot (kTLS is ADR 212's open alternative).
+
+**After the ownership fix, rerun** (four interleaved rounds, same commands, under the lock): held 1 MiB 3.12 to 3.21 GB/s on HTTP/1.1 and 3.05 to 3.09 on HTTP/2, spilled 64 MiB 2.33 to 2.36 and 2.18 to 2.23, so the held-file gain survives (the static file is `sendOwned`).
+
+**The final flush of a connection is not shielded.** It could be cut by the cancellation a stop sends, and then the last record would not leave, but so can every write of a response in flight at a stop (the flush at the end of each drain is the same write), and a shield on a write with no deadline armed would let a stalled peer hold the stop. Left as it was.
+
+**The decision it moved:** ADR 212 gained the paragraph on the record buffer and the cleartext writer. **Can it be pushed further:** HTTP/2 is 4% behind on the held file and 5% behind on the spilled one, which is the frame head and a second record per frame; batching the frames of one turn into one write would need the connection to say where a turn ends, which is `http/h2conn.zig`'s.
+
+## What a connection's task costs, how a stack buffer costs at idle, and how close the park sits to a page
+
+Run on 2026-10-08 at `514e8c1` plus the working tree, on the machine above, kernel 7.2.5. `bench/mem.py` in a private network namespace, `nilo-hello` built `ReleaseFast` with `-Dtarget=x86_64-linux-gnu -Dcpu=x86_64_v3`, server on cores 4 to 7, 1,000, 5,000 and 10,000 connections, each build twice. The before was built from the same commit in a scratch directory, same flags, same afternoon. Marginal (5,000 to 10,000) agrees with the average at 10,000 to within 10 bytes.
+
+**The 512 bytes.** [`releases.md`](./releases.md) read 4,674 at v0.2.0 and 5,186 at v0.3.0. The bisect found no frame that grew: `serve` handed every connection's task a copy of `Options` (264 bytes) among its spawn arguments, which took zio's task from its 384-byte pool to the allocator's 1,024 class, where a 512 B one had been. The arguments are now `.{ st, stream, conn_gpa, sh }` and the sizes are read through `sh.sizes`, a pointer to a heap copy `serve` makes once. Commands: each server binary run in a private network namespace (`unshare -rn`, loopback up) on cores 4 to 7, then `python3 bench/mem.py --port 8787 --steps 1000,5000,10000` (default `--settle 2`) against `nilo-hello`, the same with `--tls` against `nilo-bench-tls-server`, and `--h2 --get` (with `--tls` for the TLS rows) for the h2 rows; each build twice, the second run in the table. Bytes per idle connection at 10,000:
+
+| listener | before | after |
+|---|---|---|
+| plain | 5,188 | **4,678** |
+| plain listener of a `-Dtls` build | 9,300 | 8,787 |
+| TLS | 9,350 | 8,847 |
+| `-Dhttp2`, an HTTP/1.1 connection | 5,204 | 4,691 |
+| `-Dhttp2`, h2c after one GET | 9,677 | 9,506 |
+| `-Dtls -Dhttp2`, TLS HTTP/1.1 | 9,327 | 8,853 |
+| `-Dtls -Dhttp2`, TLS h2 after one GET | 10,259 | 10,267 |
+
+The two h2 rows move by far less than 512: the stream state those connections hold sits in the same size class either way. A variant that shrank the arguments under 384 bytes to use zio's pool saved a further 115 bytes on HTTP/1.1 and made h2c about 390 bytes worse, and was dropped. Stripped `ReleaseFast` binaries: unchanged to within 200 bytes (994.9 KB and 994.7 KB for `nilo-hello`). Taking the address of the `options` parameter instead of a heap copy added 20,304 bytes, which is why the copy is on the heap.
+
+**Throughput did not move.** `nilo-hello` `GET /`, wrk 4 threads 64 connections 10 s, server on cores 0 to 3, three interleaved rounds under the lock: 1,335,138 to 1,351,852 req/s before, 1,337,370 to 1,346,149 after, p50 latency 42 µs both.
+
+**A stack buffer is free at rest.** A body-stream route with `var buf: [64 * 1024]u8` that returns costs 4,685 bytes an idle connection, 7 more than `/health`. A route using `c.stream()` costs 12,876: the stream's own 4 KiB buffer comes from the request arena and `arena_keep` (16 KiB) retains it. With `.arena_keep = 0` it reads 4,715, with a 256 B buffer 5,806. [ADR 062](../../docs/adr/062-where-a-connection-waits-is-what-it-costs.md) and [`s3.md`](./s3.md) had read the arena's bytes as the stack's.
+
+**The park.** The plain stack flips from one resident page to two between 2,809 and 2,841 bytes of depth on the benchmark server (2,793 and 2,825 in the `park-check` program), found with ballast in steps of 16. Depth in the `park-check` program on `ReleaseFast`, read with a store-only probe in `releaseIdleStack` that is not in the tree: 2,505 default (288 under the boundary), 2,729 with `-Dhttp2` (64), 2,889 with `-Dtls` and 2,937 with both (across by 96 and 144). The depth moves by 16 to 32 bytes with a change of layout: a `std.debug.print` in the same frame read 2,537, 2,761, 2,921 and 2,969, and an earlier tree read 2,713 for `-Dhttp2`, so none of these is a constant. The `-Dtls` page is the inliner's: `Bridge.run` is a real call in the plain entry of that build, and two `always_inline` variants either did not compile away the frame or moved the depth the wrong way. `zig build park-check` counts pages and not bytes (a build under the boundary may hold one, `-Dtls` two), fails on a crossing, and runs only on a Linux x86-64 host and target.
+
+**The decision it moved:** ADR 062 gained the sections on the task size class and the park check, and was corrected on the stack buffer; ADR 212 gained the measured margin. **Can it be pushed further:** the `-Dtls` plain listener's page (4,109 bytes) is the one open item, and the pooled-argument variant would take another 115 bytes off HTTP/1.1 if the h2c cost it caused were understood.
+
+### A prototype: an idle HTTP/1.1 connection with no fiber
+
+Run on 2026-10-08, same machine, commit and flags as above, in the patch under [`spike/fiberless-idle/`](../../spike/fiberless-idle/README.md), which says the base commit and how to apply and run it, and which is not merged. The prototype is a plain listener of a default build only (no `-Dtls`, no `-Dhttp2`). At the idle peek (`waitForRequest`, after the pages are released) the connection loop returns instead of waiting, the fiber ends, and the connection is a 512-byte heap record (`Rec`: the stream, the reader and writer, the peer, the listener's state and a `NetPoll` completion) submitted to one `CompletionQueue`. One reactor fiber waits on that queue and, when a socket is readable, spawns a connection fiber on the same record. The patch is about 215 lines over `bulkhead.zig` (a `park` entry in the Waker's table), `serve.zig` and `http/engine/zio.zig`. The memory rows below were read with the first version of the patch and one row (1,000 and 10,000 connections, 1,483 and 967 bytes) again after it was rebased onto the final tree.
+
+Bytes per idle connection, `bench/mem.py` with `--settle 15`, two runs each:
+
+| build | 1,000 | 5,000 | 10,000 | marginal 5,000 to 10,000 |
+|---|---|---|---|---|
+| fibers, as now | 4,735 | 4,685 | 4,678 | 4,671 |
+| no fiber, stack pool shrinking every 1 s | 1,479 | 1,013 | 892 and 843 | 771 and 672 |
+| no fiber, zio's default 60 s shrink | 9,351 | 7,542 | 4,919 | 2,296 |
+
+The last row is the cost the prototype cannot hide: a fiber that ends hands its stack back to zio's pool, the pool keeps the stacks it recently needed (a half-life of one `shrink_interval`), and every one of them still holds the page its base frames touched. A burst of 10,000 connections that all idle at once leaves 10,000 stacks in the pool for minutes at the default. The first two rows set `stack_pool.shrink_interval` to one second in `Runtime.init`, which is an option and not a change to zio.
+
+Does it cost anything when busy or when waking? `nilo-hello` `GET /`, wrk 4 threads 64 connections 10 s, server on cores 0 to 3, three interleaved rounds under the lock: 1,340,208 to 1,326,652 req/s with fibers, 1,337,148 to 1,337,977 without, p50 42 µs both (no connection ever parks under load, so this is the control). With 1,000 connections and 300 ms of think time before every request (a wrk `delay()`), every request wakes a parked connection: 3,225 to 3,230 req/s both, p50 0.78 to 0.90 ms with fibers and 0.70 to 0.80 without, p99 1.4 to 2.0 ms and 1.6 to 2.0, server CPU 61 to 64 ticks over 12 s with fibers and 57 to 58 without (a parked wake skips the `madvise` and the fault of the stack's pages). A single client that waits past the peek and then sends one request (`wakelat.py`, 50 connections, 1,000 samples, two runs): p50 29.8 and 29.6 µs with fibers, 34.7 and 42.6 without, p99 133 and 144 µs and 193 and 224. So the first request after a quiet spell is 5 to 13 µs slower at the median and 60 to 80 µs slower at p99 when nothing else is running, which is the price of a fiber spawn and a stack acquire on a wake that an already-suspended fiber does not pay. Stripped `ReleaseFast` binary: 1,020,504 bytes against 1,018,616 (+1.9 KB).
+
+What the prototype leaves out, so the 700 to 770 bytes is a floor: an idle deadline for a parked connection (a timer or a sweep, 8 to 24 bytes), closing the parked ones at shutdown (a list and a lock, 16 bytes), a reactor per executor (one fiber behind one mutex is the wake rate's ceiling), and TLS and HTTP/2, whose connection state lives in the fiber's frame today. `zig build test` on the prototype passed 2,781 of 2,811 tests (30 skipped) with one failing step, `park-check`, which measures the park depth of a stack the parked connection no longer has; `test-all`, the fuzzers and the Debug `Str` trap across a park were not run.
+
+## A fiber that finishes a call takes the next one waiting
+
+**Question.** Every request on HTTP/2 is given a fiber by the Engine's spawn, which sampling put at about 9.5% of a server's CPU under `h2load -m 10` (near 140 ns a request). Can a fiber that finishes a call take the connection's next stream that is already waiting, with no fiber parked for a stream that has not arrived (idle memory), no call waiting behind a handler that parks (head-of-line blocking), and every rule of [ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md) kept?
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `-Doptimize=ReleaseFast -Dstrip=true -Dhttp2`. Before is `514e8c1` from `git archive`, after is the working tree on it, built the same afternoon and run interleaved under the shared lock. Server (`nilo-hello`, `/users/7`, two executors) on cores 0-1, `h2load` (`arena-h2load`, Docker, `--network host`, `--cpuset-cpus 2-3`) `-c 64 -t 2 -n N -m M`, CPU read from `/proc/<pid>/stat` across the run. The gRPC rows are `spike/grpc/server` (`nilo-grpc`, `NILO_THREADS=8`, cores 0-3 and 8-11) driven by `h2load` on cores 4-7 and 12-15, `-m 100 -t 8 -D 5` with the POST body of HttpArena's `unary-grpc`, as [the gRPC listener's throughput run](#a-grpc-listener-built) does, and `--log-file` for the latency of each request.
+
+**What was built.** A connection queues a call whose headers are in behind a fiber that has been spawned and has not begun, instead of spawning for it (`Shared.pending_head`, `fresh`); the fiber (`h2conn.runner`) takes the oldest queued call in the same hold of the lock that decides it ends (`finishNext`). Before the connection's fiber waits for anything it lets that fiber run (one yield); if it parked inside its call, the next queued call gets a fiber of its own and the connection yields again (`Conn.rendezvous`), so a call is held only by calls that are running. `spawnLocalExact` (new, in `zio.zig` and `bulkhead.zig`) is `spawnLocal` that fails with `InvalidPlacement` instead of dealing the call to another executor; where it fails, reuse is off for that connection.
+
+**Through a server**, three interleaved rounds, `-n 300000` for `-m 10` and 200,000 for `-m 1`:
+
+| shape | before req/s | after req/s | before CPU/request | after CPU/request |
+|---|---|---|---|---|
+| `-m 10` | 1,130k, 1,198k, 1,197k | 1,233k, 1,283k, 1,315k | 1,433, 1,400, 1,433 ns | 1,300, 1,266, 1,266 ns |
+| `-m 1` | 565k, 588k, 573k | 584k, 577k, 588k | 2,700, 2,600, 2,700 ns | 2,600, 2,700, 2,650 ns |
+
+**`-m 10` takes 7 to 10% more requests and 9 to 12% less CPU a request (about 135 ns, the spawn's share); `-m 1` is unchanged**, as it must be: with one stream in flight there is never a stream waiting when a call finishes, and keeping the fiber for the next one would be a parked fiber. The target of the entry was the spawn's share, and it is that.
+
+**gRPC, `-m 100`** (a unary call, 100 streams a connection; one run each, before then after, so read to 5%): 32 connections 2.38M req/s before, 3.04M after (+28%); 64 connections 2.07M, 3.05M (+48%); 128 connections 1.53M, 1.65M; 256 connections 0.99M, 1.07M; 512 connections 0.79M, 0.90M; 1,024 connections 0.94M to 1.03M, 1.05M to 1.11M. The fiber is also a stack: 100 calls that were 100 fibers are one.
+
+**Head-of-line blocking.** `grpc_live.zig` has the case: a quick call, a slow one (`slowEcho`, which sleeps 50 ms) and 24 quick ones, in one write; every quick one is answered before the slow one. With `Conn.rendezvous` taken out that test fails, and so do the existing "two calls on one connection run at once, and the quick one is not held behind the slow one" and two in `h2pipe_live.zig` ("a small answer on a connection does not wait for a large one that is being written beside it" and "three streamed answers and a whole one share a connection window"); with it the whole suite passes in Debug and ReleaseSafe. Why a queued call waits for no more than it did: on one executor a fiber of its own started when every call ahead of it had finished or suspended, and the rendezvous gives it one at the moment the call ahead suspends.
+
+**The four axes.** Allocations a request: none added (the queue is intrusive through `Stream.next`; `test "the request path stays inside its allocation budget"` passes). Idle memory, `bench/mem.py` at 10,000 connections in a private network namespace: `--h2` 9,425 B before and 9,424 after; `--h2 --get` 9,594 to 9,613 before and 9,586 to 9,606 after (three rounds each); a connection holds 24 bytes more in `Shared` and the allocator's size class absorbs them. A burst of handed-over event streams (`--h2 --streams-per-conn 100 --path /events/room`, `nilo-bench-stream-server -Dhttp2`): **7,901 B a stream at 1,000 and 8,101 at 10,000 before, 5,194 and 5,735 after**, because a burst of handlers that return at once is one fiber's work and not four to six thousand stacks. Stripped `ReleaseFast` `nilo-hello`: default build 1,021,416 before and after (`cmp`-identical), `-Dhttp2` 1,158,480 to 1,159,504 (+1,024). Throughput and p99: the rows above.
+
+**Correctness.** `zig build test` and `zig build test-all` exit 0 (no Postgres here). The frame fuzzer in `ReleaseSafe`, 1,000,000 connections, seed `0x3d9f1a62c7e45b08`, every property held (it drives a connection with no Engine, so it does not reach the new path; the live tests do). h2spec 2.6.0 (`summerwind/h2spec`, `-h 127.0.0.1 -p 8787 -P /health`) on a scratch copy of each tree with the HPACK table at 4096 in both places, `nilo-hello -Dhttp2` `ReleaseSafe`, three runs interleaved: 142, 139, 140 of 146 before and 140, 142, 140 after; the cases that fail are 3.5/2, 5.1/8, 5.1/9 and 5.1/11 constant and a GOAWAY, PING or unknown-code case (3.8/1, 6.7, 7/1) in some runs of both, so none that passed before fails.
+
+**The decision it moved:** [ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md) gained the paragraph on the fiber that takes the next call, and two rejected alternatives; [ADR 017](../../docs/adr/017-the-trade-budget-has-four-axes.md) a row in its running total. `bulkhead.yield` now reports a cancel (`error.Canceled`) instead of swallowing it: zio's `yield` is a cancellation point and consumes the cancel it reports, so the connection's yields, the new one and the existing one between rounds of a large answer, would have lost the one cancel a stop sends. A queued call is answered as turned away (gRPC 14, or a 500) and not run once a stop is requested, since the cancel of the fiber's task is spent on the call before it. A server whose tasks migrate (`zio_options`, a compile-time choice of the root module) gets a fiber for every call, as before; no test builds that configuration.
+
+**Can it be pushed further:** a connection with one stream in flight at a time (`-m 1`, a browser's first request) pays the spawn as it did; the only ways to save it are a fiber that is not parked (a pool shared across connections, which holds stacks for idle ones) or a request that does not need a fiber until it suspends, which is a design of its own and is in `docs/todo.md`.
+
+## What a `Stream` costs to recycle, and the monitor at the end of one
+
+**Question.** After [the first round](#what-a-request-on-http2-costs-once-its-clocks-copies-and-passes-are-counted), the `Stream` of 616 bytes is rebuilt at each recycle and a stream that something else reads ends under the connection's monitor. How much of a request is that, as an upper bound, before building the real thing?
+
+**Method.** Two scratch builds of the tree, `zig build profile -Dhttp2`, each binary copied to one path and run as `env -i PATH=/usr/bin taskset -c 2 ./nilo-profile`, four interleaved rounds against the unchanged tree. (a) `Monitor.enter` and `leave` made no-ops everywhere, which is wrong and an upper bound on what any change to the monitor could save. (b) `Stream.recycle` setting about thirty fields by hand and not copying the `Inbox` out and in, an upper bound on a cheaper rebuild.
+
+**Result.** (a) unary gRPC call 771 to 794 ns unchanged, 779 to 804 without the monitor; routed `GET` over HTTP/2 797 to 812 and 818 to 845; `POST` 744 to 756 and 726 to 746 (-6 to -18 ns, the only row that moved the right way, inside the 20 ns the tree's layout moves a row by). (b) gRPC 769 to 829 and 811 to 875; `GET` 794 to 856 and 813 to 872; `POST` 740 to 797 and 739 to 799: slower or equal in every row. **Neither is a result**: with the monitor taken out entirely the rows do not clear the layout noise, and the rebuild is not where a request's 800 ns goes. An `Inbox` per connection would save less than (a) and (b) together, and could not serve two streams with bodies at once without a pool, so it was not built. Nothing was kept.
+
+## Whether a connection should start on the executor that accepted it
+
+**Question.** `spawnInto(.local)` bought 2.7x for a gRPC call. Should a connection start on the executor whose acceptor took it instead of round-robin ([ADR 200](../../docs/adr/200-every-executor-accepts.md))?
+
+**Method.** A scratch build of the tree in which the Engine's accept loop places the connection with `connections.spawnInto(.local, ...)` when `NILO_PLACE` is set, and prints the thread id of each connection when `NILO_TALLY` is set. `nilo-hello` on cores 0-1 (two executors), clients on cores 2-3 (Docker, `--network host`): `wrk` (`arena-wrk`) `-t2 -c64 -d6s` for HTTP/1.1 keep-alive and with `-H 'Connection: close'`, `h2load -c 64 -t 2 -m 10 -n 600000` for HTTP/2 keep-alive and `-c 1000 -m 1 -n 3000` for connections of three requests, three interleaved rounds, round-robin then local.
+
+| shape | round-robin req/s | `.local` req/s | connections on each executor, round-robin | `.local` |
+|---|---|---|---|---|
+| HTTP/1.1 keep-alive | 810k, 786k, 843k | 881k, 798k, 876k | 33/32 every round | 30/35, 31/34, 39/26 |
+| HTTP/1.1 `Connection: close` | 95.9k, 108.7k, 104.4k | 117.7k, 113.8k, 103.1k | 288,613/288,612, 331,516/331,515, 313,987/313,986 | 354,212/353,558, 341,701/342,242, 312,162/308,537 |
+| HTTP/2 keep-alive, `-m 10` | 1,238k, 1,143k, 1,209k | **647k, 580k**, 1,076k | 32/32 every round | **6/58, 59/5**, 36/28 |
+| HTTP/2, three requests a connection | 39.4k, 32.0k, 44.3k | 40.0k, 39.9k, 38.4k | 500/500 every round | 581/419, 427/573, 733/267 |
+
+**`.local` loses 11 to 53% on HTTP/2 keep-alive in all three rounds and wins 1 to 20% on HTTP/1.1.** The reason is in the right-hand column: the kernel wakes whichever acceptor it likes, so with `.local` the split of 64 connections between two executors was 6 and 58 in one round and 59 and 5 in another, where round-robin deals exactly 32 and 32. Two executors with a 10-to-1 split serve at the speed of the busier one. The condition set for the entry (win on both shapes and lose nowhere) is not met. **Round-robin stays**, and ADR 200's note that `.local` leaves the spread to the kernel is now a number.
+
+## Where a gRPC call's worst latency comes from
+
+**Question.** [The gRPC listener's throughput run](#a-grpc-listener-built) recorded a worst call of 1.4 s at 256 connections and 3.8 s at 1,024 against tonic's 1.1 s, from `h2load`, which reports no percentiles. Where does the tail come from?
+
+**Method.** `h2load --log-file` writes the latency of every request; a ten-line script (scratch) sorts it. Server and `h2load` as in the gRPC rows above, `-c N -m 100 -t 8 -D 5`, the same pinning as the record. `ghz` (`ghcr.io/bojand/ghz`) was tried first and rejected: at 256 connections and 5,120 workers it generated 62k req/s, a tenth of what `h2load` does, so its histogram is the client's. The control is HttpArena's tonic image (`arena-tonic`, cores 0-3 and 8-11, `--network host`) read by the same script.
+
+**The 1.4 s and 3.8 s do not reproduce.** At 256 connections the worst call is 188 to 255 ms before and 226 ms after; at 1,024 connections it is 0.84 to 1.07 s before and 0.87 to 1.06 s after, against tonic's 1.07 s in the same harness (tonic p50 3.2 ms, p90 389 ms, p99 659 ms; nilo p50 71 ms, p90 195 ms, p99 430 to 550 ms). The records of 1.4 and 3.8 s predate `spawnInto(.local)` and several rounds of work since.
+
+**What the tail is made of**, at 1,024 connections (102,400 streams in flight), by the half second a request started in: the first half second has p50 303 to 438 ms and the maximum (102,400 streams are submitted at once and the connections are still being made), and the rest of the run has p50 70 ms, p99 280 to 330 ms and a maximum of 450 to 600 ms. **The mean is fixed by the load, not the server**: 102,400 in flight at 1.0 to 1.1M req/s is 93 to 100 ms by Little's law, which both servers show. What differs is the spread around it. Steady state p99 is 3 to 4 times p50 at every connection count from 256 up (256: 22 and 62 ms; 512: 49 to 57 and 213 to 242).
+
+**Where that spread comes from** (read, then tested). zio's per-executor run queue is a ring of 256 tasks: when it is full it moves the *oldest* half to a shared overflow queue, which the executor refills 64 at a time once a tick (`utils/local_run_queue.zig`: `push`, `pushOverflow`, `refill`). With thousands of ready tasks an executor, a task's wait depends on whether it landed in the ring or the overflow, not on its age. To test it, a scratch build of the server against a zio whose ring holds 16,384 tasks: at 1,024 connections p50 111 ms, p90 119, p99 526 (the first half second; after it p50 110, p99 115, maximum 118 ms), maximum 553 ms against 870 to 1,063; at 256 connections p99 33 to 42 ms against 60 to 62. **The tail was the queue.** The same build served 0.81M req/s at 1,024 connections against 1.07 to 1.16M: strict first-in first-out order across 12,800 streams an executor is slower than the unfair one, whose recently readied tasks are still in cache, so fairness costs 25 to 30% of throughput there and nothing at 256 connections (0.99M and 1.09M against 1.04M and 1.07M).
+
+**The decision it moved:** none in nilo, since the queue is in zio (a dependency, not edited) and the trade is not obviously worth making: the worst call is now what tonic's is, the p99 follows from a queue depth no server of this shape avoids, and what nilo controls, how many tasks are ready, is lower with the reuse above (a burst is one task, not a hundred; p99 at 1,024 connections 430 to 468 ms against 486 to 549). **Can it be pushed further:** a run queue with bounded unfairness is zio's to offer (a request to its author with these numbers); in nilo, fewer tasks ready at once, which for HTTP/2 is now done.
+
+## What running a call on the connection's fiber would buy on HTTP/2, and what the head built for the App costs
+
+**Question.** Two larger changes were asked about on top of the fiber that takes the next call: a request that finishes without suspending needing no fiber at all (run on the connection's until it first parks), and a request entering the App as its decoded fields instead of a text head rebuilt and parsed again. What does each buy, as an upper bound, before anyone designs it?
+
+**Machine and builds.** As in [the section above](#a-fiber-that-finishes-a-call-takes-the-next-one-waiting): `514e8c1` plus the fiber reuse, scratch copies of the tree outside the worktree, `ReleaseFast`, `-Dhttp2`, interleaved under the shared lock, the same commands. Nothing here is in the worktree.
+
+**Prototype of the first** (scratch, `Conn.start`): a call whose stream has ended (`!s.open`), or a gRPC call, which is deferred until its message has ended, runs at once on the connection's fiber through `runCall(s, true)`, the same function a call's fiber runs. It is guarded: the Engine's turn stamp (`bulkhead.loopTurnNanos`) is read before and after, and a call across which it moved parked at some point, after which that connection sends every call to a fiber as before. No code outside `Conn.start` changed. It is not safe to ship (see below), and it is the most this idea can show.
+
+**`nilo-hello`, `/users/7`, `h2load -c 64 -t 2`, three interleaved rounds:** `-m 10` before the reuse 1,073k to 1,103k requests a second and 1,533 ns of server CPU a request, with the reuse 1,112k to 1,216k and 1,366 to 1,433, with the guarded inline run 1,240k to 1,264k and 1,300 to 1,333 (**5% less CPU than the reuse, 14% less than before**); `-m 1` four rounds 545k to 584k and 2,650 to 2,800 before, 562k to 582k and 2,650 to 2,750 with the reuse, 566k to 599k and 2,600 to 2,700 guarded (**inside the spread**: with one stream in flight the spawn was never the large part of 2,650 ns).
+
+**`nilo-grpc` (`spike/grpc/server`), `-m 100 -t 8 -D 5`, cores as the record, two runs each in the order before, reuse, guarded:**
+
+| connections | before req/s | reuse req/s | guarded inline req/s | p99 before / reuse / inline (ms) | worst before / reuse / inline (ms) |
+|---|---|---|---|---|---|
+| 64 | 1.96M, 1.60M | 1.44M, 1.82M | 1.72M, 2.73M | 7.5, 8.5 / 10.8, 7.5 / 7.5, 4.3 | 43, 37 / 27, 40 / 16, 14 |
+| 256 | 1.05M, 1.29M | 1.23M, 1.30M | **2.43M, 2.49M** | 59, 44 / 50, 46 / **13.5, 12.5** | 227, 172 / 214, 177 / **34, 28** |
+| 1,024 | 0.89M, 0.99M | 0.95M, 1.08M | **1.40M, 1.87M** | 544, 466 / 519, 507 / **76, 70** | 1,097, 908 / 1,070, 1,019 / **146, 124** |
+
+**Twice the calls a second at 256 connections, 1.4 to 1.9 times at 1,024, and the worst call is 0.12 to 0.15 s where it was 0.9 to 1.1.** (The 64-connection row is dominated by the machine's other users and is read as "not worse".) Why: a call run where its headers were just decoded finds its `Stream`, its arena and the frame in the cache; with the calls queued for a fiber (and before that, with a fiber each) 100 streams' worth of memory, 500 KB a connection, is written by the connection and read cold by the call, and the executor keeps thousands of tasks ready, which is what [zio's queue](#where-a-grpc-calls-worst-latency-comes-from) spills. This is the same effect the fiber reuse could not reach, because the reuse still runs the calls after the connection has parsed the whole burst. **It also removes the tail**: with a handful of tasks ready the run queue never spills.
+
+**What it costs and breaks.**
+
+- **Idle memory: +60 bytes a connection** (`bench/mem.py --h2 --get`, 10,000 connections, two rounds: 9,565 and 9,590 with the reuse, 9,626 and 9,653 inline), the pages the route touched on the connection's stack. The hard axis says not a byte; the idle release the HTTP/2 connection already makes (`dropSpares`, its scratch) would have to give the stack pages back too, as HTTP/1.1's connection does.
+- **A call that parks stops the connection reading for as long as it parks**, once per connection with this guard (and once per route with a flag on the route, which needs `typed.zig`'s knowledge of which service a handler takes). That is the rule [ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md) refuses ("the connection stops reading while the handler waits, and a `PING`, a `RST_STREAM` or a `WINDOW_UPDATE` goes unanswered"). Cancellation of that call, a reset of another stream, a GOAWAY and a stop are all seen only when it returns. An executor already stops reading while a CPU-bound handler on a fiber of the same thread runs, so the new exposure is only the parked time, and a client that PINGs with a timeout shorter than a handler's wait would drop the connection. **The prototype does not pass the suite**: `zig build test` on the scratch tree stopped making progress in a test under `http/` (20 minutes of wall and no CPU, killed; the test was not located), which is what deferring every gRPC call until its message has ended does to a test that expects a call to be running while its message is incomplete, and the tests that hold the old rule (`grpc_live.zig` "two calls on one connection run at once...", `h2pipe_live.zig` "a small answer on a connection does not wait for a large one...") would fail by design the first time a call parks.
+- **What would make it safe** is not a guard after the fact but not parking inline: a route known not to wait (a typed handler whose arguments hold no service that waits, which `typed.zig` can see and `nilo_sql`, `nilo_fetch`, `nilo_s3` and `cache` can declare on their types) runs inline, and every other route, including every handler that takes a `*Ctx`, keeps its fiber. The guard stays as the net for the unknown and flags the route when it fires. That is a decision for the user (it revises ADR 260's refusal and adds a declaration to the services) and for the owner of `typed.zig`.
+- **Event streams, files, bodies read as they arrive** keep their fibers by construction: the criterion is a stream that has ended.
+
+**Prototype of the second, bounded and not built.** The head the App parses on HTTP/2 is built by `fieldHead` and parsed by `http1.parseHead`. `fieldHead` repeated 99 times a request in a scratch build added 2,010 ns to the routed `GET` row, 2,125 to the gRPC row and 1,495 to the `POST` (three rounds each: 19 to 21 ns for a call, 15 for a `POST`), and the parse of a 121-byte head is 73 ns in the HTTP/1.1 profile. **The most that decoded fields entering the App could save is about 90 to 95 ns of a request that costs 810 to 830 in process (11%), about 7% of the server's CPU at `-m 10` and 3.5% at `-m 1`.** Against that: `Ctx` borrows a text head (`findHeader`, the typed extractors, `Str` views into it) and `typed.zig` and `message.zig` read it, so a second representation touches the files the other two agents of this round were working in; and ADR 253's refusals would have to be one validation over a field list that the HTTP/1.1 parser also produces, a rewrite of `http1.zig` whose benefit to HTTP/1.1 is nil. Not recommended on this number; worth reopening only if a cheaper way to give `Ctx` its fields appears.
+
+**Can it be pushed further:** the first idea is the large one on this machine (2x on a gRPC server at 256 connections and above) and rests on one design decision (which calls may run where they might park), measured here only as a ceiling.

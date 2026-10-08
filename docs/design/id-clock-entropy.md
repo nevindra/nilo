@@ -43,4 +43,4 @@ Related topics: the layer rule that both the clock and entropy decisions extend 
 
 ## Open questions
 
-- **A per-thread entropy pool**, caching what `getrandom` returns instead of making a syscall every time, is open in [the roadmap](../roadmap.md). It waits for a measurement that justifies the stored state, the fork hazard and the seeding step it would add.
+- **A per-thread entropy pool**, caching what `getrandom` returns instead of making a syscall every time, is open in [the todo list](../todo.md). It waits for a measurement that justifies the stored state, the fork hazard and the seeding step it would add.

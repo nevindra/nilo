@@ -18,6 +18,11 @@ compounds does not, and no total will say which you have.
     python3 bench/mem.py --port 8790 --path /stream --hold
     python3 bench/mem.py --port 8787 --path /health --tls
     python3 bench/mem.py --port 50051 --path /pkg.Service/Method --grpc
+    python3 bench/mem.py --port 8787 --h2                  # HTTP/2, nothing in flight
+    python3 bench/mem.py --port 8787 --h2 --get --path /health   # ... after one GET (ADR 259)
+    python3 bench/mem.py --port 8787 --tls --h2 --get --path /health   # ... over TLS, `h2` by ALPN (ADR 259)
+    python3 bench/mem.py --port 8790 --h2 --streams-per-conn 100 --path /events/room --steps 1000,10000
+                                                           # held-open streams, counted a stream (ADR 260)
 
 The server is found by port rather than named, so this works against any of
 them — `nilo-hello`, `nilo-bench-sql-server`, `nilo-bench-fetch-server`, or
@@ -106,6 +111,97 @@ def open_grpc(host, port, path, timeout):
         elif kind == 0x7:
             raise SystemExit("the server sent GOAWAY")
         elif kind == 0x1 and flags & 0x1:
+            return s
+
+
+def open_h2(host, port, path, timeout, get, streams=0, tls=None):
+    """One HTTP/2 connection on a plain port (ADR 259): the preface and the
+    SETTINGS exchange both ways (through TLS with `h2` chosen by ALPN when
+    `tls` is a context, stage 7), so the connection is HTTP/2 and has said
+    everything a client says before its first request. With `get`, one GET at
+    `path` is answered and drained as well. What is left is a connection with
+    no request in flight, which is a browser's tab between clicks.
+
+    The first header block opens with the size update to 0 that the server's
+    SETTINGS oblige a client to send once it has acknowledged them (RFC 7541
+    §4.2)."""
+    s = socket.create_connection((host, port), timeout=timeout)
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    scheme = b"\x86"  # :scheme http
+    if tls:
+        s = tls.wrap_socket(s, server_hostname=host)
+        if s.selected_alpn_protocol() != "h2":
+            raise SystemExit(f"h2 was not negotiated, got {s.selected_alpn_protocol()!r}")
+        scheme = b"\x87"  # :scheme https
+    s.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(0x4, 0, 0))
+    buf = b""
+
+    def next_frame():
+        nonlocal buf
+        while len(buf) < 9:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise SystemExit("the server closed the connection")
+            buf += chunk
+        length = int.from_bytes(buf[0:3], "big")
+        while len(buf) < 9 + length:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise SystemExit("the server closed the connection")
+            buf += chunk
+        kind, flags = buf[3], buf[4]
+        buf = buf[9 + length :]
+        return kind, flags
+
+    settings, acked = False, False
+    while not (settings and acked):
+        kind, flags = next_frame()
+        if kind == 0x4 and flags & 0x1:
+            acked = True
+        elif kind == 0x4:
+            settings = True
+            s.sendall(frame(0x4, 0x1, 0))
+        elif kind == 0x7:
+            raise SystemExit("the server sent GOAWAY")
+    if streams:
+        # One request each on `streams` streams, whose answers are heads with
+        # no end: a handed-over event stream sends its head and goes quiet.
+        # Only the first block carries the size update to 0.
+        for i in range(streams):
+            block = (
+                (b"\x20" if i == 0 else b"")
+                + b"\x82"
+                + scheme
+                + literal(":path", path)
+                + literal(":authority", host)
+            )
+            s.sendall(frame(0x1, 0x5, 2 * i + 1, block))
+        heads = 0
+        while heads < streams:
+            kind, flags = next_frame()
+            if kind == 0x7:
+                raise SystemExit("the server sent GOAWAY")
+            if kind == 0x3:
+                raise SystemExit("the server reset a stream")
+            if kind == 0x1:
+                heads += 1
+        return s
+    if not get:
+        return s
+
+    block = (
+        b"\x20"  # the size update to 0
+        + b"\x82"  # :method GET
+        + scheme
+        + literal(":path", path)
+        + literal(":authority", host)
+    )
+    s.sendall(frame(0x1, 0x5, 1, block))
+    while True:
+        kind, flags = next_frame()
+        if kind == 0x7:
+            raise SystemExit("the server sent GOAWAY")
+        if kind in (0x0, 0x1) and flags & 0x1:
             return s
 
 
@@ -202,9 +298,27 @@ def main():
         help="speak h2c with prior knowledge and make one unary call at --path (ADR 220)",
     )
     p.add_argument(
+        "--h2",
+        action="store_true",
+        help="speak HTTP/2 with prior knowledge on a plain port: the preface and SETTINGS only, "
+        "or with --get one GET at --path first (ADR 259)",
+    )
+    p.add_argument(
+        "--get",
+        action="store_true",
+        help="with --h2, make one GET at --path on each connection before it is left idle",
+    )
+    p.add_argument(
+        "--streams-per-conn",
+        type=int,
+        default=0,
+        help="with --h2, open this many streams on each connection and count streams, not "
+        "connections, in --steps: what a held-open stream costs (ADR 260)",
+    )
+    p.add_argument(
         "--tls",
         action="store_true",
-        help="connect through TLS 1.3, against `zig build bench-tls-server -Dtls`",
+        help="connect through TLS 1.3, against `zig build bench-tls-server -Dtls`; with --h2, HTTP/2 over it",
     )
     args = p.parse_args()
 
@@ -215,6 +329,10 @@ def main():
         tls_ctx.check_hostname = False
         tls_ctx.verify_mode = ssl.CERT_NONE
         tls_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+        # `h2` for --h2 and `http/1.1` otherwise, so a `-Dhttp2` build's
+        # listener is made to choose (stage 7); a build without the flag
+        # offers `http/1.1` alone and ignores nothing it was asked.
+        tls_ctx.set_alpn_protocols(["h2"] if args.h2 else ["http/1.1"])
     pid = find_pid(args.port)
 
     time.sleep(args.settle)
@@ -226,16 +344,20 @@ def main():
     held = []
     try:
         for want in steps:
-            while len(held) < want:
+            per_conn = args.streams_per_conn if args.h2 else 0
+            while len(held) * max(per_conn, 1) < want:
                 held.append(
                     open_grpc(args.host, args.port, args.path, args.timeout)
                     if args.grpc
+                    else open_h2(args.host, args.port, args.path, args.timeout, args.get, per_conn, tls_ctx)
+                    if args.h2
                     else open_one(args.host, args.port, args.path, args.timeout, args.hold, tls_ctx)
                 )
             time.sleep(args.settle)
             now = rss_kb(pid)
-            per = (now - base) * 1024 / len(held)
-            print(f"{len(held):>12} {str(now) + ' kB':>12} {per:>13.0f} B")
+            units = len(held) * max(per_conn, 1)
+            per = (now - base) * 1024 / units
+            print(f"{units:>12} {str(now) + ' kB':>12} {per:>13.0f} B")
     except OSError as e:
         print(f"stopped at {len(held)} connections: {e}", file=sys.stderr)
     finally:

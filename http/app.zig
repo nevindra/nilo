@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
-const grpc = @import("grpc.zig");
+const h2conn = @import("h2conn.zig");
 const http1 = @import("http1.zig");
 const router = @import("router.zig");
 const ctx_mod = @import("ctx.zig");
@@ -26,9 +26,12 @@ const session_mod = @import("session.zig");
 const password_mod = @import("password.zig");
 const metrics_mod = @import("metrics.zig");
 const serve = @import("serve.zig");
+const framing_mod = @import("framing.zig");
 const wiring = @import("wiring.zig");
 const health_mod = @import("health.zig");
 const failurebody = @import("failurebody.zig");
+const connect = @import("connect.zig");
+const rpc_mod = @import("rpc.zig");
 const compress_mod = @import("compress.zig");
 const trace_mod = @import("trace.zig");
 
@@ -152,6 +155,10 @@ pub const App = struct {
     /// beside it is what the document says under `Failure`; set together.
     failure_write: ?failurebody.Write = null,
     failure_schema: ?*const openapi.Schema = null,
+    /// Connect's failure body, for a request that says it is a Connect call;
+    /// set by the first route that reads or answers a message and null in a
+    /// program with none, which then links none of it (ADR 257).
+    failure_connect: ?failurebody.Pick = null,
     /// Every counter in the process, or null on a server that never called
     /// `metrics()` — which is what makes the whole feature one branch on the
     /// request path (ADR 079). Sized when the chains are resolved, because
@@ -822,6 +829,14 @@ pub const App = struct {
         try self.route(.POST, pattern, handler);
     }
 
+    /// Serve a struct of typed functions as an RPC service: each `pub fn`
+    /// a method at `POST /<nilo_service>/<Method>`, the name's first letter
+    /// upper-cased, reachable by gRPC, Connect and plain JSON alike
+    /// (ADR 258). The same routes `post` would have registered one by one.
+    pub fn rpc(self: *App, comptime T: type) !void {
+        inline for (comptime rpc_mod.methodsOf(T)) |method| try self.post(method.path, @field(T, method.fn_name));
+    }
+
     pub fn put(self: *App, comptime pattern: []const u8, comptime handler: anytype) !void {
         comptime typed.check(pattern, handler);
         comptime typed.checkVerb(.PUT, pattern, handler);
@@ -982,7 +997,6 @@ pub const App = struct {
             }
         }
 
-
         try self.requirements.appendSlice(self.gpa, comptime typed.requirements(pattern, handler));
         // The name the route answers to at run time is the one the document
         // prints — given, or derived by the same function the document
@@ -999,6 +1013,7 @@ pub const App = struct {
             break :blk derived;
         };
         try self.router.addNamed(method, pattern, comptime typed.wrap(pattern, handler), route_name);
+        if (comptime typed.speaksAMessage(pattern, handler)) self.failure_connect = &connect.pick;
 
         // Read from the same argument list `wrap` just read, so the
         // description of an endpoint and the code that serves it cannot
@@ -1386,7 +1401,8 @@ pub const App = struct {
             serverStarting,
             serverStopping,
             serve.handleConnection,
-            serveGrpc,
+            serveHttp2,
+            if (framing_mod.http2_built) serveSniffed else serve.handleConnection,
         );
     }
 
@@ -1691,10 +1707,34 @@ pub const App = struct {
     /// connection loop wants. A handler that upgrades has its socket loop run
     /// here, on this frame — which is a page deeper than the connection loop
     /// would run it, and does not matter to anything that calls this.
-    /// What a listener with `.grpc = true` runs for each connection, in place
-    /// of `serve.handleConnection` (ADR 220). Reached only by an Engine
-    /// built with `-Dgrpc`, so a build without it analyses none of `grpc.zig`.
-    fn serveGrpc(
+    /// What a plain listener of a `-Dhttp2` build runs for each connection:
+    /// the first bytes choose HTTP/2 (the preface) or HTTP/1.1 (anything
+    /// else) (ADR 259). HTTP/1.1 is served from here, `handleConnection`
+    /// inlined as it is without the flag, so that an HTTP/1.1 connection
+    /// parks in the frame it parked in before the flag existed; HTTP/2 is
+    /// answered as `.http2` and run by the Engine after this has returned.
+    inline fn serveSniffed(
+        self: *App,
+        in: *std.Io.Reader,
+        out: *std.Io.Writer,
+        deadlines: bulkhead.Deadlines,
+        waker: bulkhead.Waker,
+        peer: bulkhead.Peer,
+    ) bulkhead.Hand {
+        switch (serve.sniffFraming(in, out, deadlines, waker)) {
+            .gone => out.flush() catch {},
+            .http1 => @call(.always_inline, serve.handleConnection, .{ self, in, out, deadlines, waker, peer }),
+            .http2 => return .http2,
+        }
+        return .done;
+    }
+
+    /// What a TLS listener runs for a connection whose handshake chose `h2`,
+    /// in place of `serve.handleConnection` (ADR 259), and what a plain
+    /// listener runs once `serveSniffed` has seen the HTTP/2 preface. Reached
+    /// only by an Engine built with `-Dhttp2`, so a build without it analyses
+    /// none of `h2conn.zig`.
+    fn serveHttp2(
         self: *App,
         in: *std.Io.Reader,
         out: *std.Io.Writer,
@@ -1702,34 +1742,49 @@ pub const App = struct {
         waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) void {
-        grpc.serveConnection(self.grpcHost(), in, out, deadlines, waker, peer);
+        h2conn.serveConnection(self.grpcHost(), in, out, deadlines, waker, peer);
     }
 
-    /// The App as a gRPC connection sees it (ADR 220). `grpc.zig` is outside
+    /// The App as an HTTP/2 connection sees it (ADR 220). `h2conn.zig` is outside
     /// this core and cannot name `App`, so it is handed the few things it
-    /// uses instead: the router's answer to one path, and `handleRequest`.
-    pub fn grpcHost(self: *App) grpc.Host {
+    /// uses instead: the router's answer to one path, and `serve.serveRequest`.
+    pub fn grpcHost(self: *App) h2conn.Host {
+        // A call is collected into a `framing.Collected`, which a build
+        // without `-Dhttp2` does not have: the arm is `noreturn` there, so
+        // reaching it would be undefined behaviour in ReleaseFast. A compile
+        // error says so instead (ADR 220).
+        if (comptime !framing_mod.http2_built) @compileError(
+            "nilo: the App answers gRPC only in a build with `.http2 = true` (`-Dhttp2`).",
+        );
         const Adapter = struct {
             fn routes(ptr: *anyopaque, path: []const u8) bool {
                 const app: *App = @ptrCast(@alignCast(ptr));
                 return app.router.match(.POST, path) != null;
             }
-            fn bodyLimit(ptr: *anyopaque, path: []const u8) usize {
+            fn bodyLimit(ptr: *anyopaque, method: []const u8, path: []const u8) usize {
                 const app: *App = @ptrCast(@alignCast(ptr));
-                return app.grpcBodyLimit(path);
+                return app.h2BodyLimit(http1.methodFrom(method), path);
             }
             fn handle(
                 ptr: *anyopaque,
                 arena: std.mem.Allocator,
                 lifetime: *str_mod.Lifetime,
                 in_flight: *fail.InFlight,
-                in: *std.Io.Reader,
-                out: *std.Io.Writer,
+                call: framing_mod.Call,
+                collected: *framing_mod.Collected,
                 peer: bulkhead.Peer,
                 until_ns: u64,
             ) void {
                 const app: *App = @ptrCast(@alignCast(ptr));
-                _ = app.handleRequest(arena, lifetime, in_flight, in, out, .{ .until_ns = until_ns }, .{}, peer);
+                // Handed over as what was read, with its body as the
+                // reader, and answered into `collected`, never onto a
+                // socket: the connection's fiber frames it (ADR 220,
+                // ADR 253). A call cannot hand a socket over, so there is no
+                // handover to run.
+                var fixed: std.Io.Reader = .fixed(call.body);
+                const in = if (call.inbox) |inbox| &inbox.reader else &fixed;
+                collected.inbound = call.inbox;
+                _ = serve.serveRequest(app, arena, lifetime, in_flight, in, .{ .call = &call }, .{ .collect = collected }, .{ .until_ns = until_ns }, .{}, peer);
             }
         };
         return .{
@@ -1744,18 +1799,18 @@ pub const App = struct {
         };
     }
 
-    /// What a gRPC call to `path` may be collected under: the limit of the
-    /// last `maxBody` in the chain of the route it reaches, which is the one
-    /// that would have the last word on HTTP/1, and `listen()`'s `max_body`
-    /// where there is none. Read before the message arrives, so what the
-    /// route says is what the connection collects (ADR 156, ADR 220).
+    /// What a request on HTTP/2 to `path` may be collected under: the limit of
+    /// the last `maxBody` in the chain of the route it reaches, which is the
+    /// one that would have the last word on HTTP/1, and `listen()`'s
+    /// `max_body` where there is none. Read before the body arrives, so what
+    /// the route says is what the connection collects (ADR 156, ADR 220).
     /// Allocates nothing, and does nothing at all for an App that never
     /// called `maxBody`.
-    fn grpcBodyLimit(self: *App, path: []const u8) usize {
+    fn h2BodyLimit(self: *App, method: http1.Method, path: []const u8) usize {
         const base = self.limits.max_body;
         if (self.body_limits.items.len == 0) return base;
         var found: router.Match = undefined;
-        if (!self.router.matchInto(.POST, path, &found)) return base;
+        if (!self.router.matchInto(method, path, &found)) return base;
         const found_route = &self.router.routes.items[found.index];
         if (!found_route.chain_by_path) return self.chainBodyLimit(found.chain, base);
         // A chain that depends on the path: built from the real one, as the
@@ -1780,16 +1835,14 @@ pub const App = struct {
         return limit;
     }
 
-    /// The most any gRPC route may be collected under: what bounds one
-    /// connection's messages together, because `max_body` no longer does once
+    /// The most any route may be collected under: what bounds one
+    /// connection's bodies together, because `max_body` no longer does once
     /// a route raises its own (ADR 220). A route whose chain depends on the
-    /// path counts every limit `maxBody` was given. Only POST routes, which
-    /// is what a call is.
+    /// path counts every limit `maxBody` was given.
     fn grpcBodyCeiling(self: *App) usize {
         var most = self.limits.max_body;
         if (self.body_limits.items.len == 0) return most;
         for (self.router.routes.items) |r| {
-            if (r.method != .POST) continue;
             if (r.chain_by_path) {
                 for (self.body_limits.items) |l| most = @max(most, l.read());
             } else {
@@ -1810,7 +1863,7 @@ pub const App = struct {
         waker: bulkhead.Waker,
         peer: bulkhead.Peer,
     ) bool {
-        var served = serve.serveRequest(self, arena, lifetime, in_flight, in, out, deadlines, waker, peer);
+        var served = serve.serveRequest(self, arena, lifetime, in_flight, in, .wire, .{ .wire = out }, deadlines, waker, peer);
         serve.runHandover(&served);
         return served.keep_alive;
     }
@@ -2073,6 +2126,13 @@ pub fn GroupWith(
             comptime typed.check(joined(prefix, pattern), handler);
             comptime typed.checkVerb(.POST, joined(prefix, pattern), handler);
             return self.add(true, .POST, pattern, handler);
+        }
+
+        /// `App.rpc` under this group's prefix and middleware. A gRPC
+        /// client calls `/<nilo_service>/<Method>` from the root, so its
+        /// group has no prefix; a Connect client may call it under one.
+        pub fn rpc(self: Self, comptime T: type) !void {
+            inline for (comptime rpc_mod.methodsOf(T)) |method| try self.post(method.path, @field(T, method.fn_name));
         }
 
         pub fn put(self: Self, comptime pattern: []const u8, comptime handler: anytype) !void {
@@ -2540,4 +2600,33 @@ test "a fail function in app.before work leaves its words for the boot's line" {
     // a fallback slot left pointing at this frame would be a dangling
     // pointer for the next fail function on this thread.
     try testing.expectEqual(@as(?*anyopaque, null), bulkhead.slot());
+}
+
+fn servedBySniffing(app: *App, in_bytes: []const u8, wire: []u8) struct { hand: bulkhead.Hand, answer: []const u8 } {
+    // A buffer of the connection's own over the bytes, as a socket is read.
+    // Only the choosing is driven here: an HTTP/1.1 connection runs on a
+    // task, which a test with no Engine does not have, so it is served by
+    // `grpc_live.zig`'s tests against a running server.
+    var underlying = std.Io.Reader.fixed(in_bytes);
+    var read_buf: [4096]u8 = undefined;
+    var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
+    var out = std.Io.Writer.fixed(wire);
+    const hand = App.serveSniffed(app, &limited.interface, &out, .off, .off, .{});
+    return .{ .hand = hand, .answer = out.buffered() };
+}
+
+test "a plain listener of a -Dhttp2 build hands the HTTP/2 preface on unanswered, and closes an empty connection" {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.resolveChains();
+    var wire: [4096]u8 = undefined;
+
+    const h2c = servedBySniffing(&app, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", &wire);
+    try testing.expectEqual(bulkhead.Hand.http2, h2c.hand);
+    try testing.expectEqual(@as(usize, 0), h2c.answer.len);
+
+    const empty = servedBySniffing(&app, "", &wire);
+    try testing.expectEqual(bulkhead.Hand.done, empty.hand);
+    try testing.expectEqual(@as(usize, 0), empty.answer.len);
 }

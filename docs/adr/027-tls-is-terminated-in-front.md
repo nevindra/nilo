@@ -3,12 +3,15 @@
 **Status:** accepted, amended by [ADR 212](./212-tls-is-an-option-a-build-asks-for.md)
 (TLS 1.3 is a listener option in a build that asked for it with `-Dtls`; the
 default build contains none of it, and the recommendation below stands for a
-server with a proxy in front), and by [ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md)
-(gRPC is served over h2c in a build that asked for it with `-Dgrpc`, because
-it never needed TLS; HTTP/2 for browsers stays refused)
+server with a proxy in front), by [ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md)
+(gRPC is served over h2c in a build that asked for it with `-Dhttp2`, because
+it never needed TLS), and by [ADR 259](./259-http2-is-a-framing-of-every-request.md)
+(a TLS listener of a build with `-Dtls` and `-Dhttp2` offers `h2` and
+`http/1.1` to a browser; the default build contains neither, and the
+recommendation below stands for a server on the internet)
 **Topic:** [tls](../design/tls.md)
 
-`docs/roadmap.md` carried TLS under "Not decided" with the note that it *may stay out on purpose*. This decides it. **The default build does not speak TLS.** It listens on plaintext HTTP and expects a proxy in front of it wherever the internet is involved, and that proxy stays the recommendation for a server on the internet. A build that asks with `-Dtls` gets a TLS 1.3 listener ([ADR 212](./212-tls-is-an-option-a-build-asks-for.md)); what this ADR first said, that nilo would never speak TLS, held until a Zig TLS server existed to plug in, and ADR 212 carries the evidence that moved it.
+`docs/todo.md` carried TLS under "Not decided" with the note that it *may stay out on purpose*. This decides it. **The default build does not speak TLS.** It listens on plaintext HTTP and expects a proxy in front of it wherever the internet is involved, and that proxy stays the recommendation for a server on the internet. A build that asks with `-Dtls` gets a TLS 1.3 listener ([ADR 212](./212-tls-is-an-option-a-build-asks-for.md)); what this ADR first said, that nilo would never speak TLS, held until a Zig TLS server existed to plug in, and ADR 212 carries the evidence that moved it.
 
 The question that settled it was not "how hard is TLS" but "what does every other server in the comparison actually do".
 
@@ -52,7 +55,11 @@ What is left is a bare VPS wanting to answer `:443` directly, and the answer the
 ## Consequences
 
 - **The client's address stops being obvious, and that is a real cost.** Behind a proxy every connection appears to come from the proxy, so rate limits, audit logs and blocklists are blind unless something reads `X-Forwarded-For`. This ADR is the reason `Ctx.clientIp()` and `listen(.{ .trusted_hops = … })` exist; they are not a separate feature, they are this decision's other half.
-- **HTTP/2 goes with it.** Browsers only speak HTTP/2 over TLS, negotiated with ALPN during the handshake. No handshake, no ALPN, no HTTP/2 — and no gRPC server either, since gRPC is HTTP/2. Somebody reading "no TLS" will not derive "no gRPC" on their own, so both are said out loud in the docs. *The gRPC half of this was wrong*: gRPC runs over h2c, with no TLS and no ALPN, and [ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md) serves it behind a flag. The browser half stands.
+- **HTTP/2 for a browser goes with TLS, and is a build flag away where TLS is.** Browsers only speak HTTP/2 over TLS, negotiated with ALPN during the handshake. In the default build there is no handshake, no ALPN and no HTTP/2 for a browser, and a proxy that terminates TLS speaks HTTP/1.1 to nilo. In a build with `-Dtls` and `-Dhttp2` nilo's own TLS listener offers `h2` and `http/1.1` and serves every route on either ([ADR 259](./259-http2-is-a-framing-of-every-request.md)). Somebody reading "no TLS" will not derive any of this on their own, so it is said out loud in the docs ([the deploying guide](../guide/deploying.md#http2-for-a-browser)). gRPC never needed TLS: it runs over h2c, and [ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md) serves it behind the same flag.
 - **mTLS between services is not available.** A service mesh that wants client certificates has to terminate them in a sidecar.
 - **The deploying guide owes people a working proxy config**, not a suggestion to find one. A refusal that leaves the user to work out the replacement is half a decision.
 - **This is reversible in one direction only.** If Zig's standard library grows a TLS server, or a Zig TLS library acquires the funding and the audits that rustls has, the argument above changes and this ADR should be revisited. The memory argument would still stand, which is why it is written down separately from the trust one.
+
+## What was rejected
+
+**HTTP/2 for a browser and for ordinary routes as a consequence of refusing TLS.** This ADR first said that no handshake means no ALPN means no HTTP/2 for a browser, and kept it refused when [ADR 212](./212-tls-is-an-option-a-build-asks-for.md) let TLS in behind `-Dtls` and when [ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md) let gRPC in behind `-Dhttp2`, because nothing yet made an ordinary route work on HTTP/2. Stages 1 to 6 of [the framing page](../design/framing.md) did: a request is one thing whichever framing carried it, and a stream, an event stream, a file and an upload run on HTTP/2 as on HTTP/1.1. What moved it is that, and what stage 7 measured with a browser on the other end ([`bench/result/http.md`](../../bench/result/http.md#what-offering-h2-to-a-browser-costs)): a page of nineteen subresources loads over one connection where HTTP/1.1 used six, in 77 to 80 ms against 117 to 121 with 20 ms added to every request and equal on loopback; an idle HTTP/2 connection over TLS holds 9,564 to 9,581 bytes where six HTTP/1.1 ones held 56 KB; the HTTP/1.1 connection of the same build holds the figure it held, to 6 bytes; and h2spec passes 142 of 146 over TLS. The default build is where the refusal still stands, and the trust argument is untouched: a proxy in front is still the recommendation for a server on the internet.

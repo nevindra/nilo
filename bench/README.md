@@ -66,6 +66,7 @@ zig build bench-ws-server      # idle WebSockets, for what one costs
 zig build bench-stream-server  # held-open streams, for what one costs
 zig build bench-tls-server -Dtls   # the benchmark server over TLS; absent without the flag
 zig build bench-echo-server -Dtls  # a 10 KB body echoed over TLS and in plain
+zig build bench-page-server -Dtls -Dhttp2  # a page with nineteen subresources over TLS; node bench/page_load.mjs drives Chromium at it
 zig build autobahn-server      # the echo server `bash bench/autobahn/run.sh` drives wstest at
 ```
 
@@ -75,6 +76,10 @@ zig build autobahn-server      # the echo server `bash bench/autobahn/run.sh` dr
 python3 bench/mem.py --port … --path …          # memory per idle connection, any server
 python3 bench/mem.py --port … --path … --hold   # the same for a stream nobody closes
 python3 bench/mem.py --port … --path … --tls    # the same through TLS 1.3, against bench-tls-server
+python3 bench/mem.py --port … --path … --tls --h2 --get   # HTTP/2 over TLS, `h2` by ALPN, after one GET
+node bench/page_load.mjs --port … --runs 10 [--http1] [--latency 20]   # a page load in headless Chromium: protocol, connections, time
+python3 bench/mem.py --port … --path … --h2 --streams-per-conn 100   # a held-open HTTP/2 stream, counted a stream
+python3 bench/fanout.py --port … --framing h1|h2     # events written a second to 100 subscribers of one Room
 python3 bench/slowloris.py --port … --path …    # what a body that never finishes holds (VmData, not just VmRSS)
 python3 bench/compress_rss.py ./zig-out/bin/nilo-bench-compress-server  # what the compressor pool keeps resident (ADR 248)
 python3 bench/ws_idle.py both                   # memory per idle WebSocket, nilo and gws

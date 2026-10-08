@@ -97,6 +97,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 /// leak is reported on the input that made it rather than at the end.
 fn fuzzFrames(iterations: usize, seed: u64) void {
     std.debug.print("fuzzing the gRPC listener: {d} connections, seed 0x{x}\n", .{ iterations, seed });
+    fuzz_frames.useThreads();
     var prng = std.Random.DefaultPrng.init(seed);
     var buf: [4096]u8 = undefined;
     for (0..iterations) |n| {
@@ -132,17 +133,16 @@ const methods = [_][]const u8{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"
 const targets = [_][]const u8{ "/", "/users/42", "/a/b/c", "*", "http://x/y", "/%2e%2e/", "/x?a=1&b=2", "", "/" ** 40 };
 const versions = [_][]const u8{ "HTTP/1.1", "HTTP/1.0", "HTTP/1.2", "HTTP/2.0", "http/1.1", "HTTP/1.1 ", "" };
 const header_names = [_][]const u8{
-    "Host",             "Content-Length", "Transfer-Encoding", "Connection",
-    "content-length",   "TRANSFER-ENCODING", "Upgrade",        "X-Forwarded-For",
-    "Accept-Encoding",  "Cookie",         "",                  "Content-Length ",
-    " Content-Length",  "Content_Length",
+    "Host",            "Content-Length",    "Transfer-Encoding", "Connection",
+    "content-length",  "TRANSFER-ENCODING", "Upgrade",           "X-Forwarded-For",
+    "Accept-Encoding", "Cookie",            "",                  "Content-Length ",
+    " Content-Length", "Content_Length",
 };
 const header_values = [_][]const u8{
-    "0",       "5",              "-1",      "+7",        "007",
-    "18446744073709551615",      "chunked", "identity, chunked",
-    "close",   "keep-alive",     "Upgrade", "keep-alive, Upgrade",
-    "",        " ",              "\tgzip",  "gzip;q=0",  "5, 6",
-    "localhost:8787",
+    "0",                    "5",                   "-1",                "+7",    "007",
+    "18446744073709551615", "chunked",             "identity, chunked", "close", "keep-alive",
+    "Upgrade",              "keep-alive, Upgrade", "",                  " ",     "\tgzip",
+    "gzip;q=0",             "5, 6",                "localhost:8787",
 };
 
 /// The bytes that break framing, which is where the interesting damage is.

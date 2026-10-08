@@ -300,6 +300,44 @@ try app.useOn("/api", authorize);
 
 A route registered without `named` still has a name: the derived one, so `getApiPartners` is what the table sees and what the document says. `app.routes()` lists the same name for each route, for a test that checks every key is a route and every route is a key without going through the document ([ADR 162](../adr/162-a-middleware-can-learn-which-route-it-is-in-front-of.md)).
 
+## Changing an answer after `next`
+
+**`next.run(c)` writes the answer as soon as the handler sends it**, so the code after it can read what was sent and change nothing. A header set there is refused with an error that names `hold`, where Go and Gin lose it without a word.
+
+**`next.hold(c)` keeps the answer unwritten until your middleware returns**, and gives you an `nilo.Answer` to read and change:
+
+<!-- compiles -->
+```zig
+fn timing(c: *nilo.Ctx, next: nilo.Next) !void {
+    const started = nilo.monotonicNanos();
+    const answer = try next.hold(c);
+    var buf: [32]u8 = undefined;
+    const took = (nilo.monotonicNanos() - started) / std.time.ns_per_ms;
+    try answer.setHeader("Server-Timing", try std.fmt.bufPrint(&buf, "app;dur={d}", .{took}));
+}
+```
+
+| | |
+|---|---|
+| `answer.status()` | the status, or null when nothing below answered |
+| `answer.body()` | the body of a whole answer as it was sent, null for a stream or a file |
+| `answer.setHeader(name, value)` | a header on the answer |
+| `answer.setTrailer(name, value)` | a [trailer](./responses.md#trailers) on the answer, a stream's too |
+| `answer.replace(status, content_type, body)` | a different whole answer, such as a 304 or a page of HTML; the body is copied |
+
+`replace` is refused once a head has gone, which is a stream's. A stream's trailers can still be set, because its end is held as well.
+
+**A failure after `hold` replaces a held whole answer.** A failure below `hold` comes back from it as an error, the same as from `run`, and nilo answers it after the chain. So `hold` does not show you a failure's answer. To put a header on every answer including failures, set it with `defer` around `run`:
+
+```zig
+fn served(c: *nilo.Ctx, next: nilo.Next) !void {
+    defer c.setHeader("X-Served-By", "nilo") catch {};
+    try next.run(c);
+}
+```
+
+**Holding costs a copy.** A body handed to `c.send` has to outlive the handler, so under `hold` it is copied into the request arena. That is free while the body fits in `arena_keep` (16 KiB by default) and expensive above it: a 64 KiB body cost 63% of throughput in the measurement behind [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md). A value a typed handler returns, `c.sendJson`, `c.sendKept` and a static file are not copied. [`c.sendKept(status, content_type, body)`](../reference/ctx.md#answering) is `send` for a body that already outlives the chain, such as one in the arena or a global, and never copies it. Only the routes behind a `hold` pay, and a middleware that does not call it costs nothing.
+
 ## Writing your own middleware
 
 **The signature is `fn (c: *nilo.Ctx, next: nilo.Next) !void`.** There is no registration type and no builder: `app.use` takes the function.

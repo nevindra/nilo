@@ -46,7 +46,7 @@ zio's, and one executor thread spinning in userspace with no syscall
 outstanding. Every visible symptom was downstream of nilo's last line of code.
 
 The reading was wrong, and
-[`roadmap.md`](../roadmap.md#how-this-file-is-written) had already written down
+[`todo.md`](../todo.md#how-this-file-is-written) had already written down
 why it would be: **`Waiting on: upstream` is the line to distrust.** That makes
 five blockers this repository has been wrong about, four of them somebody else's
 code that turned out to already do the thing. What settled it was not a newer

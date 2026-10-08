@@ -21,11 +21,12 @@ const cors = @import("cors.zig");
 const websocket = @import("websocket.zig");
 const room_mod = @import("room.zig");
 const stream_mod = @import("stream.zig");
+const framing_mod = @import("framing.zig");
 const body_mod = @import("body.zig");
 const range_mod = @import("range.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
-const grpc = @import("grpc.zig");
+const h2conn = @import("h2conn.zig");
 const h2 = @import("h2.zig");
 const hpack = @import("hpack.zig");
 
@@ -253,9 +254,263 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try routerScale(gpa);
     if (routes_file) |file| try routeTable(gpa, file, whole / rounds);
     try serviceScale(gpa);
-    try grpcCalls();
+    headerLookups();
+    contentTypeLookups();
+    try messageRoutes(gpa);
+    try taggedReads(gpa);
+    // A call is answered through the framing only a `-Dhttp2` build has
+    // (ADR 220), so without the flag there is no gRPC call to time.
+    if (comptime @import("nilo_build").http2) {
+        try grpcCalls();
+        try http2Gets(whole / rounds);
+        try http2JsonPosts();
+    } else std.debug.print(
+        "\nA gRPC call and a GET over HTTP/2 are timed by `zig build profile -Dhttp2`.\n",
+        .{},
+    );
 
     if (sink == 0) unreachable; // keeps the work from being optimised away
+}
+
+// ---- one header read out of a head (`Ctx.header`, ADR 256) ----
+//
+// The read every handler with a message, a form or a `c.header` call makes:
+// the iterator that splits and trims each line until a name matches, which
+// is what `Ctx.header` was, beside `http1.findHeader`, which looks only at
+// the lines that start with the name's letter. Each is asked for a name on the
+// third line of a short head, the first, the last of a browser's fifteen,
+// and one that is not there.
+
+const message_head = "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n";
+
+fn headerByIterator(head: []const u8, name: []const u8) ?[]const u8 {
+    var it = http1.HeaderIterator.from(head);
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    }
+    return null;
+}
+
+fn headerLookups() void {
+    const Case = struct { []const u8, []const u8, []const u8 };
+    const cases = [_]Case{
+        .{ "Content-Type, 3rd line of 4", message_head, "Content-Type" },
+        .{ "Host, 1st line of 4", message_head, "Host" },
+        .{ "Cookie, last of a browser's 15", browser_head, "Cookie" },
+        .{ "Accept-Language, 14th of 15", browser_head, "Accept-Language" },
+        .{ "X-Request-Id, not there (browser)", browser_head, "X-Request-Id" },
+    };
+    const none: []const u8 = "";
+    std.debug.print("\nOne header read out of a head, in a loop of its own:\n\n", .{});
+    inline for (cases) |case| {
+        const head = unseen(case[1]);
+        var name: []const u8 = case[2];
+        std.mem.doNotOptimizeAway(&name);
+        var old_best: u64 = std.math.maxInt(u64);
+        var new_best: u64 = std.math.maxInt(u64);
+        for (0..reps + 1) |rep| {
+            var started = clock();
+            for (0..rounds) |_| sink += (headerByIterator(head, name) orelse none).len;
+            const old_took = clock() - started;
+            started = clock();
+            for (0..rounds) |_| sink += (http1.findHeader(head, name) orelse none).len;
+            const new_took = clock() - started;
+            if (rep > 0) {
+                old_best = @min(old_best, old_took);
+                new_best = @min(new_best, new_took);
+            }
+        }
+        std.debug.print("  {s:<36}iterator {d:>3}ns   findHeader {d:>3}ns\n", .{ case[0], old_best / rounds, new_best / rounds });
+    }
+}
+
+/// `message.fieldIn` as ADR 256 shipped it, a byte at a time with its name
+/// known while compiling, kept here to time the lookup that replaced it.
+fn shippedFieldIn(head: []const u8, comptime name: []const u8) ?[]const u8 {
+    var at: usize = 0;
+    while (at < head.len and head[at] != '\n') at += 1;
+    at += 1;
+    while (at + name.len + 1 <= head.len) {
+        if (head[at] == '\r' or head[at] == '\n') return null;
+        if (head[at + name.len] == ':' and std.ascii.eqlIgnoreCase(head[at .. at + name.len], name)) {
+            var end = at + name.len + 1;
+            while (end < head.len and head[end] != '\n') end += 1;
+            return std.mem.trim(u8, head[at + name.len + 1 .. end], " \t\r");
+        }
+        while (at < head.len and head[at] != '\n') at += 1;
+        at += 1;
+    }
+    return null;
+}
+
+fn contentTypeLookups() void {
+    const msg = @import("message.zig");
+    const head = unseen(message_head);
+    var old_best: u64 = std.math.maxInt(u64);
+    var new_best: u64 = std.math.maxInt(u64);
+    var cls_best: u64 = std.math.maxInt(u64);
+    for (0..reps + 1) |rep| {
+        var started = clock();
+        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(shippedFieldIn(head, "content-type")));
+        const old_took = clock() - started;
+        started = clock();
+        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(msg.contentTypeIn(head)));
+        const new_took = clock() - started;
+        started = clock();
+        for (0..rounds) |_| sink += @intFromEnum(msg.codecOf(head[40..56]));
+        const cls_took = clock() - started;
+        if (rep > 0) {
+            old_best = @min(old_best, old_took);
+            new_best = @min(new_best, new_took);
+            cls_best = @min(cls_best, cls_took);
+        }
+    }
+    std.debug.print("  {s:<36}shipped {d:>3}ns   findHeader {d:>3}ns   (codecOf alone {d}ns)\n", .{ "Content-Type to a codec, msg head", old_best / rounds, new_best / rounds, cls_best / rounds });
+}
+
+// ---- a message read in either spelling (ADR 256) ----
+//
+// One route whose argument is a protobuf message, sent the same two numbers
+// as JSON and as protobuf, beside a control: a plain struct of the same
+// shape, which is what the JSON half of a message has to cost no more than.
+
+const message_rounds = 300_000;
+
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+fn sumMessage(in: SumRequest) SumReply {
+    return .{ .total = in.a + in.b };
+}
+
+fn sumPlain(in: struct { a: i32 = 0, b: i32 = 0 }) struct { total: i32 } {
+    return .{ .total = in.a + in.b };
+}
+
+fn sumForm(f: @import("form.zig").Form(struct { a: i32 = 0, b: i32 = 0 })) struct { total: i32 } {
+    return .{ .total = f.value.a + f.value.b };
+}
+
+fn messageRoutes(gpa: std.mem.Allocator) !void {
+    var message_app = App.init(gpa);
+    defer message_app.deinit();
+    try message_app.post("/sum", sumMessage);
+    try message_app.post("/plain", sumPlain);
+    try message_app.post("/form", sumForm);
+    try message_app.resolveChains();
+
+    const requests = [_]struct { []const u8, []const u8 }{
+        .{ "a plain struct, as JSON (the control)", "POST /plain HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}" },
+        .{ "a message, as JSON", "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}" },
+        .{ "a form, urlencoded", "POST /form HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 7\r\n\r\na=1&b=2" },
+        .{ "a message, as protobuf", "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02" },
+    };
+    var message_arena = std.heap.ArenaAllocator.init(gpa);
+    defer message_arena.deinit();
+    std.debug.print("\nOne POST whose body is two numbers, read and answered in process:\n\n", .{});
+    for (requests) |r| {
+        var best: u64 = std.math.maxInt(u64);
+        for (0..reps + 1) |rep| {
+            const started = clock();
+            for (0..message_rounds) |_| {
+                var in = std.Io.Reader.fixed(r[1]);
+                var out = std.Io.Writer.fixed(&out_buf);
+                sink += @intFromBool(message_app.handleRequest(message_arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{}));
+                lifetime.end();
+                _ = message_arena.reset(.{ .retain_with_limit = arena_keep });
+            }
+            const took = clock() - started;
+            if (rep > 0 and took < best) best = took;
+        }
+        std.debug.print("  {s:<40}{d:>5}ns\n", .{ r[0], best / message_rounds });
+    }
+}
+
+// ---- an internally tagged union read from a body (ADR 016) ----
+//
+// A thousand elements, read as an array, once with each element a tagged
+// value, once with the same fields and no tag, so the difference is what the
+// discriminator costs. `jsonmark.zig`'s header said it cost nothing per
+// request, which was true of the write half and was never measured for the
+// read.
+
+const tagged_rounds = 300;
+const tagged_count = 1000;
+
+const Click = struct { id: u32, x: i32, y: i32, label: []const u8 };
+
+const Event = union(enum) {
+    pub const nilo_json = .{ .tag = "kind" };
+    pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+
+    click: Click,
+    key: struct { id: u32, code: u32, shift: bool = false },
+    idle,
+};
+
+fn taggedBody(gpa: std.mem.Allocator, comptime shape: enum { first, last, plain, mixed }) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    try out.writer.writeByte('[');
+    for (0..tagged_count) |i| {
+        if (i > 0) try out.writer.writeByte(',');
+        switch (shape) {
+            .first => try out.writer.print("{{\"kind\":\"click\",\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\"}}", .{ i, i % 900, i % 700 }),
+            .last => try out.writer.print("{{\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\",\"kind\":\"click\"}}", .{ i, i % 900, i % 700 }),
+            .plain => try out.writer.print("{{\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\"}}", .{ i, i % 900, i % 700 }),
+            .mixed => if (i % 3 == 0)
+                try out.writer.print("{{\"kind\":\"key\",\"id\":{d},\"code\":{d}}}", .{ i, i % 200 })
+            else if (i % 3 == 1)
+                try out.writer.writeAll("{\"kind\":\"idle\"}")
+            else
+                try out.writer.print("{{\"kind\":\"click\",\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\"}}", .{ i, i % 900, i % 700 }),
+        }
+    }
+    try out.writer.writeByte(']');
+    return out.written();
+}
+
+fn taggedReads(gpa: std.mem.Allocator) !void {
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    const first = try taggedBody(scratch.allocator(), .first);
+    const last = try taggedBody(scratch.allocator(), .last);
+    const plain = try taggedBody(scratch.allocator(), .plain);
+    const mixed = try taggedBody(scratch.allocator(), .mixed);
+
+    var read_arena = std.heap.ArenaAllocator.init(gpa);
+    defer read_arena.deinit();
+    std.debug.print("\nOne array of {d} objects read as a body (nilo's reader, no request around it):\n\n", .{tagged_count});
+    inline for (.{
+        .{ "untagged, the control", []const Click, plain },
+        .{ "tagged, the tag first", []const Event, first },
+        .{ "tagged, the tag last", []const Event, last },
+        .{ "tagged, three variants, the tag first", []const Event, mixed },
+    }) |row| {
+        var best: u64 = std.math.maxInt(u64);
+        for (0..reps + 1) |rep| {
+            const started = clock();
+            for (0..tagged_rounds) |_| {
+                const value = try json_mod.parseLeaky(row[1], read_arena.allocator(), row[2], .{});
+                sink += value.len;
+                _ = read_arena.reset(.{ .retain_with_limit = 256 * 1024 });
+            }
+            const took = clock() - started;
+            if (rep > 0 and took < best) best = took;
+        }
+        std.debug.print("  {s:<40}{d:>7}ns  {d:>5.1}ns an object\n", .{
+            row[0],
+            best / tagged_rounds,
+            @as(f64, @floatFromInt(best)) / tagged_rounds / tagged_count,
+        });
+    }
 }
 
 // ---- one service out of several ----
@@ -629,8 +884,10 @@ fn longLived(gpa: std.mem.Allocator) !void {
     t = clock();
     for (0..piece_rounds) |_| {
         var out = std.Io.Writer.fixed(away);
+        var nothing_in = std.Io.Reader.fixed("");
+        var framing: framing_mod.Framing = .{ .http1 = .{ .in = &nothing_in, .out = &out, .minor_version = 1 } };
         var open: ?stream_mod.Open = .{ .chunked = true, .drop = false };
-        var body = stream_mod.Stream.init(&stream_buf, &out, null, &open);
+        var body = stream_mod.Stream.init(&stream_buf, &framing, null, &open);
         for (0..200) |i| try body.print("{d},wati,{d}\n", .{ i, i * 3 });
         try body.finish();
         sink += out.buffered().len;
@@ -640,8 +897,10 @@ fn longLived(gpa: std.mem.Allocator) !void {
     t = clock();
     for (0..piece_rounds) |_| {
         var out = std.Io.Writer.fixed(away);
+        var nothing_in = std.Io.Reader.fixed("");
+        var framing: framing_mod.Framing = .{ .http1 = .{ .in = &nothing_in, .out = &out, .minor_version = 1 } };
         var open: ?stream_mod.Open = .{ .chunked = true, .drop = false };
-        var events = stream_mod.Events{ .stream = .init(&stream_buf, &out, null, &open) };
+        var events = stream_mod.Events{ .stream = .init(&stream_buf, &framing, null, &open) };
         for (0..200) |i| {
             _ = i;
             try events.send(.{ .name = "token", .data = "hello" });
@@ -800,10 +1059,14 @@ const h2load_block = [_]u8{
 };
 const sum_message = [_]u8{ 0, 0, 0, 0, 4, 0x08, 0x01, 0x10, 0x02 };
 
-/// The request the call becomes, as `grpc.zig` writes it for that block.
-const grpc_as_http1 = "POST /benchmark.BenchmarkService/GetSum HTTP/1.1\r\nhost: 127.0.0.1:50061\r\n" ++
-    "user-agent: h2load nghttp2/1.59.0\r\ncontent-type: application/grpc\r\ncontent-length: 4\r\n\r\n" ++
-    "\x08\x01\x10\x02";
+/// The call the App is handed for that block, as `h2conn.zig` writes it.
+const grpc_call: framing_mod.Call = .{
+    .method = "POST",
+    .target = "/benchmark.BenchmarkService/GetSum",
+    .head = "\nhost: 127.0.0.1:50061\r\nuser-agent: h2load nghttp2/1.59.0\r\n" ++
+        "content-type: application/grpc\r\ncontent-length: 4\r\n\r\n",
+    .body = "\x08\x01\x10\x02",
+};
 
 fn getSum(c: *ctx_mod.Ctx) anyerror!void {
     const body = (try c.body()).view();
@@ -846,7 +1109,7 @@ fn grpcCalls() !void {
         out.clearRetainingCapacity();
         var in: std.Io.Reader = .fixed(wire.written());
         const started = clock();
-        grpc.serveConnection(grpc_app.grpcHost(), &in, &out.writer, .off, .off, .{});
+        h2conn.serveConnection(grpc_app.grpcHost(), &in, &out.writer, .off, .off, .{});
         const took = clock() - started;
         if (rep >= 3 and took < whole) whole = took;
     }
@@ -857,7 +1120,7 @@ fn grpcCalls() !void {
     var decoder = hpack.Decoder.init(gpa);
     defer decoder.deinit();
     var fields: std.ArrayList(hpack.Field) = .empty;
-    defer fields.deinit(gpa);
+    // Not freed here: the decoder appends to it with the scratch arena, which owns it.
     var scratch = std.heap.ArenaAllocator.init(gpa);
     defer scratch.deinit();
     var decode_best: u64 = std.math.maxInt(u64);
@@ -872,19 +1135,20 @@ fn grpcCalls() !void {
     }
     sink += fields.items.len;
 
-    // The App's share: the same request as HTTP/1.1, the way a call reaches it.
+    // The App's share: the call handed over as `h2conn.zig` hands it, and its
+    // answer collected, the way a call reaches it.
     var app_arena = std.heap.ArenaAllocator.init(gpa);
     defer app_arena.deinit();
     var app_best: u64 = std.math.maxInt(u64);
-    var answer_buf: [512]u8 = undefined;
+    const host = grpc_app.grpcHost();
     for (0..grpc_reps) |_| {
         const started = clock();
         for (0..grpc_calls) |_| {
-            var in = std.Io.Reader.fixed(grpc_as_http1);
-            var answer_out = std.Io.Writer.fixed(&answer_buf);
             var request_lifetime = str_mod.Lifetime{};
             var request_in_flight = fail.InFlight{};
-            sink += @intFromBool(grpc_app.handleRequest(app_arena.allocator(), &request_lifetime, &request_in_flight, &in, &answer_out, .off, .off, .{}));
+            var collected: framing_mod.Collected = .{ .arena = app_arena.allocator(), .front = 5 };
+            host.handle(host.ptr, app_arena.allocator(), &request_lifetime, &request_in_flight, grpc_call, &collected, .{}, 0);
+            sink += collected.status;
             request_lifetime.end();
             _ = app_arena.reset(.{ .retain_with_limit = arena_keep });
         }
@@ -897,8 +1161,8 @@ fn grpcCalls() !void {
         \\fiber: h2load's header block, HttpArena's GetSum, answered inline.
         \\
         \\  HPACK decode of the header block{d:>8}ns {d:>6.1}%
-        \\  the App, as the HTTP/1.1 request{d:>7}ns {d:>6.1}%
-        \\  the rest: frames, translation, answer{d:>3}ns {d:>6.1}%
+        \\  the App, handed the call       {d:>7}ns {d:>6.1}%
+        \\  the rest: frames, the call, answer{d:>6}ns {d:>6.1}%
         \\
     , .{
         per_call,
@@ -909,6 +1173,189 @@ fn grpcCalls() !void {
         per_call -| (decode_best + app_best) / grpc_calls,
         pct(per_call -| (decode_best + app_best) / grpc_calls, per_call),
     });
+}
+
+// ---- a GET over HTTP/2 beside the same GET over HTTP/1.1 (ADR 259) ----
+
+const get_requests = 1000;
+
+/// The head of `GET /users/7` as `h2conn.zig` hands it to the App: what wrk
+/// sends on HTTP/1.1, without the `Connection` line, and the length of no body.
+const get_call: framing_mod.Call = .{
+    .method = "GET",
+    .target = "/users/7",
+    .head = "\nhost: example.dev\r\nuser-agent: wrk\r\naccept: */*\r\naccept-encoding: gzip\r\ncontent-length: 0\r\n\r\n",
+    .body = "",
+};
+
+/// The routed GET of the main figure, carried as HTTP/2 on one connection and
+/// answered through the connection's own fiber (no Engine runs here, so no
+/// fiber is spawned: `spawnLocal` has nowhere to put one and the request runs
+/// inline). Next to it, what the HTTP/1.1 figure above is.
+fn http2Gets(h1_ns: u64) !void {
+    const gpa = std.heap.smp_allocator;
+    var block: std.Io.Writer.Allocating = .init(gpa);
+    defer block.deinit();
+    const b = &block.writer;
+    try b.writeAll("\x82\x86"); // GET, http
+    try hpack.writeLiteral(b, ":path", "/users/7");
+    try hpack.writeLiteral(b, ":authority", "example.dev");
+    try hpack.writeLiteral(b, "user-agent", "wrk");
+    try hpack.writeLiteral(b, "accept", "*/*");
+    try hpack.writeLiteral(b, "accept-encoding", "gzip");
+
+    var wire: std.Io.Writer.Allocating = .init(gpa);
+    defer wire.deinit();
+    const w = &wire.writer;
+    // Windows as wide as a client that reads at once leaves them, so what is
+    // timed is the framing and not a wait for a WINDOW_UPDATE.
+    try w.writeAll(h2.preface);
+    try h2.writeSettings(w, &.{.{ .initial_window_size, 1 << 30 }});
+    try h2.writeSettingsAck(w);
+    try h2.writeWindowUpdate(w, 0, (1 << 31) - 1 - h2.default_window);
+    var id: u31 = 1;
+    for (0..get_requests) |i| {
+        // The first block opens with the size update to 0 that the ACK obliges
+        // a client to send.
+        const update: []const u8 = if (i == 0) &.{0x20} else &.{};
+        try h2.writeHeader(w, update.len + block.written().len, .headers, h2.Flags.end_headers | h2.Flags.end_stream, id);
+        try w.writeAll(update);
+        try w.writeAll(block.written());
+        id += 2;
+    }
+
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 2048 * get_requests);
+    defer out.deinit();
+    var whole: u64 = std.math.maxInt(u64);
+    for (0..grpc_reps + 3) |rep| {
+        out.clearRetainingCapacity();
+        var in: std.Io.Reader = .fixed(wire.written());
+        const started = clock();
+        h2conn.serveConnection(app.grpcHost(), &in, &out.writer, .off, .off, .{});
+        const took = clock() - started;
+        if (rep >= 3 and took < whole) whole = took;
+    }
+    sink += out.written().len;
+    const per_get = whole / get_requests;
+
+    // The block, decoded with the table at 0.
+    var decoder = hpack.Decoder.init(gpa);
+    defer decoder.deinit();
+    var fields: std.ArrayList(hpack.Field) = .empty;
+    // Not freed here: the decoder appends to it with the scratch arena, which owns it.
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    var decode_best: u64 = std.math.maxInt(u64);
+    for (0..grpc_reps) |_| {
+        const started = clock();
+        for (0..get_requests) |_| {
+            fields.clearRetainingCapacity();
+            _ = decoder.decode(block.written(), scratch.allocator(), &fields, 1 << 16) catch unreachable;
+            _ = scratch.reset(.retain_capacity);
+        }
+        decode_best = @min(decode_best, clock() - started);
+    }
+    sink += fields.items.len;
+
+    // The App's share: the request handed over as `h2conn.zig` hands it.
+    var app_arena = std.heap.ArenaAllocator.init(gpa);
+    defer app_arena.deinit();
+    var app_best: u64 = std.math.maxInt(u64);
+    const host = app.grpcHost();
+    for (0..grpc_reps) |_| {
+        const started = clock();
+        for (0..get_requests) |_| {
+            var request_lifetime = str_mod.Lifetime{};
+            var request_in_flight = fail.InFlight{};
+            var collected: framing_mod.Collected = .{ .arena = app_arena.allocator(), .lines = true };
+            host.handle(host.ptr, app_arena.allocator(), &request_lifetime, &request_in_flight, get_call, &collected, .{}, 0);
+            sink += collected.status;
+            request_lifetime.end();
+            _ = app_arena.reset(.{ .retain_with_limit = arena_keep });
+        }
+        app_best = @min(app_best, clock() - started);
+    }
+
+    std.debug.print(
+        \\
+        \\The same routed GET over HTTP/2, {d}ns each on one connection's fiber
+        \\(HTTP/1.1's is {d}ns above, with no frames and no connection around it),
+        \\answered inline: no Engine runs here, so what a fiber spawn costs is
+        \\not in it.
+        \\
+        \\  HPACK decode of the header block{d:>8}ns {d:>6.1}%
+        \\  the App, handed the request    {d:>7}ns {d:>6.1}%
+        \\  the rest: frames, head, answer{d:>9}ns {d:>6.1}%
+        \\
+    , .{
+        per_get,
+        h1_ns,
+        decode_best / get_requests,
+        pct(decode_best / get_requests, per_get),
+        app_best / get_requests,
+        pct(app_best / get_requests, per_get),
+        per_get -| (decode_best + app_best) / get_requests,
+        pct(per_get -| (decode_best + app_best) / get_requests, per_get),
+    });
+}
+
+/// A POST of a small JSON body over HTTP/2, the request that has to wait for
+/// its body once the handler starts (ADR 260). With no Engine it is run
+/// inline once its stream has ended, so this is the framing and the pipe's
+/// share, and the wait itself, which needs a scheduler to park on, is timed
+/// by a server and not here.
+fn http2JsonPosts() !void {
+    const gpa = std.heap.smp_allocator;
+    var posts_app = App.init(gpa);
+    defer posts_app.deinit();
+    try posts_app.post("/plain", sumPlain);
+    try posts_app.resolveChains();
+
+    var block: std.Io.Writer.Allocating = .init(gpa);
+    defer block.deinit();
+    const b = &block.writer;
+    try b.writeAll("\x83\x86"); // POST, http
+    try hpack.writeLiteral(b, ":path", "/plain");
+    try hpack.writeLiteral(b, ":authority", "example.dev");
+    try hpack.writeLiteral(b, "content-type", "application/json");
+    try hpack.writeLiteral(b, "content-length", "13");
+
+    var wire: std.Io.Writer.Allocating = .init(gpa);
+    defer wire.deinit();
+    const w = &wire.writer;
+    try w.writeAll(h2.preface);
+    try h2.writeSettings(w, &.{.{ .initial_window_size, 1 << 30 }});
+    try h2.writeSettingsAck(w);
+    try h2.writeWindowUpdate(w, 0, (1 << 31) - 1 - h2.default_window);
+    var id: u31 = 1;
+    for (0..get_requests) |i| {
+        const update: []const u8 = if (i == 0) &.{0x20} else &.{};
+        try h2.writeHeader(w, update.len + block.written().len, .headers, h2.Flags.end_headers, id);
+        try w.writeAll(update);
+        try w.writeAll(block.written());
+        try h2.writeHeader(w, 13, .data, h2.Flags.end_stream, id);
+        try w.writeAll("{\"a\":1,\"b\":2}");
+        id += 2;
+    }
+
+    var out: std.Io.Writer.Allocating = try .initCapacity(gpa, 2048 * get_requests);
+    defer out.deinit();
+    var whole: u64 = std.math.maxInt(u64);
+    for (0..grpc_reps + 3) |rep| {
+        out.clearRetainingCapacity();
+        var in: std.Io.Reader = .fixed(wire.written());
+        const started = clock();
+        h2conn.serveConnection(posts_app.grpcHost(), &in, &out.writer, .off, .off, .{});
+        const took = clock() - started;
+        if (rep >= 3 and took < whole) whole = took;
+    }
+    sink += out.written().len;
+    std.debug.print(
+        \\
+        \\A POST of {{"a":1,"b":2}} as JSON over HTTP/2, {d}ns each on one connection's
+        \\fiber, answered inline once its stream has ended.
+        \\
+    , .{whole / get_requests});
 }
 
 fn pct(part: u64, whole: u64) f64 {

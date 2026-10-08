@@ -7,7 +7,7 @@ What happens between `## Unreleased` and a tag. Read it when you cut one; the re
 - `.version` in `build.zig.zon`
 - the badge and the `?ref=` in `README.md`
 - the `?ref=` in `docs/guide/getting-started.md`
-- the "needs Zig" line in `docs/roadmap.md`
+- the "needs Zig" line in `docs/todo.md`, and its `Ranked at` line, once the list has been ranked again against the release's numbers ([its rule 9](./todo.md#how-this-file-is-written)) and the roadmap's order read again ([its rule 6](./roadmap.md#how-this-file-is-written)); `docs-check` refuses the commit until it says the new version
 - the comment in `stress/arsip/build.zig.zon`
 
 The version follows the size of the change: a fix or any small change is a patch, minor is for new features, major for breaks.

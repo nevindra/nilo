@@ -24,6 +24,8 @@
 | `std.mem.Allocator` | the request arena |
 | `std.Io` | the server's loop, for a `std.Io.Queue` or `std.Io.Event` a handler waits on while a fiber from `app.spawn` answers ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)). A resolver may take it too |
 | a type with `nilo_resolve` | a resolved value |
+| a struct with a `wire` table | the body as a protobuf message, read as JSON or protobuf by its `Content-Type`; the answer goes back in the same ([below](#a-body-in-another-format)) |
+| a type with `nilo_content_type` and `nilo_decode` | the body, read by the type itself, and only under its own content type |
 | any other struct | the body, parsed from JSON |
 
 **A body field may be `Patch(T)`, which tells "not sent" apart from "sent as null"**: `.absent`, `.cleared`, `.value`. Give it `= .absent` as its default; `.orNull()` merges the two empty cases.
@@ -190,7 +192,7 @@ fn placeOrder(key: nilo.Idempotent(Replays, .{ .by = account }), body: NewOrder)
 }
 ```
 
-The first request with a key runs the handler and **stores what it returned**: the status, the `Response(T)` headers, and the body. Every later request with that key gets the stored answer back, byte for byte, with `Idempotent-Replayed: true`, and the handler does not run. A failure is not stored, so a retry after a `fail.…` or an error runs the handler again.
+The first request with a key runs the handler and **stores what it returned**: the status, the `Response(T)` headers and trailers, and the body. Every later request with that key gets the stored answer back, byte for byte, with `Idempotent-Replayed: true`, and the handler does not run. A failure is not stored, so a retry after a `fail.…` or an error runs the handler again.
 
 | | |
 |---|---|
@@ -218,7 +220,7 @@ fn frontPage(page: nilo.Cached(Pages, .{ .ttl_s = 60 })) !Front {
 }
 ```
 
-The first request runs the handler and **stores what it returned** (status, the `Response(T)` headers, the body) under the path and query. Every request for the same path and query within `ttl_s` gets the stored answer back, byte for byte, with `Cache-Status: nilo; hit`, and the handler does not run; a fresh answer carries `Cache-Status: nilo; fwd=miss`. A failure is not stored, so the next request runs the handler again. **An answer that sets a cookie, or carries a header `setHeader` refuses, is sent and not kept**, with a `warn`, so the first visitor's `Set-Cookie` is never replayed to everybody ([ADR 188](../adr/188-a-route-can-say-cache-this-answer-for-a-minute.md)).
+The first request runs the handler and **stores what it returned** (status, the `Response(T)` headers and trailers, the body) under the path and query. Every request for the same path and query within `ttl_s` gets the stored answer back, byte for byte, with `Cache-Status: nilo; hit`, and the handler does not run; a fresh answer carries `Cache-Status: nilo; fwd=miss`. A failure is not stored, so the next request runs the handler again. **An answer that sets a cookie, or carries a header `setHeader` refuses, is sent and not kept**, with a `warn`, so the first visitor's `Set-Cookie` is never replayed to everybody ([ADR 188](../adr/188-a-route-can-say-cache-this-answer-for-a-minute.md)).
 
 | | |
 |---|---|
@@ -275,6 +277,68 @@ A `Failure` has `field`, `reason`, `given`, `kind`, `expected`, `said`, and `say
 
 `must` returns a `Checked`, which has the same `value`, `failed`, `failedCount`, `given`, `failures` and `fail`, and another `must` for chaining. `holds` is true when the rule holds, not when it fails. A handler that checks no rules never builds a `Checked` and pays nothing ([ADR 034](../adr/034-a-binding-hands-its-failures-to-the-handler.md)).
 
+### A body in another format
+
+**A struct with a `wire` table is a protobuf message, and the request says which of its two spellings it sent** ([ADR 256](../adr/256-a-body-is-read-as-what-its-type-says.md)). `application/proto`, `application/protobuf`, `application/x-protobuf` and gRPC's `application/grpc` are read by [`nilo_proto`](./proto.md); anything else, no content type included, is read as JSON like any other struct, so `curl -d` works against it.
+
+<!-- compiles -->
+```zig
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+fn sum(in: SumRequest) SumReply {
+    return .{ .total = in.a + in.b };
+}
+```
+
+**The answer goes back in the spelling the request came in**: protobuf under `application/proto` to a request that sent protobuf, `application/grpc` to a gRPC call, and JSON to everything else, a GET included. It is the request's `Content-Type` that decides, never `Accept`. A route whose body is a message answers a message or nothing, and anything else is a compile error.
+
+| | |
+|---|---|
+| bytes that are not the message | 400, naming the type and what was wrong: `it ends in the middle of a field` |
+| `Bound(T)` around a message | a compile error: protobuf has no field that fails on its own |
+| in the document | filed under both `application/json` and `application/proto`, with one schema |
+| a failure, to a request carrying `Connect-Protocol-Version: 1` | `{"code":"not_found","message":"…"}`, the code from the error first and the status otherwise ([ADR 257](../adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)) |
+
+Its JSON is nilo's JSON, the same as any other struct's: field names as written, a 64-bit integer as a number, and a `bytes` field as text, where protobuf's own JSON mapping uses base64 ([todo](../todo.md)).
+
+**Any other type that knows its own bytes declares `nilo_content_type` and `nilo_decode`**, the mirror of [a type that writes its own answer](#a-type-that-writes-its-own-answer):
+
+<!-- compiles -->
+```zig
+const Reading = struct {
+    sensor: u16,
+    tenths: u32,
+
+    pub const nilo_content_type = "application/x-reading";
+
+    pub fn nilo_decode(body: []const u8, arena: std.mem.Allocator) !Reading {
+        _ = arena;
+        if (body.len != 6) return error.NotSixBytes;
+        return .{
+            .sensor = std.mem.readInt(u16, body[0..2], .big),
+            .tenths = std.mem.readInt(u32, body[2..6], .big),
+        };
+    }
+};
+
+fn record(r: Reading) u32 {
+    return r.tenths;
+}
+```
+
+It is read only when the request's media type is its own, compared without case and without parameters; anything else, or no content type at all, is a 415 saying what it reads. An error `nilo_decode` returns is a 400 naming it, and a fail function it calls answers with its own status and sentence. The bytes live as long as the request, so the value may point into them. The document files the body under the type's content type, described by its `nilo_openapi` or by `{}` with a note.
+
+A `nilo_decode` without `nilo_content_type`, one with any other signature, a type with both `nilo_decode` and a `wire` table, and one with both `nilo_decode` and `nilo_parse` are each a compile error naming the route.
+
 ## Handler returns
 
 | Returned | Response |
@@ -303,6 +367,8 @@ Versioned([]Order){ .version = revision, .value = orders }  // `W/"…"`; `.unch
 ```
 
 `Headers` holds up to 8 headers by value; a ninth is a compile error.
+
+**`Status(code, T)` and `Response(T)` also take `.trailers: Headers = .{}`**, sent after the body the way `c.setTrailer` sends them, under the same rules and refusals ([ADR 254](../adr/254-an-answer-can-carry-trailers.md), [Trailers](ctx.md#trailers)). Costs nothing when empty.
 
 ### A `*Ctx` handler that returns `void`
 
@@ -354,7 +420,7 @@ fn showInvoice(number: u32) ?Invoice {
 
 Every wrapper works the way it does for JSON: `?Invoice` is a 404 when null, `Status(201, Invoice)` is a 201, `Response(Invoice)` carries headers, and an `Idempotent` route stores the answer with its content type. The body is written into the request arena the same way a JSON body is (one allocation, the same one), and a program with no such type links none of it.
 
-**Both declarations or neither.** One without the other is a compile error, and so is an empty content type, one containing a control character, or a `nilo_write` with any other signature. The document names the content type and describes the body with `nilo_openapi` if the type has one, or with `{}` and a note otherwise, the same as for a type that writes its own JSON. nilo knows nothing about XML, CSV or HTML and does not parse them on the way in; to read a body in one of those formats, use `c.body()`.
+**Both declarations or neither.** One without the other is a compile error, and so is an empty content type, one containing a control character, or a `nilo_write` with any other signature. The document names the content type and describes the body with `nilo_openapi` if the type has one, or with `{}` and a note otherwise, the same as for a type that writes its own JSON. nilo knows nothing about XML, CSV or HTML; a type that reads one from a request declares `nilo_decode` beside its content type ([a body in another format](#a-body-in-another-format)).
 
 ## JSON shapes
 

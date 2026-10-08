@@ -60,8 +60,9 @@ common case — one address — reads exactly as it did. `Options` gains one
 field with an empty default.
 
 **An entry carries what belongs to an address, not the other thirty.** `Listener` is
-`address`, `port`, `tls`, and `grpc` for a listener that speaks h2c
-([ADR 220](./220-grpc-is-served-over-h2c-behind-a-flag.md)). Everything else in `Options` is the *server's*
+`address`, `port` and `tls`. (A fourth, `grpc`, made a listener speak h2c
+and went when every listener came to answer both framings,
+[ADR 259](./259-http2-is-a-framing-of-every-request.md).) Everything else in `Options` is the *server's*
 rather than the *address's*: the buffers a connection gets, the deadlines it
 runs under, how many connections this process holds, how many threads serve
 them. `max_connections` in particular counts sockets across every listener

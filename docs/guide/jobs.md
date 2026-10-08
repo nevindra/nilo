@@ -286,7 +286,7 @@ const Nightly = struct {
 | `job.cron("0 3 * * *")` | `minute hour day month weekday`, UTC, parsed while compiling. `*`, lists, ranges and `*/n`; a date that never comes (`0 0 31 2 *`) is a compile error. When either day field starts with `*`, the day must match both |
 | `job.every(600_000)` | every ten minutes from whenever the worker started, for when it does not matter which ten |
 
-A field out of range, a sixth field or a backwards range is a compile error naming the field. **UTC only**: a program in Jakarta writes `0 20 * * *` with a comment, and `docs/roadmap.md` records the gap.
+A field out of range, a sixth field or a backwards range is a compile error naming the field. **UTC only**: a program in Jakarta writes `0 20 * * *` with a comment, and `docs/todo.md` records the gap.
 
 **`overlap`** decides what happens when the previous run is still going when the next tick is due:
 
@@ -459,7 +459,7 @@ Against [ADR 017](../adr/017-the-trade-budget-has-four-axes.md)'s axes, with the
 
 ## What it will not do
 
-**It is not a priority queue with numbers**: a kind says `.high`, `.normal` or `.low`, and among equals rows come out in `run_at` order ([ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)). It is not a workflow engine, not a rate limiter for a kind (`nilo.Gate` inside `run` does that), and not exactly once. It has no time zones. Each of those is in [`docs/roadmap.md`](../roadmap.md) under `nilo_job`, with what it is waiting for.
+**It is not a priority queue with numbers**: a kind says `.high`, `.normal` or `.low`, and among equals rows come out in `run_at` order ([ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)). It is not a workflow engine, not a rate limiter for a kind (`nilo.Gate` inside `run` does that), and not exactly once. It has no time zones. Each of those is in [`docs/todo.md`](../todo.md) under `nilo_job`, with what it is waiting for.
 
 ## See also
 

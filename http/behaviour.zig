@@ -43,6 +43,10 @@ const secure = @import("secure.zig");
 const trace_mod = @import("trace.zig");
 const allowance = @import("allowance.zig");
 const patch_mod = @import("patch.zig");
+const h2test = @import("h2test.zig");
+const hpack = @import("hpack.zig");
+const h2 = @import("h2.zig");
+const framing_mod = @import("framing.zig");
 
 const App = app_mod.App;
 const Group = app_mod.Group;
@@ -58,7 +62,9 @@ const Harness = struct {
     arena: std.heap.ArenaAllocator,
     lifetime: str_mod.Lifetime = .{},
     in_flight: fail.InFlight = .{},
-    buf: [4096]u8 = undefined,
+    /// Room for the largest answer a test reads back whole: the file the
+    /// two-framing table serves is 72,000 bytes.
+    buf: [80_000]u8 = undefined,
     restore_log_level: std.log.Level,
     /// Who these requests come from. No socket by default, which is what
     /// every test that does not care about the address wants.
@@ -1116,7 +1122,7 @@ test "the document names the type's own content type, and its schema only when t
     try testing.expect(std.mem.indexOf(u8, doc, "\"application/xml\":{\"schema\":{\"type\":\"string\"}}") != null);
     // The CSV said nothing, so the document says nothing — `{}` and the
     // note — rather than reflecting two integer fields nobody sends.
-    try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"description\":\"This type writes its own body") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"description\":\"This type reads or writes its own bytes") != null);
     try testing.expect(std.mem.indexOf(u8, doc, "\"text/csv\":{\"schema\":{\"type\":\"object\"") == null);
 }
 
@@ -1142,6 +1148,295 @@ test "an idempotent route keeps an answer a type wrote itself, label and all" {
     try testing.expect(std.mem.indexOf(u8, again, "Idempotent-Replayed: true") != null);
     try testing.expect(std.mem.indexOf(u8, again, "Content-Type: application/xml") != null);
     try testing.expect(std.mem.endsWith(u8, again, "<invoice><number>1</number><total>10</total></invoice>"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+// ---- a body read as what its type says (ADR 256) ----
+
+const SumRequest = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumReply = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+fn sumOf(in: SumRequest) SumReply {
+    return .{ .total = in.a + in.b };
+}
+
+fn keepSum(key: typed.Idempotent(FakeReplays, .{}), counter: *OrderCounter, in: SumRequest) !SumReply {
+    _ = key;
+    counter.placed += 1;
+    return .{ .total = in.a + in.b };
+}
+
+/// Six bytes: a sensor and a reading, big-endian, under a label of its own.
+const Reading = struct {
+    sensor: u16,
+    tenths: u32,
+
+    pub const nilo_content_type = "application/x-reading";
+
+    pub fn nilo_decode(body: []const u8, arena: std.mem.Allocator) !Reading {
+        _ = arena;
+        if (body.len != 6) return error.NotSixBytes;
+        if (body[0] == 0xff) return fail.unprocessable("sensor {d} is not one this site has", .{body[1]});
+        return .{ .sensor = std.mem.readInt(u16, body[0..2], .big), .tenths = std.mem.readInt(u32, body[2..6], .big) };
+    }
+};
+
+fn recordReading(r: Reading) typed.Status(201, struct { sensor: u16, tenths: u32 }) {
+    return .{ .value = .{ .sensor = r.sensor, .tenths = r.tenths } };
+}
+
+fn sumRequest(h: *Harness, app: *App, content_type: ?[]const u8, body: []const u8) []const u8 {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.writeAll("POST /sum HTTP/1.1\r\nHost: t\r\n") catch unreachable;
+    if (content_type) |ct| w.print("Content-Type: {s}\r\n", .{ct}) catch unreachable;
+    w.print("Content-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
+    return h.send(app, w.buffered()).response;
+}
+
+test "a message is read and answered in the spelling the request came in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const json = sumRequest(&h, &app, "application/json", "{\"a\":1,\"b\":2}");
+    try testing.expect(std.mem.startsWith(u8, json, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, json, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.endsWith(u8, json, "{\"total\":3}"));
+
+    // Field 1 is 1 and field 2 is 2; the answer is field 1, 3.
+    const proto = sumRequest(&h, &app, "application/proto", "\x08\x01\x10\x02");
+    try testing.expect(std.mem.startsWith(u8, proto, "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, proto, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, proto, "\r\n\r\n\x08\x03"));
+
+    // The name older clients send is the same spelling, answered under
+    // Connect's name for it.
+    const older = sumRequest(&h, &app, "Application/X-Protobuf; charset=binary", "\x08\x05");
+    try testing.expect(std.mem.indexOf(u8, older, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, older, "\r\n\r\n\x08\x05"));
+
+    // No content type at all is JSON, as every other body is.
+    const bare = sumRequest(&h, &app, null, "{\"a\":4}");
+    try testing.expect(std.mem.endsWith(u8, bare, "{\"total\":4}"));
+}
+
+test "a message sent under any label but protobuf's is read as JSON, and bytes that are not one a 400 naming the type" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    var h = Harness.init();
+    defer h.deinit();
+
+    // What `curl -d` and a `fetch` of a string send: read as JSON, as a
+    // plain struct would be, and answered in it.
+    for ([_][]const u8{ "application/x-www-form-urlencoded", "text/plain;charset=UTF-8" }) |label| {
+        const sent = sumRequest(&h, &app, label, "{\"a\":1,\"b\":2}");
+        try testing.expect(std.mem.startsWith(u8, sent, "HTTP/1.1 200"));
+        try testing.expect(std.mem.indexOf(u8, sent, "Content-Type: application/json") != null);
+        try testing.expect(std.mem.endsWith(u8, sent, "{\"total\":3}"));
+    }
+
+    // A key with no value after it.
+    const cut = sumRequest(&h, &app, "application/proto", "\x08");
+    try testing.expect(std.mem.startsWith(u8, cut, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, cut, "is not a protobuf behaviour.SumRequest: it ends in the middle of a field") != null);
+}
+
+fn findSum(in: SumRequest) !SumReply {
+    if (in.a < 0) return fail.notFound("no sum starts at {d}", .{in.a});
+    if (in.a == 1000) return error.AlreadyExists;
+    return .{ .total = in.a + in.b };
+}
+
+fn connectCall(h: *Harness, app: *App, path: []const u8, connect: bool, body: []const u8) []const u8 {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.print("POST {s} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n", .{path}) catch unreachable;
+    if (connect) w.writeAll("Connect-Protocol-Version: 1\r\n") catch unreachable;
+    w.print("Content-Length: {d}\r\n\r\n{s}", .{ body.len, body }) catch unreachable;
+    return h.send(app, w.buffered()).response;
+}
+
+test "a Connect call that fails is told its code and nilo's sentence, and every other request keeps nilo's shape" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/math.Sums/Find", findSum);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const missing = connectCall(&h, &app, "/math.Sums/Find", true, "{\"a\":-2,\"b\":0}");
+    try testing.expect(std.mem.startsWith(u8, missing, "HTTP/1.1 404"));
+    try testing.expect(std.mem.indexOf(u8, missing, "Content-Type: application/json") != null);
+    try testing.expect(std.mem.endsWith(u8, missing, "{\"code\":\"not_found\",\"message\":\"no sum starts at -2\"}"));
+
+    // The error says more than its 409 does, as it does to a gRPC client.
+    const taken = connectCall(&h, &app, "/math.Sums/Find", true, "{\"a\":1000,\"b\":0}");
+    try testing.expect(std.mem.startsWith(u8, taken, "HTTP/1.1 409"));
+    try testing.expect(std.mem.endsWith(u8, taken, "{\"code\":\"already_exists\",\"message\":\"Conflict\"}"));
+
+    // A body that is not the message, and a path no route answers.
+    const bad = connectCall(&h, &app, "/math.Sums/Find", true, "{\"a\":\"x\"}");
+    try testing.expect(std.mem.startsWith(u8, bad, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, bad, "{\"code\":\"invalid_argument\",\"message\":") != null);
+    const nowhere = connectCall(&h, &app, "/math.Sums/Lose", true, "{}");
+    try testing.expect(std.mem.startsWith(u8, nowhere, "HTTP/1.1 404"));
+    try testing.expect(std.mem.indexOf(u8, nowhere, "{\"code\":\"not_found\",\"message\":") != null);
+
+    // The same failure asked without the header.
+    const plain = connectCall(&h, &app, "/math.Sums/Find", false, "{\"a\":-2,\"b\":0}");
+    try testing.expect(std.mem.endsWith(u8, plain, "{\"error\":\"no sum starts at -2\",\"status\":404}"));
+}
+
+test "a Connect call is answered in Connect's shape over an application's own, and only by a program with a message route" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.failures(ApiError);
+    try app.get("/orders", failsWithASentence);
+    var h = Harness.init();
+    defer h.deinit();
+
+    // No route speaks a message yet: the header means nothing here.
+    const before = h.send(&app, "GET /orders HTTP/1.1\r\nHost: t\r\nConnect-Protocol-Version: 1\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, before, "{\"code\":404,\"detail\":\"no order \\\"7\\\"\"}"));
+
+    try app.post("/math.Sums/Find", findSum);
+    const connect = h.send(&app, "GET /orders HTTP/1.1\r\nHost: t\r\nConnect-Protocol-Version: 1\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, connect, "{\"code\":\"not_found\",\"message\":\"no order \\\"7\\\"\"}"));
+    const own = h.send(&app, "GET /orders HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, own, "{\"code\":404,\"detail\":\"no order \\\"7\\\"\"}"));
+}
+
+const Sums = struct {
+    pub const nilo_service = "math.v1.Sums";
+
+    pub fn add(in: SumRequest) SumReply {
+        return .{ .total = in.a + in.b };
+    }
+
+    pub fn find(in: SumRequest) !SumReply {
+        return findSum(in);
+    }
+
+    /// Not `pub`, so not a method.
+    fn helper() void {}
+};
+
+test "a struct of typed functions is served as a service, each pub fn a method with its first letter upper-cased" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.rpc(Sums);
+    var h = Harness.init();
+    defer h.deinit();
+    Sums.helper();
+
+    const json = h.send(&app, "POST /math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}").response;
+    try testing.expect(std.mem.startsWith(u8, json, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, json, "{\"total\":3}"));
+
+    const proto_answer = h.send(&app, "POST /math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02").response;
+    try testing.expect(std.mem.indexOf(u8, proto_answer, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, proto_answer, "\x08\x03"));
+
+    // The function's own name is not a path, and a method is a POST.
+    const lower = h.send(&app, "POST /math.v1.Sums/add HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, lower, "HTTP/1.1 404"));
+    const get = h.send(&app, "GET /math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, get, "HTTP/1.1 405"));
+
+    const missing = connectCall(&h, &app, "/math.v1.Sums/Find", true, "{\"a\":-1,\"b\":0}");
+    try testing.expect(std.mem.endsWith(u8, missing, "{\"code\":\"not_found\",\"message\":\"no sum starts at -1\"}"));
+}
+
+test "a service registered on a group carries the group's prefix and middleware" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.group("/rpc").rpc(Sums);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const sent = h.send(&app, "POST /rpc/math.v1.Sums/Add HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":2,\"b\":2}").response;
+    try testing.expect(std.mem.endsWith(u8, sent, "{\"total\":4}"));
+}
+
+test "a type with nilo_decode is read only when it arrives under its own label" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/readings", recordReading);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const ok = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-reading\r\nContent-Length: 6\r\n\r\n\x00\x07\x00\x00\x01\x02").response;
+    try testing.expect(std.mem.startsWith(u8, ok, "HTTP/1.1 201"));
+    try testing.expect(std.mem.endsWith(u8, ok, "{\"sensor\":7,\"tenths\":258}"));
+
+    const wrong = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").response;
+    try testing.expect(std.mem.startsWith(u8, wrong, "HTTP/1.1 415"));
+    try testing.expect(std.mem.indexOf(u8, wrong, "reads application/x-reading") != null);
+
+    const unlabelled = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Length: 6\r\n\r\n\x00\x07\x00\x00\x01\x02").response;
+    try testing.expect(std.mem.startsWith(u8, unlabelled, "HTTP/1.1 415"));
+    try testing.expect(std.mem.indexOf(u8, unlabelled, "said nothing about what its body is") != null);
+
+    const short = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-reading\r\nContent-Length: 2\r\n\r\n\x00\x07").response;
+    try testing.expect(std.mem.startsWith(u8, short, "HTTP/1.1 400"));
+    try testing.expect(std.mem.indexOf(u8, short, "NotSixBytes") != null);
+
+    // A decoder that fails with a fail function says its own sentence.
+    const unknown = h.send(&app, "POST /readings HTTP/1.1\r\nHost: t\r\nContent-Type: application/x-reading\r\nContent-Length: 6\r\n\r\n\xff\x09\x00\x00\x01\x02").response;
+    try testing.expect(std.mem.startsWith(u8, unknown, "HTTP/1.1 422"));
+    try testing.expect(std.mem.indexOf(u8, unknown, "sensor 9 is not one this site has") != null);
+}
+
+test "the document files a message under both its spellings, and a type's own body under its label" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    try app.post("/readings", recordReading);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+    const doc = out.written();
+
+    const both = "\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/SumRequest\"}},\"application/proto\":{\"schema\":{\"$ref\":\"#/components/schemas/SumRequest\"}}";
+    try testing.expect(std.mem.indexOf(u8, doc, both) != null);
+    const answered = "\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/SumReply\"}},\"application/proto\":{\"schema\":{\"$ref\":\"#/components/schemas/SumReply\"}}";
+    try testing.expect(std.mem.indexOf(u8, doc, answered) != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"application/x-reading\":{\"schema\":{\"description\":\"This type reads or writes its own bytes") != null);
+}
+
+test "an idempotent route keeps a protobuf answer as protobuf" {
+    var replays = FakeReplays.init(testing.allocator);
+    defer replays.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&replays);
+    try app.provide(&counter);
+    try app.post("/sum", keepSum);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const raw = "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Type: application/proto\r\nIdempotency-Key: s-1\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02";
+    const first = h.send(&app, raw).response;
+    try testing.expect(std.mem.indexOf(u8, first, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, first, "\r\n\r\n\x08\x03"));
+
+    const again = h.send(&app, raw).response;
+    try testing.expect(std.mem.indexOf(u8, again, "Idempotent-Replayed: true") != null);
+    try testing.expect(std.mem.indexOf(u8, again, "Content-Type: application/proto") != null);
+    try testing.expect(std.mem.endsWith(u8, again, "\r\n\r\n\x08\x03"));
     try testing.expectEqual(@as(u32, 1), counter.placed);
 }
 
@@ -4370,7 +4665,7 @@ test "static files: HEAD gives the head, POST is not answered with the file" {
 }
 
 // A number that is the same on every machine, unlike requests per second
-// on a shared VM (docs/roadmap.md). It will not tell you how fast the
+// on a shared VM (docs/todo.md). It will not tell you how fast the
 // server is, but it does notice the day somebody puts an allocation back
 // onto the path everything goes down.
 test "the request path stays inside its allocation budget" {
@@ -4428,6 +4723,45 @@ test "the request path stays inside its allocation budget" {
     //     in the `Ctx` itself; the arena only hears about a seventh.
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+test "a message read and answered as protobuf allocates no more than the same message as JSON" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sum", sumOf);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const count = struct {
+        fn of(a: *App, c: *budget.Counting, ar: *std.heap.ArenaAllocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8, request: []const u8) usize {
+            for (0..4) |round| {
+                if (round == 3) c.reset();
+                var in = std.Io.Reader.fixed(request);
+                var out = std.Io.Writer.fixed(b);
+                _ = a.handleRequest(c.allocator(), l, f, &in, &out, .off, .off, .{});
+                l.end();
+                _ = ar.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+            }
+            return c.allocs;
+        }
+    }.of;
+
+    const json = count(&app, &counting, &arena, &lifetime, &in_flight, &buf, "POST /sum HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"b\":2}");
+    const proto = count(&app, &counting, &arena, &lifetime, &in_flight, &buf, "POST /sum HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/proto\r\nContent-Length: 4\r\n\r\n\x08\x01\x10\x02");
+    // Protobuf is three: the head copied for a request with a body, the
+    // body, and the answer, sized and written once. A message with no
+    // repeated field decodes in place, where the JSON reader allocates once
+    // more. Raising either needs a reason (ADR 256).
+    try testing.expectEqual(@as(usize, 4), json);
+    try testing.expectEqual(@as(usize, 3), proto);
 }
 
 test "a traced request stays inside the same allocation budget" {
@@ -7073,7 +7407,7 @@ test "a failure drops the headers that described the answer it replaced, and kee
     defer h.deinit();
     try h.ready(&app);
     const result = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
-    const head = result.response[0 .. std.mem.indexOf(u8, result.response, "\r\n\r\n").?];
+    const head = result.response[0..std.mem.indexOf(u8, result.response, "\r\n\r\n").?];
     try testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 409 "));
     for ([_][]const u8{ "Content-Encoding", "Cache-Control", "Expires", "ETag", "Last-Modified", "Content-Range", "Content-Disposition", "Location" }) |gone| {
         if (std.ascii.indexOfIgnoreCase(head, gone) != null) {
@@ -10662,6 +10996,66 @@ test "a second discriminator in a tagged body is a 400 naming the key" {
     try testing.expect(try Harness.saysFailure(twice, "\"kind\""));
 }
 
+const Queue = struct {
+    steps: []const Step,
+
+    /// Every variant a plain struct: the tag-first reader applies.
+    const Step = union(enum) {
+        pub const nilo_json = .{ .tag = "signal" };
+        pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+
+        queued,
+        run: struct { pid: u8 },
+    };
+};
+
+const Pairs = struct {
+    steps: []const Step,
+
+    /// A variant that is a tuple: the general reader applies.
+    const Step = union(enum) {
+        pub const nilo_json = .{ .tag = "signal" };
+        pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+
+        queued,
+        run: struct { u8 },
+    };
+};
+
+fn takeQueue(incoming: Queue) !struct { n: usize } {
+    return .{ .n = incoming.steps.len };
+}
+
+fn takePairs(incoming: Pairs) !struct { n: usize } {
+    return .{ .n = incoming.steps.len };
+}
+
+test "a stray closing bracket where a tagged value should start is a 400, not an abort" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/queue", takeQueue);
+    try app.post("/pairs", takePairs);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const bodies = [_][]const u8{
+        "{\"steps\":[{\"signal\":\"queued\"},{\"signal\":\"queued\"}},{}]}",
+        "{\"steps\":[{\"signal\":\"queued\"}]}",
+        "{\"steps\":[{\"signal\":\"queued\"},]}",
+        "{\"steps\":[{\"signal\":\"queued\"}",
+        "{\"steps\":[{\"signal\":\"queued\"},}",
+        "{\"steps\":[}",
+    };
+    for (bodies, 0..) |body, i| {
+        for ([_][]const u8{ "/queue", "/pairs" }) |path| {
+            const answer = postJson(&h, &app, path, body);
+            // The one well-formed body is the only 200.
+            const want = if (i == 1) "HTTP/1.1 200 OK\r\n" else "HTTP/1.1 400 Bad Request\r\n";
+            try testing.expect(std.mem.startsWith(u8, answer, want));
+        }
+    }
+}
+
 // ---- a type that skips the keys it does not know (ADR 168) ----
 
 const LooseNote = struct {
@@ -11100,4 +11494,716 @@ test "a group bound twice is bound to the listeners both name" {
         const response = h.send(&app, "GET /narrow HTTP/1.1\r\nHost: t\r\n\r\n").response;
         if (l == 2) try expectOk(response) else try testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 404 "));
     }
+}
+
+// ---- holding an answer, and trailers (ADR 008, ADR 254) ----
+
+var late_header_refused = false;
+
+/// The half after `next.run` setting a header, which has nowhere to go.
+fn lateHeader(c: *Ctx, next: mw.Next) anyerror!void {
+    try next.run(c);
+    late_header_refused = false;
+    c.setHeader("X-Late", "1") catch |err| {
+        late_header_refused = err == error.Failed;
+    };
+}
+
+/// The same, holding the answer first.
+fn heldHeader(c: *Ctx, next: mw.Next) anyerror!void {
+    const answer = try next.hold(c);
+    try answer.setHeader("Server-Timing", "app;dur=1");
+}
+
+fn heldTrailer(c: *Ctx, next: mw.Next) anyerror!void {
+    const answer = try next.hold(c);
+    try answer.setTrailer("Server-Timing", "app;dur=1");
+}
+
+/// What a conditional-GET middleware does: the client has this body already.
+fn heldNotModified(c: *Ctx, next: mw.Next) anyerror!void {
+    const answer = try next.hold(c);
+    if (answer.status() == 200 and answer.body() != null) try answer.replace(304, "", "");
+}
+
+fn heldThenRefused(c: *Ctx, next: mw.Next) anyerror!void {
+    _ = try next.hold(c);
+    return fail.forbidden("decided after the handler", .{});
+}
+
+/// Sends from a buffer of its own and then reuses it, which a held answer
+/// must not see.
+fn reusesItsBuffer(c: *Ctx) anyerror!void {
+    var buf = "first".*;
+    try c.send(200, "text/plain", &buf);
+    @memset(&buf, 'x');
+}
+
+fn streamsAndFinishes(c: *Ctx) anyerror!void {
+    var body = try c.stream(200, "text/plain");
+    try body.writeAll("piece");
+    try body.finish();
+}
+
+fn sendsWithTrailer(c: *Ctx) anyerror!void {
+    try c.setTrailer("Server-Timing", "db;dur=3");
+    try c.send(200, "text/plain", "hi");
+}
+
+fn barredTrailer(c: *Ctx) anyerror!void {
+    try c.setTrailer("Content-Type", "text/html");
+    try c.send(200, "text/plain", "hi");
+}
+
+var trailer_after_end_refused = false;
+
+fn trailerAfterEnd(c: *Ctx) anyerror!void {
+    try c.send(200, "text/plain", "hi");
+    trailer_after_end_refused = false;
+    c.setTrailer("Server-Timing", "db;dur=3") catch |err| {
+        trailer_after_end_refused = err == error.Failed;
+    };
+}
+
+test "a header set after next.run is refused, where it used to be lost without a word" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(lateHeader);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Late") == null);
+    try testing.expect(late_header_refused);
+}
+
+test "a middleware that holds the answer adds a header after the handler ran" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+    try testing.expect(result.keep_alive);
+}
+
+/// A timing middleware that covers failures too: a failure below `hold`
+/// comes back as its error, as from `run`, and a header set on the way out
+/// goes on the failure's answer as on any other.
+fn timingEveryAnswer(c: *Ctx, next: mw.Next) anyerror!void {
+    defer c.setHeader("Server-Timing", "app;dur=1") catch {};
+    _ = try next.hold(c);
+}
+
+test "a holding middleware covers App's own 404 by setting its header on the way out" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(timingEveryAnswer);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+}
+
+test "a held answer can be replaced, and the replacement is what goes out" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldNotModified);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 304 "));
+}
+
+test "a failure after next.hold replaces the held answer and keeps the connection" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldThenRefused);
+    try app.get("/x", plainOk);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 403 "));
+    try testing.expect(try Harness.saysFailure(result.response, "decided after the handler"));
+    try testing.expect(result.keep_alive);
+}
+
+test "a held body is copied, so a buffer the handler reuses after send does not change it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.get("/x", reusesItsBuffer);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\nfirst"));
+}
+
+test "a held stream takes a trailer after the handler finished it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldTrailer);
+    try app.get("/x", streamsAndFinishes);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "Transfer-Encoding: chunked\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "5\r\npiece\r\n0\r\nServer-Timing: app;dur=1\r\n\r\n"));
+    try testing.expect(result.keep_alive);
+}
+
+test "a whole answer's trailers go out chunked to a client that reads them, and not to one that did not ask" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", sendsWithTrailer);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const asked = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nTE: trailers\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, asked.response, "Transfer-Encoding: chunked\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, asked.response, "2\r\nhi\r\n0\r\nServer-Timing: db;dur=3\r\n\r\n"));
+
+    const plain = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, plain.response, "Content-Length: 2\r\n") != null);
+    try testing.expect(std.mem.indexOf(u8, plain.response, "Server-Timing") == null);
+}
+
+test "a trailer RFC 9110 keeps out of trailers is refused with a sentence" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", barredTrailer);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 "));
+    try testing.expect(try Harness.saysFailure(result.response, "cannot be a trailer"));
+}
+
+test "a trailer set after the body ended is refused" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", trailerAfterEnd);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    _ = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nTE: trailers\r\n\r\n");
+    try testing.expect(trailer_after_end_refused);
+}
+
+test "a typed Response carries its trailers" {
+    const Typed = struct {
+        fn handler() typed.Response([]const u8) {
+            return .{ .value = "hi", .trailers = .of(&.{.{ .name = "Server-Timing", .value = "db;dur=4" }}) };
+        }
+    };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", Typed.handler);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nTE: trailers\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "0\r\nServer-Timing: db;dur=4\r\n\r\n"));
+}
+
+test "a held answer with nothing held is App's empty 200, with the held middleware's header" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.get("/x", answersNothing);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+}
+
+test "a held static file goes out after the chain with the middleware's header" {
+    var files = try TmpFiles.init(testing.allocator, &.{.{ "a.txt", "alphabet" }});
+    defer files.deinit(testing.allocator);
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(heldHeader);
+    try app.static("/", files.path);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /a.txt HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Server-Timing: app;dur=1\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "\r\n\r\nalphabet"));
+}
+
+// ---- one request, two framings (ADR 259) ----
+//
+// The same request over HTTP/1.1 and over HTTP/2 reaches the same route and
+// gets the same answer: the status, the headers other than the ones one
+// framing writes for itself (`content-length` where the body is chunked,
+// `date`, `connection`), the body, and the trailers. A table of requests
+// rather than a test each, because what is being held is the sameness.
+
+var framed_db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+
+fn framedWelcome(c: *Ctx) anyerror!void {
+    try c.redirect(302, "/welcome");
+}
+
+fn framedTrailing(c: *Ctx) anyerror!void {
+    try c.setTrailer("x-sum", "ok");
+    try c.sendText(200, "body");
+}
+
+fn framedCookie(c: *Ctx) anyerror!void {
+    try c.sendText(200, if (c.header("cookie")) |h| h.view() else "no cookie");
+}
+
+fn framedSize(c: *Ctx) anyerror!void {
+    var buf: [20]u8 = undefined;
+    try c.sendText(200, std.fmt.bufPrint(&buf, "{d}", .{(try c.body()).view().len}) catch unreachable);
+}
+
+fn framedCapped(c: *Ctx) anyerror!void {
+    var incoming = c.bodyStreamWith(.{ .max_bytes = 8 }) catch
+        return fail.tooLarge("that upload is bigger than this endpoint takes", .{});
+    var buf: [8]u8 = undefined;
+    while (try incoming.read(&buf)) |_| {}
+    try c.sendText(200, "took it");
+}
+
+fn framedMedium(c: *Ctx) anyerror!void {
+    try c.send(200, "text/plain", "0123456789" ** 250);
+}
+
+/// A streamed answer, a stream that promised its length, an event stream and
+/// a file, each of which is the same bytes in chunks, in frames or from a
+/// descriptor (ADR 260).
+fn framedStreamed(c: *Ctx) anyerror!void {
+    var out = try c.stream(200, "text/plain");
+    for (0..30) |i| {
+        try out.print("line {d}\n", .{i});
+        try out.flush();
+    }
+    try out.finish();
+}
+
+fn framedPromised(c: *Ctx) anyerror!void {
+    var out = try c.streamWith(200, "text/plain", .{ .length = 12 });
+    try out.writeAll("twelve bytes");
+    try out.finish();
+}
+
+fn framedEvents(c: *Ctx) anyerror!void {
+    var events = try c.events();
+    try events.send(.{ .name = "tick", .data = "1" });
+    try events.send(.{ .id = "2", .data = "two" });
+    try events.close();
+}
+
+var framed_room: ?*room_mod.Room = null;
+
+/// A GET never ends on either framing, so the table asks it as a HEAD, which
+/// is the head both framings write for a feed without a seat.
+fn framedFeed(c: *Ctx) anyerror!void {
+    return c.eventsFrom(framed_room.?, .{});
+}
+
+var framed_file: ?*bulkhead.Dir = null;
+/// What the file route sends: more than the 65,535 bytes a connection's
+/// window starts at, and more than a buffer of the pipe's.
+const framed_file_bytes = "0123456789abcdefghijklmnopqrstuvwxyz" ** 2_000;
+
+fn framedFile(c: *Ctx) anyerror!void {
+    const file = try framed_file.?.openFile("f.bin");
+    return c.sendFile(.{ .file = file, .content_type = "application/octet-stream" });
+}
+
+fn framedApp() !App {
+    var app = App.init(testing.allocator);
+    errdefer app.deinit();
+    try app.provide(&framed_db);
+    try app.get("/streamed", framedStreamed);
+    try app.get("/promised", framedPromised);
+    try app.get("/events", framedEvents);
+    try app.get("/file", framedFile);
+    try app.get("/feed", framedFeed);
+    try app.use(cors.permissive);
+    try app.get("/users/:id", getUser);
+    try app.post("/users", createUser);
+    try app.post("/sum", sumOf);
+    try app.post("/math.Sums/Find", findSum);
+    try app.get("/go", framedWelcome);
+    try app.get("/trailing", framedTrailing);
+    try app.get("/cookie", framedCookie);
+    try app.post("/size", framedSize);
+    try app.post("/store", storeUpload);
+    try app.post("/capped", framedCapped);
+    try app.get("/medium", framedMedium);
+    try app.resolveChains();
+    return app;
+}
+
+const Spec = struct {
+    method: []const u8 = "GET",
+    path: []const u8,
+    fields: []const hpack.Field = &.{},
+    /// What HTTP/2 sends in `fields`' place, for a request one framing
+    /// spells differently: a client splits a `cookie` for compression.
+    h2_fields: ?[]const hpack.Field = null,
+    body: []const u8 = "",
+    window: ?u32 = null,
+    /// What both must say, so a table of two 404s is not a table of anything.
+    status: u16,
+    says: []const u8 = "",
+};
+
+const Answered = struct {
+    status: u16,
+    headers: []const hpack.Field,
+    body: []const u8,
+    trailers: []const hpack.Field,
+};
+
+/// An HTTP/1.1 answer read back into what an HTTP/2 one carries, in `a`.
+fn readHttp1(a: std.mem.Allocator, response: []const u8, head_only: bool) !Answered {
+    const status = try std.fmt.parseInt(u16, response[9..12], 10);
+    const blank = std.mem.indexOf(u8, response, "\r\n\r\n").?;
+    var headers: std.ArrayList(hpack.Field) = .empty;
+    var lines = std.mem.splitSequence(u8, response[std.mem.indexOf(u8, response, "\r\n").? + 2 .. blank], "\r\n");
+    var chunked = false;
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':').?;
+        const name = try std.ascii.allocLowerString(a, line[0..colon]);
+        const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+        if (std.mem.eql(u8, name, "transfer-encoding")) chunked = true;
+        try headers.append(a, .{ .name = name, .value = value });
+    }
+    var rest = response[blank + 4 ..];
+    if (head_only) rest = "";
+    var body: std.ArrayList(u8) = .empty;
+    var trailers: std.ArrayList(hpack.Field) = .empty;
+    if (chunked and !head_only) {
+        while (true) {
+            const eol = std.mem.indexOf(u8, rest, "\r\n").?;
+            const n = try std.fmt.parseInt(usize, rest[0..eol], 16);
+            rest = rest[eol + 2 ..];
+            if (n == 0) break;
+            try body.appendSlice(a, rest[0..n]);
+            rest = rest[n + 2 ..];
+        }
+        var tl = std.mem.splitSequence(u8, rest, "\r\n");
+        while (tl.next()) |line| {
+            if (line.len == 0) continue;
+            const colon = std.mem.indexOfScalar(u8, line, ':').?;
+            try trailers.append(a, .{ .name = try std.ascii.allocLowerString(a, line[0..colon]), .value = std.mem.trim(u8, line[colon + 1 ..], " ") });
+        }
+    } else try body.appendSlice(a, rest);
+    return .{ .status = status, .headers = headers.items, .body = body.items, .trailers = trailers.items };
+}
+
+/// Whether `name` is one only one framing writes for itself.
+fn framingOwn(name: []const u8) bool {
+    return std.mem.eql(u8, name, "date") or std.mem.eql(u8, name, "connection") or
+        std.mem.eql(u8, name, "transfer-encoding") or std.mem.eql(u8, name, "keep-alive");
+}
+
+fn valueOf(fields: []const hpack.Field, name: []const u8) ?[]const u8 {
+    for (fields) |f| if (std.mem.eql(u8, f.name, name)) return f.value;
+    return null;
+}
+
+fn expectSameAnswer(app: *App, spec: Spec) !void {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var text: std.Io.Writer.Allocating = .init(a);
+    try text.writer.print("{s} {s} HTTP/1.1\r\nHost: localhost\r\n", .{ spec.method, spec.path });
+    for (spec.fields) |f| try text.writer.print("{s}: {s}\r\n", .{ f.name, f.value });
+    if (spec.body.len > 0) try text.writer.print("Content-Length: {d}\r\n", .{spec.body.len});
+    try text.writer.print("\r\n{s}", .{spec.body});
+
+    var h = Harness.init();
+    defer h.deinit();
+    const head_only = std.mem.eql(u8, spec.method, "HEAD");
+    const one = try readHttp1(a, h.send(app, text.written()).response, head_only);
+
+    var two = try h2test.roundTrip(app, .{
+        .method = spec.method,
+        .path = spec.path,
+        .fields = spec.h2_fields orelse spec.fields,
+        .body = spec.body,
+        .frame = 7_000,
+        .window = spec.window,
+    });
+    defer two.deinit();
+
+    try testing.expectEqual(spec.status, one.status);
+    try testing.expectEqual(one.status, two.status);
+    try testing.expect(std.mem.indexOf(u8, one.body, spec.says) != null);
+    try testing.expectEqualStrings(one.body, two.body);
+
+    // Every header one says, the other says, with the same value, bar the
+    // ones a framing writes for itself and a length HTTP/1.1 chunked away.
+    for (one.headers) |f| {
+        if (framingOwn(f.name)) continue;
+        if (std.mem.eql(u8, f.name, "content-length") and valueOf(two.headers, f.name) == null) continue;
+        try testing.expectEqualStrings(f.value, valueOf(two.headers, f.name) orelse {
+            std.debug.print("HTTP/1.1 sent {s}, HTTP/2 did not\n", .{f.name});
+            return error.HeaderMissingOnHttp2;
+        });
+    }
+    for (two.headers) |f| {
+        if (framingOwn(f.name)) continue;
+        if (std.mem.eql(u8, f.name, "content-length") and valueOf(one.headers, f.name) == null) continue;
+        _ = valueOf(one.headers, f.name) orelse {
+            std.debug.print("HTTP/2 sent {s}, HTTP/1.1 did not\n", .{f.name});
+            return error.HeaderMissingOnHttp1;
+        };
+    }
+    try testing.expect(valueOf(two.headers, "date") != null);
+    try testing.expectEqual(one.trailers.len, two.trailers.len);
+    for (one.trailers) |t| try testing.expectEqualStrings(t.value, valueOf(two.trailers, t.name).?);
+}
+
+test "the same requests over HTTP/1.1 and over HTTP/2 get the same answers" {
+    const previous = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = previous;
+    var app = try framedApp();
+    defer app.deinit();
+
+    const json = [_]hpack.Field{.{ .name = "content-type", .value = "application/json" }};
+    const cross_origin = [_]hpack.Field{.{ .name = "origin", .value = "https://app.example" }};
+    const asks_trailers = [_]hpack.Field{.{ .name = "te", .value = "trailers" }};
+    const connect = [_]hpack.Field{ .{ .name = "content-type", .value = "application/json" }, .{ .name = "connect-protocol-version", .value = "1" } };
+
+    // A GET with a path parameter, and the two ways it can fail to be one.
+    try expectSameAnswer(&app, .{ .path = "/users/7", .status = 200, .says = "wati" });
+    try expectSameAnswer(&app, .{ .path = "/users/8", .status = 404, .says = "no user 8" });
+    try expectSameAnswer(&app, .{ .path = "/users/seven", .status = 400 });
+    try expectSameAnswer(&app, .{ .path = "/nowhere", .status = 404, .says = "there is no /nowhere" });
+    try expectSameAnswer(&app, .{ .method = "DELETE", .path = "/users/7", .status = 405, .says = "not allowed" });
+
+    // A typed body, a body that is not JSON, and one that breaks a rule.
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/sum", .fields = &json, .body = "{\"a\":1,\"b\":2}", .status = 200, .says = "{\"total\":3}" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/users", .fields = &json, .body = "{\"name\":", .status = 400 });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/users", .fields = &json, .body = "{\"name\":\"\"}", .status = 422, .says = "name must not be empty" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/users", .fields = &json, .body = "{\"name\":\"wati\"}", .status = 201, .says = "\"id\":1" });
+
+    // A HEAD has the head a GET would, and a middleware's headers go with it.
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/users/7", .status = 200 });
+    try expectSameAnswer(&app, .{ .path = "/users/7", .fields = &cross_origin, .status = 200, .says = "wati" });
+
+    // Trailers, and a Connect call that fails in Connect's words.
+    try expectSameAnswer(&app, .{ .path = "/trailing", .fields = &asks_trailers, .status = 200, .says = "body" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/math.Sums/Find", .fields = &connect, .body = "{\"a\":-2,\"b\":0}", .status = 404, .says = "\"code\":\"not_found\"" });
+
+    // A body in several DATA frames, an answer written across several
+    // windows, a cookie a client split, and a redirect.
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/size", .body = "x" ** 60_000, .status = 200, .says = "60000" });
+    // A body read in pieces, as it arrives on HTTP/2 and as it is read
+    // out of the buffer on HTTP/1.1, and one the route holds to a limit.
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/store", .body = "x" ** 60_000, .status = 200, .says = "\"stored\":60000" });
+    try expectSameAnswer(&app, .{ .method = "POST", .path = "/capped", .body = "abcdefgh", .status = 200, .says = "took it" });
+    try expectSameAnswer(&app, .{
+        .method = "POST",
+        .path = "/capped",
+        .body = "abcdefghijklmnopqrst",
+        .h2_fields = &.{.{ .name = "content-length", .value = "20" }},
+        .status = 413,
+        .says = "bigger than this endpoint takes",
+    });
+    try expectSameAnswer(&app, .{ .path = "/medium", .window = 700, .status = 200, .says = "0123456789" });
+    try expectSameAnswer(&app, .{
+        .path = "/cookie",
+        .fields = &.{.{ .name = "cookie", .value = "a=1; b=2" }},
+        .h2_fields = &.{ .{ .name = "cookie", .value = "a=1" }, .{ .name = "cookie", .value = "b=2" } },
+        .status = 200,
+        .says = "a=1; b=2",
+    });
+    try expectSameAnswer(&app, .{ .path = "/go", .status = 302 });
+}
+
+test "a streamed answer, an event stream and a file are the same over HTTP/1.1 and over HTTP/2" {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    const previous = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = previous;
+    var tmp = nilo_testing.tmpDir();
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = framed_file_bytes });
+    var path_buf: [128]u8 = undefined;
+    var dir = try bulkhead.Dir.open(try tmp.path(&path_buf, ""));
+    defer dir.close();
+    framed_file = &dir;
+    defer framed_file = null;
+    var app = try framedApp();
+    defer app.deinit();
+
+    var expected_lines: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer expected_lines.deinit();
+    for (0..30) |i| try expected_lines.writer.print("line {d}\n", .{i});
+
+    try expectSameAnswer(&app, .{ .path = "/streamed", .status = 200, .says = expected_lines.written() });
+    try expectSameAnswer(&app, .{ .path = "/streamed", .window = 100, .status = 200, .says = "line 29" });
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/streamed", .status = 200 });
+    try expectSameAnswer(&app, .{ .path = "/promised", .status = 200, .says = "twelve bytes" });
+    try expectSameAnswer(&app, .{ .path = "/events", .status = 200, .says = "event: tick\ndata: 1\n\nid: 2\ndata: two\n\n" });
+    var table_room = try room_mod.Room.initWith(testing.allocator, .{});
+    defer table_room.deinit();
+    framed_room = &table_room;
+    defer framed_room = null;
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/feed", .status = 200 });
+    try expectSameAnswer(&app, .{ .path = "/file", .window = 65_535, .status = 200, .says = "0123456789abcdefghijklmnopqrstuvwxyz" });
+    try expectSameAnswer(&app, .{ .method = "HEAD", .path = "/file", .status = 200 });
+    try expectSameAnswer(&app, .{
+        .path = "/file",
+        .fields = &.{.{ .name = "range", .value = "bytes=100-90000" }},
+        .window = 65_535,
+        .status = 206,
+        .says = "0123456789abcdefghijklmnopqrstuvwxyz",
+    });
+}
+
+test "a request on HTTP/2 allocates no more than the same request on HTTP/1.1 from the second on a connection" {
+    if (comptime !framing_mod.http2_built) return error.SkipZigTest;
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.use(cors.permissive);
+    try app.resolveChains();
+
+    // HTTP/1.1, as the budget test above measures it, counted where its
+    // arena meets the general-purpose allocator: a warm arena keeps what a
+    // request touched, so the second request reaches the allocator for none.
+    var gpa_h1 = budget.Counting{ .child = testing.allocator };
+    var arena = std.heap.ArenaAllocator.init(gpa_h1.allocator());
+    defer arena.deinit();
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+    for (0..3) |_| {
+        var in = std.Io.Reader.fixed(request);
+        var out = std.Io.Writer.fixed(&buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+        lifetime.end();
+        _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+    }
+    gpa_h1.reset();
+    {
+        var in = std.Io.Reader.fixed(request);
+        var out = std.Io.Writer.fixed(&buf);
+        _ = app.handleRequest(arena.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+        lifetime.end();
+    }
+    const h1_allocs = gpa_h1.allocs;
+
+    // The same request on HTTP/2: what two and twelve of them reach the
+    // general-purpose allocator for differ by what ten more cost.
+    var gpa_h2 = budget.Counting{ .child = testing.allocator };
+    var totals: [2]usize = undefined;
+    for (&totals, [_]usize{ 2, 12 }) |*total, requests| {
+        var client = try h2test.TestClient.init();
+        defer client.deinit();
+        var id: u31 = 1;
+        for (0..requests) |_| {
+            try h2test.requestOn(&client, id, .{ .path = "/users/7", .fields = &.{
+                .{ .name = "user-agent", .value = "wrk" },
+                .{ .name = "accept", .value = "*/*" },
+                .{ .name = "accept-encoding", .value = "gzip" },
+            } });
+            id += 2;
+        }
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        var host = app.grpcHost();
+        host.gpa = gpa_h2.allocator();
+        gpa_h2.reset();
+        @import("h2conn.zig").serveConnection(host, &in, &out.writer, .off, .off, .{});
+        total.* = gpa_h2.allocs;
+    }
+    const per_request = (totals[1] - totals[0]) / 10;
+    try testing.expectEqual(@as(usize, 0), h1_allocs);
+    try testing.expect(per_request <= h1_allocs);
+    try testing.expectEqual(@as(usize, 0), (totals[1] - totals[0]) % 10);
+}
+
+test "c.header finds a name whether the head is borrowed or was copied for a body, and a name that only starts like it is not it" {
+    const Read = struct {
+        fn run(c: *Ctx) anyerror!void {
+            const wanted = if (c.header("x-wanted")) |v| v.view() else "none";
+            const prefix = if (c.header("X-Want")) |v| v.view() else "none";
+            const longer = if (c.header("X-Wanted-Too")) |v| v.view() else "none";
+            const twice = if (c.header("X-Twice")) |v| v.view() else "none";
+            var buf: [96]u8 = undefined;
+            try c.sendText(200, try std.fmt.bufPrint(&buf, "{s}|{s}|{s}|{s}", .{ wanted, prefix, longer, twice }));
+        }
+    };
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/read", Read.run);
+    try app.post("/read", Read.run);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const head = "/read HTTP/1.1\r\nHost: t\r\nX-Wanted-Too: b\r\nX-WANTED:  a \r\nX-Twice: 1\r\nX-Twice: 2\r\n";
+    // Borrowed from the read buffer: a GET reads nothing after its head.
+    const borrowed = h.send(&app, "GET " ++ head ++ "\r\n");
+    try testing.expect(std.mem.endsWith(u8, borrowed.response, "a|none|b|1"));
+    // Copied into the arena: a request with a body reads again.
+    const kept = h.send(&app, "POST " ++ head ++ "Content-Length: 2\r\n\r\nhi");
+    try testing.expect(std.mem.endsWith(u8, kept.response, "a|none|b|1"));
+}
+
+test "the head a Ctx holds ends at its blank line, over HTTP/1.1 and over HTTP/2, which is what findHeader relies on" {
+    const Tail = struct {
+        fn run(c: *Ctx) anyerror!void {
+            const head = c._head;
+            const closed = std.mem.endsWith(u8, head, "\r\n\r\n") or std.mem.endsWith(u8, head, "\n\n");
+            // Nothing past the first blank line: it is the one at the end.
+            const first = std.mem.indexOf(u8, head, "\r\n\r\n") orelse std.mem.indexOf(u8, head, "\n\n") orelse head.len;
+            const only = first + (if (std.mem.indexOf(u8, head, "\r\n\r\n") != null) @as(usize, 4) else 2) == head.len;
+            const value = if (c.header("x-wanted")) |v| v.view() else "none";
+            var buf: [64]u8 = undefined;
+            try c.sendText(200, try std.fmt.bufPrint(&buf, "tail {s} {s}", .{ if (closed and only) "ok" else "bad", value }));
+        }
+    };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/tail", Tail.run);
+    try app.post("/tail", Tail.run);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const got = h.send(&app, "GET /tail HTTP/1.1\r\nHost: t\r\nX-Wanted: a\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, got.response, "tail ok a"));
+    const posted = h.send(&app, "POST /tail HTTP/1.1\r\nHost: t\r\nX-Wanted: a\r\nContent-Length: 17\r\n\r\nX-Wanted: b\r\n\r\nzz");
+    try testing.expect(std.mem.endsWith(u8, posted.response, "tail ok a"));
+    // The same route over HTTP/2, in a build that has it.
+    if (comptime !framing_mod.http2_built) return;
+    try expectSameAnswer(&app, .{ .path = "/tail", .fields = &.{.{ .name = "x-wanted", .value = "a" }}, .status = 200, .says = "tail ok a" });
 }

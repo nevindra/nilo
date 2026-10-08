@@ -19,7 +19,9 @@
 //! failed, a seek that failed, and a client that vanished mid-transfer. A
 //! caller made responsible for the descriptor would have to get all eight
 //! right, and would be holding an fd across a `try` it did not write. On the
-//! caller's side the whole story is one line: open it, hand it over.
+//! caller's side the whole story is one line: open it, hand it over. **The one
+//! way it outlives `send` is a middleware holding the answer** (ADR 008):
+//! then the held answer has it, and `writeHeld` or `Ctx.dropHeld` closes it.
 
 const std = @import("std");
 
@@ -61,6 +63,25 @@ pub const Contents = struct {
     cache_control: []const u8 = "",
 };
 
+/// A file answer a middleware is holding: the descriptor, and where the part
+/// to send starts and how long it is. Everything borrowed in `contents` has
+/// been copied, because the frame it came from is gone by the time this is
+/// written.
+pub const Held = struct {
+    contents: Contents,
+    status: u16,
+    from: u64,
+    len: u64,
+};
+
+/// A header about the file. Borrowed when the head goes out before `send`
+/// returns, which is what `Contents` promises its text; copied when a
+/// middleware holds the answer, because then it does not.
+fn about(c: *Ctx, name: []const u8, value: []const u8) !void {
+    if (c._hold) return c.setHeader(name, value);
+    return c.setStaticHeader(name, value);
+}
+
 /// Write the whole response: the conditional headers, the range, and the
 /// bytes.
 ///
@@ -71,8 +92,10 @@ pub const Contents = struct {
 /// into a 200 rather than into a corrupt download.
 pub fn send(c: *Ctx, contents: Contents) !void {
     // The descriptor is this function's from here, and this is the only line
-    // that gives it back — see the module comment.
-    defer contents.file.close();
+    // that gives it back — see the module comment — unless a held answer
+    // took it.
+    var handed_over = false;
+    defer if (!handed_over) contents.file.close();
 
     // After the `defer`, so a second answer still gives the descriptor back;
     // an error rather than an assert for `Ctx.send`'s reason.
@@ -80,8 +103,8 @@ pub fn send(c: *Ctx, contents: Contents) !void {
 
     const total = contents.size orelse (try contents.file.stat()).size;
 
-    if (contents.etag.len > 0) try c.setStaticHeader("ETag", contents.etag);
-    if (contents.cache_control.len > 0) try c.setStaticHeader("Cache-Control", contents.cache_control);
+    if (contents.etag.len > 0) try about(c, "ETag", contents.etag);
+    if (contents.cache_control.len > 0) try about(c, "Cache-Control", contents.cache_control);
     // Said on every answer, the 304 and the 416 included: it is how a client
     // learns it may ask for part of this at all.
     try c.setStaticHeader("Accept-Ranges", "bytes");
@@ -116,23 +139,53 @@ pub fn send(c: *Ctx, contents: Contents) !void {
     switch (range_mod.parse(headerValue(c, "Range"), total, still_the_same)) {
         .whole => {},
         .part => |part| {
-            try c.setStaticHeader("Content-Range", range_mod.contentRange(&buf, part, total));
-            return writeBody(c, contents, 206, part.start, part.len());
+            try about(c, "Content-Range", range_mod.contentRange(&buf, part, total));
+            handed_over = try writeBody(c, contents, 206, part.start, part.len());
+            return;
         },
         .unsatisfiable => {
             // The one answer whose whole content is "you have the wrong idea
             // about how big this is", which the header carries and the body
             // does not need to repeat.
-            try c.setStaticHeader("Content-Range", range_mod.unsatisfiableRange(&buf, total));
+            try about(c, "Content-Range", range_mod.unsatisfiableRange(&buf, total));
             return c.send(416, contents.content_type, "");
         },
     }
 
-    return writeBody(c, contents, 200, 0, total);
+    handed_over = try writeBody(c, contents, 200, 0, total);
 }
 
 /// The head, and then `len` bytes of the file starting at `from`.
-fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !void {
+/// The head, and then `len` bytes of the file from `from`, now or, under a
+/// middleware holding the answer, once the chain has unwound. True when the
+/// held answer took the descriptor.
+fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !bool {
+    // Checked now, held or not, so a type that cannot be a header value is a
+    // clean 500 from here.
+    try c.contentTypeOk(contents.content_type);
+    // On HTTP/2 the bytes are read into frames through the connection's pipe
+    // (ADR 260), which a gRPC call, answering one message, has not got. A
+    // HEAD sends none of them, and a 304 or a 416 never gets here.
+    if (c.method != .HEAD) try c.refuseFileInCall();
+
+    if (c._hold) {
+        c.markAnswered(status);
+        var kept = contents;
+        kept.content_type = try c._arena.dupe(u8, contents.content_type);
+        (try c.heldSlot()).* = .{ .file = .{ .contents = kept, .status = status, .from = from, .len = len } };
+        return true;
+    }
+    try put(c, contents, status, from, len);
+    return false;
+}
+
+/// Write a file answer a middleware held, and give its descriptor back.
+pub fn writeHeld(c: *Ctx, held: Held) !void {
+    defer held.contents.file.close();
+    return put(c, held.contents, held.status, held.from, held.len);
+}
+
+fn put(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !void {
     // No buffer of its own, and that is deliberate rather than lazy. On the
     // zero-copy path the bytes never enter this process, so a buffer here
     // would be pages nothing writes to; where they do — a platform with no
@@ -147,10 +200,11 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !voi
     // that a file which cannot be positioned is a clean 500 rather than half
     // an answer. On a regular file this is arithmetic rather than a syscall:
     // the reader reads positionally, so its position is a number it hands to
-    // `pread` rather than state in the kernel.
+    // `pread` rather than state in the kernel. Here and not when the answer
+    // is held, because a reader that cannot read positionally seeks by
+    // reading, and a second reader would seek past the part again; a held
+    // file that cannot be positioned closes the connection instead.
     try reader.seekTo(from);
-    try c.contentTypeOk(contents.content_type);
-
     c.markAnswered(status);
 
     // Putting the answer on the wire is nilo waiting on the client, not the
@@ -162,50 +216,20 @@ fn writeBody(c: *Ctx, contents: Contents, status: u16, from: u64, len: u64) !voi
     defer watchdog.waited(c._watch, w);
     c.armWriteLimit();
 
-    const connection = c.connection();
+    const keep = c.keepAlive();
+    c._head_written = true;
+    c._body_ended = true;
 
     // A HEAD gets the head a GET would have got, `Content-Length` and all,
     // and none of the body. Nothing is read from the file, so a HEAD of a
     // four-gigabyte file costs an open, a stat and a close.
     if (c.method == .HEAD) {
-        try http1.writeResponseHeadOnly(
-            c._out,
-            status,
-            http1.statusPhrase(status),
-            contents.content_type,
-            len,
-            connection,
-            c.extraHeaders(),
-        );
-        return http1.settle(c._out, c._in);
+        return c._framing.head(status, contents.content_type, len, keep, c.extraHeaders());
     }
 
-    // Left in the write buffer on purpose: `sendFileAll` sends what is
-    // already buffered ahead of the file's first bytes, so the head and the
-    // start of the body leave together.
-    try http1.writeFileHead(
-        c._out,
-        status,
-        http1.statusPhrase(status),
-        contents.content_type,
-        len,
-        connection,
-        c.extraHeaders(),
-    );
-
-    // A loop rather than one call, because a `std.Io.Limit` is a `usize` and
-    // the length of a file is not: on a 32-bit build `limited64` clamps, and
-    // without this a four-gigabyte download would look like a truncated file
-    // and close the connection for it. On a 64-bit build it goes round once.
-    // `sendFileAll` is short only at the end of the file, so nothing left to
-    // send and nothing sent means there is no more file.
-    var sent: u64 = 0;
-    while (sent < len) {
-        const n = try c._out.sendFileAll(&reader, .limited64(len - sent));
-        if (n == 0) break;
-        sent += n;
-    }
-    try c._out.flush();
+    // The head and the body leave together where the framing can manage
+    // it, and zero-copy where the connection allows (ADR 009).
+    const sent = try c._framing.file(status, contents.content_type, &reader, len, keep, c.extraHeaders());
 
     // Fewer bytes than the head promised. The length came from a `stat` that
     // is now out of date — the file was truncated or replaced underneath the

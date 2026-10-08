@@ -5,7 +5,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .grpc = true, .tls = true });
+    const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .http2 = true, .tls = true });
     const exe = b.addExecutable(.{
         .name = "nilo-grpc",
         .root_module = b.createModule(.{

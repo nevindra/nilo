@@ -33,7 +33,7 @@ Every call is listed in [the reference](../reference/ctx.md#answering).
 | `c.setHeader(name, value)` | copied into the request arena |
 | `c.setStaticHeader(name, value)` | for text that already outlives the request (a literal), so nothing is copied |
 
-**Set headers before sending.** A response is finished the moment it is sent, so nothing can change afterwards.
+**Set headers before sending.** A response is finished the moment it is sent, so nothing can change afterwards. A header set after the head has gone is refused with an error sentence, never lost silently. A middleware that needs to change an answer on the way out holds it first ([`next.hold`](./middleware.md#changing-an-answer-after-next)).
 
 nilo writes `Content-Type`, `Content-Length`, `Transfer-Encoding` and `Connection` itself, and setting them is refused, because a response carrying two of any of those is malformed. Pass the content type to `send` instead.
 
@@ -53,6 +53,33 @@ return .{ .headers = .of(&.{
 ```
 
 The limit there is eight per response. A ninth is a compile error that points you to `c.setHeader`, which has no limit ([ADR 018](../adr/018-a-response-owns-its-headers.md)).
+
+## Trailers
+
+**A trailer is a field sent after the body**, for what is only known once the body is out, such as a checksum or a gRPC status. `c.setTrailer(name, value)` sets one, and `c.trailers()` lists what is set:
+
+```zig
+fn export_(c: *nilo.Ctx) !void {
+    try c.setTrailer("x-rows", "1204");
+    try c.send(200, "text/csv", csv);
+}
+```
+
+A trailer can be set until the body ends: before `send` for a whole answer, before `finish` for [a stream](./streaming.md#trailers), and after `next` only from a middleware that called [`next.hold`](./middleware.md#changing-an-answer-after-next). Setting a name twice keeps the last value.
+
+**Where a trailer goes depends on the protocol.** On HTTP/2, which is gRPC, it is a HEADERS frame after the body. On an HTTP/1.1 stream it is the trailer section of the chunked body. A whole HTTP/1.1 answer has a length, so carrying a trailer means sending it chunked, and nilo does that only when the request said `TE: trailers` (and is not a HEAD, and the status has a body). Without that header the trailers are left off, which RFC 9110 allows, because a client that did not ask may not read them. `c.clientReadsTrailers()` says which case this request is.
+
+**Some names are refused**: the ones RFC 9110 section 6.5.1 bars from a trailer (`content-length`, `transfer-encoding`, `host`, `authorization`, `set-cookie`, `cache-control`, `content-type`, `content-encoding` and the like) and any pseudo-header ([ADR 254](../adr/254-an-answer-can-carry-trailers.md)).
+
+A handler that returns a value sets trailers through `.trailers`, beside `.headers`, on `nilo.Response(T)` and `nilo.Status(code)`:
+
+```zig
+return .{ .trailers = .of(&.{
+    .{ .name = "x-rows", .value = "1204" },
+}), .value = report };
+```
+
+The limit there is eight, as for headers, and a ninth is a compile error that points to `c.setTrailer`.
 
 ## Redirects
 
@@ -291,7 +318,7 @@ The generated API description follows either encoding, so a client generated fro
 
 ## When a response is sent
 
-**A response is written in one go, and only once.** There is no "start the response, then change your mind" state, so there are no bugs where a header set too late silently disappears. If you need to decide as you go, use [a stream](./streaming.md); even there the head goes out first and cannot change after that.
+**A response is written in one go, and only once.** There is no "start the response, then change your mind" state, so a header set too late is refused with an error rather than lost. If you need to decide as you go, use [a stream](./streaming.md); even there the head goes out first and cannot change after that.
 
 The response is on the wire before the connection next waits for the client. For a client that sends a request and waits for the answer, which is every browser, that is the moment `send` returns. A client that pipelines, sending its next request before reading this answer, gets the answers in one write instead of one each. It was not waiting, and the batch is bounded by `write_buffer` ([ADR 201](../adr/201-a-response-is-flushed-before-the-connection-waits.md)).
 
@@ -380,6 +407,8 @@ fn showInvoice(number: u32) ?Invoice {
 
 Return it the way you would return a struct (bare, in a `?`, in a `Status(201, …)` or a `Response(…)`) and the wrappers mean what they always mean. The difference from `c.send` is that the route is described: the document names `application/xml`, and says what the body looks like if the type adds `pub const nilo_openapi = .{ .type = "string" };`. See [the reference](../reference/handlers.md#a-type-that-writes-its-own-answer).
 
-Write both declarations or neither: a content type with no `nilo_write`, or the other way round, is a compile error naming the route.
+Write both declarations or neither: a content type with no `nilo_write`, or the other way round, is a compile error naming the route. The same content type with `nilo_decode` reads the format on the way in ([Requests](./requests.md#protobuf-and-other-formats)).
+
+**A protobuf message answers in the spelling it was asked in**: a struct with a `wire` table goes out as protobuf to a request that sent protobuf and as JSON to everything else, with no declaration ([Requests](./requests.md#protobuf-and-other-formats)).
 
 Static files get their type from the file extension. See [Static files](./static-files.md).

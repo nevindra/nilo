@@ -333,14 +333,18 @@ const Accepting = struct {
     /// Set on a TLS listener and null on a plain one, which is the whole
     /// of how the acceptor tells them apart.
     secured: ?*Secured = null,
-    /// Set on a listener that speaks gRPC (ADR 220). Read only in a build
-    /// with `-Dgrpc`; every other build refuses the listener before this
-    /// exists.
-    grpc: bool = false,
     /// This listener's place in the list `listen()` was given: 0 for the
     /// first, then each `also` entry in order (ADR 252). Copied into each
     /// connection's `Peer`, which is how a request learns it.
     index: u8 = 0,
+    /// The `Options` `serve` was given, a heap copy it keeps for as long as
+    /// any connection does. Type-erased because this struct is not generic over
+    /// the Bulkhead's `Options`, and read back by the two entries, which are:
+    /// a connection reads its sizes through here rather than being handed a copy,
+    /// because the copy was 264 bytes of the task zio allocates for it, which put
+    /// the task in the next size class of the allocator and made every idle
+    /// connection 512 bytes dearer (ADR 062).
+    sizes: *const anyopaque,
 
     fn fail(self: *Accepting, err: anyerror) void {
         self.all.fail(err);
@@ -395,7 +399,6 @@ pub fn explained(err: anyerror) bool {
         error.TlsNotBuilt,
         error.TlsOnUnixSocket,
         error.TlsCertificate,
-        error.GrpcNotBuilt,
         => true,
         else => false,
     };
@@ -683,6 +686,10 @@ pub const Wake = struct {
     /// different moments, and a completion that is still pending must not be
     /// handed to `submit` a second time: the queue would link it twice.
     poll_armed: bool = false,
+    /// A `wait` or `lookNow` was answered from bytes the record layer already
+    /// held, so the readable poll may since have fired for bytes that were
+    /// read in the meantime. Looked at once, by `believe`.
+    skipped: bool = false,
 
     /// What sits between a TLS connection's socket and the buffers the
     /// handler reads: the records arrive in `in` and leave from `out`, and
@@ -705,6 +712,50 @@ pub const Wake = struct {
         const raw = self.raw orelse return null;
         if (raw.leftover.len != 0) return null;
         return raw;
+    }
+
+    /// Bytes this connection already holds that no poll of the socket will
+    /// ever announce: a whole record of ciphertext the record layer read off the socket along
+    /// with the record it decrypted (tls.zig pulls whatever is there, and
+    /// decrypts one record a call), or cleartext a record decrypted that the
+    /// reader has not taken yet. The caller checks its own cleartext buffer
+    /// before it waits, which does not see either; a plain connection has
+    /// neither. Without this a second frame sent a moment behind the first
+    /// waits on a socket the kernel has already emptied, until the client
+    /// sends again or a limit runs out: one HTTP/2 connection in a thousand
+    /// over TLS, found by `bench/mem.py --tls --h2` in stage 7 of framing
+    /// (ADR 259), and the question a WebSocket over TLS had open.
+    fn held(self: *const Wake) bool {
+        // Only a TLS connection has a layer under its buffers, and only a
+        // build with TLS in it has the code to make one.
+        if (comptime !nilo_build.tls) return false;
+        const raw = self.raw orelse return false;
+        if (raw.leftover.len != 0) return true;
+        // A whole record, and only a whole one: tls.zig peeks the five-byte
+        // header and takes the payload, so a header or half a payload would
+        // send the caller into a read that blocks on the socket until the
+        // rest arrives, deaf to every post meanwhile. A partial record falls
+        // through to the poll, which fires when the rest does (the socket is
+        // drained). A whole record that is not application data (a ticket, a
+        // KeyUpdate) cannot be told from one: every record after the
+        // handshake is type 23 on the wire, and only decrypting says more.
+        const buffered = raw.in.buffered();
+        if (buffered.len < 5) return false;
+        return buffered.len >= 5 + std.mem.readInt(u16, buffered[3..5], .big);
+    }
+
+    /// Whether a fired poll still means something. After an answer from
+    /// `held`, the poll that was armed stays armed, and may fire for bytes
+    /// the reads that followed have already taken, which would send the caller
+    /// into a read that nothing can end. Asked once, and only then, of the
+    /// kernel: a socket with nothing in it is a poll to arm again.
+    fn believe(self: *Wake) bool {
+        if (comptime !nilo_build.tls) return true;
+        if (!self.skipped) return true;
+        self.skipped = false;
+        var fds = [1]std.posix.pollfd{.{ .fd = self.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&fds, 0) catch return true;
+        return ready != 0;
     }
 
     pub fn init(handle: zio.ev.Backend.NetHandle) Wake {
@@ -737,6 +788,48 @@ pub const Wake = struct {
         socket.shutdown(.send) catch {};
     }
 
+    /// Submit the two halves that are not in the loop's hands: the post half,
+    /// and the readable half, which is armed here, on the way in, and not on
+    /// the way out of a `.readable` (see `wait`).
+    fn arm(self: *Wake) void {
+        if (!self.armed) {
+            self.cq.submit(&self.wake.c) catch unreachable;
+            self.armed = true;
+        }
+        if (!self.poll_armed) {
+            self.cq.submit(&self.poll.c) catch unreachable;
+            self.poll_armed = true;
+        }
+    }
+
+    /// `wait` that does not: what has already completed, `.timed_out` if
+    /// nothing has. The loop has to have run since the socket changed for a
+    /// completion to be there, which is what the caller's yield is for.
+    /// Armed and answered exactly as `wait` is, and a readable poll that has
+    /// not fired stays armed for the next look or wait, so nothing is
+    /// submitted twice (`poll_armed` clears only when it fires).
+    pub fn lookNow(self: *Wake) Woken {
+        self.arm();
+        if (self.held()) {
+            self.skipped = true;
+            return .readable;
+        }
+        const done = self.cq.next() orelse return .timed_out;
+        if (done == &self.wake.c) {
+            self.cq.submit(&self.wake.c) catch unreachable;
+            return .posted;
+        }
+        if (done == &self.poll.c) {
+            self.poll_armed = false;
+            if (!self.believe()) {
+                self.arm();
+                return .timed_out;
+            }
+            return .readable;
+        }
+        return .timed_out;
+    }
+
     /// Park until the socket has something to read or somebody posts.
     ///
     /// Only correct with the connection's read buffer already drained — a
@@ -746,9 +839,11 @@ pub const Wake = struct {
     /// this; the Engine cannot, because it does not know what a frame is.
     /// `limit_ms` of 0 waits with no limit at all.
     pub fn wait(self: *Wake, limit_ms: u32) Woken {
-        if (!self.armed) {
-            self.cq.submit(&self.wake.c) catch unreachable;
-            self.armed = true;
+        self.arm();
+        // Bytes already held are readable whatever the socket says (`held`).
+        if (self.held()) {
+            self.skipped = true;
+            return .readable;
         }
         // Armed on the way *in*, after the caller has read whatever the last
         // `.readable` was about, rather than on the way out of it.
@@ -769,11 +864,6 @@ pub const Wake = struct {
         // belongs to a group or another queue. Nothing closes this queue and
         // both completions are this queue's own, so neither can happen here
         // — which is what `unreachable` states, at every `submit` in this file.
-        if (!self.poll_armed) {
-            self.cq.submit(&self.poll.c) catch unreachable;
-            self.poll_armed = true;
-        }
-
         while (true) {
             // The limit belongs to the wait, not to the connection: it is
             // measured from *this* call, so a client that spoke a moment ago
@@ -804,6 +894,10 @@ pub const Wake = struct {
             }
             if (done == &self.poll.c) {
                 self.poll_armed = false;
+                if (!self.believe()) {
+                    self.arm();
+                    continue;
+                }
                 return .readable;
             }
             // Neither of ours. Nothing else is ever submitted to this queue,
@@ -870,6 +964,44 @@ pub const Wake = struct {
 /// under it is stack that has not been used yet and faults back in as zeroes,
 /// which is what a fresh frame wants anyway.
 const stack_margin = 512;
+
+/// The most a connection's argument list may weigh, so that its task stays in
+/// the 512-byte class of the allocator.
+///
+/// zio puts a task (`AnyTask`, then the result, then the context: 8 bytes for
+/// the group and the arguments) in a pool item when it fits
+/// `TaskPool.pool_item_size`, 384 bytes, and in `rt.allocator` when it does not.
+/// The allocator rounds to a power of two, so a task of 385 to 512 bytes costs
+/// 512 bytes resident per connection and one of 513 to 1,024 costs 1,024.
+/// Handing each connection the whole `Options` by value, 264 bytes, put the
+/// task in the 1,024 class: that is the 512 bytes an idle connection grew
+/// between v0.2.0 and v0.3.0 (ADR 017, ADR 062), and why a connection reads its
+/// sizes through `Accepting.sizes` instead.
+///
+/// **These are constants, not `@sizeOf`s, because zio does not export the types.**
+/// `zio.zig` re-exports neither `AnyTask` nor `TaskPool`, so nothing here can
+/// ask for their sizes. Read from the pinned zio 0.18.0: `src/task.zig:181`
+/// (`AnyTask`, 192 bytes on x86-64), `src/task.zig:785-786`
+/// (`pool_item_size = alignForward(@sizeOf(AnyTask) + 128, 128)`) and
+/// `src/task.zig:801-808` (`alloc` sends anything over that to the allocator).
+/// A zio bump re-reads those lines; `bench/mem.py` is what notices if nobody
+/// does, since an argument list that fits here and a task that no longer does
+/// reads as bytes on every idle connection.
+const zio_any_task_bytes = 192;
+const zio_context_header_bytes = 8;
+const allocator_class_bytes = 512;
+const connection_args_max = allocator_class_bytes - zio_any_task_bytes - zio_context_header_bytes;
+
+fn assertTaskClass(comptime F: type) void {
+    const size = @sizeOf(std.meta.ArgsTuple(F));
+    if (size > connection_args_max) @compileError(std.fmt.comptimePrint(
+        "nilo: a connection's argument list is {d} bytes and may be {d}: past that zio's task " ++
+            "for it falls into the next size class of the allocator and every idle connection " ++
+            "pays 512 bytes more. Hand the large part over by pointer to something `serve` " ++
+            "keeps for as long as its connections (ADR 062)",
+        .{ size, connection_args_max },
+    ));
+}
 
 /// Hand back the pages of the *running* fiber's stack that are below its
 /// current frame.
@@ -1029,36 +1161,6 @@ const TlsRefusal = enum {
         }
     }
 };
-
-/// Why `.grpc` cannot be honoured, decided the way `TlsRefusal` is (ADR 220).
-/// Beside `.tls` it is gRPC over TLS, `h2` by ALPN, and that is the TLS
-/// refusal's business: a build without TLS is told so by `TlsRefusal` first.
-const GrpcRefusal = enum {
-    not_built,
-
-    fn toError(self: GrpcRefusal) anyerror {
-        return switch (self) {
-            .not_built => error.GrpcNotBuilt,
-        };
-    }
-
-    fn say(self: GrpcRefusal, address: []const u8) void {
-        switch (self) {
-            .not_built => std.log.err(
-                "the listener on \"{s}\" sets `.grpc`, and this build has no gRPC in it. Pass " ++
-                    "`.grpc = true` to `b.dependency(\"nilo\", …)` in build.zig (`-Dgrpc` in " ++
-                    "this repository), or drop `.grpc` from the listener (ADR 220).",
-                .{address},
-            ),
-        }
-    }
-};
-
-fn grpcRefusal(built: bool, wanted: bool) ?GrpcRefusal {
-    if (!wanted) return null;
-    if (!built) return .not_built;
-    return null;
-}
 
 fn tlsRefusal(built: bool, wanted: bool, over_unix_socket: bool) ?TlsRefusal {
     if (!wanted) return null;
@@ -1474,7 +1576,8 @@ pub fn serve(
     comptime ready: anytype,
     comptime stopping: anytype,
     comptime handler: anytype,
-    comptime grpc_handler: anytype,
+    comptime plain_handler: anytype,
+    comptime hand_on: anytype,
 ) !void {
     const State = @TypeOf(state);
     const Options = @TypeOf(options);
@@ -1528,7 +1631,6 @@ pub fn serve(
         address: []const u8,
         port: u16,
         tls: @TypeOf(options.tls),
-        grpc: bool,
     };
 
     // One address this server answers on, and everything that belongs to
@@ -1547,8 +1649,6 @@ pub fn serve(
         accepting: Accepting,
         /// What `listen()` was told, for the log line.
         address: []const u8,
-        /// Speaks gRPC over h2c rather than HTTP/1.1 (ADR 220).
-        grpc: bool,
         /// Set once the socket is closed and its path removed, which a stop
         /// does as soon as the acceptors are gone rather than at the end.
         closed: bool = false,
@@ -1585,13 +1685,12 @@ pub fn serve(
 
     for (listeners, 0..) |*b, i| {
         const want: Want = if (i == 0)
-            .{ .address = options.address, .port = options.port, .tls = options.tls, .grpc = options.grpc }
+            .{ .address = options.address, .port = options.port, .tls = options.tls }
         else
             .{
                 .address = options.also[i - 1].address,
                 .port = options.also[i - 1].port,
                 .tls = options.also[i - 1].tls,
-                .grpc = options.also[i - 1].grpc,
             };
 
         // A path rather than a port: `.address = "unix:/run/nilo.sock"`. One
@@ -1601,10 +1700,6 @@ pub fn serve(
         const unix_path = unixPathIn(want.address);
 
         if (tlsRefusal(nilo_build.tls, want.tls != null, unix_path != null)) |refusal| {
-            refusal.say(want.address);
-            return refusal.toError();
-        }
-        if (grpcRefusal(nilo_build.grpc, want.grpc)) |refusal| {
             refusal.say(want.address);
             return refusal.toError();
         }
@@ -1683,7 +1778,6 @@ pub fn serve(
             .secured = secured,
             .accepting = undefined,
             .address = want.address,
-            .grpc = want.grpc,
         };
         opened = i + 1;
     }
@@ -1694,6 +1788,16 @@ pub fn serve(
     // about.
     const server = listeners[0].server;
     const unix_path = listeners[0].unix_path;
+
+    // What every connection reads its sizes from (`Accepting.sizes`). A copy
+    // of the `Options` in an allocation of its own, made before the group so
+    // that it is freed after the group has cut the last connection off, and
+    // **not a pointer to `options`**: taking the address of that parameter
+    // keeps it in memory, and the same program grew by 20,304 bytes
+    // (ADR 017, ADR 062).
+    const held = try gpa.create(Options);
+    defer gpa.destroy(held);
+    held.* = options;
 
     var group: zio.Group = .init;
     // Whatever is still running when the grace period is over is cut off
@@ -1769,6 +1873,18 @@ pub fn serve(
         }
     }.f;
 
+    // How many records the ciphertext buffer of a TLS connection holds, so
+    // a drain seals up to this many before one write. Page-aligned and
+    // given back at every idle transition with the rest, so only the pages a
+    // large answer touches are resident, and only until the connection waits.
+    const cork_records = 2;
+    // A file shorter than this is read through the writer's buffer as ever.
+    const bulk_min = 16 * 1024;
+    // What a file is read through, and sealed from, at a time on TLS.
+    const bulk_file = 64 * 1024;
+    // The slices of a drain that can keep a byte back (a write is a few).
+    const held_slices = 8;
+
     // A connection's two halves, joined so that a read on one flushes the
     // other first ([ADR 201](../../docs/adr/201-a-response-is-flushed-before-the-connection-waits.md)).
     //
@@ -1838,21 +1954,22 @@ pub fn serve(
     };
 
     const Conn = struct {
-        /// The plain entry, and the gRPC one (ADR 220): one body, two
-        /// handlers. A comptime parameter rather than a branch, so `run` is
-        /// the function it was to the byte and a gRPC listener's fiber is a
-        /// copy of it that calls something else. Only `-Dgrpc` analyses the
-        /// second.
-        const run = Entry(handler).run;
-        const runGrpc = Entry(grpc_handler).run;
+        /// The plain entry: one body for every connection a plain listener
+        /// takes. In a `-Dhttp2` build it is handed `plain_handler`, which
+        /// reads the first bytes, serves HTTP/1.1 itself and answers `.http2`
+        /// for an HTTP/2 connection, which `hand_on` then runs from this
+        /// entry's frame once the choosing has returned (ADR 259, ADR 062);
+        /// in any other build it is `handler` and this is the function it
+        /// was to the byte. A comptime parameter rather than a branch, so a
+        /// build without the flag analyses none of the choosing.
+        const run = if (nilo_build.http2) Entry(plain_handler, hand_on).run else Entry(handler, null).run;
 
-        fn Entry(comptime connection: anytype) type {
+        fn Entry(comptime connection: anytype, comptime hand_on_to: anytype) type {
             return struct {
         fn run(
             st: State,
             stream: zio.net.Stream,
             conn_gpa: std.mem.Allocator,
-            sizes: Options,
             // The listener's own state rather than `&sh.all.capacity`, which is all this
             // entry reads of it: `runTls` below wants the rest, and the two
             // entries keep one argument list so the plain one's frame is
@@ -1863,6 +1980,7 @@ pub fn serve(
             sh: *Accepting,
         ) void {
             const capacity = &sh.all.capacity;
+            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
             // After the close, not before: the count is meant to answer
             // "how many sockets does this process hold", and the socket is
             // held until it is shut. Deferred first so it runs last.
@@ -1926,7 +2044,14 @@ pub fn serve(
             };
             peer._len = writePeer(&peer._text, stream.socket.address);
 
-            connection(st, &link.reader.interface, &link.writer.interface, &clocks, &wake, peer);
+            const handed = connection(st, &link.reader.interface, &link.writer.interface, &clocks, &wake, peer);
+            // A plain listener of a `-Dhttp2` build answers which framing it
+            // read, and HTTP/2 is run from here, with the choosing returned
+            // from, rather than from inside it (ADR 259). Nothing here in a
+            // build without the flag: `connection` returns `void`.
+            if (comptime @TypeOf(handed) != void) {
+                if (handed == .http2) hand_on_to(&st, &link.reader.interface, &link.writer.interface, &clocks, &wake, &peer);
+            }
         }
             };
         }
@@ -1948,26 +2073,33 @@ pub fn serve(
         ///
         /// What one of these holds while idle, measured at 10,000
         /// connections: 9,307 bytes, fourteen more than a plain connection
-        /// on the same build. The 33 KB of record buffers are page-aligned
+        /// on the same build. The 49 KB of record buffers are page-aligned
         /// and handed back with the cleartext pair at every idle transition,
         /// so they are not in that figure.
-        const runTls = TlsEntry(handler, &.{"http/1.1"}).run;
-        /// gRPC over TLS (ADR 220): the same entry, offering `h2` and
-        /// nothing else in ALPN, so a client that asked for HTTP/1.1 fails
-        /// the handshake rather than being handed frames it cannot read.
-        const runTlsGrpc = TlsEntry(grpc_handler, &.{"h2"}).run;
+        ///
+        /// In a `-Dhttp2` build the handshake offers `h2` and `http/1.1` by
+        /// ALPN, `h2` first (the server's preference, RFC 7301), and the
+        /// connection is served as what was chosen: HTTP/2 through
+        /// `hand_on`, from this frame, and HTTP/1.1 through `handler` as
+        /// ever. A client that sends no ALPN extension at all is served
+        /// HTTP/1.1, the library selecting nothing; one that offers ALPN with
+        /// nothing in common is sent RFC 7301's `no_application_protocol`
+        /// alert (§3.2) and the handshake fails. In any other build it offers `http/1.1` alone and the
+        /// choice is not compiled (ADR 259, ADR 027).
+        const runTls = TlsEntry(handler, if (nilo_build.http2) hand_on else null).run;
 
-        fn TlsEntry(comptime connection: anytype, comptime alpn: []const []const u8) type {
+        fn TlsEntry(comptime connection: anytype, comptime hand_on_to: anytype) type {
+            const alpn: []const []const u8 = if (nilo_build.http2) &.{ "h2", "http/1.1" } else &.{"http/1.1"};
             return struct {
         fn run(
             st: State,
             stream: zio.net.Stream,
             conn_gpa: std.mem.Allocator,
-            sizes: Options,
             sh: *Accepting,
         ) void {
             if (!nilo_build.tls) unreachable;
             const capacity = &sh.all.capacity;
+            const sizes: *const Options = @ptrCast(@alignCast(sh.sizes));
             defer capacity.give();
             defer stream.close();
             // Always IP: a TLS listener on a unix socket is refused in
@@ -1976,13 +2108,15 @@ pub fn serve(
 
             // The record layer. A TLS record is at most 16,645 bytes on the
             // wire and has to be whole before it can be decrypted, so the
-            // input side cannot be smaller than one; the output side is the
-            // largest record this library writes. Page-aligned for the same
+            // input side cannot be smaller than one; the output side holds
+            // `cork_records` of the largest record this library writes, so a
+            // drain is sealed and sent in as few writes as that allows
+            // (ADR 212). Page-aligned for the same
             // reason the cleartext pair is: so every page of them belongs
             // to this connection alone and can be given back.
             const raw_in = alignedPages(conn_gpa, tls.input_buffer_len) catch return;
             defer conn_gpa.free(raw_in);
-            const raw_out = alignedPages(conn_gpa, tls.output_buffer_len) catch return;
+            const raw_out = alignedPages(conn_gpa, tls.output_buffer_len * cork_records) catch return;
             defer conn_gpa.free(raw_out);
             var link: Link = undefined;
             link.init(stream, raw_in, raw_out);
@@ -2037,7 +2171,126 @@ pub fn serve(
             defer conn_gpa.free(clear_in);
             const clear_out = alignedPages(conn_gpa, sizes.write_buffer) catch return;
             defer conn_gpa.free(clear_out);
-            var tw = conn.writer(clear_out);
+            const TlsWriter = @TypeOf(conn.writer(clear_out));
+            // The cleartext writer the handler sees. The library seals a
+            // record and writes it to the socket at once, so a frame's
+            // nine-byte head and its payload were two records and two
+            // writes, and a body of a megabyte was sixty-four. Sealer
+            // keeps the library's flush after each record for the length of
+            // one drain and sends what it sealed in as few writes as the
+            // record buffer holds (`cork_records` of them).
+            const Sealer = struct {
+                inner: TlsWriter,
+                link: *Link,
+                plain: *const std.Io.Writer.VTable,
+                corked: std.Io.Writer.VTable,
+                gpa: std.mem.Allocator,
+                interface: std.Io.Writer,
+
+                const vtable: std.Io.Writer.VTable = .{ .drain = sealDrain, .sendFile = sealFile };
+
+                fn of(w: *std.Io.Writer) *@This() {
+                    return @alignCast(@fieldParentPtr("interface", w));
+                }
+
+                fn cork(self: *@This()) void {
+                    self.link.writer.interface.vtable = &self.corked;
+                }
+
+                /// The library's flushes are over: the one write for what
+                /// it sealed in between.
+                fn uncork(self: *@This()) std.Io.Writer.Error!void {
+                    const out = &self.link.writer.interface;
+                    out.vtable = self.plain;
+                    try out.flush();
+                }
+
+                fn sealDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+                    const self = of(w);
+                    // A drain that carries data keeps the last byte of it in
+                    // the buffer: the records sealed so far wait in the
+                    // record buffer for the write that the flush (or the
+                    // next full buffer) makes, and a caller that flushes
+                    // only a writer with something in it still finds
+                    // something, as it would on a plain connection whose
+                    // buffer was not emptied. Without it a frame's head and
+                    // its payload were two writes.
+                    var total: usize = 0;
+                    if (splat == 1) for (data) |d| {
+                        total += d.len;
+                    };
+                    var view: [held_slices][]const u8 = undefined;
+                    var last: u8 = 0;
+                    const hold = total != 0 and data.len <= held_slices;
+                    if (hold) {
+                        @memcpy(view[0..data.len], data);
+                        var at = data.len;
+                        while (at > 0) {
+                            at -= 1;
+                            if (view[at].len == 0) continue;
+                            last = view[at][view[at].len - 1];
+                            view[at] = view[at][0 .. view[at].len - 1];
+                            break;
+                        }
+                    }
+                    self.inner.interface.end = w.end;
+                    self.cork();
+                    const n = self.inner.interface.vtable.drain(&self.inner.interface, if (hold) view[0..data.len] else data, splat) catch |err| {
+                        w.end = self.inner.interface.end;
+                        self.link.writer.interface.vtable = self.plain;
+                        return err;
+                    };
+                    w.end = self.inner.interface.end;
+                    if (hold) {
+                        self.link.writer.interface.vtable = self.plain;
+                        w.buffer[0] = last;
+                        w.end = 1;
+                        return n + 1;
+                    }
+                    try self.uncork();
+                    return n;
+                }
+
+                /// A file is read a buffer at a time and sealed as it goes.
+                /// The writer's own buffer is a connection's write buffer,
+                /// 4 KiB, which made every record 4 KiB and every record a
+                /// read and a write; the buffer here lives for the file
+                /// alone, so no connection holds it idle.
+                fn sealFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+                    const self = of(w);
+                    const left0: usize = @intFromEnum(limit);
+                    // `sendFileAll` asks again until its limit is met, and a
+                    // limit past the end of the file means a second call
+                    // that would take a buffer to learn there is nothing.
+                    if (file_reader.atEnd()) return error.EndOfStream;
+                    const left_in_file: u64 = if (file_reader.size) |size| size -| file_reader.logicalPos() else left0;
+                    const wanted: usize = @intCast(@min(left0, left_in_file));
+                    if (wanted < bulk_min) return error.Unimplemented;
+                    const buf = self.gpa.alloc(u8, @min(wanted, bulk_file)) catch return error.Unimplemented;
+                    defer self.gpa.free(buf);
+                    var total: usize = 0;
+                    while (total < wanted) {
+                        const want = @min(wanted - total, buf.len);
+                        const n = file_reader.interface.readSliceShort(buf[0..want]) catch return error.ReadFailed;
+                        if (n == 0) {
+                            if (total == 0) return error.EndOfStream;
+                            break;
+                        }
+                        try w.writeAll(buf[0..n]);
+                        total += n;
+                    }
+                    return total;
+                }
+            };
+            var tw: Sealer = .{
+                .inner = conn.writer(clear_out),
+                .link = &link,
+                .plain = link.writer.interface.vtable,
+                .corked = link.writer.interface.vtable.*,
+                .gpa = conn_gpa,
+                .interface = .{ .vtable = &Sealer.vtable, .buffer = clear_out },
+            };
+            tw.corked.flush = std.Io.Writer.noopFlush;
 
             // `Link` one layer up: before the cleartext reader asks the
             // library for a record, what the handler wrote into the cleartext
@@ -2082,7 +2335,18 @@ pub fn serve(
                 .leftover = &conn.cleartext_buf,
             };
             wake.raw = &raw;
-            connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
+            // What the handshake settled on is read here and the HTTP/2
+            // connection is run through one call that is never inlined, so
+            // none of its frame is the one an HTTP/1.1 connection parks
+            // under (ADR 062, ADR 259). A build without the flag has neither
+            // the test nor the call.
+            if (comptime nilo_build.http2) {
+                const h2 = if (conn.alpn_protocol) |chosen| std.mem.eql(u8, chosen, "h2") else false;
+                if (h2)
+                    hand_on_to(&st, &tr.interface, &tw.interface, &clocks, &wake, &peer)
+                else
+                    connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
+            } else connection(st, &tr.interface, &tw.interface, &clocks, &wake, peer);
             // The handler is done with the connection: what it wrote goes
             // out as records, then close_notify, so the peer sees an end
             // rather than a reset. A failure here is a peer already gone.
@@ -2109,8 +2373,8 @@ pub fn serve(
     for (listeners, 0..) |*b, i| b.accepting = .{
         .all = &shared,
         .secured = if (b.secured) |*sec| sec else null,
-        .grpc = b.grpc,
         .index = @intCast(i),
+        .sizes = held,
     };
 
     // One acceptor. There is one per executor ([ADR 200](../../docs/adr/200-every-executor-accepts.md)),
@@ -2121,7 +2385,7 @@ pub fn serve(
     // one does not matter, because the connection is then dealt to an
     // executor round-robin by `spawn`, the same as before.
     const Acceptor = struct {
-        fn run(sh: *Accepting, server_: zio.net.Server, st: State, conn_gpa: std.mem.Allocator, sizes: Options, connections: *zio.Group) void {
+        fn run(sh: *Accepting, server_: zio.net.Server, st: State, conn_gpa: std.mem.Allocator, connections: *zio.Group) void {
             // Grows while accepting keeps failing for want of a descriptor,
             // and is reset by the first connection that gets through. Per
             // acceptor, because each one waits on its own; the log line is
@@ -2233,14 +2497,12 @@ pub fn serve(
                 // Two entries and one argument list, for the reason on
                 // `Conn.runTls`. `nilo_build.tls` first so that a build
                 // without TLS has no reference to `runTls` to analyse.
-                const spawned = if (nilo_build.tls and nilo_build.grpc and sh.secured != null and sh.grpc)
-                    connections.spawn(Conn.runTlsGrpc, .{ st, stream, conn_gpa, sizes, sh })
-                else if (nilo_build.tls and sh.secured != null)
-                    connections.spawn(Conn.runTls, .{ st, stream, conn_gpa, sizes, sh })
-                else if (nilo_build.grpc and sh.grpc)
-                    connections.spawn(Conn.runGrpc, .{ st, stream, conn_gpa, sizes, sh })
+                comptime assertTaskClass(@TypeOf(Conn.run));
+                if (nilo_build.tls) comptime assertTaskClass(@TypeOf(Conn.runTls));
+                const spawned = if (nilo_build.tls and sh.secured != null)
+                    connections.spawn(Conn.runTls, .{ st, stream, conn_gpa, sh })
                 else
-                    connections.spawn(Conn.run, .{ st, stream, conn_gpa, sizes, sh });
+                    connections.spawn(Conn.run, .{ st, stream, conn_gpa, sh });
                 spawned catch |err| {
                     sh.all.capacity.give();
                     stream.close();
@@ -2268,7 +2530,7 @@ pub fn serve(
     defer acceptors.cancel();
     for (listeners) |*b| {
         for (0..threads) |_| {
-            try acceptors.spawn(Acceptor.run, .{ &b.accepting, b.server, state, gpa, options, &group });
+            try acceptors.spawn(Acceptor.run, .{ &b.accepting, b.server, state, gpa, &group });
         }
     }
 
@@ -2417,6 +2679,26 @@ pub const blocking = zio.blockInPlace;
 /// the pool's `max_threads`, so the call never waits in the queue behind a
 /// job already running (zio#745).
 pub const blockingReserved = zio.blockInPlaceReserved;
+
+/// Let the other fibers on this thread run before this one goes on, and
+/// return at once where there is nothing to switch to. **A yield is a
+/// cancellation point:** zio checks for a cancel when it switches and consumes
+/// it, so a caller that swallowed the error would lose the one cancel a stop
+/// sends it. Every caller passes `error.Canceled` on.
+pub fn yield() error{Canceled}!void {
+    try zio.yield();
+}
+
+/// Writes and waits made between `beginShield` and `endShield` are not
+/// cancelled: how a connection that was cancelled at shutdown still says what
+/// it owes its peer, once, before it goes (ADR 260). Outside a fiber, nothing.
+pub fn beginShield() void {
+    zio.beginShield();
+}
+
+pub fn endShield() void {
+    zio.endShield();
+}
 
 /// Wait, without stopping the thread. `error.Canceled` if the request was
 /// cancelled while waiting — the same failure `Mutex.lock` has, and it maps
@@ -2611,6 +2893,15 @@ pub fn spawnLocal(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void 
     };
 }
 
+/// `spawnLocal` that says so when the work could not be kept on the calling
+/// executor (`error.InvalidPlacement`, work stealing), instead of dealing it
+/// round-robin: for a caller whose reuse of a fiber depends on the next
+/// stream running on the same thread (ADR 260).
+pub fn spawnLocalExact(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+    const group = background.load(.acquire) orelse return error.NoServer;
+    return group.spawnInto(.local, func, args);
+}
+
 // ---- the per-request slot (see ADR 006) ----
 //
 // zio runs each connection in its own fiber, and many fibers share one OS
@@ -2755,13 +3046,6 @@ test "a path is read as a path only when it says unix:" {
     // Said, rather than guessed at: an empty path is refused by `listenOnUnix`
     // with a sentence, not treated as an address.
     try testing.expectEqualStrings("", unixPathIn("unix:").?);
-}
-
-test "`.grpc` is refused by a build without it" {
-    try testing.expectEqual(@as(?GrpcRefusal, null), grpcRefusal(false, false));
-    try testing.expectEqual(@as(?GrpcRefusal, null), grpcRefusal(true, true));
-    try testing.expectEqual(@as(?GrpcRefusal, .not_built), grpcRefusal(false, true));
-    try testing.expect(explained(GrpcRefusal.not_built.toError()));
 }
 
 test "`.tls` is refused, in words, by a build without it and by a listener on a socket file" {

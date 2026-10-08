@@ -69,6 +69,9 @@
 //!   failures it has already explained in words.
 //! - `debug_io` — wired into `std_options_debug_io` so that `std.log`
 //!   does not block the event loop.
+//! - `beginShield`/`endShield` — keep a cancel from reaching the writes
+//!   between them, so a connection cancelled at shutdown can end the
+//!   streams it holds with their last frames (ADR 260).
 //! - `Binding`/`bindSlot`/`unbindSlot`/`slot` — one pointer bound to the
 //!   unit of work currently running (a fiber, a thread, whatever the
 //!   Engine uses), for hidden per-request state (ADR 006).
@@ -93,6 +96,22 @@
 //! - `spawn`/`spawnLocal`: start a fiber the running server owns, dealt
 //!   to the next executor or kept on the caller's. An Engine with one
 //!   thread has one answer to both (ADR 028, ADR 220).
+//! - `spawnLocalExact`: `spawnLocal` that fails with `error.InvalidPlacement`
+//!   where the Engine cannot keep the work on the caller's executor, instead
+//!   of dealing it elsewhere: an HTTP/2 connection queues its next call
+//!   behind a fiber only where the two share a thread (ADR 260). An Engine
+//!   with one thread never fails it.
+//! - `yield`: let the other fibers of this thread run. It is a cancellation
+//!   point and fails with `error.Canceled`, the only report of that cancel.
+//! - `Monitor`/`Signal`: a call waiting on its connection, and the connection
+//!   telling it so. `Monitor` is the Engine's `Mutex`, taken where a refusal
+//!   has nowhere to go, and `Signal` is its `Condition` parked on that
+//!   mutex, with or without a limit on how long. They are what the inbound
+//!   pipe of an HTTP/2 request waits on (ADR 260), and they have to be
+//!   thread-safe, because `spawnLocal` keeps a call on its connection's
+//!   executor only where the Engine can: where tasks work steal it deals the
+//!   call to another thread. An Engine that has a parking lock and a wait
+//!   queue on it (the same two `Gate` is built on) has both already.
 //! - `blocking`/`sleep` — the general form of that same problem. A handler
 //!   that calls anything blocking stops every other request sharing its
 //!   thread, and the Engine is the only layer that knows how to wait
@@ -207,7 +226,7 @@ pub const Options = struct {
         key: []const u8,
     };
 
-    /// One more address to answer on, named by `also`. The three fields a
+    /// One more address to answer on, named by `also`. The fields a
     /// second listener can differ in and no others: everything else about
     /// a connection — its buffers, its deadlines, how many the process
     /// holds — is the server's rather than the port's
@@ -224,14 +243,6 @@ pub const Options = struct {
         /// a plain port and a TLS port in one process is what the field
         /// exists for, and each certificate is that listener's alone.
         tls: ?Tls = null,
-        /// Speak gRPC on this one rather than HTTP/1.1: HTTP/2 with prior
-        /// knowledge (h2c), or with `tls` set as well, HTTP/2 chosen by ALPN
-        /// (`h2`, and nothing else offered). Each unary call is answered by
-        /// the route `app.post` registered at its path
-        /// ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
-        /// Needs `.grpc = true` on the dependency, and is refused at
-        /// `listen()` without it.
-        grpc: bool = false,
     };
 
     /// An IPv4 or IPv6 address in the usual notation: `"127.0.0.1"` and
@@ -360,7 +371,7 @@ pub const Options = struct {
     /// six years speaks and nothing older does. One certificate per
     /// listener: no selection by name, no client certificates, no session
     /// tickets, and no reload without a restart, each of which is a
-    /// use case waiting for a caller (`docs/roadmap.md`).
+    /// use case waiting for a caller (`docs/todo.md`).
     ///
     /// The handshake is bounded by `header_timeout_ms` and
     /// `write_timeout_ms`, because until it is done that is what a
@@ -368,13 +379,6 @@ pub const Options = struct {
     /// client that connects and goes quiet, or speaks plain HTTP to this
     /// port, is dropped when the first of those runs out.
     tls: ?Tls = null,
-
-    /// Speak gRPC on `address` and `port` rather than HTTP/1.1, the way
-    /// `Listener.grpc` does on an entry in `also`: h2c, or HTTP/2 by ALPN when
-    /// `tls` is set. For a server that answers nothing but gRPC; one that
-    /// serves both gives gRPC an entry in `also` instead
-    /// ([ADR 220](../docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
-    grpc: bool = false,
 
     /// More addresses to answer on, beside the one `address` and `port`
     /// name ([ADR 213](../docs/adr/213-a-server-answers-on-more-than-one-address.md)).
@@ -799,7 +803,8 @@ pub fn serve(
     comptime ready: anytype,
     comptime stopping: anytype,
     comptime handler: anytype,
-    comptime grpc_handler: anytype,
+    comptime h2_handler: anytype,
+    comptime plain_handler: anytype,
 ) !void {
     const State = @TypeOf(state);
 
@@ -823,21 +828,44 @@ pub fn serve(
             handler(carried.state, in, out, deadlines, waker, peer);
         }
 
-        /// The same for a listener that speaks gRPC (ADR 220). Its own
-        /// function rather than a flag on `run`, for the reason the Engine
-        /// keeps `runTls` apart: nothing is added to the plain path.
-        fn runGrpc(
+        /// The same for a plain listener of a `-Dhttp2` build, which chooses
+        /// its framing from the first bytes (ADR 259) and says which it chose
+        /// by what it returns. Its own function rather than a flag on `run`,
+        /// for the reason the Engine keeps `runTls` apart: nothing is added
+        /// to the path a build without the flag, or a TLS listener, runs.
+        fn runPlain(
             carried: Carried,
             in: *std.Io.Reader,
             out: *std.Io.Writer,
             clocks: *engine.Clocks,
             wake: *engine.Wake,
             peer: Peer,
+        ) Hand {
+            var deadlines = carried.limits;
+            deadlines.target = clocks;
+            const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
+            return plain_handler(carried.state, in, out, deadlines, waker, peer);
+        }
+
+        /// What the Engine runs once `runPlain` has answered `.http2`, or a
+        /// TLS handshake has chosen `h2` (stage 7), from the entry's own
+        /// frame after the choosing has returned, so that the
+        /// HTTP/1.1 connection that did not need it holds none of what it
+        /// takes: its arguments are pointers to what the entry already keeps
+        /// live, and it is `noinline` so none of its frame is the entry's
+        /// (ADR 259, ADR 062).
+        noinline fn handOn(
+            carried: *const Carried,
+            in: *std.Io.Reader,
+            out: *std.Io.Writer,
+            clocks: *engine.Clocks,
+            wake: *engine.Wake,
+            peer: *const Peer,
         ) void {
             var deadlines = carried.limits;
             deadlines.target = clocks;
             const waker: Waker = .{ .vtable = &engine_waker, .target = wake };
-            grpc_handler(carried.state, in, out, deadlines, waker, peer);
+            h2_handler(carried.state, in, out, deadlines, waker, peer.*);
         }
 
         /// The startup hook, unwrapped from what the Engine carries. The
@@ -868,7 +896,7 @@ pub fn serve(
             .body_grace_ms = options.body_grace_ms,
             .write_ms = options.write_timeout_ms,
         },
-    }, Bridge.start, Bridge.winddown, Bridge.run, Bridge.runGrpc);
+    }, Bridge.start, Bridge.winddown, Bridge.run, Bridge.runPlain, Bridge.handOn);
 }
 
 const engine_waker: Waker.VTable = .{
@@ -911,6 +939,17 @@ const engine_waker: Waker.VTable = .{
         fn f(target: ?*anyopaque) void {
             const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
             wake.halfClose();
+        }
+    }.f,
+    .poll = if (!looks_ahead) {} else struct {
+        fn f(target: ?*anyopaque) Woken {
+            const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
+            return switch (wake.lookNow()) {
+                .readable => .readable,
+                .posted => .posted,
+                .timed_out => .timed_out,
+                .closed => .closed,
+            };
         }
     }.f,
 };
@@ -1236,6 +1275,84 @@ pub const Gate = struct {
     }
 };
 
+/// The lock a call and its connection share while one of them is waiting on
+/// the other (ADR 260): the Engine's `Mutex`, taken in a section that is short
+/// and cannot itself wait, so taking it is never refused.
+///
+/// A wrapper for the reason `Mutex` is, and apart from `Mutex` because what is
+/// held under it is the pair's: the section is a handful of loads and stores,
+/// no allocation of a request's and no socket, and it is entered on every
+/// `DATA` frame and every read of a body, which `Mutex.lock`'s `Canceled` has
+/// no place in.
+pub const Monitor = struct {
+    _lock: engine.Mutex = .init,
+
+    pub const init: Monitor = .{};
+
+    pub fn enter(self: *Monitor) void {
+        // Free almost always, and then nothing was waited for to report.
+        if (self._lock.tryLock()) return;
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        self._lock.lockUncancelable();
+    }
+
+    pub fn leave(self: *Monitor) void {
+        self._lock.unlock();
+    }
+};
+
+/// A place to park on a `Monitor` until somebody says there is something new
+/// (ADR 260). One fiber waits on one of these, and `wake` is the other side
+/// saying so, from any thread.
+///
+/// Like the Engine's condition it wraps, a wait can end with nothing changed:
+/// the caller checks what it waited for in a loop, with the monitor held.
+pub const Signal = struct {
+    _cond: engine.Condition = .init,
+
+    pub const init: Signal = .{};
+
+    /// Park, releasing `monitor` for as long as it takes and holding it again
+    /// on every return, an error included. `error.TimedOut` when `limit_ms`
+    /// went by with no `wake`; `error.Canceled` when the fiber is being shut
+    /// down. No limit when `limit_ms` is null.
+    pub fn wait(self: *Signal, monitor: *Monitor, limit_ms: ?u64) error{ Canceled, TimedOut }!void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        if (limit_ms) |ms| return engine.waitWithin(&self._cond, &monitor._lock, @max(ms, 1));
+        return self._cond.wait(&monitor._lock);
+    }
+
+    /// `wait` that cancellation cannot end: for a fiber that has lent memory
+    /// of its own to another and must not return, and so free it, until that
+    /// other has said it is done with it (ADR 260). The monitor is held again
+    /// on return.
+    pub fn waitUncancelable(self: *Signal, monitor: *Monitor) void {
+        const w = watchdog.waitingAnywhere();
+        defer watchdog.waitedAnywhere(w);
+        self._cond.waitUncancelable(&monitor._lock);
+    }
+
+    /// Wake the one that is parked, if any. Held under the monitor or not.
+    pub fn wake(self: *Signal) void {
+        self._cond.signal();
+    }
+};
+
+/// Let the other fibers of this thread run, and come straight back where
+/// there are none: how a connection with a great deal to write gives the calls
+/// it is writing for their turn between rounds (ADR 260). It fails with
+/// `error.Canceled` when the fiber is cancelled, which is the only report of
+/// that cancel there will be.
+pub const yield = engine.yield;
+
+/// Run the writes between these two without a cancel reaching them: a
+/// connection cancelled at shutdown uses it to end the streams it holds
+/// before it goes (ADR 260).
+pub const beginShield = engine.beginShield;
+pub const endShield = engine.endShield;
+
 /// Wait, without stopping the thread. Wrapped for the same reason `Mutex`
 /// is: a sleeping fiber is not a held thread.
 pub fn sleep(ms: u64) error{Canceled}!void {
@@ -1251,6 +1368,10 @@ pub const spawn = engine.spawn;
 /// `spawn`, kept on the calling fiber's thread: for work that answers the
 /// fiber that started it, a gRPC call answering its connection (ADR 220).
 pub const spawnLocal = engine.spawnLocal;
+
+/// `spawnLocal` that fails with `error.InvalidPlacement` rather than
+/// dealing the work to another executor (ADR 260).
+pub const spawnLocalExact = engine.spawnLocalExact;
 
 // ---- files (ADR 009) ----
 //
@@ -1390,6 +1511,22 @@ pub const File = struct {
 
 // ---- idle connections give their pages back ----
 
+/// Hand back the pages the running fiber's stack touched below its current
+/// frame, for a fiber that is about to end having done its work deep in the
+/// stack.
+///
+/// A fiber that ends puts its stack in the Engine's pool with every page it
+/// touched still resident, and the pool keeps what a burst needed for a
+/// minute and more. A handler of HTTP/2 that handed its event stream to the
+/// connection touched 15 KiB of it, and ten thousand of them opened in one
+/// step left four thousand of those stacks pooled, 6 KB for every stream
+/// (`bench/result/http.md`, "What an event stream handed to the HTTP/2
+/// connection costs"). The call is one `madvise`, which is why it is made for
+/// a stream that will live on and not for every request.
+pub fn releaseEndingFiberStack() void {
+    engine.releaseIdleStack();
+}
+
 /// Hand the physical pages behind a connection's buffers back to the kernel
 /// while it waits for the next request.
 ///
@@ -1494,6 +1631,13 @@ pub const Woken = enum { readable, posted, timed_out, closed };
 /// straight has bytes in a fixed buffer or it does not; there is nobody to
 /// post to it, and a `receive` that parked waiting for one would hang the
 /// suite rather than fail it.
+/// What a plain listener's choosing of a framing returned: the connection
+/// was served, or it is HTTP/2 and still to be (ADR 259).
+pub const Hand = enum { done, http2 };
+
+/// Whether the Waker can be asked without waiting; only HTTP/2's connection does.
+const looks_ahead = @import("nilo_build").http2;
+
 pub const Waker = struct {
     target: ?*anyopaque = null,
     vtable: *const VTable = &no_engine,
@@ -1515,7 +1659,16 @@ pub const Waker = struct {
         /// Shut the send side of this connection's socket, and nothing else.
         /// See `halfClose`.
         half_close: *const fn (target: ?*anyopaque) void,
+        /// `wait` without waiting: what has happened already, or `.timed_out`.
+        /// See `poll`.
+        /// Only a `-Dhttp2` build has the field: a default build's Waker is
+        /// the bytes it was.
+        poll: if (looks_ahead) *const fn (target: ?*anyopaque) Woken else void = if (looks_ahead) &nothingYet else {},
     };
+
+    fn nothingYet(_: ?*anyopaque) Woken {
+        return .timed_out;
+    }
 
     /// No Engine underneath: every wait says "go and read", every post is
     /// dropped. `App.handleRequest` called from a test gets this.
@@ -1580,6 +1733,17 @@ pub const Waker = struct {
     /// before the close (ADR 195). Nothing happens with no Engine underneath.
     pub fn halfClose(self: Waker) void {
         self.vtable.half_close(self.target);
+    }
+
+    /// Whether the socket is readable or somebody has posted, without
+    /// waiting: `.timed_out` when neither has happened yet. For a connection
+    /// that is busy writing and must still read what the client sends, where
+    /// `wait` with a limit would cost a millisecond a look and `wait(0)` is no
+    /// limit at all. The same contract as `wait`: one `.readable` per arrival
+    /// of bytes, and the caller has drained its read buffer (ADR 260).
+    pub fn poll(self: Waker) Woken {
+        if (comptime !looks_ahead) unreachable;
+        return self.vtable.poll(self.target);
     }
 };
 

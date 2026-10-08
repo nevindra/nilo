@@ -168,6 +168,7 @@ const http_above_core = [_][]const u8{
     "logger",    "cors",      "csrf",      "secure",    "allowance", "deadline",
     "maxbody",   "http",      "behaviour", "live",      "profile",
     "fuzz",      "fuzz_main", "fuzz_llhttp", "test_root", "wide",
+    "h2test",
 };
 
 const Layer = struct {
@@ -2055,6 +2056,58 @@ const refusals = [_]Refusal{
         .says = "the handler for route \"/invoices/:id\" returns ownbody_content_type_without_write.Invoice, which names a `nilo_content_type` and has no `nilo_write`.",
     },
     .{
+        .name = "decode_without_content_type",
+        .says = "the request body on route \"/readings\" is a decode_without_content_type.Reading, which has a `nilo_decode` and no `nilo_content_type`.",
+    },
+    .{
+        .name = "decode_wrong_signature",
+        .says = "decode_wrong_signature.Reading's `nilo_decode` is not `fn (body: []const u8, arena: std.mem.Allocator) !decode_wrong_signature.Reading`.",
+    },
+    .{
+        .name = "message_with_its_own_decode",
+        .says = "the request body on route \"/sum\" is a message_with_its_own_decode.Sum, which has both a `wire` table and a `nilo_decode`, so it says two things about how its bytes are read.",
+    },
+    .{
+        .name = "decode_and_parse",
+        .says = "argument 1 of the handler for route \"/readings\" is a decode_and_parse.Reading, which carries both `nilo_parse` and `nilo_decode`, so it could be a path param or the request body.",
+    },
+    .{
+        .name = "bound_message",
+        .says = "the handler for route \"/sum\" binds a bound_message.Sum with `Bound(…)`, which reads a JSON body field by field — and this type's body is read whole, as protobuf or by its own `nilo_decode`.",
+    },
+    .{
+        .name = "message_answering_json",
+        .says = "the handler for route \"/sum\" reads a protobuf message (message_answering_json.Sum) and answers with a message_answering_json.Total, which is not one.",
+    },
+    .{
+        .name = "rpc_not_a_struct",
+        .says = "`app.rpc` was given u32, which is not a struct.",
+    },
+    .{
+        .name = "rpc_without_name",
+        .says = "rpc_without_name.Greeter is given to `app.rpc` and does not say which service it is.",
+    },
+    .{
+        .name = "rpc_bad_name",
+        .says = "rpc_bad_name.Greeter's `nilo_service` is \"hello/Greeter\", which is not a service's full name.",
+    },
+    .{
+        .name = "rpc_name_not_text",
+        .says = "rpc_name_not_text.Greeter's `nilo_service` has to be text, the service's full name: `pub const nilo_service = \"package.Service\";`.",
+    },
+    .{
+        .name = "rpc_method_without_message",
+        .says = "rpc_method_without_message.Greeter.ping is a `pub fn` of an RPC service, so it is served as \"POST /hello.Greeter/Ping\", and it neither reads nor answers a message.",
+    },
+    .{
+        .name = "rpc_methods_collide",
+        .says = "rpc_methods_collide.Greeter.sayHello and rpc_methods_collide.Greeter.SayHello are both served as \"POST /hello.Greeter/SayHello\": a method's name is its function's with the first letter upper-cased.",
+    },
+    .{
+        .name = "rpc_no_methods",
+        .says = "rpc_no_methods.Greeter is given to `app.rpc` and has no `pub fn`, so it serves nothing.",
+    },
+    .{
         .name = "ownbody_write_without_content_type",
         .says = "the handler for route \"/invoices/:id\" returns ownbody_write_without_content_type.Invoice, which has a `nilo_write` and no `nilo_content_type`.",
     },
@@ -2698,6 +2751,7 @@ const Snippets = struct {
         .{ .path = "docs/guide/metrics.md" },
         .{ .path = "docs/guide/tracing.md" },
         .{ .path = "docs/guide/middleware.md" },
+        .{ .path = "docs/guide/requests.md" },
         .{ .path = "docs/guide/responses.md" },
         .{ .path = "docs/guide/grpc.md" },
         .{ .path = "docs/guide/streaming.md" },
@@ -3400,10 +3454,10 @@ fn s3For(
 /// `wireOptions` below, which every instance of the http module goes through.
 var want_tls: bool = false;
 var in_repo: bool = false;
-/// `-Dgrpc` (ADR 220). No dependency behind it, unlike `-Dtls`: what it
-/// keeps out of a build that did not ask is the code, the binary size ADR 017
-/// counts, rather than a fetch.
-var want_grpc: bool = false;
+/// `-Dhttp2` (ADR 259, ADR 220). No dependency behind it, unlike `-Dtls`: what
+/// it keeps out of a build that did not ask is the code, the binary size ADR
+/// 017 counts, rather than a fetch.
+var want_http2: bool = false;
 
 /// `-Dlibdeflate` (ADR 248): gzip through libdeflate rather than
 /// `std.flate`, for a response and for a static file gzipped at load.
@@ -3427,12 +3481,12 @@ var want_libdeflate: bool = false;
 /// http test root, which links the library whatever the flag says so that
 /// `compress.zig`'s tests hold both backends in one run, while the App
 /// under test keeps the backend a dependent gets by default.
-fn wireOptions(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, mode: std.builtin.OptimizeMode, on: bool, grpc: bool, link_libdeflate: bool) void {
+fn wireOptions(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, mode: std.builtin.OptimizeMode, on: bool, http2: bool, link_libdeflate: bool) void {
     const opts = b.addOptions();
     opts.addOption(bool, "tls", on);
-    // gRPC rides the same options module. It has no library to fetch, so
-    // there is nothing to wire beyond the flag (ADR 220).
-    opts.addOption(bool, "grpc", grpc);
+    // HTTP/2 rides the same options module, and gRPC rides HTTP/2. It has no
+    // library to fetch, so there is nothing to wire beyond the flag (ADR 259).
+    opts.addOption(bool, "http2", http2);
     const linked = link_libdeflate or want_libdeflate;
     opts.addOption(bool, "libdeflate", want_libdeflate);
     opts.addOption(bool, "libdeflate_linked", linked);
@@ -3568,7 +3622,7 @@ fn httpFor(
             .{ .name = "nilo_pw", .module = pwFor(b, target, mode) },
         },
     });
-    wireOptions(b, module, target, mode, want_tls, want_grpc, false);
+    wireOptions(b, module, target, mode, want_tls, want_http2, false);
     return module;
 }
 
@@ -4125,6 +4179,16 @@ const AdrCheck = struct {
 /// one the pages produce. `docs-index` rewrites that list; `docs-check`, on
 /// `test`, refuses it when it is out of step.
 ///
+/// The todo list and the roadmap are held the same way. An anchor into them,
+/// or into `decided.md`, `history.md` and `risks.md`, is checked as one into a
+/// page is, though their own heads and prose are not a page's. A todo entry
+/// names the roadmap direction it serves on a `**Direction:**` line, and each
+/// direction's list of those entries is written by `docs-index` from those
+/// lines, so a direction never lists an entry that has left. The todo list
+/// says on its `**Ranked at X.**` line which version it was last ranked at,
+/// and a release that bumps `build.zig.zon` past it fails here until the list
+/// is ranked again.
+///
 /// Anchors are GitHub's, lowercase with punctuation dropped, because the
 /// reference and the design pages are read on GitHub (ADR 219). A scan rather
 /// than a parse, like `AdrCheck`: the shapes it reads are the ones these pages
@@ -4135,6 +4199,13 @@ const DocsCheck = struct {
     const index_heading = "## Every heading";
     const index_note = "Every heading of every page, in page order. Find a name here, then read it on its page. `zig build docs-index` writes this list from the pages, and `zig build docs-check` refuses it when it is out of step.";
     const folders = [_][]const u8{ "docs/guide", "docs/design", "docs/reference" };
+    const todo = "docs/todo.md";
+    const roadmap = "docs/roadmap.md";
+    /// Files other pages link into by heading that are not pages themselves.
+    const targets = [_][]const u8{ todo, roadmap, "docs/decided.md", "docs/history.md", "docs/risks.md" };
+    const gathered_open = "<!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->";
+    const gathered_close = "<!-- /gathered -->";
+    const direction_line = "**Direction:**";
     const heads = [_][]const u8{ "**Guide:**", "**Reference:**", "**Design:**" };
 
     fn step(b: *std.Build, comptime write: bool) *std.Build.Step {
@@ -4146,9 +4217,9 @@ const DocsCheck = struct {
             .makeFn = make,
         }) };
         const named = if (write)
-            b.step("docs-index", "Rewrite the reference's list of every heading from the pages")
+            b.step("docs-index", "Rewrite the reference's list of every heading, and the roadmap's lists of todo entries")
         else
-            b.step("docs-check", "Check each doc page's head, prose and links, the map, and the reference's list of headings");
+            b.step("docs-check", "Check each doc page's head, prose and links, the map, the reference's list of headings, and the roadmap's lists of todo entries");
         named.dependOn(&self._step);
         return named;
     }
@@ -4182,24 +4253,37 @@ const DocsCheck = struct {
             }
         }
 
+        var known: std.ArrayList(Page) = .empty;
+        try known.appendSlice(gpa, pages.items);
+        for (targets) |path| try known.append(gpa, .{ .path = path, .text = try root.readFileAlloc(io, path, gpa, .limited(1 << 20)) });
+
+        var refused: usize = 0;
         const current = pageAt(pages.items, index).?.text;
         const wanted = try indexed(gpa, pages.items, current);
+        const plan = pageAt(known.items, roadmap).?.text;
+        const planned = try gathered(s, pageAt(known.items, todo).?.text, plan, &refused);
         if (self.write) {
             if (!std.mem.eql(u8, wanted, current)) try root.writeFile(io, .{ .sub_path = index, .data = wanted });
+            if (!std.mem.eql(u8, planned, plan)) try root.writeFile(io, .{ .sub_path = roadmap, .data = planned });
+            if (refused > 0) return error.MakeFailed;
             return;
         }
 
-        var refused: usize = 0;
         for (pages.items) |page| {
             refused += try head(s, page);
             refused += try prose(s, page);
-            refused += try links(s, page.path, page.text, pages.items, true);
+            refused += try links(s, page.path, page.text, known.items, true);
         }
         refused += try mapped(s, pages.items);
         if (!std.mem.eql(u8, wanted, current)) {
             refused += 1;
             try s.addError("nilo: {s}'s list of every heading is out of step with the pages; `zig build docs-index` rewrites it.", .{index});
         }
+        if (!std.mem.eql(u8, planned, plan)) {
+            refused += 1;
+            try s.addError("nilo: {s}'s lists of todo entries are out of step with the Direction lines in {s}; `zig build docs-index` rewrites them.", .{ roadmap, todo });
+        }
+        refused += try ranked(s, pageAt(known.items, todo).?.text, try root.readFileAlloc(io, "build.zig.zon", gpa, .limited(1 << 16)));
 
         // An anchor named from anywhere else: an ADR, the changelog, the roadmap.
         var repo = try root.openDir(io, ".", .{ .iterate = true });
@@ -4214,7 +4298,7 @@ const DocsCheck = struct {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".md")) continue;
             if (pageAt(pages.items, entry.path) != null) continue;
             const text = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(8 << 20)) catch continue;
-            refused += try links(s, try gpa.dupe(u8, entry.path), text, pages.items, false);
+            refused += try links(s, try gpa.dupe(u8, entry.path), text, known.items, false);
         }
 
         if (refused > 0) return error.MakeFailed;
@@ -4317,7 +4401,8 @@ const DocsCheck = struct {
     }
 
     /// Every `](target)` whose target is in the repository: the file exists
-    /// (checked on the pages only), and an anchor into a page is a heading on it.
+    /// (checked on the pages only), and an anchor into a page, or into one of
+    /// `targets`, is a heading on it.
     fn links(s: *std.Build.Step, path: []const u8, text: []const u8, pages: []const Page, files: bool) !usize {
         const b = s.owner;
         const gpa = b.allocator;
@@ -4465,6 +4550,128 @@ const DocsCheck = struct {
             }
         }
         return out.items;
+    }
+
+    const Served = struct { direction: []const u8, line: []const u8 };
+
+    /// The roadmap with each direction's list of the todo entries that serve
+    /// it written again from the todo list. A direction is a `###` heading of
+    /// the roadmap, and its list sits between `gathered_open` and
+    /// `gathered_close`; an entry is the last bold claim of the todo list
+    /// above a `**Direction:**` line, listed with its tier (the `##` heading
+    /// it is under, up to a colon) and its module (the `###` one).
+    fn gathered(s: *std.Build.Step, todo_text: []const u8, plan: []const u8, refused: *usize) ![]u8 {
+        const gpa = s.owner.allocator;
+        var directions: std.StringHashMapUnmanaged(void) = .empty;
+        for (try headings(gpa, plan)) |h| if (h.depth == 3) try directions.put(gpa, h.anchor, {});
+
+        var served: std.ArrayList(Served) = .empty;
+        var tier: []const u8 = "";
+        var tier_anchor: []const u8 = "";
+        var module: []const u8 = "";
+        var claim: []const u8 = "";
+        var fenced = false;
+        var number: usize = 0;
+        var lines = std.mem.splitScalar(u8, todo_text, '\n');
+        while (lines.next()) |line| {
+            number += 1;
+            if (fence(line)) fenced = !fenced;
+            if (fenced) continue;
+            if (std.mem.startsWith(u8, line, "## ")) {
+                const words = std.mem.trim(u8, line[3..], " ");
+                tier = words[0 .. std.mem.indexOfScalar(u8, words, ':') orelse words.len];
+                tier_anchor = try slug(gpa, words);
+                module = "";
+                claim = "";
+            } else if (std.mem.startsWith(u8, line, "### ")) {
+                module = std.mem.trim(u8, line[4..], " ");
+            } else if (std.mem.startsWith(u8, line, direction_line)) {
+                var at: usize = 0;
+                var named: usize = 0;
+                while (std.mem.indexOfPos(u8, line, at, "](./roadmap.md#")) |open| {
+                    at = open + "](./roadmap.md#".len;
+                    const close = std.mem.indexOfScalarPos(u8, line, at, ')') orelse break;
+                    const anchor = line[at..close];
+                    named += 1;
+                    if (!directions.contains(anchor)) {
+                        refused.* += 1;
+                        try s.addError("nilo: {s}:{d} names #{s} as its direction, and no `###` heading of {s} has that anchor.", .{ todo, number, anchor, roadmap });
+                    } else if (claim.len == 0) {
+                        refused.* += 1;
+                        try s.addError("nilo: {s}:{d} names a direction with no bold claim above it in its tier.", .{ todo, number });
+                    } else {
+                        try served.append(gpa, .{
+                            .direction = anchor,
+                            .line = try std.fmt.allocPrint(gpa, "- [{s}](./todo.md#{s}) · {s} · {s}", .{ tier, tier_anchor, module, claim }),
+                        });
+                    }
+                }
+                if (named == 0) {
+                    refused.* += 1;
+                    try s.addError("nilo: {s}:{d} is a Direction line that links no heading of {s}.", .{ todo, number, roadmap });
+                }
+            } else if (std.mem.startsWith(u8, line, "**") and !std.mem.startsWith(u8, line, "**Needs:**") and !std.mem.startsWith(u8, line, "**What would settle it:**")) {
+                if (std.mem.indexOfPos(u8, line, 2, "**")) |end| claim = line[2..end];
+            }
+        }
+
+        var out: std.ArrayList(u8) = .empty;
+        var listed: std.StringHashMapUnmanaged(void) = .empty;
+        var direction: []const u8 = "";
+        var skipping = false;
+        var rest = std.mem.splitScalar(u8, plan, '\n');
+        var first = true;
+        while (rest.next()) |line| {
+            if (skipping) {
+                if (!std.mem.eql(u8, line, gathered_close)) continue;
+                skipping = false;
+            }
+            if (!first) try out.append(gpa, '\n');
+            first = false;
+            try out.appendSlice(gpa, line);
+            if (std.mem.startsWith(u8, line, "## ")) direction = "";
+            if (std.mem.startsWith(u8, line, "### ")) direction = try slug(gpa, line[4..]);
+            if (!std.mem.eql(u8, line, gathered_open)) continue;
+            if (direction.len == 0) {
+                refused.* += 1;
+                try s.addError("nilo: {s} has a list of todo entries outside any direction.", .{roadmap});
+                continue;
+            }
+            try listed.put(gpa, direction, {});
+            try out.appendSlice(gpa, "\n\n");
+            var any = false;
+            for (served.items) |item| {
+                if (!std.mem.eql(u8, item.direction, direction)) continue;
+                try out.print(gpa, "{s}\n", .{item.line});
+                any = true;
+            }
+            if (!any) try out.appendSlice(gpa, "No entry in the todo list names this direction yet.\n");
+            skipping = true;
+        }
+        if (skipping) {
+            refused.* += 1;
+            try s.addError("nilo: {s} opens a list of todo entries and never closes it with `{s}`.", .{ roadmap, gathered_close });
+        }
+        var it = directions.keyIterator();
+        while (it.next()) |anchor| {
+            if (listed.contains(anchor.*)) continue;
+            refused.* += 1;
+            try s.addError("nilo: {s}'s direction #{s} has no list of the todo entries that serve it; put `{s}` and `{s}` under it, and `zig build docs-index` fills them.", .{ roadmap, anchor.*, gathered_open, gathered_close });
+        }
+        return out.items;
+    }
+
+    /// The todo list was last ranked at the version `build.zig.zon` names,
+    /// which a release bumps: ranking it again is part of cutting one.
+    fn ranked(s: *std.Build.Step, todo_text: []const u8, zon: []const u8) !usize {
+        const gpa = s.owner.allocator;
+        const key = ".version = \"";
+        const from = (std.mem.indexOf(u8, zon, key) orelse return 0) + key.len;
+        const to = std.mem.indexOfScalarPos(u8, zon, from, '"') orelse return 0;
+        const line = try std.fmt.allocPrint(gpa, "**Ranked at {s}.**", .{zon[from..to]});
+        if (std.mem.indexOf(u8, todo_text, line) != null) return 0;
+        try s.addError("nilo: {s} does not say `{s}`: build.zig.zon names a version the list was not ranked at. Rank it again (its rule 9) and say so on that line.", .{ todo, line });
+        return 1;
     }
 };
 
@@ -4816,11 +5023,19 @@ pub fn build(b: *std.Build) void {
         "Build the TLS listener into nilo_http and fetch the library it needs (ADR 212). Off until a dependent passes `.tls = true`",
     ) orelse false;
     in_repo = b.pkg_hash.len == 0;
-    want_grpc = b.option(
+    want_http2 = b.option(
         bool,
-        "grpc",
-        "Build the gRPC listener into nilo_http: unary calls over h2c (ADR 220). Off until a dependent passes `.grpc = true`",
+        "http2",
+        "Build HTTP/2 into nilo_http, which gRPC rides (ADR 259, ADR 220). Off until a dependent passes `.http2 = true`",
     ) orelse false;
+    // The flag's old name is declared only to be refused: an undeclared
+    // option is reported at the end of configuration as "invalid option",
+    // which says nothing about what to pass instead.
+    if (b.option(bool, "grpc", "Renamed: pass `-Dhttp2` (ADR 259)") != null) std.process.fatal(
+        "nilo: `-Dgrpc` is `-Dhttp2` now: HTTP/2 serves every request and gRPC rides it (ADR 259). " ++
+            "Pass `.http2 = true` to `b.dependency(\"nilo\", …)`.",
+        .{},
+    );
     // Whether gzip is libdeflate's (ADR 248). Off until asked, the way TLS
     // is: the C is fetched and compiled only behind this flag, and a build
     // without it gzips with `std.flate` exactly as before. What is always
@@ -4989,7 +5204,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "nilo_pw", .module = nilo_pw },
         },
     });
-    wireOptions(b, nilo_http, target, optimize, want_tls, want_grpc, false);
+    wireOptions(b, nilo_http, target, optimize, want_tls, want_http2, false);
 
     // The SQL module: a second module beside the library rather than inside
     // it (ADR 036). It lives in `sql/` rather than under `src/` so that the
@@ -5073,9 +5288,16 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zio", .module = zio.module("zio") },
                 .{ .name = "nilo_core", .module = coreFor(b, target, .ReleaseFast) },
+                // A message route is timed, and its body is read by
+                // `nilo_proto` (ADR 256).
+                .{ .name = "nilo_proto", .module = protoFor(b, target, .ReleaseFast) },
             },
         }),
     });
+    // The App's files ask `nilo_build` which deflate to gzip with and
+    // whether gRPC is in (ADR 248, ADR 220), so the profile is wired the way
+    // every other instance of them is.
+    wireOptions(b, profile.root_module, target, .ReleaseFast, want_tls, want_http2, false);
     const run_profile = b.addRunArtifact(profile);
     // `zig build profile -- --routes <file>` times matching on a route table
     // of the caller's, one `METHOD /pattern` a line.
@@ -5103,6 +5325,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // gRPC in whatever the flags say, because `--frames` is the gRPC
+    // listener, and without it a call has nowhere to go (ADR 220).
+    wireOptions(b, fuzzer.root_module, target, .ReleaseSafe, false, true, false);
     const run_fuzzer = b.addRunArtifact(fuzzer);
     if (b.args) |args| run_fuzzer.addArgs(args);
     b.step("fuzz", "Throw generated requests at the parser, or with --frames connections at the gRPC listener").dependOn(&run_fuzzer.step);
@@ -5159,6 +5384,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the tests in Debug — the fast loop");
     const test_all_step = b.step("test-all", "Run the tests in Debug and ReleaseSafe — what CI runs");
     test_all_step.dependOn(test_step);
+
+    // The profile is compiled on every run and not run: a measuring tool
+    // nothing builds stopped compiling twice before anybody reached for it
+    // (it lost `nilo_build` with ADR 248, and `Stream.init` with ADR 253).
+    // The fuzzer is the same case: it lost `nilo_build` when `framing.zig`
+    // started asking it whether gRPC is in, and nothing noticed.
+    test_step.dependOn(&profile.step);
+    test_step.dependOn(&fuzzer.step);
 
     // Core, on its own, in both modes (ADR 038). It hangs off `test` rather
     // than beside it because it is the fastest thing in this file — no
@@ -5751,7 +5984,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "nilo_fetch", .module = fetchFor(b, target, .ReleaseFast, bench_core) },
         },
     });
-    wireOptions(b, bench_http, target, .ReleaseFast, want_tls, want_grpc, false);
+    wireOptions(b, bench_http, target, .ReleaseFast, want_tls, want_http2, false);
     const bench_nilo_sql = b.createModule(.{
         .root_source_file = b.path("sql/sql.zig"),
         .target = target,
@@ -6164,6 +6397,53 @@ pub fn build(b: *std.Build) void {
     b.step("bench-body-server", "A server reading request bodies, for what one holds while it arrives")
         .dependOn(&b.addInstallArtifact(bench_body_server, .{}).step);
 
+    // Whether a plain idle connection holds one page of fiber stack, or two,
+    // which is the line between 4,669 bytes and 8,765 on every connection a
+    // server holds. Held by a step on `test` so a change to the connection
+    // loop cannot cross it unseen (ADR 062, ADR 212). Built `ReleaseFast` with
+    // the flags of this build, because Debug frames are not the frames being
+    // guarded and `-Dtls` moves the answer.
+    //
+    // **Linux on x86-64 only, host and target both.** The program reads
+    // `/proc/self/smaps` and the boundary is an x86-64 frame size. Anywhere
+    // else the step is still there, named "skipped", runs nothing and
+    // succeeds, so `zig build test` is green on macOS, Windows and a
+    // cross-compile without the check having said anything about them.
+    const park_check_step = b.step("park-check", "Fail if a plain idle connection holds a second page of stack it should not (Linux x86-64 only)");
+    const park_here = b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64 and
+        target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
+    if (park_here) {
+        const park_options = b.addOptions();
+        park_options.addOption(bool, "tls", want_tls);
+        park_options.addOption(bool, "http2", want_http2);
+        const park_check = b.addExecutable(.{
+            .name = "nilo-park-check",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/park_check.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .strip = stripMeasured(strip, .ReleaseFast),
+                .imports = &.{
+                    .{ .name = "nilo_http", .module = bench_http },
+                    .{ .name = "park_options", .module = park_options.createModule() },
+                },
+            }),
+        });
+        park_check_step.dependOn(&b.addRunArtifact(park_check).step);
+    } else {
+        const skipped = b.allocator.create(std.Build.Step) catch @panic("OOM");
+        skipped.* = std.Build.Step.init(.{
+            .id = .custom,
+            .name = "park-check skipped: it needs a Linux x86-64 host and target",
+            .owner = b,
+            .makeFn = struct {
+                fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {}
+            }.make,
+        });
+        park_check_step.dependOn(skipped);
+    }
+    test_step.dependOn(park_check_step);
+
     // The benchmark target over TLS, so the plain one has a control on the
     // axes ADR 212 spends: `bench/mem.py --tls` for the idle connection, and
     // `wrk` over `https://` for the request. Only under `-Dtls`, because a
@@ -6183,6 +6463,23 @@ pub fn build(b: *std.Build) void {
         });
         b.step("bench-tls-server", "The benchmark server over TLS, for what the encryption costs a request and an idle connection")
             .dependOn(&b.addInstallArtifact(bench_tls_server, .{}).step);
+
+        // A page with a dozen subresources over TLS, for what a browser
+        // gets from `h2` against `http/1.1`; `bench/page_load.mjs` drives it
+        // (stage 7 of framing, ADR 259).
+        const bench_page_server_module = b.createModule(.{
+            .root_source_file = b.path("bench/page_server.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .strip = stripMeasured(strip, .ReleaseFast),
+            .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+        });
+        const bench_page_server = b.addExecutable(.{
+            .name = "nilo-bench-page-server",
+            .root_module = bench_page_server_module,
+        });
+        b.step("bench-page-server", "A page with a dozen subresources over TLS, for what a browser gets from h2 against http/1.1")
+            .dependOn(&b.addInstallArtifact(bench_page_server, .{}).step);
 
         // Both directions loaded at once, which is the one thing the server
         // above does not do: a 10 KB body in and the same 10 KB out, with
@@ -6249,7 +6546,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_fetch", .module = fetchFor(b, target, mode, core_mod) },
             },
         });
-        wireOptions(b, framework, target, mode, want_tls, want_grpc, false);
+        wireOptions(b, framework, target, mode, want_tls, want_http2, false);
 
         // The test build is the one place this module names an App, and it
         // gets both: `nilo_core` for the module itself, `nilo` for the tests
@@ -6402,7 +6699,7 @@ pub fn build(b: *std.Build) void {
         // feature that is not tested (ADR 032). In-repo only: a dependent
         // running its own tests against nilo is not made to fetch the
         // library for a listener it never asked for.
-        wireOptions(b, lib_tests, target, mode, want_tls or in_repo, want_grpc or in_repo, in_repo);
+        wireOptions(b, lib_tests, target, mode, want_tls or in_repo, want_http2 or in_repo, in_repo);
 
         const library = b.createModule(.{
             .root_source_file = b.path("http/http.zig"),
@@ -6416,7 +6713,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_pw", .module = pw_mod },
             },
         });
-        wireOptions(b, library, target, mode, want_tls, want_grpc, false);
+        wireOptions(b, library, target, mode, want_tls, want_http2, false);
 
         const bench_tests = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
@@ -6495,6 +6792,20 @@ pub fn build(b: *std.Build) void {
         });
         const refused = b.addObject(.{ .name = refusal.name, .root_module = module });
         refused.expect_errors = .{ .contains = b.fmt("error: nilo: {s}", .{refusal.says}) };
+        refusals_step.dependOn(&refused.step);
+    }
+    // One refusal holds only in a build without `-Dhttp2`, because with the
+    // flag the same program is correct: asking the App for gRPC where there
+    // is no framing to collect a call into (ADR 220).
+    if (!want_http2) {
+        const module = b.createModule(.{
+            .root_source_file = b.path("refusals/grpc_without_the_build_flag.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
+        });
+        const refused = b.addObject(.{ .name = "grpc_without_the_build_flag", .root_module = module });
+        refused.expect_errors = .{ .contains = "error: nilo: the App answers gRPC only in a build with `.http2 = true` (`-Dhttp2`)." };
         refusals_step.dependOn(&refused.step);
     }
     test_step.dependOn(refusals_step);

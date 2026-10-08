@@ -87,10 +87,10 @@ pub fn main() !void {
         .threads = threads,
         .port = 8788,
         .also = &.{
-            .{ .address = "127.0.0.1", .port = 50051, .grpc = true },
+            .{ .address = "127.0.0.1", .port = 50051 },
             // gRPC over TLS, `h2` by ALPN, with the suite's self-signed
             // certificate: run from the repository root.
-            .{ .address = "127.0.0.1", .port = 50443, .grpc = true, .tls = .{
+            .{ .address = "127.0.0.1", .port = 50443, .tls = .{
                 .cert = "http/testdata/tls/localhost.pem",
                 .key = "http/testdata/tls/localhost-key.pem",
             } },

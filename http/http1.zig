@@ -65,6 +65,11 @@ pub const Encoding = enum {
     other,
 };
 
+/// Whether a build has a framing whose body the transport frames, which is
+/// what `Request.ends_with_stream` is for. A build without it has no such
+/// field, so `Request` is the struct it always was.
+const transport_framed = @import("nilo_build").http2;
+
 pub const Request = struct {
     /// Slices into the reader's buffer. Valid until the next read from the
     /// same connection (including `discardBody`) — after that the contents
@@ -117,6 +122,12 @@ pub const Request = struct {
     /// `Upgrade: websocket`: what this answers is "might this connection be
     /// read from again", and the only wrong answer is a false negative.
     upgrade: bool = false,
+    /// Whether the body is framed by the transport and ends where the stream
+    /// does: a request on HTTP/2, whose `DATA` is read through the pipe the
+    /// connection fills (ADR 260). `content_length` is then only what the
+    /// client announced, when `has_content_length`, and the connection holds
+    /// the `DATA` to it. Free in memory for the reason `has_content_length` is.
+    ends_with_stream: if (transport_framed) bool else void = if (transport_framed) false else {},
     /// Whether the client said `Expect: 100-continue` and is holding its body
     /// back until the server answers (ADR 073). `Ctx` sends the interim
     /// response at the moment it commits to reading, and `App` reads this to
@@ -388,6 +399,58 @@ pub fn isReservedHeader(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "connection");
 }
 
+/// Whether a field may not travel as a trailer, because what it says has to
+/// be known before the content is (RFC 9110 §6.5.1): the framing, the route,
+/// a request modifier, authentication, a response control, the content's own
+/// format, and HTTP/2's pseudo-headers. A recipient may drop such a trailer or
+/// act on it wrongly, so `Ctx.setTrailer` refuses it where it is set.
+pub fn barredFromTrailer(name: []const u8) bool {
+    if (name.len > 0 and name[0] == ':') return true;
+    const names = [_][]const u8{
+        // framing and the connection
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "upgrade",
+        "trailer",
+        "te",
+        // routing and request modifiers
+        "host",
+        "cache-control",
+        "expect",
+        "max-forwards",
+        "pragma",
+        "range",
+        "if-match",
+        "if-none-match",
+        "if-modified-since",
+        "if-unmodified-since",
+        "if-range",
+        // authentication
+        "authorization",
+        "proxy-authorization",
+        "www-authenticate",
+        "proxy-authenticate",
+        "set-cookie",
+        "cookie",
+        // response controls
+        "age",
+        "date",
+        "expires",
+        "location",
+        "retry-after",
+        "vary",
+        "warning",
+        // the content's format
+        "content-type",
+        "content-encoding",
+        "content-range",
+    };
+    for (names) |n| if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    return false;
+}
+
 /// Whether a response header described the answer a failure is replacing,
 /// and so must not go out on the failure (ADR 024): a JSON 409 labelled gzip,
 /// cacheable for a year, or pointing at an order that was never made.
@@ -400,10 +463,10 @@ pub fn isReservedHeader(name: []const u8) bool {
 /// is no more fit to keep, so that one stays.
 pub fn describesAnswer(name: []const u8, value: []const u8) bool {
     const names = [_][]const u8{
-        "content-encoding", "content-language", "content-location", "content-range",
-        "content-disposition", "content-digest", "repr-digest", "digest",
-        "etag", "last-modified", "accept-ranges", "expires",
-        "age", "location",
+        "content-encoding",    "content-language", "content-location", "content-range",
+        "content-disposition", "content-digest",   "repr-digest",      "digest",
+        "etag",                "last-modified",    "accept-ranges",    "expires",
+        "age",                 "location",
     };
     for (names) |n| {
         if (std.ascii.eqlIgnoreCase(name, n)) return true;
@@ -553,6 +616,121 @@ pub const HeaderIterator = struct {
     }
 };
 
+/// `a` against `b` ignoring case, byte by byte and stopping at the first
+/// difference, which for a line that merely shares a first letter is the
+/// second byte. The same answer as `std.ascii.eqlIgnoreCase`, which lower-cases
+/// both sides of every byte and, measured, was most of a lookup (ADR 256).
+inline fn sameName(a: []const u8, b: []const u8) bool {
+    for (a, b) |x, y| {
+        const d = x ^ y;
+        if (d != 0 and (d != 0x20 or !std.ascii.isAlphabetic(x))) return false;
+        if (y == ':') return false;
+    }
+    return true;
+}
+
+/// The value of the first header called `name` (compared without case), or
+/// null: what `HeaderIterator` finds by splitting every line and trimming it,
+/// found by looking at the bytes that can start the line.
+///
+/// A line starts after a `\n`, and the one asked for starts with the name's
+/// first letter in either case, so one block's `\n` mask and the same block
+/// shifted a byte for that letter are `and`ed and only a line that passes both
+/// is looked at. Of those, one whose `:` is not exactly `name.len` bytes in
+/// is not this name, which is a byte compared where the iterator found the
+/// colon and trimmed. Measured against the iterator in
+/// `bench/result/http.md#a-header-is-looked-for-by-the-lines-that-can-hold-it`.
+/// A head the parser accepted has no space before a colon
+/// and a token for a name, so the name is the bytes up to the first `:` and
+/// this answers what the iterator does (ADR 256, `Ctx.header`).
+///
+/// **Relies on the head ending at its blank line**, which the iterator did not
+/// need: a line start after the blank line would be found. Every head a `Ctx`
+/// holds ends there. `readHead` returns the bytes up to the end of the head
+/// and not past it, the copy made for a request that reads again is of those
+/// bytes, and `h2conn.fieldHead` writes the blank line last. It is also the
+/// head `parseHead` or `parseFields` accepted, so a name is a token and has no
+/// space before its colon. A name that holds a `:` is never found, because no
+/// header's name does.
+///
+/// **The value is read out of line** (`valueAfter`), because inlined into the
+/// loop it made the lookup of an absent name slower: the loop lost its
+/// registers to a path it takes once.
+pub fn findHeader(head: []const u8, name: []const u8) ?[]const u8 {
+    const colon = findHeaderColon(head, name) orelse return null;
+    return valueAfter(head, colon);
+}
+
+/// Where the `:` of the first header called `name` is, which is `findHeader`
+/// before it reads the value, for a caller that wants to look at the first
+/// bytes of the value without finding the end of its line (`message.codecIn`).
+/// The same rules, the same reliance on the head ending at its blank line.
+pub inline fn findHeaderColon(head: []const u8, name: []const u8) ?usize {
+    if (name.len == 0) return null;
+    const first = name[0] | 0x20;
+    var i: usize = 0;
+    while (i + 1 < head.len) : (i += 16) {
+        var starts = headerStarts(head, i, first);
+        while (starts != 0) : (starts &= starts - 1) {
+            const at = i + 1 + @ctz(starts);
+            const colon = at + name.len;
+            if (colon >= head.len or head[colon] != ':') continue;
+            if (!sameName(head[at..colon], name)) continue;
+            return colon;
+        }
+    }
+    return null;
+}
+
+/// The value of the line whose `:` is at `colon`: what follows it up to the
+/// line's end, without the CR and without the spaces and tabs at either end.
+/// Out of `findHeader` so its loop keeps its registers, which the lookup is
+/// measured to lose when this is inlined into it (see `findHeader`).
+pub noinline fn valueAfter(head: []const u8, colon: usize) []const u8 {
+    var start = colon + 1;
+    var end = lineEnd(head, start);
+    if (end > start and head[end - 1] == '\r') end -= 1;
+    while (start < end and (head[start] == ' ' or head[start] == '\t')) start += 1;
+    while (end > start and (head[end - 1] == ' ' or head[end - 1] == '\t')) end -= 1;
+    return head[start..end];
+}
+
+/// Where the line that has reached `from` ends: its `\n`, or the end of the
+/// head, found sixteen bytes a load.
+inline fn lineEnd(head: []const u8, from: usize) usize {
+    const V = @Vector(16, u8);
+    var at = from;
+    while (at + 16 <= head.len) : (at += 16) {
+        const block: V = head[at..][0..16].*;
+        const lines: u16 = @bitCast(block == @as(V, @splat('\n')));
+        if (lines != 0) return at + @ctz(lines);
+    }
+    while (at < head.len and head[at] != '\n') at += 1;
+    return at;
+}
+
+/// Bit *k* is set when `head[at + k]` is a `\n` and the byte after it, folded,
+/// is `first`: the lines that start with a name's letter, sixteen bytes at a
+/// time, which is one compare and one mask a half where 32 lanes on a target
+/// without AVX2 are two of each joined. A tail shorter than a block loads from
+/// `len - 17` and shifts off what was looked at, as `scan.positionsOf` does.
+inline fn headerStarts(head: []const u8, at: usize, first: u8) u16 {
+    const V = @Vector(16, u8);
+    if (head.len < 17) {
+        var bits: u16 = 0;
+        for (head[at..], 0..) |ch, k| {
+            if (ch == '\n' and at + k + 1 < head.len and head[at + k + 1] | 0x20 == first) bits |= @as(u16, 1) << @intCast(k);
+        }
+        return bits;
+    }
+    const base = @min(at, head.len - 17);
+    const here: V = head[base..][0..16].*;
+    const next: V = head[base + 1 ..][0..16].*;
+    const lines: u16 = @bitCast(here == @as(V, @splat('\n')));
+    const firsts: u16 = @bitCast((next | @as(V, @splat(0x20))) == @as(V, @splat(first)));
+    return (lines & firsts) >> @intCast(at - base);
+}
+
 /// Wait until one complete head (up to the blank line) is in the buffer,
 /// then return a slice of it without copying and without advancing the
 /// reader. The caller decides when to `in.toss(head.len)`.
@@ -674,11 +852,44 @@ pub fn findEndOfHead(buf: []const u8, from: usize) ?usize {
 /// Tab is the one control a header value may hold; the request line may hold
 /// none, so there it is refused too.
 pub fn parseHead(head: []const u8, r: *Request) ParseError!void {
+    return parseLines(head, r, true);
+}
+
+/// The fields of a request whose method and target arrived some other way,
+/// which is an HTTP/2 call's: `head` is a head whose request line is empty, so
+/// `HeaderIterator` reads it as it reads any other, and its fields are held
+/// to every rule `parseHead` holds an HTTP/1.1 head's to, by the same loop
+/// (ADR 253). `applyTarget` is the request line's half.
+pub fn parseFields(head: []const u8, r: *Request) ParseError!void {
+    if (head.len == 0 or head[0] != '\n') return error.BadRequestLine;
+    return parseLines(head[1..], r, false);
+}
+
+/// The method and target of a request that had no request line to carry
+/// them, held to what `parseRequestLine` holds a line's to: a method that is
+/// a token, and a target with no space or control byte in it, which in a
+/// line would have split it or been refused. A target is a path, or `*` for
+/// an `OPTIONS`: the absolute and authority forms are HTTP/1.1's, and HTTP/2
+/// says the authority in a field of its own (RFC 9113 §8.3.1).
+pub fn applyTarget(method: []const u8, target: []const u8, r: *Request) ParseError!void {
+    if (method.len == 0 or target.len == 0) return error.BadRequestLine;
+    if (!tokenAt(method, 0, method.len)) return error.BadRequestLine;
+    for (target) |ch| if (ch <= ' ' or ch == 0x7F) return error.BadRequestLine;
+    if (target[0] != '/' and !(std.mem.eql(u8, target, "*") and std.mem.eql(u8, method, "OPTIONS")))
+        return error.BadRequestLine;
+    r.method = method;
+    r.target = target;
+}
+
+/// `parseHead`'s loop, with or without a request line in front of the fields.
+/// Comptime, so the head an HTTP/1.1 connection reads compiles to exactly the
+/// loop it did before there was a second caller.
+inline fn parseLines(head: []const u8, r: *Request, comptime request_line: bool) ParseError!void {
     var line_start: usize = 0;
     // Where this line's first colon is. 0 stands for "none yet" — a line
     // cannot begin with one, so the position is free to be the sentinel.
     var colon: usize = 0;
-    var first_line = true;
+    var first_line = request_line;
     // Whether the line still open holds a byte no line may. Carried across
     // blocks for the same reason `colon` is.
     var line_bad = false;
@@ -1491,6 +1702,21 @@ pub fn endChunk(out: *std.Io.Writer) !void {
 /// section after it.
 pub fn writeLastChunk(out: *std.Io.Writer) !void {
     try out.writeAll("0\r\n\r\n");
+}
+
+/// The zero-length chunk, and a trailer section holding `trailers` (RFC 9112
+/// §7.1.2). Each one was checked as a header when it was set, so it is
+/// written as it is.
+pub fn writeLastChunkWith(out: *std.Io.Writer, trailers: []const Header) !void {
+    if (trailers.len == 0) return writeLastChunk(out);
+    try out.writeAll("0\r\n");
+    for (trailers) |t| {
+        try out.writeAll(t.name);
+        try out.writeAll(": ");
+        try out.writeAll(t.value);
+        try out.writeAll("\r\n");
+    }
+    try out.writeAll("\r\n");
 }
 
 /// The response to a HEAD: the head has to be byte-for-byte what a GET
@@ -3269,4 +3495,157 @@ test "a Host that is not an authority is a 400" {
         try parseHead(head, &r);
         try testing.expect(r.has_host);
     }
+}
+
+test "a field block is held to every rule a head's fields are, and parses to what the head would" {
+    // What an HTTP/2 call's fields reach the App as (ADR 253). Each of these
+    // is refused for the reason the same line in an HTTP/1.1 head is.
+    const refused = [_]struct { []const u8, ParseError }{
+        .{ "\nhost: a\r\nx-note: a\x01b\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\nhost: b\r\n\r\n", error.BadHeader },
+        .{ "\nhost: evil.com/reset\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\nbad name: x\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\n folded\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\ncontent-length: 4\r\ncontent-length: 5\r\n\r\n", error.BadHeader },
+        .{ "\nhost: a\r\ncontent-encoding: br\r\ncontent-length: 4\r\n\r\n", error.UnsupportedContentEncoding },
+        // No host at all, which RFC 9112 §3.2 makes a 400 on HTTP/1.1.
+        .{ "\ncontent-length: 4\r\n\r\n", error.BadHeader },
+        // No empty request line in front: not a field block.
+        .{ "host: a\r\n\r\n", error.BadRequestLine },
+    };
+    for (refused) |case| {
+        var r = Request{};
+        try testing.expectError(case[1], parseFields(case[0], &r));
+    }
+
+    const block = "\nhost: example.com\r\nx-note: a\tb\r\ncontent-encoding: gzip\r\ncontent-length: 4\r\n\r\n";
+    var fields = Request{};
+    try parseFields(block, &fields);
+    var head = Request{};
+    try parseHead("POST / HTTP/1.1" ++ block, &head);
+    try testing.expectEqual(head.content_length, fields.content_length);
+    try testing.expectEqual(head.content_encoding, fields.content_encoding);
+    try testing.expect(fields.has_host and fields.has_content_length);
+    // And `Ctx` reads its headers as it reads a head's, past the empty line.
+    var it = HeaderIterator.from(block);
+    try testing.expectEqualStrings("host", it.next().?.name);
+    try testing.expectEqualStrings("a\tb", it.next().?.value);
+}
+
+test "a target that arrived without a request line is held to what one in a line is" {
+    var r = Request{};
+    try applyTarget("POST", "/pkg.Service/Method?x=1", &r);
+    try testing.expectEqualStrings("/pkg.Service/Method?x=1", r.target);
+    try applyTarget("OPTIONS", "*", &r);
+    // A space or a control byte would have split a line or been refused in
+    // it; a method that is not a token, or a form that is HTTP/1.1's alone,
+    // is refused as it is there.
+    for ([_][2][]const u8{
+        .{ "POST", "/a b" },
+        .{ "POST", "/a\tb" },
+        .{ "POST", "/a\x7fb" },
+        .{ "POST", "" },
+        .{ "", "/" },
+        .{ "PO ST", "/" },
+        .{ "GET", "*" },
+        .{ "GET", "http://example.com/" },
+        .{ "CONNECT", "example.com:443" },
+    }) |case| try testing.expectError(error.BadRequestLine, applyTarget(case[0], case[1], &r));
+}
+
+/// What `Ctx.header` did before `findHeader`: the first line the iterator
+/// yields whose name matches.
+fn headerByIterator(head: []const u8, name: []const u8) ?[]const u8 {
+    var it = HeaderIterator.from(head);
+    while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+    return null;
+}
+
+test "a header is found by its name in any case, and its value is trimmed" {
+    const head = "GET / HTTP/1.1\r\nHost:   example.dev \t\r\nX-Token:abc\r\ncontent-TYPE: text/plain\r\nEmpty:\r\n\r\n";
+    try testing.expectEqualStrings("example.dev", findHeader(head, "host").?);
+    try testing.expectEqualStrings("example.dev", findHeader(head, "HOST").?);
+    try testing.expectEqualStrings("abc", findHeader(head, "x-token").?);
+    try testing.expectEqualStrings("text/plain", findHeader(head, "Content-Type").?);
+    try testing.expectEqualStrings("", findHeader(head, "empty").?);
+    try testing.expect(findHeader(head, "missing") == null);
+    try testing.expect(findHeader(head, "") == null);
+}
+
+test "a name that is a prefix of another, or has another as its prefix, is not the other" {
+    const head = "GET / HTTP/1.1\r\nHost-Extra: 1\r\nAccept-Encoding: gzip\r\nAccept: */*\r\nHo: 2\r\n\r\n";
+    try testing.expectEqualStrings("*/*", findHeader(head, "Accept").?);
+    try testing.expectEqualStrings("gzip", findHeader(head, "accept-encoding").?);
+    try testing.expectEqualStrings("2", findHeader(head, "Ho").?);
+    try testing.expect(findHeader(head, "Host") == null);
+    try testing.expect(findHeader(head, "Accept-Encodin") == null);
+    try testing.expect(findHeader(head, "Accept-Encodings") == null);
+    // Nor is a name found inside a value, or the request line.
+    try testing.expect(findHeader("GET /Host:x HTTP/1.1\r\nA: b\r\n\r\n", "Host") == null);
+    try testing.expect(findHeader("GET / HTTP/1.1\r\nA: b host: y\r\n\r\n", "host") == null);
+}
+
+test "a header sent twice answers the first, and a name with a colon in it is never found" {
+    const head = "GET / HTTP/1.1\r\nX-A: one\r\nX-A: two\r\nX: y\r\n\r\n";
+    try testing.expectEqualStrings("one", findHeader(head, "x-a").?);
+    try testing.expect(findHeader(head, "x-a:") == null);
+    try testing.expect(findHeader(head, "X:") == null);
+}
+
+test "a bare LF line end and an HTTP/2 call's empty request line are read alike" {
+    try testing.expectEqualStrings("b", findHeader("GET / HTTP/1.1\nA: b\n\n", "a").?);
+    try testing.expectEqualStrings("t", findHeader("\nhost: t\r\ncontent-length: 4\r\n\r\n", "host").?);
+    try testing.expectEqualStrings("4", findHeader("\nhost: t\r\ncontent-length: 4\r\n\r\n", "content-length").?);
+}
+
+test "findHeader reads every head the parser accepts as the iterator does, at every block boundary" {
+    var prng = std.Random.DefaultPrng.init(0x4ead);
+    const rng = prng.random();
+    const names = [_][]const u8{ "Host", "host-x", "Content-Type", "Content-Length", "Accept", "Accept-Encoding", "X-Request-Id", "Cookie", "Origin", "A", "a-b", "X-1", "Authorization" };
+    const probes = names ++ [_][]const u8{ "HOST", "content-type", "Hos", "Hostt", "Missing", "x", "content-typ", "a:", "A-B", "x-1", "" };
+    // Bytes a value may hold, among them the colon, the tab, and letters that
+    // start a probe's name, so a name inside a value is tried.
+    const value_bytes = "abc :;=xHhost\tAaCc";
+    var buf: [2048]u8 = undefined;
+    var checked: usize = 0;
+    for (0..6000) |_| {
+        var w = std.Io.Writer.fixed(&buf);
+        const with_line = rng.boolean();
+        const eol: []const u8 = if (rng.boolean()) "\n" else "\r\n";
+        if (with_line) {
+            w.writeAll("GET /a?b=c HTTP/1.1") catch unreachable;
+            w.writeAll(eol) catch unreachable;
+        } else w.writeAll("\n") catch unreachable;
+        w.print("Host: t{s}", .{eol}) catch unreachable;
+        for (0..rng.uintLessThan(usize, 14)) |_| {
+            const n = names[rng.uintLessThan(usize, names.len)];
+            for (n) |ch| {
+                const flip = rng.boolean() and std.ascii.isAlphabetic(ch);
+                w.writeByte(if (flip) ch ^ 0x20 else ch) catch unreachable;
+            }
+            w.writeAll(":") catch unreachable;
+            if (rng.boolean()) w.writeAll(" ") catch unreachable;
+            for (0..rng.uintLessThan(usize, 30)) |_| w.writeByte(value_bytes[rng.uintLessThan(usize, value_bytes.len)]) catch unreachable;
+            if (rng.boolean()) w.writeAll(" \t") catch unreachable;
+            w.writeAll(eol) catch unreachable;
+        }
+        w.writeAll(eol) catch unreachable;
+        const head = w.buffered();
+        var r = Request{};
+        if (with_line) parseHead(head, &r) catch continue else parseFields(head, &r) catch continue;
+        checked += 1;
+        for (probes) |p| {
+            // The probe in a random case, as a caller may spell it.
+            var spelled: [32]u8 = undefined;
+            for (p, 0..) |ch, k| spelled[k] = if (rng.boolean() and std.ascii.isAlphabetic(ch)) ch ^ 0x20 else ch;
+            const probe = spelled[0..p.len];
+            const fast = findHeader(head, probe);
+            const slow = headerByIterator(head, probe);
+            if (slow) |sv| {
+                try testing.expectEqualStrings(sv, fast.?);
+                try testing.expectEqual(sv.ptr, fast.?.ptr);
+            } else try testing.expect(fast == null);
+        }
+    }
+    try testing.expect(checked > 1000);
 }

@@ -46,7 +46,7 @@ const nilo = @import("nilo_http");
 8. [Sessions](./sessions.md): a struct of yours sealed into one cookie, with nothing kept on the server, and checking the password that opens one.
 9. [Streaming](./streaming.md): writing an answer whose length is not known yet, and server-sent events.
 10. [WebSocket](./websocket.md): a handler that keeps a connection open for a while.
-11. [gRPC](./grpc.md): a gRPC method as a route, on a listener of its own, in a build that asks for it.
+11. [gRPC](./grpc.md): a gRPC method as a route, on the port HTTP/1.1 is on, in a build that asks for it.
 
 ## Building an application
 
@@ -84,6 +84,6 @@ const nilo = @import("nilo_http");
 - [The reference](../reference/README.md): every public name, as a list.
 - [The design pages](../design/README.md): one page a topic, with the rules in force and the decisions behind them.
 - [`../adr/`](../adr/): why each decision went the way it did.
-- [`../roadmap.md`](../roadmap.md): what's next.
+- [`../todo.md`](../todo.md): what's next.
 - [`../decided.md`](../decided.md): what's refused, and why.
 - [`../../CONTEXT.md`](../../CONTEXT.md): the project's vocabulary.

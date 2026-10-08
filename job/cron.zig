@@ -16,7 +16,7 @@
 //! a year and a dependency to carry it, and the ordinary schedule — clean up
 //! every ten minutes, report nightly — does not care which wall clock it is
 //! read against. A caller who needs 03:00 Jakarta writes `0 20 * * *` and
-//! says so in a comment. `docs/roadmap.md` carries the gap.
+//! says so in a comment. `docs/todo.md` carries the gap.
 //!
 //! When both the day-of-month and the day-of-week fields are restricted, a
 //! day matches if **either** does, which is what every cron since Vixie has

@@ -3,11 +3,27 @@
 //!
 //! The vocabulary and nothing else: what a frame header is, what the types,
 //! flags, settings and error codes are called, and how to write the frames
-//! this side sends. What a connection does with them is `grpc.zig`'s. Like
+//! this side sends. What a connection does with them is `h2conn.zig`'s. Like
 //! `hpack.zig` this takes no Engine and no IO beyond a `std.Io.Writer`, so
 //! `zig test http/h2.zig` runs the whole of it.
 
 const std = @import("std");
+
+/// Headers that belong to one HTTP/1.1 connection rather than to a request,
+/// which HTTP/2 forbids (§8.2.2), plus `te`, which means something else in
+/// HTTP/1.1.
+pub fn hopByHop(name: []const u8) bool {
+    // By length first: a name is compared with the one or two of its size,
+    // where a list of six was six compares for every field of every request.
+    return switch (name.len) {
+        2 => std.mem.eql(u8, name, "te"),
+        7 => std.mem.eql(u8, name, "upgrade"),
+        10 => std.mem.eql(u8, name, "connection") or std.mem.eql(u8, name, "keep-alive"),
+        16 => std.mem.eql(u8, name, "proxy-connection"),
+        17 => std.mem.eql(u8, name, "transfer-encoding"),
+        else => false,
+    };
+}
 
 /// What a client sends before anything else, so a server knows it is not
 /// talking to HTTP/1.1 (§3.4). h2c with prior knowledge begins with this.
@@ -75,7 +91,7 @@ pub const default_max_frame = 16_384;
 /// The window every stream and the connection start with (§6.9.2).
 pub const default_window = 65_535;
 /// The largest a flow-control window may grow (§6.9.1).
-pub const max_window = std.math.maxInt(i31);
+pub const max_window = std.math.maxInt(u31);
 
 pub const Header = struct {
     len: u24,

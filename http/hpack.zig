@@ -135,27 +135,49 @@ const canonical: Canonical = blk: {
 /// The end-of-string symbol, 30 ones. It may only appear as padding.
 const eos_len = 30;
 
-/// Codes of up to this many bits decode with one table lookup. Every byte a
-/// header name or an ordinary value is made of has a code of 5 to 8 bits, so
-/// this is the path nearly every symbol takes; the rest walk `canonical`.
-const fast_bits = 9;
+/// Up to two symbols decode with one table lookup when their codes come to
+/// this many bits or fewer. Every byte a header name or an ordinary value is
+/// made of has a code of 5 to 8 bits, so two of the commonest fit, and one of
+/// anything up to 12 bits; the rest walk `canonical`.
+///
+/// Twelve because it was measured against its neighbours on h2load's five
+/// strings: 165ns for the decoder this replaced, one symbol a lookup at 9
+/// bits; two a lookup, 133 at 10 bits, 97 at 11, 82 at 12 and 77 at 13, where
+/// each bit doubles the table
+/// ([`bench/result/http.md`](../bench/result/http.md#two-huffman-symbols-a-lookup)).
+const fast_bits = 12;
 
-const Fast = struct {
-    sym: u8,
-    /// 0 when the code starting here is longer than `fast_bits`.
+const Fast = extern struct {
+    first: u8,
+    second: u8,
+    /// The first symbol's bits; 0 when the code starting here is longer than
+    /// `fast_bits`.
     len: u8,
+    /// Both symbols' bits; 0 when only the first fits.
+    both: u8,
 };
 
-/// Indexed by the next `fast_bits` bits of input. 512 entries, two bytes
-/// each, built while compiling from the same tables `canonical` is.
+/// Indexed by the next `fast_bits` bits of input: 4,096 entries, four bytes
+/// each, built while compiling from the same tables `canonical` is. A pair is
+/// read off the single-symbol answer for what the first symbol leaves.
 const fast: [1 << fast_bits]Fast = blk: {
     @setEvalBranchQuota(100_000);
-    var t: [1 << fast_bits]Fast = @splat(.{ .sym = 0, .len = 0 });
+    var one: [1 << fast_bits]Fast = @splat(.{ .first = 0, .second = 0, .len = 0, .both = 0 });
     for (0..256) |s| {
-        const len = lengths[s];
+        const len: u32 = lengths[s];
         if (len > fast_bits) continue;
         const first = codes[s] << (fast_bits - len);
-        for (0..(1 << (fast_bits - len))) |i| t[first + i] = .{ .sym = s, .len = len };
+        for (0..(1 << (fast_bits - len))) |i| one[first + i] = .{ .first = s, .second = 0, .len = len, .both = 0 };
+    }
+    var t = one;
+    for (&t, 0..) |*e, i| {
+        if (e.len == 0) continue;
+        // What follows the first code, its low bits zero: a second code that
+        // ends within the real bits is read correctly whatever they are.
+        const after = one[(i << e.len) & ((1 << fast_bits) - 1)];
+        if (after.len == 0 or e.len + after.len > fast_bits) continue;
+        e.second = after.first;
+        e.both = e.len + after.len;
     }
     break :blk t;
 };
@@ -163,37 +185,54 @@ const fast: [1 << fast_bits]Fast = blk: {
 /// Decode a Huffman string into `out`. Padding is at most seven bits and all
 /// ones, and the end-of-string symbol inside a string is an error (§5.2).
 ///
-/// Up to 64 bits of input are held at once and a symbol is taken off the top
-/// of them, rather than a bit at a time: measured at 563ns for the 89-byte
-/// header block h2load sends, 37% of a whole call, before this was written
-/// (ADR 220).
+/// Up to 64 bits of input are held at the top of a word, refilled a word at a
+/// time, and one or two symbols are taken off the top of them a lookup. A bit
+/// at a time was 563ns for the 89-byte header block h2load sends, 37% of a
+/// whole call (ADR 220); one symbol a lookup took that to 165ns of Huffman in
+/// it, and two to 82.
 pub fn huffmanDecode(in: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Error!void {
     // Every symbol is at least five bits, so this is the most it can be.
     try out.ensureUnusedCapacity(gpa, in.len * 8 / 5 + 1);
+    // Written through the slice rather than appended one at a time; each
+    // write is counted, so the reservation above still holds.
+    const buf = out.allocatedSlice();
+    var n = out.items.len;
+    defer out.items.len = n;
+    // Input not yet decoded, at the top of `acc`; the bits below are zeros.
     var acc: u64 = 0;
-    // How many of `acc`'s low bits are input not yet decoded.
     var bits: u32 = 0;
     var next: usize = 0;
     while (true) {
-        while (bits <= 56 and next < in.len) : (next += 1) {
-            acc = (acc << 8) | in[next];
+        if (next + 8 <= in.len) {
+            // A whole word, of which as many bytes as fit below what is held.
+            acc |= std.mem.readInt(u64, in[next..][0..8], .big) >> @intCast(bits);
+            const take = (63 - bits) / 8;
+            next += take;
+            bits += take * 8;
+        } else while (bits <= 56 and next < in.len) : (next += 1) {
+            acc |= @as(u64, in[next]) << @intCast(56 - bits);
             bits += 8;
         }
         if (bits == 0) return;
 
-        // The next `fast_bits` bits, padded with ones past the end of the
-        // input. A code the padding completes is longer than what is left,
-        // which is how the end is told apart from a symbol below.
-        const peek: usize = if (bits >= fast_bits)
-            @intCast((acc >> @intCast(bits - fast_bits)) & ((1 << fast_bits) - 1))
-        else
-            @intCast(((acc << @intCast(fast_bits - bits)) | ((@as(u64, 1) << @intCast(fast_bits - bits)) - 1)) & ((1 << fast_bits) - 1));
-        const hit = fast[peek];
+        // Past the end of the input the bits are zeros. A code that reaches
+        // into them is longer than what is left, which is how the end is
+        // told apart from a symbol below.
+        const hit = fast[@intCast(acc >> (64 - fast_bits))];
+        if (hit.both != 0 and hit.both <= bits) {
+            buf[n] = hit.first;
+            buf[n + 1] = hit.second;
+            n += 2;
+            acc <<= @intCast(hit.both);
+            bits -= hit.both;
+            continue;
+        }
         if (hit.len != 0) {
             if (hit.len > bits) return padding(acc, bits);
-            out.appendAssumeCapacity(hit.sym);
+            buf[n] = hit.first;
+            n += 1;
+            acc <<= @intCast(hit.len);
             bits -= hit.len;
-            acc &= (@as(u64, 1) << @intCast(bits)) - 1;
             continue;
         }
 
@@ -203,12 +242,13 @@ pub fn huffmanDecode(in: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Alloc
         var len: u32 = fast_bits + 1;
         while (true) : (len += 1) {
             if (len > bits) return padding(acc, bits);
-            const code: u32 = @intCast((acc >> @intCast(bits - len)) & ((@as(u64, 1) << @intCast(len)) - 1));
+            const code: u32 = @intCast(acc >> @intCast(64 - len));
             const rel = code -% canonical.first[len];
             if (canonical.count[len] != 0 and code >= canonical.first[len] and rel < canonical.count[len]) {
-                out.appendAssumeCapacity(canonical.symbols[canonical.offset[len] + rel]);
+                buf[n] = canonical.symbols[canonical.offset[len] + rel];
+                n += 1;
+                acc <<= @intCast(len);
                 bits -= len;
-                acc &= (@as(u64, 1) << @intCast(bits)) - 1;
                 break;
             }
             // Thirty bits that are no byte's code: the end-of-string symbol,
@@ -218,18 +258,19 @@ pub fn huffmanDecode(in: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Alloc
     }
 }
 
-/// What is left at the end of a Huffman string: shorter than a byte and
-/// every bit set, or the string is refused.
+/// What is left at the top of `acc` at the end of a Huffman string: shorter
+/// than a byte and every bit set, or the string is refused.
 fn padding(acc: u64, bits: u32) Error!void {
     if (bits > 7) return error.Compression;
+    if (bits == 0) return;
     const ones = (@as(u64, 1) << @intCast(bits)) - 1;
-    if (acc & ones != ones) return error.Compression;
+    if (acc >> @intCast(64 - bits) != ones) return error.Compression;
 }
 
 // ---- the static table (Appendix A) ----
 
 /// Appendix A: the 61 fields every HPACK encoder may name by number.
-pub const static_table = [61]Field{
+const static_entries = [61]Field{
     .{ .name = ":authority", .value = "" },
     .{ .name = ":method", .value = "GET" },
     .{ .name = ":method", .value = "POST" },
@@ -293,14 +334,88 @@ pub const static_table = [61]Field{
     .{ .name = "www-authenticate", .value = "" },
 };
 
+const static_name_bytes = blk: {
+    var n: usize = 0;
+    for (static_entries) |f| n += f.name.len;
+    break :blk n;
+};
+
+/// Every name of the static table, one after another.
+const static_blob: [static_name_bytes]u8 = blk: {
+    var bytes: [static_name_bytes]u8 = undefined;
+    var at: usize = 0;
+    for (static_entries) |f| {
+        @memcpy(bytes[at..][0..f.name.len], f.name);
+        at += f.name.len;
+    }
+    break :blk bytes;
+};
+
+/// The static table, **with its names kept in one block of memory**
+/// (`static_blob`), so that a name a decoder hands back can be told from one a
+/// client wrote by where it points (`isStaticName`) rather than by reading it.
+pub const static_table: [static_entries.len]Field = blk: {
+    var table: [static_entries.len]Field = undefined;
+    var at: usize = 0;
+    for (static_entries, &table) |f, *out| {
+        out.* = .{ .name = static_blob[at..][0..f.name.len], .value = f.value };
+        at += f.name.len;
+    }
+    break :blk table;
+};
+
+/// Whether `name` is one the static table named, which a decoder returns as it
+/// is in the table and never as a copy: so a field a client sent by index
+/// has a name that is known to be a lowercase token without being looked at.
+/// A name from anywhere else (a literal, or a slice of a test's) is not.
+pub fn isStaticName(name: []const u8) bool {
+    const start = @intFromPtr(&static_blob);
+    const at = @intFromPtr(name.ptr);
+    return at >= start and at - start < static_blob.len;
+}
+
 /// The index of the first static entry named `name`, or null. What the
 /// encoder uses so that a name it writes costs one byte rather than its
 /// length; the value is always written out.
 pub fn staticNameIndex(name: []const u8) ?u32 {
+    return static_names.get(name);
+}
+
+/// Each name the static table has, with the index of its first entry. Built
+/// while compiling: the answer is a switch on the name's length and a compare
+/// against the few of that length, where a walk down the table compared a
+/// name with up to sixty-one before it was found (`bench/result/http.md`).
+const static_names: std.StaticStringMap(u32) = blk: {
+    @setEvalBranchQuota(100_000);
+    var kvs: [static_table.len]struct { []const u8, u32 } = undefined;
+    var n: usize = 0;
     for (static_table, 1..) |f, i| {
-        if (std.mem.eql(u8, f.name, name)) return @intCast(i);
+        const seen = for (kvs[0..n]) |kv| {
+            if (std.mem.eql(u8, kv[0], f.name)) break true;
+        } else false;
+        if (!seen) {
+            kvs[n] = .{ f.name, @intCast(i) };
+            n += 1;
+        }
     }
-    return null;
+    const fixed = kvs[0..n].*;
+    break :blk std.StaticStringMap(u32).initComptime(fixed);
+};
+
+/// The static-table indices of the names an answer's head always uses, so
+/// writing them is not a lookup.
+pub const index_content_length = 28;
+pub const index_content_type = 31;
+pub const index_date = 33;
+
+comptime {
+    for (.{
+        .{ index_content_length, "content-length" },
+        .{ index_content_type, "content-type" },
+        .{ index_date, "date" },
+    }) |pair| {
+        if (!std.mem.eql(u8, static_table[pair[0] - 1].name, pair[1])) @compileError("nilo: a static-table index in hpack.zig is wrong");
+    }
 }
 
 // ---- the decoder (§3, §6) ----
@@ -519,15 +634,31 @@ pub fn writeIndexed(w: *std.Io.Writer, index: u32) std.Io.Writer.Error!void {
 /// from the static table when it is there (§6.2.2). The one representation
 /// this side writes, and why the client's table never grows on our account.
 pub fn writeLiteral(w: *std.Io.Writer, name: []const u8, value: []const u8) std.Io.Writer.Error!void {
-    if (staticNameIndex(name)) |i| {
-        try writeInt(w, 0x00, 4, i);
-    } else {
-        try w.writeByte(0x00);
-        try writeInt(w, 0x00, 7, @intCast(name.len));
-        try w.writeAll(name);
-    }
+    if (staticNameIndex(name)) |i| return writeLiteralAt(w, i, value);
+    try w.writeByte(0x00);
+    try writeInt(w, 0x00, 7, @intCast(name.len));
+    try w.writeAll(name);
     try writeInt(w, 0x00, 7, @intCast(value.len));
     try w.writeAll(value);
+}
+
+/// `writeLiteral` for a name the static table has, given by its index.
+pub fn writeLiteralAt(w: *std.Io.Writer, index: u32, value: []const u8) std.Io.Writer.Error!void {
+    try writeInt(w, 0x00, 4, index);
+    try writeInt(w, 0x00, 7, @intCast(value.len));
+    try w.writeAll(value);
+}
+
+/// A header list as one block: `:status 200` from the static table, every
+/// other field as `writeLiteral` writes it.
+pub fn encodeBlock(a: std.mem.Allocator, fields: []const Field) ![]const u8 {
+    var w: std.Io.Writer.Allocating = try .initCapacity(a, 64);
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.name, ":status") and std.mem.eql(u8, f.value, "200")) {
+            try writeIndexed(&w.writer, 8);
+        } else try writeLiteral(&w.writer, f.name, f.value);
+    }
+    return w.written();
 }
 
 const testing = std.testing;
@@ -768,6 +899,30 @@ test "every byte survives a trip through the Huffman code" {
     for (out.items, 0..) |b, i| try testing.expectEqual(@as(u8, @intCast(i)), b);
 }
 
+test "every pair of bytes survives a trip through the Huffman code" {
+    // The two-symbol lookups, and each pair at both ends of a string: the
+    // padding after it is 0 to 7 bits, and a pair that ends on it must not
+    // be read past.
+    var bits: std.ArrayList(u8) = .empty;
+    defer bits.deinit(testing.allocator);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    for (0..256) |a| for (0..256) |b| {
+        bits.clearRetainingCapacity();
+        var acc: u64 = (@as(u64, codes[a]) << lengths[b]) | codes[b];
+        var n: u6 = @as(u6, lengths[a]) + lengths[b];
+        while (n >= 8) {
+            n -= 8;
+            try bits.append(testing.allocator, @intCast((acc >> n) & 0xff));
+        }
+        acc &= (@as(u64, 1) << n) - 1;
+        if (n > 0) try bits.append(testing.allocator, @intCast(((acc << (8 - n)) | ((@as(u64, 1) << (8 - n)) - 1)) & 0xff));
+        out.clearRetainingCapacity();
+        try huffmanDecode(bits.items, &out, testing.allocator);
+        try testing.expectEqualSlices(u8, &.{ @intCast(a), @intCast(b) }, out.items);
+    };
+}
+
 test "headers past the list limit are dropped and said so, and the table still moves" {
     var d = Decoder.init(testing.allocator);
     defer d.deinit();
@@ -868,49 +1023,49 @@ test "what the encoder writes, this decoder reads, and it inserts nothing" {
 
 /// Appendix B: each byte's code, right-aligned, and its length in bits.
 const codes = [256]u32{
-    0x1ff8, 0x7fffd8, 0xfffffe2, 0xfffffe3, 0xfffffe4, 0xfffffe5, 0xfffffe6, 0xfffffe7,
-    0xfffffe8, 0xffffea, 0x3ffffffc, 0xfffffe9, 0xfffffea, 0x3ffffffd, 0xfffffeb, 0xfffffec,
-    0xfffffed, 0xfffffee, 0xfffffef, 0xffffff0, 0xffffff1, 0xffffff2, 0x3ffffffe, 0xffffff3,
-    0xffffff4, 0xffffff5, 0xffffff6, 0xffffff7, 0xffffff8, 0xffffff9, 0xffffffa, 0xffffffb,
-    0x14, 0x3f8, 0x3f9, 0xffa, 0x1ff9, 0x15, 0xf8, 0x7fa,
-    0x3fa, 0x3fb, 0xf9, 0x7fb, 0xfa, 0x16, 0x17, 0x18,
-    0x0, 0x1, 0x2, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
-    0x1e, 0x1f, 0x5c, 0xfb, 0x7ffc, 0x20, 0xffb, 0x3fc,
-    0x1ffa, 0x21, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62,
-    0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a,
-    0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72,
-    0xfc, 0x73, 0xfd, 0x1ffb, 0x7fff0, 0x1ffc, 0x3ffc, 0x22,
-    0x7ffd, 0x3, 0x23, 0x4, 0x24, 0x5, 0x25, 0x26,
-    0x27, 0x6, 0x74, 0x75, 0x28, 0x29, 0x2a, 0x7,
-    0x2b, 0x76, 0x2c, 0x8, 0x9, 0x2d, 0x77, 0x78,
-    0x79, 0x7a, 0x7b, 0x7ffe, 0x7fc, 0x3ffd, 0x1ffd, 0xffffffc,
-    0xfffe6, 0x3fffd2, 0xfffe7, 0xfffe8, 0x3fffd3, 0x3fffd4, 0x3fffd5, 0x7fffd9,
-    0x3fffd6, 0x7fffda, 0x7fffdb, 0x7fffdc, 0x7fffdd, 0x7fffde, 0xffffeb, 0x7fffdf,
-    0xffffec, 0xffffed, 0x3fffd7, 0x7fffe0, 0xffffee, 0x7fffe1, 0x7fffe2, 0x7fffe3,
-    0x7fffe4, 0x1fffdc, 0x3fffd8, 0x7fffe5, 0x3fffd9, 0x7fffe6, 0x7fffe7, 0xffffef,
-    0x3fffda, 0x1fffdd, 0xfffe9, 0x3fffdb, 0x3fffdc, 0x7fffe8, 0x7fffe9, 0x1fffde,
-    0x7fffea, 0x3fffdd, 0x3fffde, 0xfffff0, 0x1fffdf, 0x3fffdf, 0x7fffeb, 0x7fffec,
-    0x1fffe0, 0x1fffe1, 0x3fffe0, 0x1fffe2, 0x7fffed, 0x3fffe1, 0x7fffee, 0x7fffef,
-    0xfffea, 0x3fffe2, 0x3fffe3, 0x3fffe4, 0x7ffff0, 0x3fffe5, 0x3fffe6, 0x7ffff1,
-    0x3ffffe0, 0x3ffffe1, 0xfffeb, 0x7fff1, 0x3fffe7, 0x7ffff2, 0x3fffe8, 0x1ffffec,
-    0x3ffffe2, 0x3ffffe3, 0x3ffffe4, 0x7ffffde, 0x7ffffdf, 0x3ffffe5, 0xfffff1, 0x1ffffed,
-    0x7fff2, 0x1fffe3, 0x3ffffe6, 0x7ffffe0, 0x7ffffe1, 0x3ffffe7, 0x7ffffe2, 0xfffff2,
-    0x1fffe4, 0x1fffe5, 0x3ffffe8, 0x3ffffe9, 0xffffffd, 0x7ffffe3, 0x7ffffe4, 0x7ffffe5,
-    0xfffec, 0xfffff3, 0xfffed, 0x1fffe6, 0x3fffe9, 0x1fffe7, 0x1fffe8, 0x7ffff3,
-    0x3fffea, 0x3fffeb, 0x1ffffee, 0x1ffffef, 0xfffff4, 0xfffff5, 0x3ffffea, 0x7ffff4,
-    0x3ffffeb, 0x7ffffe6, 0x3ffffec, 0x3ffffed, 0x7ffffe7, 0x7ffffe8, 0x7ffffe9, 0x7ffffea,
-    0x7ffffeb, 0xffffffe, 0x7ffffec, 0x7ffffed, 0x7ffffee, 0x7ffffef, 0x7fffff0, 0x3ffffee,
+    0x1ff8,    0x7fffd8,  0xfffffe2,  0xfffffe3, 0xfffffe4, 0xfffffe5,  0xfffffe6,  0xfffffe7,
+    0xfffffe8, 0xffffea,  0x3ffffffc, 0xfffffe9, 0xfffffea, 0x3ffffffd, 0xfffffeb,  0xfffffec,
+    0xfffffed, 0xfffffee, 0xfffffef,  0xffffff0, 0xffffff1, 0xffffff2,  0x3ffffffe, 0xffffff3,
+    0xffffff4, 0xffffff5, 0xffffff6,  0xffffff7, 0xffffff8, 0xffffff9,  0xffffffa,  0xffffffb,
+    0x14,      0x3f8,     0x3f9,      0xffa,     0x1ff9,    0x15,       0xf8,       0x7fa,
+    0x3fa,     0x3fb,     0xf9,       0x7fb,     0xfa,      0x16,       0x17,       0x18,
+    0x0,       0x1,       0x2,        0x19,      0x1a,      0x1b,       0x1c,       0x1d,
+    0x1e,      0x1f,      0x5c,       0xfb,      0x7ffc,    0x20,       0xffb,      0x3fc,
+    0x1ffa,    0x21,      0x5d,       0x5e,      0x5f,      0x60,       0x61,       0x62,
+    0x63,      0x64,      0x65,       0x66,      0x67,      0x68,       0x69,       0x6a,
+    0x6b,      0x6c,      0x6d,       0x6e,      0x6f,      0x70,       0x71,       0x72,
+    0xfc,      0x73,      0xfd,       0x1ffb,    0x7fff0,   0x1ffc,     0x3ffc,     0x22,
+    0x7ffd,    0x3,       0x23,       0x4,       0x24,      0x5,        0x25,       0x26,
+    0x27,      0x6,       0x74,       0x75,      0x28,      0x29,       0x2a,       0x7,
+    0x2b,      0x76,      0x2c,       0x8,       0x9,       0x2d,       0x77,       0x78,
+    0x79,      0x7a,      0x7b,       0x7ffe,    0x7fc,     0x3ffd,     0x1ffd,     0xffffffc,
+    0xfffe6,   0x3fffd2,  0xfffe7,    0xfffe8,   0x3fffd3,  0x3fffd4,   0x3fffd5,   0x7fffd9,
+    0x3fffd6,  0x7fffda,  0x7fffdb,   0x7fffdc,  0x7fffdd,  0x7fffde,   0xffffeb,   0x7fffdf,
+    0xffffec,  0xffffed,  0x3fffd7,   0x7fffe0,  0xffffee,  0x7fffe1,   0x7fffe2,   0x7fffe3,
+    0x7fffe4,  0x1fffdc,  0x3fffd8,   0x7fffe5,  0x3fffd9,  0x7fffe6,   0x7fffe7,   0xffffef,
+    0x3fffda,  0x1fffdd,  0xfffe9,    0x3fffdb,  0x3fffdc,  0x7fffe8,   0x7fffe9,   0x1fffde,
+    0x7fffea,  0x3fffdd,  0x3fffde,   0xfffff0,  0x1fffdf,  0x3fffdf,   0x7fffeb,   0x7fffec,
+    0x1fffe0,  0x1fffe1,  0x3fffe0,   0x1fffe2,  0x7fffed,  0x3fffe1,   0x7fffee,   0x7fffef,
+    0xfffea,   0x3fffe2,  0x3fffe3,   0x3fffe4,  0x7ffff0,  0x3fffe5,   0x3fffe6,   0x7ffff1,
+    0x3ffffe0, 0x3ffffe1, 0xfffeb,    0x7fff1,   0x3fffe7,  0x7ffff2,   0x3fffe8,   0x1ffffec,
+    0x3ffffe2, 0x3ffffe3, 0x3ffffe4,  0x7ffffde, 0x7ffffdf, 0x3ffffe5,  0xfffff1,   0x1ffffed,
+    0x7fff2,   0x1fffe3,  0x3ffffe6,  0x7ffffe0, 0x7ffffe1, 0x3ffffe7,  0x7ffffe2,  0xfffff2,
+    0x1fffe4,  0x1fffe5,  0x3ffffe8,  0x3ffffe9, 0xffffffd, 0x7ffffe3,  0x7ffffe4,  0x7ffffe5,
+    0xfffec,   0xfffff3,  0xfffed,    0x1fffe6,  0x3fffe9,  0x1fffe7,   0x1fffe8,   0x7ffff3,
+    0x3fffea,  0x3fffeb,  0x1ffffee,  0x1ffffef, 0xfffff4,  0xfffff5,   0x3ffffea,  0x7ffff4,
+    0x3ffffeb, 0x7ffffe6, 0x3ffffec,  0x3ffffed, 0x7ffffe7, 0x7ffffe8,  0x7ffffe9,  0x7ffffea,
+    0x7ffffeb, 0xffffffe, 0x7ffffec,  0x7ffffed, 0x7ffffee, 0x7ffffef,  0x7fffff0,  0x3ffffee,
 };
 
 const lengths = [256]u5{
     13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28,
     28, 28, 28, 28, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 28,
-    6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6,
-    5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10,
-    13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 8, 7, 8, 13, 19, 13, 14, 6,
-    15, 5, 6, 5, 6, 5, 6, 6, 6, 5, 7, 7, 6, 6, 6, 5,
-    6, 7, 6, 5, 5, 6, 7, 7, 7, 7, 7, 15, 11, 14, 13, 28,
+    6,  10, 10, 12, 13, 6,  8,  11, 10, 10, 8,  11, 8,  6,  6,  6,
+    5,  5,  5,  6,  6,  6,  6,  6,  6,  6,  7,  8,  15, 6,  12, 10,
+    13, 6,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,
+    7,  7,  7,  7,  7,  7,  7,  7,  8,  7,  8,  13, 19, 13, 14, 6,
+    15, 5,  6,  5,  6,  5,  6,  6,  6,  5,  7,  7,  6,  6,  6,  5,
+    6,  7,  6,  5,  5,  6,  7,  7,  7,  7,  7,  15, 11, 14, 13, 28,
     20, 22, 20, 20, 22, 22, 22, 23, 22, 23, 23, 23, 23, 23, 24, 23,
     24, 24, 22, 23, 24, 23, 23, 23, 23, 21, 22, 23, 22, 23, 23, 24,
     22, 21, 20, 22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23,

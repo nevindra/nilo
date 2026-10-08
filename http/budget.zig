@@ -1,7 +1,7 @@
 //! An allocator that counts, so the request path can be held to a budget.
 //!
 //! The point is a number that does not depend on the machine. Requests per
-//! second on a shared VM says nothing (docs/roadmap.md), but "this request
+//! second on a shared VM says nothing (docs/todo.md), but "this request
 //! path took N trips to the allocator" is the same everywhere and is a fair
 //! proxy for the work being done per request.
 

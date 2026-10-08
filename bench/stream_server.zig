@@ -121,6 +121,24 @@ fn roomFeedDeep(c: *nilo.Ctx) !void {
     return roomFeed(c);
 }
 
+/// Posts into `feed_room` for `BLAST_MS` (2,000 by default) as fast as it can,
+/// a burst and then a turn for the connections, and answers how many it made.
+/// `bench/fanout.py` counts what the subscribers were written (stage 6.3).
+fn blast(c: *nilo.Ctx) !void {
+    const until = nilo.monotonicNanos() + blast_ms * std.time.ns_per_ms;
+    var n: u64 = 0;
+    while (nilo.monotonicNanos() < until) {
+        for (0..16) |_| {
+            feed_room.print("event {d}", .{n}) catch {};
+            n += 1;
+        }
+        nilo.sleep(0) catch break;
+    }
+    var buf: [32]u8 = undefined;
+    return c.sendText(200, try std.fmt.bufPrint(&buf, "{d}\n", .{n}));
+}
+var blast_ms: u64 = 2000;
+
 /// The pool `/events/named` borrows a Room from, one per connection, sized
 /// like `feed_room`.
 var pool: *nilo.Rooms = undefined;
@@ -142,8 +160,9 @@ fn millisFrom(init: std.process.Init, name: []const u8, default: u64) u64 {
 pub fn main(init: std.process.Init) !void {
     hold_ms = millisFrom(init, "HOLD_MS", hold_ms);
     keepalive_ms = @intCast(millisFrom(init, "KEEPALIVE_MS", 0));
+    blast_ms = millisFrom(init, "BLAST_MS", blast_ms);
 
-    var room = try nilo.Room.initWith(std.heap.smp_allocator, .{ .seats = 20_000 });
+    var room = try nilo.Room.initWith(std.heap.smp_allocator, .{ .seats = 20_000, .backlog = @intCast(millisFrom(init, "BACKLOG", 4)) });
     defer room.deinit();
     feed_room = &room;
     var rooms = try nilo.Rooms.initWith(std.heap.smp_allocator, .{ .rooms = 20_000, .seats = 1 });
@@ -161,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
     try app.get("/events/room", roomFeed);
     try app.get("/events/room/deep", roomFeedDeep);
     try app.get("/events/named", namedFeed);
+    try app.get("/blast", blast);
 
     // The control for the logger itself. **Registration order buys nothing
     // here** — `use` says so in as many words, because chains are resolved in

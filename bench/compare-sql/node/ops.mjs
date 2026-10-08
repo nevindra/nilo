@@ -9,7 +9,7 @@
 //
 //   pg       node-postgres, the control.
 //   drizzle  a query builder *over* node-postgres, so subtracting the control
-//            leaves the mapper and nothing else. `docs/roadmap.md` names
+//            leaves the mapper and nothing else. `docs/todo.md` names
 //            Drizzle as nilo_sql's fair yardstick, which is why it is here.
 //   prisma   its own engine and its own connection. Its distance from the
 //            control is an engine difference as well as a mapper one, and

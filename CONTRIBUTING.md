@@ -92,8 +92,10 @@ Documentation is part of the change, not a follow-up:
 | a design decision | a new file in [`docs/adr/`](./docs/adr/), naming the alternative it rejected; a change to one edits that ADR in place ([ADR 221](./docs/adr/221-an-adr-is-the-rule-in-force-and-a-topic-page-joins-them.md)) |
 | something you measured, or a guess that turned out wrong | [`docs/history.md`](./docs/history.md) |
 | a benchmark you ran | [`bench/result/`](./bench/result/), one file an area |
-| something now built | delete its entry from [`docs/roadmap.md`](./docs/roadmap.md) |
-| a question answered, or a feature refused with its reason | [`docs/decided.md`](./docs/decided.md), and out of the roadmap |
+| a direction the framework should take, larger than one change | [`docs/roadmap.md`](./docs/roadmap.md) |
+| something left open: a defect, a decision, a question, a measurement, a fix upstream | an entry in [`docs/todo.md`](./docs/todo.md), in the tier its evidence puts it, with a `Direction:` line if it serves a direction of the roadmap |
+| something now built | delete its entry from [`docs/todo.md`](./docs/todo.md), and from [`docs/roadmap.md`](./docs/roadmap.md) when it closes a direction |
+| a question answered, or a feature refused with its reason | [`docs/decided.md`](./docs/decided.md), and out of the todo list |
 | something a user has to change | [`CHANGELOG.md`](./CHANGELOG.md), under `## Unreleased` |
 | a public API | [`docs/reference/`](./docs/reference/), one page a module; `zig build docs-index` rewrites the list of every heading on its `README.md` |
 | how to use something | [`docs/guide/`](./docs/guide/), one page a task |
@@ -107,7 +109,7 @@ Documentation is part of the change, not a follow-up:
 
 **A benchmark that changed a decision gets written down where it can be re-run.** The entry says what was run, on what machine, at what commit, through what transport (the same server measured 197k requests a second across a Docker port and 458k over a unix socket), what the numbers were, and what they changed; and it closes with whether the number can be pushed further, ranked. Build the before rather than quoting it, interleave the runs, pin both sides of a comparison, and quote a margin narrower than its own spread as a range. This is a rule because the repository has already published wrong numbers three times, and all three were found by re-measuring ([ADR 062](./docs/adr/062-where-a-connection-waits-is-what-it-costs.md)).
 
-**The roadmap holds nothing finished and nothing decided.** When something ships its entry leaves entirely: no strikethrough, no "done". **`docs/history.md` stays short**: an entry gets in only if it would change what somebody does next time, not to record what shipped.
+**The roadmap and the todo list hold nothing finished and nothing decided.** When something ships its entry leaves entirely: no strikethrough, no "done". **`docs/history.md` stays short**: an entry gets in only if it would change what somebody does next time, not to record what shipped.
 
 ## Writing the code
 
@@ -139,7 +141,7 @@ One decision per pull request. A branch carrying two is two pull requests, and t
 
 ## Where to start
 
-- **An [open question](./docs/roadmap.md#open-questions) in the roadmap.** Those want an argument more than a patch, and each entry ends with what would settle it.
+- **A todo entry that ends with `What would settle it:`** ([the list](./docs/todo.md)). Those want an argument or a number more than a patch, and the line says which.
 - **A module that dials out.** Mail and Redis are ordinary work now: the outbound seam is designed ([ADR 061](./docs/adr/061-a-fitting-borrows-the-loop.md)), `nilo_fetch` is the way out and `s3/` is a worked example on top of it.
 - **The small end, which is real work here.** A refusal whose wording could be clearer, a guide page that assumes something it shouldn't, an example for the case you hit. Wording is a feature in this repository, so improving a sentence is a change, not a chore.
 
@@ -151,7 +153,7 @@ One ask: read the diff before you send it. An agent will happily write a paragra
 
 ## What gets turned down
 
-Templates, TLS and gRPC in the default build, and HTTP/2 for ordinary routes. These aren't gaps waiting for a volunteer, they are decisions with reasoning on file; the move is to argue against the ADR, not to open a pull request adding one. (TLS behind `-Dtls` is the one that was argued and moved, and [ADR 212](./docs/adr/212-tls-is-an-option-a-build-asks-for.md) is what that took: the numbers on all four axes, and a default build that pays 2,760 bytes. gRPC behind `-Dgrpc` moved the same way, [ADR 220](./docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md).) Also anything that needs an annotation to work, anything that can't say what it costs, and anything that adds an allocation to a request path that didn't ask for one. None of that is meant to sound closed; it's meant to save you from writing a thousand lines that were never going to land.
+Templates, TLS and gRPC in the default build, and HTTP/2 for ordinary routes. These aren't gaps waiting for a volunteer, they are decisions with reasoning on file; the move is to argue against the ADR, not to open a pull request adding one. (TLS behind `-Dtls` is the one that was argued and moved, and [ADR 212](./docs/adr/212-tls-is-an-option-a-build-asks-for.md) is what that took: the numbers on all four axes, and a default build that pays 2,760 bytes. gRPC behind `-Dhttp2` moved the same way, [ADR 220](./docs/adr/220-grpc-is-served-over-h2c-behind-a-flag.md).) Also anything that needs an annotation to work, anything that can't say what it costs, and anything that adds an allocation to a request path that didn't ask for one. None of that is meant to sound closed; it's meant to save you from writing a thousand lines that were never going to land.
 
 ## License
 

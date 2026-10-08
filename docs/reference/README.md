@@ -91,6 +91,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`Cached(Pages, options)`](./handlers.md#cachedpages-options)
   - [A query field that is a list](./handlers.md#a-query-field-that-is-a-list)
   - [`Bound(W)`](./handlers.md#boundw)
+  - [A body in another format](./handlers.md#a-body-in-another-format)
 - [Handler returns](./handlers.md#handler-returns)
   - [A `*Ctx` handler that returns `void`](./handlers.md#a-ctx-handler-that-returns-void)
   - [A `?` inside a wrapper](./handlers.md#a--inside-a-wrapper)
@@ -118,6 +119,8 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [Reading](./ctx.md#reading)
   - [Answering](./ctx.md#answering)
   - [Response headers](./ctx.md#response-headers)
+  - [A stream and an event stream on HTTP/2](./ctx.md#a-stream-and-an-event-stream-on-http2)
+  - [Trailers](./ctx.md#trailers)
   - [`c.host` and `c.scheme`](./ctx.md#chost-and-cscheme)
   - [Compressed request bodies](./ctx.md#compressed-request-bodies)
   - [A stream with a `.length`](./ctx.md#a-stream-with-a-length)
@@ -171,6 +174,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
     - [`allowance.keyed`](./middleware.md#allowancekeyed)
   - [`nilo.deadline`](./middleware.md#nilodeadline)
   - [`nilo.maxBody`](./middleware.md#nilomaxbody)
+- [Holding the answer with `next.hold`](./middleware.md#holding-the-answer-with-nexthold)
 - [`nilo.accept`](./middleware.md#niloaccept)
 
 **[Testing](./testing.md)**: nilo's test helpers send requests to an App in memory, with no socket, and read back what it answered.

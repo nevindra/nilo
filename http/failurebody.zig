@@ -63,6 +63,13 @@ const naming = @import("names.zig");
 /// in `app.zig` — this file stays outside the App's core by not naming it.
 pub const Write = *const fn (status: u16, message: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void;
 
+/// Connect's failure body for a request that asked for it, and null for any
+/// other (ADR 257): handed the request's head and the error, it says which
+/// shape this failure takes over the App's own. The error is read here, not
+/// by the shape, so `Write` keeps the signature an App's own shape has. Set by the first route that reads or
+/// answers a message, so a program with none links none of it.
+pub const Pick = *const fn (head: []const u8, err: anyerror) ?Write;
+
 pub fn writerOf(comptime T: type) Write {
     comptime check(T);
     const Writer = struct {

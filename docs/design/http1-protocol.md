@@ -64,5 +64,5 @@ Related topics: TLS is terminated in front of nilo, not by it, which is exactly 
 
 ## Open questions
 
-- **How much a connection holds mid-request with the 16 KiB `read_buffer`** is calculated (two more pages than before), not measured. `docs/roadmap.md`'s "Measurements outstanding" table names the run: `bench/mem.py --hold` against `bench-stream-server` at 8 and at 16.
+- **How much a connection holds mid-request with the 16 KiB `read_buffer`** is calculated (two more pages than before), not measured. An entry in `docs/todo.md` names the run: `bench/mem.py --hold` against `bench-stream-server` at 8 and at 16.
 - **RFC 6266's `filename*` stays rejected instead of decoded**, as recorded in [ADR 073](../adr/073-a-header-is-answered-as-asked-or-refused.md). `core/percent.zig` could decode it; it waits for a client that sends only the encoded form rather than alongside a plain `filename`.

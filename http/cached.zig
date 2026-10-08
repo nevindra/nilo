@@ -528,7 +528,7 @@ test "a request that finds the answer still being made waits for it, and gets it
     // second fiber's would.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const record = try idempotent.encode(arena.allocator(), .json, 200, fingerprintOf(under), &.{}, "", "{\"id\":7,\"served\":99}");
+    const record = try idempotent.encode(arena.allocator(), .json, 200, fingerprintOf(under), &.{}, &.{}, "", "{\"id\":7,\"served\":99}");
     const Lander = struct {
         fn land(pages: *FakePages, bytes: []const u8) void {
             // A plain thread sleeps through an `Io` of its own; 0.16 has no

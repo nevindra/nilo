@@ -59,7 +59,7 @@ In the order the guide teaches them. Each row is one guide page and the referenc
 | [Sessions](./guide/sessions.md) | `nilo_http`, `nilo_pw` | [`Session(T)`](./reference/ctx.md#sessiont), [`session_secret` and the other `listen` options](./reference/app.md#listen-options), [password calls on `Ctx`](./reference/ctx.md#reading), [`nilo_pw`](./reference/pw.md) | [Cookies and sessions](./design/cookies-sessions.md) |
 | [Streaming](./guide/streaming.md) | `nilo_http` | [`Stream`](./reference/streaming.md#stream), [`Events`](./reference/streaming.md#events), [`Room`](./reference/streaming.md#room), [`Rooms`](./reference/streaming.md#rooms) | [Responses](./design/responses.md) |
 | [WebSocket](./guide/websocket.md) | `nilo_http` | [`c.upgrade`](./reference/ctx.md#answering), [`Socket`](./reference/streaming.md#socket), [`Room`](./reference/streaming.md#room), [`Rooms`](./reference/streaming.md#rooms) | [WebSockets](./design/websocket.md) |
-| [gRPC](./guide/grpc.md) | `nilo_http` | [`listen` options (`grpc`, `also`)](./reference/app.md#listen-options) | none; the decision is [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) |
+| [gRPC](./guide/grpc.md) | `nilo_http` | [`listen` options (`also`, `tls`)](./reference/app.md#listen-options) | none; the decision is [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) |
 
 ### Building an application
 
@@ -116,6 +116,7 @@ These are covered inside the guide pages named on the right, or matter only when
 | Memory per request and per connection | [Memory](./design/memory.md) | [Deploying](./guide/deploying.md), [Services](./guide/services.md) |
 | Accepting and serving connections | [The engine](./design/engine.md) | [Deploying](./guide/deploying.md) |
 | Parsing HTTP/1.1 | [The HTTP/1.1 wire protocol](./design/http1-protocol.md) | [Requests](./guide/requests.md) |
+| Writing an answer in HTTP/1.1 or HTTP/2 | [Framing](./design/framing.md) | [Requests](./guide/requests.md) |
 | TLS | [TLS](./design/tls.md) | [Deploying](./guide/deploying.md) |
 | Timeouts on network waits | [Deadlines](./design/deadlines.md) | [Deploying](./guide/deploying.md) |
 | Startup, services and shutdown | [Lifecycle](./design/lifecycle.md) | [Services](./guide/services.md), [Deploying](./guide/deploying.md) |
@@ -130,7 +131,8 @@ These are covered inside the guide pages named on the right, or matter only when
 | File | What it holds |
 |---|---|
 | [`../CHANGELOG.md`](../CHANGELOG.md) | what changed in each release, and under `## Unreleased` what will |
-| [`roadmap.md`](./roadmap.md) | what is planned and not built yet |
+| [`roadmap.md`](./roadmap.md) | where the framework is heading: a few directions, each larger than one change |
+| [`todo.md`](./todo.md) | every concrete item still open: defects, decisions, callers awaited, questions, measurements and upstream fixes |
 | [`decided.md`](./decided.md) | questions already answered, gaps kept on purpose, and features refused with the reason |
 | [`history.md`](./history.md) | lessons learned while building nilo: numbers measured, premises that turned out false |
 | [`risks.md`](./risks.md) | risks that are not bugs, and what guards against each |

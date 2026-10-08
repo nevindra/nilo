@@ -84,7 +84,7 @@ fn publish(news: *nilo.Room, headline: nilo.Str) !void {
 }
 ```
 
-`eventsFrom` takes a seat in the room, writes the head and returns. From then on the connection waits on the room the same way an idle connection waits for its next request, and every `say`, `print`, `json` or `event` into the room goes out as an event, one chunk each. While nothing is said, a comment goes out every 30 seconds, so a proxy that closes quiet connections sees this one speak (`.keepalive_ms`, `0` for none). The stream ends when the browser goes away or the server stops.
+`eventsFrom` takes a seat in the room, writes the head and returns. From then on the connection waits on the room the same way an idle connection waits for its next request, and every `say`, `print`, `json` or `event` into the room goes out as an event, one chunk each. While nothing is said, a comment goes out every 30 seconds, so a proxy that closes quiet connections sees this one speak (`.keepalive_ms`, `0` for none). The stream ends when the browser goes away or the server stops. In a `-Dhttp2` build the same call works over HTTP/2, where the connection writes the posts itself, in turn with its other streams, and a client that stops reading is reset at the write limit.
 
 To listen to more than one room, pass a tuple: `c.eventsFrom(.{ lobby, mine }, .{})`, and the stream hears all of them. A room can hold WebSockets and event streams together, so the chat room a socket speaks into can be the one a read-only page listens to. A binary message said into it reaches the sockets and is counted as missed for the streams, because an event is text.
 
@@ -111,6 +111,25 @@ var body = try c.streamWith(200, object.content_type, .{ .length = object.len })
 The head then carries `Content-Length` and no `Transfer-Encoding`, and the pieces go out unframed. The gain is not less framing overhead. A browser downloading a chunked response has nothing to draw a progress bar against, and a `Range` request against it cannot be answered at all, which is exactly the request a large download makes when it resumes.
 
 **A stream with a length is held to it.** Writing past the stated length fails with `error.WriteFailed` before any byte of the overrun goes out, because a client reading a `Content-Length` stops there and would read everything after it as the start of the next response. Finishing short cannot be refused, since the head has already gone, so the connection closes and the log names both numbers ([ADR 101](../adr/101-a-stream-that-knows-its-length-says-so.md)).
+
+## Trailers
+
+**A stream can end with trailers**, fields that go after the last piece. Set them before `finish`, which is what sends them:
+
+```zig
+fn report(c: *nilo.Ctx, db: *Db) !void {
+    var body = try c.stream(200, "text/csv");
+    var rows: usize = 0;
+    for (db.rows()) |row| {
+        try body.print("{d},{s}\n", .{ row.id, row.name });
+        rows += 1;
+    }
+    try c.setTrailer("x-rows", try std.fmt.allocPrint(c.arena(), "{d}", .{rows}));
+    try body.finish();
+}
+```
+
+On an HTTP/1.1 stream they are the trailer section of the chunked body. A client only reads them if it said `TE: trailers`, and `c.clientReadsTrailers()` tells you; setting them when it did not is harmless, and they are left off. A stream with a known length has no chunked body to carry them. The names that may not be trailers are listed under [Trailers](./responses.md#trailers).
 
 ## When a stream ends
 
