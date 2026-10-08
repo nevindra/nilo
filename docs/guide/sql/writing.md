@@ -111,13 +111,15 @@ fn receive(db: *sql.Db, c: *nilo.Ctx, body: []const Line) ![]Item {
 }
 ```
 
-The rows come back in the order they were sent. `tx.insertMany` is the same call inside a transaction.
+The rows come back in the order they were sent, and the statement orders them so: the `ORDER BY` is on the ordinal `WITH ORDINALITY` adds, which costs no sort. `tx.insertMany` is the same call inside a transaction.
 
 The rows are a slice of a **named** struct, not a tuple of literals, because the statement is compiled from the element type. It compiles to one array parameter per column:
 
 ```sql
 INSERT INTO "items" ("sku", "qty")
-SELECT * FROM unnest($1::text[], $2::int4[])
+SELECT "sku", "qty"
+FROM unnest($1::text[], $2::int4[]) WITH ORDINALITY AS "v"("sku", "qty", "#n")
+ORDER BY "#n"
 RETURNING "id", "sku", "qty"
 ```
 

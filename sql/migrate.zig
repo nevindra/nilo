@@ -1162,6 +1162,19 @@ fn diffTable(
         try renamed.append(gpa, r);
     }
 
+    // **A trigger that names a column about to change type comes down first.**
+    // Postgres refuses `ALTER COLUMN … TYPE` on a column a trigger names in
+    // `UPDATE OF` or `WHEN`, so a trigger that has not moved, and that the
+    // trigger diff below therefore leaves alone, failed the version.
+    var retyped: std.ArrayList([]const u8) = .empty;
+    if (comptime D.can_alter_column) {
+        for (t.desc.columns) |c| {
+            const before = columnBefore(old, c.name, renamed.items) orelse continue;
+            if (!std.mem.eql(u8, c.sql_type, before.sql_type)) try retyped.append(gpa, c.name);
+        }
+    }
+    const early = try dropTriggersNamingRetyped(gpa, D, t, old, retyped.items, steps);
+
     for (t.desc.columns) |c| {
         const was = columnBefore(old, c.name, renamed.items) orelse {
             // **A Problem on SQLite rather than a step that fails at the
@@ -1375,7 +1388,7 @@ fn diffTable(
     // OF` a column refuses the column's drop while it is there. Every column
     // they may name by now is added or renamed.
     try diffChecks(gpa, D, t, old, steps, problems);
-    try diffTriggers(gpa, D, t, old, steps);
+    try diffTriggers(gpa, D, t, old, early, steps);
 
     // **An index that is going goes before a column that is going.** Postgres
     // drops a column's indexes with it, so a `DROP INDEX` after the column was
@@ -1885,12 +1898,16 @@ fn diffTriggers(
     comptime D: type,
     t: Table,
     old: Desc,
+    early: []const []const u8,
     steps: *std.ArrayList(Step),
 ) !void {
     for (t.desc.triggers) |tr| {
         const before = findNamed(old.triggers, tr.name);
-        if (before != null and before.?.sameAs(tr)) continue;
-        if (before != null) try steps.append(gpa, .{
+        // Already dropped by `dropTriggersNamingRetyped`, so it is made again
+        // here whether or not its text moved.
+        const down = hasName(early, tr.name);
+        if (before != null and !down and before.?.sameAs(tr)) continue;
+        if (before != null and !down) try steps.append(gpa, .{
             .kind = .drop_trigger,
             .sql = try ddl.dropTrigger(D, gpa, t.desc, tr.name),
             .why = try std.fmt.allocPrint(gpa, "{s} runs something else now", .{tr.name}),
@@ -1904,12 +1921,57 @@ fn diffTriggers(
 
     for (old.triggers) |o| {
         if (findNamed(t.desc.triggers, o.name) != null) continue;
+        if (hasName(early, o.name)) continue;
         try steps.append(gpa, .{
             .kind = .drop_trigger,
             .sql = try ddl.dropTrigger(D, gpa, t.desc, o.name),
             .why = try std.fmt.allocPrint(gpa, "drop trigger {s}", .{o.name}),
         });
     }
+}
+
+/// The triggers dropped before a column changes type, by name, so
+/// `diffTriggers` neither drops them twice nor leaves them unmade.
+///
+/// **Which ones**: a trigger that is changing or going comes down anyway, and
+/// the snapshot holds only a hash of its old text, so there is no telling
+/// whether it names the column and it comes down now. One that has not moved
+/// is the text the database holds, and a word match (`mentions`, which errs
+/// toward dropping one that did not need it) says whether it names a column
+/// being retyped, in `UPDATE OF`, in `WHEN` or anywhere else. A trigger that
+/// does not is left standing; it costs nothing and keeps the step list short.
+fn dropTriggersNamingRetyped(
+    gpa: std.mem.Allocator,
+    comptime D: type,
+    t: Table,
+    old: Desc,
+    retyped: []const []const u8,
+    steps: *std.ArrayList(Step),
+) ![]const []const u8 {
+    if (retyped.len == 0) return &.{};
+    var early: std.ArrayList([]const u8) = .empty;
+    for (old.triggers) |o| {
+        if (findNamed(t.desc.triggers, o.name)) |now| {
+            if (now.sameAs(o) and !mentionsAny(now.body, retyped) and !mentionsAny(now.tail, retyped)) continue;
+        }
+        try steps.append(gpa, .{
+            .kind = .drop_trigger,
+            .sql = try ddl.dropTrigger(D, gpa, t.desc, o.name),
+            .why = try std.fmt.allocPrint(
+                gpa,
+                "drop trigger {s} while a column of {s} changes type, which Postgres refuses under a trigger that names it",
+                .{ o.name, t.desc.table },
+            ),
+        });
+        try early.append(gpa, o.name);
+    }
+    return early.items;
+}
+
+/// Whether `text` names any of `names` as a whole identifier.
+fn mentionsAny(text: []const u8, names: []const []const u8) bool {
+    for (names) |n| if (mentions(text, n)) return true;
+    return false;
 }
 
 fn findNamed(list: []const table_mod.NamedText, name: []const u8) ?table_mod.NamedText {
@@ -2275,7 +2337,7 @@ pub fn createMissing(db: anytype, scope: anytype, comptime schema: Schema) !void
     const D = comptime DialectOf(@TypeOf(db));
     comptime core.checkScope(@TypeOf(scope), "migrate.createMissing");
 
-    var tx = try db.begin(scope, .{});
+    var tx = try db.begin(scope, .{ .isolation = comptime schemaLevel(D) });
     errdefer tx.rollback();
     try enterLocked(D, &tx, scope, default_lock_timeout_ms);
 
@@ -2330,6 +2392,21 @@ pub fn createMissing(db: anytype, scope: anytype, comptime schema: Schema) !void
 fn enterLocked(comptime D: type, tx: anytype, scope: anytype, lock_timeout_ms: u32) !void {
     try takeAdvisory(D, tx, scope);
     try boundTableWaits(D, tx, scope, lock_timeout_ms);
+}
+
+/// The level a transaction that takes the advisory lock begins at, or null for
+/// a database that has no weaker one to name.
+///
+/// **Named, never left to the role.** A plain `BEGIN` is whatever the role's
+/// `default_transaction_isolation` says, and under REPEATABLE READ the snapshot
+/// is taken when the lock's `SELECT` starts: the replica that then waits for
+/// the lock reads a ledger from before the other committed, does not see the
+/// version, and runs it again. At READ COMMITTED the `find` after the lock is a
+/// new statement and sees what the other replica left. Whether a role may be
+/// set to the stricter level is the DBA's business; whether a migration is
+/// safe under it is not left to chance.
+fn schemaLevel(comptime D: type) ?wire_mod.Isolation {
+    return if (D.has_read_committed) .read_committed else null;
 }
 
 fn takeAdvisory(comptime D: type, tx: anytype, scope: anytype) !void {
@@ -2410,7 +2487,7 @@ pub fn addMissingColumns(db: anytype, scope: anytype, comptime schema: Schema) !
     comptime core.checkScope(@TypeOf(scope), "migrate.addMissingColumns");
     const arena = scope.arena();
 
-    var tx = try db.begin(scope, .{});
+    var tx = try db.begin(scope, .{ .isolation = comptime schemaLevel(D) });
     errdefer tx.rollback();
     try enterLocked(D, &tx, scope, default_lock_timeout_ms);
 
@@ -2541,12 +2618,21 @@ fn hasNamed(columns: []const wire_mod.Column, name: []const u8) bool {
 /// The ledger, made if it is not there: the same `CREATE TABLE IF NOT
 /// EXISTS` any other table gets, behind the lock `apply` takes.
 ///
-/// **The lock is not ceremony.** Two Postgres sessions running `CREATE TABLE
-/// IF NOT EXISTS` for the same new table at the same moment can both pass
-/// the "not there" check, and the second fails on the catalog's own unique
-/// index, which arrives as `AlreadyExists`. Ten replicas booting against a
-/// fresh database is exactly that moment. Four round trips instead of one, at
-/// boot and in the `db` command, and nowhere else.
+/// **A ledger that is already there is one catalog read and nothing else**, and
+/// that is the case that matters most. `CREATE TABLE IF NOT EXISTS` is checked
+/// against the schema's CREATE privilege *before* it looks for the table, so
+/// asking it of a database that has the ledger refused an application role
+/// that may read and write rows and may not create anything, which is the role
+/// an application that is not the migration's owner connects as. `expect` runs
+/// on every boot, so it would have refused to start for a table that was right
+/// there. The read is of the catalog, which needs no privilege on the table.
+///
+/// **The lock is not ceremony when it is not there.** Two Postgres sessions
+/// running `CREATE TABLE IF NOT EXISTS` for the same new table at the same
+/// moment can both pass the "not there" check, and the second fails on the
+/// catalog's own unique index, which arrives as `AlreadyExists`. Ten replicas
+/// booting against a fresh database is exactly that moment, so a ledger that is
+/// not there is made behind the lock: four round trips instead of one, once.
 pub fn ensureLedger(db: anytype, scope: anytype) !void {
     const D = comptime DialectOf(@TypeOf(db));
     const create = comptime ddl.createIfMissing(D, Applied);
@@ -2555,7 +2641,10 @@ pub fn ensureLedger(db: anytype, scope: anytype) !void {
         _ = try db.exec(scope, create, .{});
         return;
     }
-    var tx = try db.begin(scope, .{});
+    const q = comptime row_mod.qualifiedOf(Applied);
+    if ((try db.liveColumns(scope, q.schema, q.table)).len > 0) return;
+
+    var tx = try db.begin(scope, .{ .isolation = comptime schemaLevel(D) });
     defer tx.deinit();
     _ = try tx.exec(scope, lock.?, .{});
     _ = try tx.exec(scope, create, .{});
@@ -2703,10 +2792,14 @@ pub fn apply(
     // version keeps them on, so a `DELETE` of a parent cascades as the
     // schema says and nothing reads every key in the file at its end. A
     // dialect that alters a column in place has no rebuild to protect.
+    //
+    // **At READ COMMITTED where the database has it** (`schemaLevel`): the
+    // ledger is read after the advisory lock, and only a statement that starts
+    // after the lock is granted sees what the replica that held it committed.
     var tx = if (comptime !D.can_alter_column) (if (rebuilds(v.steps))
-        try db.begin(scope, .{ .rebuilding = true })
+        try db.begin(scope, .{ .rebuilding = true, .isolation = comptime schemaLevel(D) })
     else
-        try db.begin(scope, .{})) else try db.begin(scope, .{});
+        try db.begin(scope, .{ .isolation = comptime schemaLevel(D) })) else try db.begin(scope, .{ .isolation = comptime schemaLevel(D) });
     errdefer tx.rollback();
 
     try takeAdvisory(D, &tx, scope);
@@ -4272,6 +4365,94 @@ test "a changed body under the same name is one drop and one create, for both ki
     );
     try testing.expectEqual(Kind.create_trigger, change.steps[3].kind);
     try testing.expect(std.mem.indexOf(u8, change.steps[3].sql, "AFTER UPDATE") != null);
+}
+
+/// A table with a trigger on `UPDATE OF count`, and the same table with that
+/// column wider. Postgres refuses to retype a column a trigger names, whether
+/// or not the trigger moved with it (`dropTriggersNamingRetyped`).
+fn Metered(comptime count: type, comptime when: []const u8) type {
+    return struct {
+        pub const nilo_table = .{
+            .name = "meters",
+            .key = .id,
+            .trigger = .{ .meters_touch = .{
+                .when = when,
+                .run = "FOR EACH ROW EXECUTE FUNCTION set_updated_at()",
+            } },
+        };
+        id: i64,
+        count: count,
+        note: ?[]const u8,
+    };
+}
+
+const MeterNarrow = Metered(i32, "BEFORE UPDATE OF count");
+const MeterWide = Metered(i64, "BEFORE UPDATE OF count");
+const MeterWideMoved = Metered(i64, "AFTER UPDATE OF count");
+const NoteNarrow = Metered(i32, "BEFORE UPDATE OF note");
+const NoteWide = Metered(i64, "BEFORE UPDATE OF note");
+const MeterWideBare = struct {
+    pub const nilo_table = .{ .name = "meters", .key = .id };
+    id: i64,
+    count: i64,
+    note: ?[]const u8,
+};
+
+test "a trigger that names a column about to change type comes down before it and is made again after" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try snapshotFrom(a, Pg, &.{MeterNarrow});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{MeterWide} }), before);
+
+    // The trigger has not moved, and Postgres refuses the `ALTER` under it
+    // all the same: it comes down, the column changes, it goes back.
+    const kinds = [_]Kind{ .drop_trigger, .change_type, .create_trigger };
+    try testing.expectEqual(kinds.len, change.steps.len);
+    for (kinds, change.steps) |want, step| try testing.expectEqual(want, step.kind);
+    try testing.expectEqualStrings("DROP TRIGGER \"meters_touch\" ON \"meters\"", change.steps[0].sql);
+    try testing.expect(std.mem.indexOf(u8, change.steps[2].sql, "CREATE TRIGGER \"meters_touch\" BEFORE UPDATE OF count") != null);
+}
+
+test "a trigger that names another column is left standing while a column changes type" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try snapshotFrom(a, Pg, &.{NoteNarrow});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{NoteWide} }), before);
+
+    try testing.expectEqual(@as(usize, 1), change.steps.len);
+    try testing.expectEqual(Kind.change_type, change.steps[0].kind);
+}
+
+test "a trigger that moves while its column changes type is dropped once, before the change, and made once, after" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try snapshotFrom(a, Pg, &.{MeterNarrow});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{MeterWideMoved} }), before);
+
+    // The drop used to follow the `ALTER`, which the old trigger refused.
+    const kinds = [_]Kind{ .drop_trigger, .change_type, .create_trigger };
+    try testing.expectEqual(kinds.len, change.steps.len);
+    for (kinds, change.steps) |want, step| try testing.expectEqual(want, step.kind);
+    try testing.expect(std.mem.indexOf(u8, change.steps[2].sql, "AFTER UPDATE OF count") != null);
+}
+
+test "a trigger the types dropped comes down before a column changes type, not after" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try snapshotFrom(a, Pg, &.{MeterNarrow});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{MeterWideBare} }), before);
+
+    const kinds = [_]Kind{ .drop_trigger, .change_type };
+    try testing.expectEqual(kinds.len, change.steps.len);
+    for (kinds, change.steps) |want, step| try testing.expectEqual(want, step.kind);
 }
 
 test "a check the types no longer name is dropped, and so is a trigger" {

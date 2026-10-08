@@ -49,26 +49,6 @@ Nothing is open at this tier.
 
 **Needs:** a harness — a build step that stands up a second writer, which here is a second process on the same file rather than a socket.
 
-**Whether two replicas applying migrations at once are safe under REPEATABLE READ.** `apply` begins with no isolation named, takes `pg_advisory_xact_lock` and then reads the ledger (`migrate.zig:1824`). Under a role whose default is REPEATABLE READ the snapshot is taken at the lock's `SELECT`, so the replica that waited does not see the other's ledger row and runs the version again; two `psql` sessions show it, and the suite has no way to set a role's default.
-
-**What would settle it:** a live test with two pools on a role set to REPEATABLE READ, or `apply` naming READ COMMITTED, which makes the question moot.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
-**Whether `insertMany`'s `RETURNING` comes back in the order of its input.** It rests on how Postgres runs `INSERT … SELECT FROM unnest`, which it does not promise.
-
-**What would settle it:** a Postgres statement that it does, or `WITH ORDINALITY` and an `ORDER BY` in the statement.
-
-**Smaller suspicions, each needing a probe.** `Ordering.by` guards its length with `std.debug.assert`, which is out of bounds in ReleaseFast, and `nilo_parse` takes `?order=id,id`. `violated` guesses a constraint by `_pkey` and `_key`, which breaks once Postgres truncates a name at 63 bytes. `.x = null` on a column that cannot be null compiles to an `IS NULL` that is always false, the silent shape [ADR 040](./adr/040-a-condition-holds-a-value-not-a-maybe.md) refuses for `= NULL`. `.now` against an `AsText("timestamp")` column writes `now()`, a `timestamptz` that Postgres converts to the session's zone, so a session in Asia/Jakarta stores and compares seven hours off (`where.zig:1838`). Changing the type of a column an unchanged trigger names in `UPDATE OF` or `WHEN` is refused by Postgres, and `diffTriggers` remakes a trigger only when its hash moved (`migrate.zig:1066`). The introspection resolves a Row with no schema through `current_schema()` (`dialect.zig:750`), where a query resolves it through the whole `search_path`. The others (`Composed.text`, `Savepoint.release`, a stale `sql.problem`, `rawExplain` on SQLite) were checked on their own.
-
-**What would settle it:** a probe each, kept as a test if it fails.
-
-**Whether `expect` can boot under a role that may only read and write rows.** `expect` reaches `ensureLedger` (`migrate.zig:2601`), whose `CREATE TABLE IF NOT EXISTS` is checked against the schema's CREATE privilege, so an application role that is not the migration's owner may be refused at boot.
-
-**What would settle it:** a live test under a role granted DML only.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
 ### `nilo_http`
 
 **The OpenAPI document is looser than the server.** An unsigned integer gets `minimum: 0` and no `maximum`, although a `u8` refuses 256 with a 400, and a field with a default or a `?T` is marked not required in a response schema, although the writer always sends it, so a generated client null-checks every one.

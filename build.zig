@@ -1393,6 +1393,29 @@ const sql_refusals = [_]Refusal{
         .name = "shape_grouped_children",
         .says = "shape_grouped_children.ByCustomer is grouped and reads `lines` as children.",
     },
+    // The probes of the P1 suspicions: an ordering with no term or too many,
+    // a null compared with a column that is never null (ADR 040), and `.now`
+    // on a `timestamp` that a session's zone would shift (ADR 067).
+    .{
+        .name = "ordering_by_with_no_terms",
+        .says = "sql.Ordering(ordering_by_with_no_terms.Ticket).by was given no terms.",
+    },
+    .{
+        .name = "ordering_by_with_more_terms_than_keys",
+        .says = "sql.Ordering(ordering_by_with_more_terms_than_keys.Ticket).by was given 2 terms and the ordering has 1 key.",
+    },
+    .{
+        .name = "null_on_a_column_that_is_never_null",
+        .says = "the condition `.age = null` on null_on_a_column_that_is_never_null.User compares `age` with null, and `age` is never null.",
+    },
+    .{
+        .name = "not_null_on_a_column_that_is_never_null",
+        .says = "the condition `.age = .{ .ne = null }` on not_null_on_a_column_that_is_never_null.User compares `age` with null, and `age` is never null.",
+    },
+    .{
+        .name = "now_on_a_timestamp_without_a_zone",
+        .says = "`.set = .{ .seen_at = .now }` on now_on_a_timestamp_without_a_zone.Card, whose `seen_at` is a `timestamp` column read as text.",
+    },
 };
 
 /// The same, for `s3/refusals/`. The fifth table, hung off `test-s3`.

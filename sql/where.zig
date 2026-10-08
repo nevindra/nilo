@@ -1792,7 +1792,12 @@ fn clockOf(
                 (if (now)
                     "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp` " ++
                         "or a `sql.AsText(\"timestamptz\")`." ++
-                        (if (C == types.Date or day) " A date takes `.today`." else "")
+                        (if (C == types.Date or day) " A date takes `.today`." else "") ++
+                        (if (text) |t| (if (isNaiveMomentColumn(t))
+                            " A `" ++ t ++ "` has no zone, so the session's TimeZone would decide " ++
+                                "what `now()` means in it; a `timestamptz` keeps the instant."
+                        else
+                            "") else "")
                 else
                     "  `.today` is the day the statement runs, so it goes in a `sql.Date` " ++
                         "or a `sql.AsText(\"date\")`." ++
@@ -1864,10 +1869,23 @@ pub fn clockShifted(
 /// spelling Postgres accepts for it.
 fn isMomentColumn(comptime t: []const u8) bool {
     comptime {
-        for ([_][]const u8{ "timestamptz", "timestamp", "timestamp with time zone", "timestamp without time zone" }) |name| {
+        // **Not `timestamp`.** A `timestamp` has no zone, so `now()` meets it
+        // through the session's TimeZone: a session in Asia/Jakarta writes and
+        // compares seven hours off a session in UTC, and the same statement
+        // answers differently from two connections. `now_text` is `now()`
+        // because the column is a `timestamptz`; it cannot be said of this.
+        for ([_][]const u8{ "timestamptz", "timestamp with time zone" }) |name| {
             if (std.ascii.eqlIgnoreCase(t, name)) return true;
         }
         return false;
+    }
+}
+
+/// A column type named in text that is a moment with no zone.
+fn isNaiveMomentColumn(comptime t: []const u8) bool {
+    comptime {
+        return std.ascii.eqlIgnoreCase(t, "timestamp") or
+            std.ascii.eqlIgnoreCase(t, "timestamp without time zone");
     }
 }
 
@@ -1886,7 +1904,10 @@ fn condition(
         // `.deleted_at = null` is `IS NULL`. It cannot mean anything else:
         // `= NULL` is never true in SQL, so reading it the other way would
         // produce a condition that silently matches nothing.
-        if (@typeInfo(T) == .null) return quoted ++ " IS NULL";
+        if (@typeInfo(T) == .null) {
+            assertCanBeNull(Row, column, null, state);
+            return quoted ++ " IS NULL";
+        }
 
         // A term that is only there when the filter carried a value
         // ([ADR 149](../docs/adr/149-a-filter-that-is-absent-is-not-a-filter-that-is-null.md)).
@@ -2326,7 +2347,10 @@ fn operator(
             );
             // A null written as a literal needs no parameter at all — the
             // comparison is against NULL itself, which is a keyword.
-            if (@typeInfo(op.T) == .null) return quoted ++ " " ++ spelled ++ " NULL";
+            if (@typeInfo(op.T) == .null) {
+                assertCanBeNull(Row, column, op.name, state);
+                return quoted ++ " " ++ spelled ++ " NULL";
+            }
             return quoted ++ " " ++ spelled ++ " " ++ D.bindAs(
                 D.placeholder(state.take(path, .{
                     .column = column,
@@ -2460,7 +2484,10 @@ fn operator(
         // `.ne = null` is `IS NOT NULL`, for the same reason `= null` is
         // `IS NULL`: `<> NULL` is never true either.
         if (@typeInfo(op.T) == .null) {
-            if (std.mem.eql(u8, op.name, "ne")) return quoted ++ " IS NOT NULL";
+            if (std.mem.eql(u8, op.name, "ne")) {
+                assertCanBeNull(Row, column, op.name, state);
+                return quoted ++ " IS NOT NULL";
+            }
             @compileError(
                 "nilo: `" ++ op.name ++ "` was given null on column `" ++ column ++ "`.\n" ++
                     "  Comparing with null is never true in SQL. `.col = null` asks " ++
@@ -2473,6 +2500,40 @@ fn operator(
             D.placeholder(state.take(path, .{ .column = column })),
             row_mod.ColumnType(Row, column),
             false,
+        );
+    }
+}
+
+/// A null written in a condition on a column that is never null is a Refusal.
+///
+/// `.age = null` is `IS NULL`, which no row of a `NOT NULL` column satisfies,
+/// and `.age = .{ .ne = null }` is `IS NOT NULL`, which every row does: a
+/// statement that runs, answers and is wrong, the shape
+/// [ADR 040](../docs/adr/040-a-condition-holds-a-value-not-a-maybe.md) refuses
+/// for `= NULL`. The type the Row gives the field is what says it cannot be
+/// null, so an optional is the one way to ask.
+///
+/// Skipped where the thing compared is not a column of this Row: an aggregate
+/// of a group, which `state.spelled` names, and a path through a parent.
+fn assertCanBeNull(
+    comptime Row: type,
+    comptime column: []const u8,
+    comptime op: ?[]const u8,
+    comptime state: *State,
+) void {
+    comptime {
+        if (state.spelled.len > 0) return;
+        if (!row_mod.hasColumn(Row, column)) return;
+        const F = row_mod.ColumnType(Row, column);
+        if (@typeInfo(F) == .optional) return;
+        const written = if (op) |name| "." ++ column ++ " = .{ ." ++ name ++ " = null }" else "." ++ column ++ " = null";
+        @compileError(
+            "nilo: the condition `" ++ written ++ "` on " ++ @typeName(Row) ++ " compares `" ++
+                column ++ "` with null, and `" ++ column ++ "` is never null.\n" ++
+                "  A column that cannot be null is never `IS NULL` and always `IS NOT NULL`, so " ++
+                "the condition matches nothing or everything and the query says nothing about it.\n" ++
+                "  Drop the condition, or make the field `?" ++ @typeName(F) ++ "` if the column " ++
+                "can be null.",
         );
     }
 }
@@ -3196,13 +3257,13 @@ test "an any nests inside an any, which is what closes the boolean algebra" {
     // It only holds if `.any` composes with itself, which nothing asserted
     // until now.
     try testing.expectEqualStrings(
-        "(\"role\" <> $1 OR (\"age\" < $2 OR \"email\" IS NULL))",
+        "(\"role\" <> $1 OR (\"age\" < $2 OR \"deleted_at\" IS NULL))",
         sqlOf(.{
             .any = .{
                 .{ .role = .{ .ne = "admin" } },
                 .{ .any = .{
                     .{ .age = .{ .lt = 18 } },
-                    .{ .email = null },
+                    .{ .deleted_at = null },
                 } },
             },
         }),

@@ -359,7 +359,7 @@ fn constraintSpellings(comptime Row: type, comptime columns: anytype) []const []
 
         const keys = row_mod.keysIfAnyOf(owner);
         if (keys.len > 0 and sameSet(wanted, keys)) {
-            const out = [_][]const u8{ desc.table ++ "_pkey", sqliteSpelling(desc.table, keys) };
+            const out = [_][]const u8{ pkeyName(desc.table), sqliteSpelling(desc.table, keys) };
             return &out;
         }
         var declared: []const u8 = "";
@@ -377,6 +377,25 @@ fn constraintSpellings(comptime Row: type, comptime columns: anytype) []const []
                 (if (declared.len > 0) ", and the uniques are:" ++ declared else ", and it declares no `.unique`.") ++
                 "\n  A constraint the marker does not declare is one this cannot name for you.",
         );
+    }
+}
+
+/// What Postgres calls the primary key of a table it was not told a name for:
+/// the table's name and `_pkey`, with the table's part cut so that the whole
+/// fits the 63 bytes an identifier keeps (`makeObjectName`, which cuts at a
+/// character and not in the middle of one). A table of 62 bytes has a key
+/// called after its first 58, and `<62 bytes>_pkey` is a name the database
+/// never reports, so `sql.violated` said no to the very key that broke.
+///
+/// Not handled: a second table whose first 58 bytes agree. Postgres then
+/// numbers the second (`…_pkey1`), and this names the first.
+fn pkeyName(comptime table: []const u8) []const u8 {
+    comptime {
+        const room = table_mod.max_identifier - "_pkey".len;
+        if (table.len <= room) return table ++ "_pkey";
+        var end: usize = room;
+        while (end > 0 and (table[end] & 0xC0) == 0x80) end -= 1;
+        return table[0..end] ++ "_pkey";
     }
 }
 
@@ -6325,9 +6344,10 @@ fn touchEverything(db: *FakeDb, c: *nilo.Ctx) !void {
     // here is a Refusal, because whether that means `= $1` or `IS NULL`
     // would depend on a value that arrives after the statement is a constant
     // (`where.zig`, `assertNotOptional`).
+    _ = try db.select(Person, c, .{ .where = .{ .nickname = .{ .ne = null } } });
     _ = try db.select(Person, c, .{ .where = .{
         .nickname = null,
-        .id = .{ .ne = null },
+        .id = .{ .gt = @as(i64, 0) },
         .email = .{ .like = "%@b.c", .not_like = "%+test@%" },
         .age = .{ .in = &[_]i32{ 1, 2, 3 }, .not_in = &[_]i32{ 9, 10 } },
         .any = .{ .{ .age = @as(i32, 1) }, .{ .age = @as(i32, 2) } },
@@ -7105,7 +7125,9 @@ test "a batch sends one statement, and it does not mention how many rows" {
     try testing.expectEqual(@as(usize, 2), stored.len);
     try testing.expectEqualStrings(
         "INSERT INTO \"people\" (\"email\", \"age\")" ++
-            " SELECT * FROM unnest($1::text[], $2::int4[])" ++
+            " SELECT \"email\", \"age\"" ++
+            " FROM unnest($1::text[], $2::int4[]) WITH ORDINALITY AS \"v\"(\"email\", \"age\", \"#n\")" ++
+            " ORDER BY \"#n\"" ++
             " RETURNING \"id\", \"email\", \"nickname\", \"age\"",
         db.wire.?.last_sql,
     );
@@ -10912,7 +10934,14 @@ test "an update or a delete whose condition the request emptied is refused befor
     try testing.expectEqual(@as(usize, 0), try db.delete(SqliteAccount, &run, .{ .where = .{ .email = .{ .not_icontains = blank } } }));
     // And a condition that binds nothing is a condition: `IS NULL` used to be
     // refused as if the `.where` were empty, because it takes no parameter.
-    try testing.expectEqual(@as(usize, 0), try db.delete(SqliteAccount, &run, .{ .where = .{ .email = null } }));
+    // Over a Row that says the column may be null, which the real one may not:
+    // `IS NULL` on a column that cannot be is a Refusal (`where.assertCanBeNull`).
+    const Loose = struct {
+        pub const nilo_table = .{ .name = "accounts", .key = .id };
+        id: i64,
+        email: ?nilo.Str,
+    };
+    try testing.expectEqual(@as(usize, 0), try db.delete(Loose, &run, .{ .where = .{ .email = null } }));
     try testing.expectEqual(@as(usize, 1), try db.count(SqliteAccount, &run, .{}));
 }
 
@@ -11069,6 +11098,22 @@ test "a constraint's spellings are the Postgres name and SQLite's column list" {
     try testing.expectEqualStrings("members.org, members.handle", both[1]);
     const key = comptime constraintSpellings(Member, .id);
     try testing.expectEqualStrings("members_pkey", key[0]);
+}
+
+const pk_fits: [58]u8 = @splat('a');
+const pk_over: [62]u8 = @splat('b');
+const pk_multibyte: []const u8 = &(@as([57]u8, @splat('c')) ++ "\xc3\xa9".* ++ "tail".*);
+
+test "the primary key of a table with a long name is called after the part of it that fits" {
+    try testing.expectEqualStrings("members_pkey", comptime pkeyName("members"));
+    // 58 bytes and `_pkey` are the 63 an identifier keeps.
+    try testing.expectEqualStrings(&pk_fits ++ "_pkey", comptime pkeyName(&pk_fits));
+    // Longer is cut to that, as Postgres cuts it: 62 bytes keep their first 58.
+    try testing.expectEqualStrings(pk_over[0..58] ++ "_pkey", comptime pkeyName(&pk_over));
+    try testing.expectEqual(@as(usize, 63), (comptime pkeyName(&pk_over)).len);
+    // And not in the middle of a character: the two bytes of `\xc3\xa9` start at
+    // byte 57, so the cut falls inside them and backs off to before the first.
+    try testing.expectEqualStrings(pk_multibyte[0..57] ++ "_pkey", comptime pkeyName(pk_multibyte));
 }
 
 const Draft = struct {

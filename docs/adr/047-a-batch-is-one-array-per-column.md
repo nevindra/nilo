@@ -24,12 +24,20 @@ const stored = try db.insertMany(Item, c, lines);   // lines: []const Line
 
 ```sql
 INSERT INTO "items" ("sku", "qty")
-SELECT * FROM unnest($1::text[], $2::int4[])
+SELECT "sku", "qty"
+FROM unnest($1::text[], $2::int4[]) WITH ORDINALITY AS "v"("sku", "qty", "#n")
+ORDER BY "#n"
 RETURNING "id", "sku", "qty"
 ```
 
 Two placeholders, whatever the batch size. `RETURNING` gives the stored rows
-back in the order they were sent, because `unnest` walks the arrays in step.
+back in the order they were sent, and the statement says so: Postgres does not
+promise the order of `INSERT … SELECT`, only that rows go in as the `SELECT`
+produces them, so the `SELECT` is ordered by the ordinal `WITH ORDINALITY`
+numbers each element with. It costs nothing to run (`EXPLAIN` shows no `Sort`,
+because a function scan with an ordinality column is already in that order).
+It first read `SELECT * FROM unnest(…)` and leaned on `unnest` walking the
+arrays in step, which held in every run and was written down nowhere.
 
 The rows arrive as a slice of a **named** struct rather than a tuple of
 literals, and that is not a limitation to apologise for: the statement is

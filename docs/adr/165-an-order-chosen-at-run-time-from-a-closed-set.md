@@ -136,14 +136,21 @@ compile error. The closed set is declared, the way everything else here is.
 
 ## Consequences
 
-- `sql.Ordering(Row, keys)`, `.by(terms)`, `nilo_parse`, `.write(D, w)`.
+- `sql.Ordering(Row, keys)`, `.by(terms)`, `.fromTerms(terms)`, `nilo_parse`,
+  `.write(D, w)`. **`.by` takes its terms while compiling** (`comptime terms`)
+  and refuses none and more than there are keys there, where a `std.debug.assert`
+  checked it at run time: out of bounds in ReleaseFast, and for none a statement
+  whose key tiebreak began with a comma. Terms that arrive at run time go through
+  `.fromTerms`, which answers null for the same two cases, as `nilo_parse` does
+  for text. A key said twice (`?order=title,title:desc`) is not refused: both
+  databases take `ORDER BY x ASC, x DESC`, and the first decides.
   `db.select`, `db.one`, `db.page`, `db.stream` and their `tx` forms take one
   in `.order`; `db.rawOrdered` and `tx.rawOrdered` take one beside the values.
 - `statement.Statement` has `ordered` and `tail`. A statement that is not
   ordered has `tail = ""` and is exactly what it was.
-- Four Refusals: a key naming a column the Row lacks, an ordering for another
-  Row, an expression key on a typed statement, and a raw statement with no
-  `{order}`.
+- Six Refusals: a key naming a column the Row lacks, an ordering for another
+  Row, an expression key on a typed statement, a raw statement with no
+  `{order}`, and `.by` with no terms or with more than there are keys.
 - The port's `platform/listsort.zig` — the CASE ladder and its `clause` —
   goes, and the flagship list is one statement.
 - The mechanism is used a second time by [ADR 149](149-a-filter-that-is-absent-is-not-a-filter-that-is-null.md):

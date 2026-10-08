@@ -1253,7 +1253,9 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
 ///
 /// ```sql
 /// INSERT INTO "items" ("sku", "qty")
-/// SELECT * FROM unnest($1::text[], $2::int4[])
+/// SELECT "sku", "qty"
+/// FROM unnest($1::text[], $2::int4[]) WITH ORDINALITY AS "v"("sku", "qty", "#n")
+/// ORDER BY "#n"
 /// RETURNING "id", "sku", "qty"
 /// ```
 ///
@@ -1265,7 +1267,12 @@ pub fn insert(comptime D: type, comptime Row: type, comptime V: type) Statement 
 /// Postgres would re-plan it every time the batch size changed.
 ///
 /// `RETURNING` is the Row's column list, the same as `insert`'s and for the
-/// same reason. Rows come back in the order the arrays were given.
+/// same reason. **Rows come back in the order the arrays were given, and the
+/// statement says so**: Postgres does not promise the order of `INSERT …
+/// SELECT`, only that the rows go in as the `SELECT` produces them, so the
+/// `SELECT` is `ORDER BY` the ordinal `WITH ORDINALITY` numbers each element
+/// with. It costs nothing to run: `EXPLAIN` shows no `Sort`, because a
+/// function scan with an ordinality column is already in that order.
 pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statement {
     return comptime blk: {
         dialect_mod.assertDialect(D);
@@ -1320,15 +1327,25 @@ pub fn insertMany(comptime D: type, comptime Row: type, comptime V: type) Statem
             params = params ++ &[_]where_mod.Param{.{ .column = f_name, .list = true }};
         }
 
+        // `names` is also the alias list of the `unnest`, so the select list
+        // is the same names again and the ordinal rides one column past them.
         break :blk .{
             .sql = "INSERT INTO " ++ relation(D, Row) ++
-                " (" ++ names ++ ") SELECT * FROM unnest(" ++ arrays ++ ")" ++
+                " (" ++ names ++ ") SELECT " ++ names ++
+                " FROM unnest(" ++ arrays ++ ") WITH ORDINALITY AS " ++
+                D.quote(batch_source) ++ "(" ++ names ++ ", " ++ D.quote(batch_ordinal) ++ ")" ++
+                " ORDER BY " ++ D.quote(batch_ordinal) ++
                 " RETURNING " ++ columnList(D, Row),
             .paths = paths,
             .params = params,
         };
     };
 }
+
+/// The name `insertMany` gives the ordinal `WITH ORDINALITY` adds. A `#` in it
+/// is why no column can be called the same: it needs quoting, and the Row's
+/// fields are Zig identifiers.
+const batch_ordinal = "#n";
 
 /// The relation aliases a batched update needs. Two names in one place, so
 /// the four fragments that have to agree about them cannot drift.
@@ -3123,7 +3140,9 @@ test "a batch insert is one array per column, and the text never mentions a coun
     const found = comptime insertMany(Pg, User, Line);
     try testing.expectEqualStrings(
         "INSERT INTO \"users\" (\"email\", \"age\")" ++
-            " SELECT * FROM unnest($1::text[], $2::int4[])" ++
+            " SELECT \"email\", \"age\"" ++
+            " FROM unnest($1::text[], $2::int4[]) WITH ORDINALITY AS \"v\"(\"email\", \"age\", \"#n\")" ++
+            " ORDER BY \"#n\"" ++
             " RETURNING \"id\", \"email\", \"age\", \"created_at\"",
         found.sql,
     );
@@ -4012,7 +4031,8 @@ test "a write seventeen columns wide on a twenty-column Row compiles, and its te
     try testing.expectEqual(@as(usize, 17), single.params.len);
 
     const many = comptime insertMany(Pg, RabLine, Saved);
-    try testing.expect(std.mem.containsAtLeast(u8, many.sql, 1, "SELECT * FROM unnest($1::int8[], $2::int8[], $3::int4[],"));
+    try testing.expect(std.mem.containsAtLeast(u8, many.sql, 1, "FROM unnest($1::int8[], $2::int8[], $3::int4[],"));
+    try testing.expect(std.mem.containsAtLeast(u8, many.sql, 1, " ORDER BY \"#n\" RETURNING "));
     try testing.expect(std.mem.containsAtLeast(u8, many.sql, 1, "$17::text[])"));
     try testing.expectEqual(@as(usize, 17), many.params.len);
 

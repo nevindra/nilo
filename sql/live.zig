@@ -45,6 +45,7 @@ const nilo = @import("nilo_http");
 const live_config = @import("live_config");
 
 const db_mod = @import("db.zig");
+const ddl = @import("ddl.zig");
 const dialect = @import("dialect.zig");
 const migrate = @import("migrate.zig");
 const postgres = @import("postgres.zig");
@@ -2969,6 +2970,345 @@ test "a version gives up on a table another transaction holds after its own lock
     try holder.commit();
     try testing.expect(try migrate.apply(&stack.db, &run, .{ .number = number, .name = "waited", .steps = &steps }, hash));
     _ = try stack.db.exec(&run, "SELECT \"n\" FROM \"" ++ held ++ "\"", .{});
+}
+
+// -- a role that is not the owner ------------------------------------------
+//
+// Every test below makes a role of its own and drops it again, so the suite is
+// rerunnable and leaves the cluster as it found it. A role is cluster-wide, not
+// per database, so each is named for the optimize mode as the tables are: the
+// two modes run at once.
+
+/// `url` with its user and password swapped for `role` and `nilo`, which is the
+/// password every role these tests make is given.
+fn urlAs(arena: std.mem.Allocator, url: []const u8, role: []const u8) ![]const u8 {
+    const scheme_end = (std.mem.indexOf(u8, url, "://") orelse return error.SkipZigTest) + 3;
+    const slash = std.mem.indexOfScalarPos(u8, url, scheme_end, '/') orelse url.len;
+    const at = std.mem.lastIndexOfScalar(u8, url[scheme_end..slash], '@');
+    const host = if (at) |a| url[scheme_end + a + 1 ..] else url[scheme_end..];
+    return std.fmt.allocPrint(arena, "{s}{s}:nilo@{s}", .{ url[0..scheme_end], role, host });
+}
+
+/// Make a role, or skip the test where the connection may not: a role is a
+/// privilege a managed database often withholds, and a test that needs one is
+/// not a reason to fail a run there.
+fn makeRole(db: *db_mod.Db, run: *core.Run, comptime role: []const u8) !void {
+    _ = try db.exec(run, "DROP ROLE IF EXISTS " ++ role, .{});
+    _ = db.exec(run, "CREATE ROLE " ++ role ++ " LOGIN PASSWORD 'nilo'", .{}) catch |err| {
+        if (db_mod.lastProblem(run)) |problem| {
+            if (std.mem.eql(u8, problem.code, "42501")) return error.SkipZigTest;
+        }
+        return err;
+    };
+}
+
+/// What a replica applying a version found.
+const Applying = enum { ran, already, failed };
+
+fn applyAs(db: *db_mod.Db, gpa: std.mem.Allocator, v: migrate.Version, hash: []const u8) Applying {
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    const ran = migrate.apply(db, &run, v, hash) catch return .failed;
+    return if (ran) .ran else .already;
+}
+
+const rr_role = "nilo_probe_rr_" ++ mode_suffix;
+const rr_schema = "nilo_probe_rr_" ++ mode_suffix;
+
+test "two replicas migrating at once apply a version once, under a role whose default is REPEATABLE READ" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var admin = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer admin.deinit();
+    try admin.nilo_start(io, .off);
+    defer admin.nilo_stop();
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    // The role and the schema it owns, which its `search_path` is, so the
+    // ledger and the table the version makes land there and nowhere shared.
+    _ = try admin.exec(&run, "DROP SCHEMA IF EXISTS " ++ rr_schema ++ " CASCADE", .{});
+    try makeRole(&admin, &run, rr_role);
+    defer _ = admin.exec(&run, "DROP ROLE IF EXISTS " ++ rr_role, .{}) catch {};
+    defer _ = admin.exec(&run, "DROP SCHEMA IF EXISTS " ++ rr_schema ++ " CASCADE", .{}) catch {};
+    _ = try admin.exec(&run, "CREATE SCHEMA " ++ rr_schema ++ " AUTHORIZATION " ++ rr_role, .{});
+    _ = try admin.exec(&run, "ALTER ROLE " ++ rr_role ++ " SET search_path = " ++ rr_schema, .{});
+    // What the todo list asked about: `ALTER ROLE … SET
+    // default_transaction_isolation` is a thing, and a plain `BEGIN` obeys it.
+    _ = try admin.exec(&run, "ALTER ROLE " ++ rr_role ++ " SET default_transaction_isolation = 'repeatable read'", .{});
+
+    // Two replicas: two pools, two connections, one role.
+    const as_role = try urlAs(run.arena(), url, rr_role);
+    var first = db_mod.Db.init(gpa, as_role, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer first.deinit();
+    try first.nilo_start(io, .off);
+    defer first.nilo_stop();
+    var second = db_mod.Db.init(gpa, as_role, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer second.deinit();
+    try second.nilo_start(io, .off);
+    defer second.nilo_stop();
+
+    // The premise: the role really does begin in REPEATABLE READ.
+    var plain = try first.begin(&run, .{});
+    defer plain.deinit();
+    const level = (try plain.rawOne([]const u8, &run, "SELECT current_setting('transaction_isolation')", .{})).?;
+    try testing.expectEqualStrings("repeatable read", level);
+    try plain.commit();
+
+    try migrate.ensureLedger(&first, &run);
+
+    // A version that fails if it runs twice: its table is made by a plain
+    // `CREATE TABLE`. The first replica holds the lock for most of a second.
+    const steps = [_]migrate.Step{
+        .{ .kind = .create_table, .sql = "CREATE TABLE \"nilo_probe_twice\" (\"id\" int)", .why = "" },
+        .{ .kind = .data, .sql = "SELECT pg_sleep(0.8)", .why = "stay in the transaction a while" },
+    };
+    const v: migrate.Version = .{ .number = 1, .name = "twice", .steps = &steps };
+    var digest: [64]u8 = undefined;
+    const hash = migrate.hashOf("", v.steps, &digest);
+
+    var one = io.concurrent(applyAs, .{ &first, gpa, v, hash }) catch return error.SkipZigTest;
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    // The second arrives while the first holds the lock, so its snapshot, if it
+    // takes one at the lock, is from before the first commits.
+    var two = io.concurrent(applyAs, .{ &second, gpa, v, hash }) catch return error.SkipZigTest;
+
+    const a = one.await(io);
+    const b = two.await(io);
+    try testing.expectEqual(Applying.ran, a);
+    try testing.expectEqual(Applying.already, b);
+}
+
+const dml_role = "nilo_probe_dml_" ++ mode_suffix;
+const dml_schema = "nilo_probe_dml_" ++ mode_suffix;
+
+test "expect boots under a role that may read and write rows and may create nothing" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var admin = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer admin.deinit();
+    try admin.nilo_start(io, .off);
+    defer admin.nilo_stop();
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    // The schema belongs to the admin, as the migration's owner's would: the
+    // role is let in and given rows, and no CREATE.
+    _ = try admin.exec(&run, "DROP SCHEMA IF EXISTS " ++ dml_schema ++ " CASCADE", .{});
+    try makeRole(&admin, &run, dml_role);
+    defer _ = admin.exec(&run, "DROP ROLE IF EXISTS " ++ dml_role, .{}) catch {};
+    defer _ = admin.exec(&run, "DROP SCHEMA IF EXISTS " ++ dml_schema ++ " CASCADE", .{}) catch {};
+    _ = try admin.exec(&run, "CREATE SCHEMA " ++ dml_schema, .{});
+    _ = try admin.exec(&run, "ALTER ROLE " ++ dml_role ++ " SET search_path = " ++ dml_schema, .{});
+    _ = try admin.exec(&run, "GRANT USAGE ON SCHEMA " ++ dml_schema ++ " TO " ++ dml_role, .{});
+
+    // The migration's owner made the ledger, as `db migrate` did.
+    {
+        var tx = try admin.begin(&run, .{});
+        defer tx.deinit();
+        _ = try tx.exec(&run, "SET LOCAL search_path TO " ++ dml_schema, .{});
+        _ = try tx.exec(&run, comptime ddl.createIfMissing(dialect.Postgres, migrate.Applied), .{});
+        try tx.commit();
+    }
+    _ = try admin.exec(&run, "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA " ++ dml_schema ++ " TO " ++ dml_role, .{});
+
+    const as_role = try urlAs(run.arena(), url, dml_role);
+    var app_db = db_mod.Db.init(gpa, as_role, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer app_db.deinit();
+    try app_db.nilo_start(io, .off);
+    defer app_db.nilo_stop();
+
+    // The premise: it really may create nothing.
+    try testing.expectError(error.QueryFailed, app_db.exec(&run, "CREATE TABLE \"nilo_probe_nope\" (id int)", .{}));
+
+    // The boot of an application that is not the migration's owner.
+    try migrate.expect(&app_db, &run, 0);
+    try testing.expectEqual(@as(i64, 0), try migrate.headVersion(&app_db, &run));
+}
+
+/// A table name of 62 bytes, which is allowed, and whose primary key Postgres
+/// then cannot name `<table>_pkey`: that is 67, so it cuts the table's part.
+const long_pk_head = "nilo_probe_pkey_" ++ mode_suffix ++ "_";
+const long_pk_pad: [62 - long_pk_head.len]u8 = @splat('p');
+const long_pk_table = long_pk_head ++ long_pk_pad;
+
+const LongPk = struct {
+    pub const nilo_table = .{ .name = long_pk_table, .key = .id };
+    id: i64,
+    label: []const u8,
+};
+
+test "sql.violated names the primary key of a table whose name leaves no room for _pkey" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    try testing.expectEqual(@as(usize, 62), long_pk_table.len);
+    _ = try db.exec(&run, "DROP TABLE IF EXISTS \"" ++ long_pk_table ++ "\"", .{});
+    defer _ = db.exec(&run, "DROP TABLE IF EXISTS \"" ++ long_pk_table ++ "\"", .{}) catch {};
+    try migrate.createMissing(&db, &run, .{ .tables = &.{LongPk} });
+
+    _ = try db.insert(LongPk, &run, .{ .id = @as(i64, 1), .label = "one" });
+    try testing.expectError(error.AlreadyExists, db.insert(LongPk, &run, .{ .id = @as(i64, 1), .label = "again" }));
+    // Postgres says which constraint, and it is not `<62 bytes>_pkey`.
+    try testing.expect(db_mod.lastProblem(&run).?.constraint.len <= 63);
+    try testing.expect(db_mod.violated(&run, LongPk, .id));
+}
+
+const sp_schema = "nilo_probe_sp_" ++ mode_suffix;
+const sp_table = "nilo_probe_sp_t_" ++ mode_suffix;
+
+test "a table with no schema is found down the whole search_path, as a query finds it" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    // The table is in `public`, and the path puts another schema first: the
+    // shape of an application whose role has a schema of its own.
+    _ = try db.exec(&run, "DROP SCHEMA IF EXISTS " ++ sp_schema ++ " CASCADE", .{});
+    _ = try db.exec(&run, "DROP TABLE IF EXISTS \"" ++ sp_table ++ "\"", .{});
+    defer _ = db.exec(&run, "DROP SCHEMA IF EXISTS " ++ sp_schema ++ " CASCADE", .{}) catch {};
+    defer _ = db.exec(&run, "DROP TABLE IF EXISTS \"" ++ sp_table ++ "\"", .{}) catch {};
+    _ = try db.exec(&run, "CREATE SCHEMA " ++ sp_schema, .{});
+    _ = try db.exec(&run, "CREATE TABLE \"" ++ sp_table ++ "\" (id int8 PRIMARY KEY, label text NOT NULL)", .{});
+
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+    _ = try tx.exec(&run, "SET LOCAL search_path TO " ++ sp_schema ++ ", public", .{});
+    // A query resolves it, down the path.
+    _ = try tx.exec(&run, "SELECT id, label FROM \"" ++ sp_table ++ "\"", .{});
+    // And so must the question about its columns.
+    const columns = try tx.liveColumns(&run, null, sp_table);
+    try testing.expectEqual(@as(usize, 2), columns.len);
+}
+
+const trig_table = "nilo_probe_trig_" ++ mode_suffix;
+const trig_fn = "nilo_probe_trig_fn_" ++ mode_suffix;
+
+test "a plan that retypes a column an unchanged trigger names in UPDATE OF runs on Postgres" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var db = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer db.deinit();
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+
+    const Before = struct {
+        pub const nilo_table = .{
+            .name = trig_table,
+            .key = .id,
+            .trigger = .{ .nilo_probe_trig_touch = .{
+                .when = "BEFORE UPDATE OF count",
+                .run = "FOR EACH ROW EXECUTE FUNCTION " ++ trig_fn ++ "()",
+            } },
+        };
+        id: i64,
+        count: i32,
+    };
+    // The same trigger, word for word, over a column that is wider.
+    const After = struct {
+        pub const nilo_table = .{
+            .name = trig_table,
+            .key = .id,
+            .trigger = .{ .nilo_probe_trig_touch = .{
+                .when = "BEFORE UPDATE OF count",
+                .run = "FOR EACH ROW EXECUTE FUNCTION " ++ trig_fn ++ "()",
+            } },
+        };
+        id: i64,
+        count: i64,
+    };
+
+    _ = try db.exec(&run, "DROP TABLE IF EXISTS \"" ++ trig_table ++ "\"", .{});
+    _ = try db.exec(&run, "DROP FUNCTION IF EXISTS " ++ trig_fn ++ "()", .{});
+    defer _ = db.exec(&run, "DROP FUNCTION IF EXISTS " ++ trig_fn ++ "()", .{}) catch {};
+    defer _ = db.exec(&run, "DROP TABLE IF EXISTS \"" ++ trig_table ++ "\"", .{}) catch {};
+    _ = try db.exec(&run, "CREATE FUNCTION " ++ trig_fn ++ "() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql", .{});
+    try migrate.createMissing(&db, &run, .{ .tables = &.{Before} });
+    _ = try db.insert(Before, &run, .{ .id = @as(i64, 1), .count = @as(i32, 7) });
+
+    const a = run.arena();
+    const before = try migrate.snapshotOf(a, dialect.Postgres, 1, comptime migrate.desiredOf(dialect.Postgres, .{ .tables = &.{Before} }));
+    const change = try migrate.plan(a, dialect.Postgres, comptime migrate.desiredOf(dialect.Postgres, .{ .tables = &.{After} }), before);
+    try testing.expectEqual(@as(usize, 0), change.problems.len);
+
+    // In one transaction, as `apply` sends a version. Postgres refuses the
+    // `ALTER … TYPE` while the trigger that names the column is there.
+    var tx = try db.begin(&run, .{});
+    defer tx.deinit();
+    for (change.steps) |step| _ = try tx.exec(&run, step.sql, .{});
+    try tx.commit();
+
+    // And the trigger is still there afterwards, doing its job.
+    const kept = (try db.find(After, &run, @as(i64, 1))).?;
+    try testing.expectEqual(@as(i64, 7), kept.count);
+    const triggers = try db.rawOne(i64, &run, "SELECT count(*)::int8 FROM pg_trigger WHERE tgname = 'nilo_probe_trig_touch' AND tgrelid = '\"" ++ trig_table ++ "\"'::regclass", .{});
+    try testing.expectEqual(@as(?i64, 1), triggers);
+}
+
+const Shuffled = struct {
+    id: i64,
+    email: []const u8,
+    age: i32,
+};
+
+test "a batch of three hundred comes back row for row in the order it went in" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+
+    // Ids that run backwards and ages that repeat: nothing about the data
+    // makes input order and any other order the same.
+    const count = 300;
+    const first: i64 = 50_000;
+    var rows: [count]Shuffled = undefined;
+    for (&rows, 0..) |*row, i| row.* = .{
+        .id = first + @as(i64, @intCast(count - i)),
+        .email = try std.fmt.allocPrint(run.arena(), "ordered{d}@batch.dev", .{i}),
+        .age = @intCast(i % 7),
+    };
+    defer _ = stack.db.delete(Person, &run, .{ .where = .{ .id = .{ .gte = first } } }) catch {};
+    const stored = try stack.db.insertMany(Person, &run, @as([]const Shuffled, &rows));
+
+    try testing.expectEqual(@as(usize, count), stored.len);
+    for (stored, rows) |got, sent| {
+        try testing.expectEqual(sent.id, got.id);
+        try testing.expectEqualStrings(sent.email, got.email);
+    }
 }
 
 // -- the column type nothing checks at startup ----------------------------

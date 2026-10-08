@@ -60,7 +60,7 @@ The full list of operators is in [the reference](../../reference/sql.md#conditio
 
 - `.in` takes a list and compiles to `= ANY($1)`: **one** parameter, so the statement stays a constant however long the list is. Its negation is `.not_in`, which is `<> ALL($1)` and also costs one parameter. `.not_like` and `.not_ilike` are the other two negations.
 - `.ieq` is `=` ignoring case, `lower("email") = lower($1)`, the lookup a `.unique` with `.ignoring_case` is an index for. `.not_ieq` negates it.
-- A `sql.Date` column compares with `.today` and a `sql.Timestamp` column with `.now`, using the database's clock with nothing bound: `.due_date = .{ .lt = .today }`. A column read as text takes the word its column type names: `.today` on `sql.AsText("date")` and `.now` on `sql.AsText("timestamptz")`.
+- A `sql.Date` column compares with `.today` and a `sql.Timestamp` column with `.now`, using the database's clock with nothing bound: `.due_date = .{ .lt = .today }`. A column read as text takes the word its column type names: `.today` on `sql.AsText("date")` and `.now` on `sql.AsText("timestamptz")`. A `timestamp` column, which has no zone, takes neither: the session's time zone would decide what `now()` means in it.
 - Either one can be moved by a number written out, for a window that ends now: `.closed_at = .{ .gte = .{ .today = -90 } }` is the last ninety days by the database's calendar, and `.seen_at = .{ .gt = .{ .now = .{ .hours = -24 } } }` is the last day by its clock.
 - `.distinct_from` and `.not_distinct_from` are the null-safe pair; see below.
 

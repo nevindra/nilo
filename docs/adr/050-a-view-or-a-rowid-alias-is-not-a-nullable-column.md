@@ -29,14 +29,15 @@ FROM pg_catalog.pg_attribute a
 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
-WHERE n.nspname = COALESCE($1, current_schema())
+WHERE (n.nspname = $1::text
+       OR ($1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)))
   AND c.relname = $2
   AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
   AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum
 ```
 
-The five relation kinds accepted are an ordinary table, a partitioned table, a view, a materialized view and a foreign table; an index and a sequence are relations too and are not things a Row reads. Leaving `information_schema` is safe because this query lives in the Postgres Dialect, the one place portability is not a property to protect: a second Dialect writes its own `introspect`. One behaviour changed that nothing in the suite covers: a domain type now reports the domain's own name where `udt_name` reported the base type's.
+The five relation kinds accepted are an ordinary table, a partitioned table, a view, a materialized view and a foreign table; an index and a sequence are relations too and are not things a Row reads. **A Row with no schema is resolved the way a query resolves it**, down the whole `search_path` (`pg_table_is_visible`). It was `COALESCE($1, current_schema())`, the first schema only, so a table in `public` behind a schema of the role's own was reported missing while every query on it worked, and `ensureLedger` would have made a second ledger. Leaving `information_schema` is safe because this query lives in the Postgres Dialect, the one place portability is not a property to protect: a second Dialect writes its own `introspect`. One behaviour changed that nothing in the suite covers: a domain type now reports the domain's own name where `udt_name` reported the base type's.
 
 ### SQLite: the rowid alias is the third branch, behind the view check
 

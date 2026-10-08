@@ -123,11 +123,38 @@ pub fn Ordering(comptime Row: type, comptime keys: anytype) type {
         terms: [max]Term = undefined,
         len: usize = 0,
 
-        /// An ordering built by the caller — from its own parsing, or as the
-        /// default a query field falls back to. At least one term, and at
-        /// most `max`.
-        pub fn by(terms: []const Term) Self {
-            std.debug.assert(terms.len > 0 and terms.len <= max);
+        /// An ordering written out, as the default a query field falls back to
+        /// or the order of a screen: `Sort.by(&.{.{ .key = .due }})`. At least
+        /// one term, and at most `max`.
+        ///
+        /// **Known while compiling, so the count is checked there.** It was a
+        /// run-time `std.debug.assert`, which is out of bounds in ReleaseFast
+        /// (more terms than the array holds) and, for none, wrote a statement
+        /// whose key tiebreak began with a comma. Terms that arrive at run time
+        /// go through `fromTerms`, which answers null instead.
+        pub fn by(comptime terms: []const Term) Self {
+            comptime {
+                if (terms.len == 0) @compileError(
+                    "nilo: " ++ nilo_type_name ++ ".by was given no terms.\n" ++
+                        "  An ordering orders by something: `.by(&.{.{ .key = .<one of its keys> }})`.",
+                );
+                if (terms.len > max) @compileError(
+                    "nilo: " ++ nilo_type_name ++ ".by was given " ++
+                        std.fmt.comptimePrint("{d}", .{terms.len}) ++ " terms and the ordering has " ++
+                        std.fmt.comptimePrint("{d}", .{max}) ++ (if (max == 1) " key" else " keys") ++ ".\n" ++
+                        "  A tier past the last key repeats one, and a repeat never changes " ++
+                        "the order. Leave the extra terms out.",
+                );
+            }
+            return fromTerms(terms).?;
+        }
+
+        /// An ordering from terms that are known only at run time, such as
+        /// the caller's own parsing: null when there are none or more than
+        /// `max`, which is the answer `nilo_parse` gives text for the same
+        /// reasons.
+        pub fn fromTerms(terms: []const Term) ?Self {
+            if (terms.len == 0 or terms.len > max) return null;
             var self: Self = .{};
             for (terms, 0..) |t, i| self.terms[i] = t;
             self.len = terms.len;
@@ -584,6 +611,39 @@ test "a term is a fragment settled while compiling, written in the order the req
     const text = try clauseOf(dialect_mod.Postgres, chosen);
     defer testing.allocator.free(text);
     try testing.expectEqualStrings(" ORDER BY \"due_at\" DESC NULLS LAST, \"title\" ASC", text);
+}
+
+test "terms known only at run time make an ordering when there are one to max, and null otherwise" {
+    var terms = [_]Sort.Term{
+        .{ .key = .due, .direction = .desc },
+        .{ .key = .title },
+        .{ .key = .weight },
+        .{ .key = .due },
+    };
+    // More terms than keys, which `by` could not take: `std.debug.assert`
+    // there was out of bounds in ReleaseFast.
+    try testing.expectEqual(@as(?Sort, null), Sort.fromTerms(terms[0..4]));
+    try testing.expectEqual(@as(?Sort, null), Sort.fromTerms(terms[0..0]));
+
+    const two = Sort.fromTerms(terms[0..2]).?;
+    try testing.expectEqual(@as(usize, 2), two.len);
+    const text = try clauseOf(dialect_mod.Postgres, two);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings(" ORDER BY \"due_at\" DESC NULLS LAST, \"title\" ASC", text);
+}
+
+test "a key said twice is an ordering that runs, because the second never changes the order" {
+    // `?order=title,title:desc`: two tiers on one key. Both databases accept
+    // `ORDER BY x ASC, x DESC`, and the first decides, so there is nothing to
+    // refuse and nothing to answer a 400 for.
+    const twice = Sort.nilo_parse("title,title:desc").?;
+    try testing.expectEqual(@as(usize, 2), twice.len);
+    const pg = try clauseOf(dialect_mod.Postgres, twice);
+    defer testing.allocator.free(pg);
+    try testing.expectEqualStrings(" ORDER BY \"title\" ASC, \"title\" DESC", pg);
+    const lite = try clauseOf(dialect_mod.SQLite, twice);
+    defer testing.allocator.free(lite);
+    try testing.expectEqualStrings(" ORDER BY \"title\" ASC, \"title\" DESC", lite);
 }
 
 test "the request says which way, and the key says where NULLs go under either" {

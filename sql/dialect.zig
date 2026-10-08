@@ -722,6 +722,15 @@ pub const Postgres = struct {
     /// came out with ([ADR 240](../docs/adr/240-a-migration-waits-five-seconds-for-a-table.md)).
     pub const lock_timeout: ?[]const u8 = "SELECT set_config('lock_timeout', $1, true)";
 
+    /// **Yes**: a transaction can say `READ COMMITTED`, and a migration does.
+    /// The advisory lock above is a `SELECT`, and under REPEATABLE READ (a
+    /// role's `default_transaction_isolation` can be set to it) the snapshot is
+    /// taken when that statement starts, before it waits. The replica that
+    /// waited then reads a ledger from before the other committed, finds its
+    /// version missing and runs it again. Asking for the level in the `BEGIN`
+    /// leaves nothing to the role's setting (`migrate.apply`).
+    pub const has_read_committed = true;
+
     /// **No**: the prefix is escaped inside the statement and binds as the
     /// caller's text, with nothing allocated. Postgres folds the expression
     /// into a constant when it plans for the value, and reads the same index
@@ -799,6 +808,12 @@ pub const Postgres = struct {
     /// Two parameters: the schema, which is null for a Row that named none and
     /// then means whatever `search_path` resolves to, and the relation.
     ///
+    /// **Resolved the way a query resolves it**: `pg_table_is_visible` finds the
+    /// relation the first schema on the path that has one of that name would
+    /// answer. It was `current_schema()`, which is the *first* schema only, so
+    /// a table in `public` behind a schema of the role's own was reported as
+    /// missing while every query on it worked.
+    ///
     /// **`pg_catalog` rather than `information_schema`, for three reasons that
     /// each showed up as a wrong answer** (ADR 050):
     ///
@@ -834,7 +849,8 @@ pub const Postgres = struct {
         \\  FROM pg_catalog.pg_attribute a
         \\  JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
         \\  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        \\  WHERE n.nspname = COALESCE($1, current_schema())
+        \\  WHERE (n.nspname = $1::text
+        \\         OR ($1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)))
         \\    AND c.relname = $2
         \\    AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
         \\    AND a.attnum > 0
@@ -876,7 +892,8 @@ pub const Postgres = struct {
         \\  FROM pg_catalog.pg_attribute a
         \\  JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
         \\  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        \\  WHERE n.nspname = COALESCE($1, current_schema())
+        \\  WHERE (n.nspname = $1::text
+        \\         OR ($1::text IS NULL AND pg_catalog.pg_table_is_visible(c.oid)))
         \\    AND c.relname = ANY($2::text[]::name[])
         \\    AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
         \\    AND a.attnum > 0
@@ -1403,6 +1420,11 @@ pub const SQLite = struct {
     /// `busy_timeout` is what bounds that wait, per connection.
     pub const lock_timeout: ?[]const u8 = null;
 
+    /// **No**: every transaction is a snapshot taken after the one writer has
+    /// the file, so what the other level guards against cannot happen, and
+    /// `wire.Begin` refuses to name it (`sqlite.Wire.checkIsolation`).
+    pub const has_read_committed = false;
+
     /// **Yes**: SQLite reads an index range off `LIKE ?1` only when `?1` is
     /// the pattern itself, and off `replace(…) || '%'` never, so an
     /// `istarts_with` over a `NOCASE` index scanned the table. The binder
@@ -1898,6 +1920,7 @@ pub fn assertDialect(comptime D: type) void {
             "can_alter_column",
             "advisoryLock",
             "lock_timeout",
+            "has_read_committed",
             "prefix_bound",
             "plan_may_go_generic",
             "nulls",

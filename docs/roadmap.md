@@ -72,8 +72,6 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_sql` · Whether two replicas applying migrations at once are safe under REPEATABLE READ.
-- [P1](./todo.md#p1-belongs-in-the-next-release) · `nilo_sql` · Whether `expect` can boot under a role that may only read and write rows.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_sql` · Migration steps and their words disagree with what runs.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_sql` · `reset` and `squash` are missing from the migrations, and they are the debt that forward-only creates.
 - [P2](./todo.md#p2-evidence-it-matters) · `nilo_sql` · An index on a big live Postgres table cannot be built without blocking its writes.

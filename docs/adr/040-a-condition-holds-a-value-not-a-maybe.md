@@ -75,6 +75,18 @@ NULL, and there is only ever one statement. The Refusal lives in `where.zig`,
 which is the file both reads and conditions go through and neither write
 does.
 
+**A null written against a column that is never null is refused too.** `.age = null` is
+`IS NULL`, which no row of a `NOT NULL` column satisfies, and `.age = .{ .ne = null }`
+is `IS NOT NULL`, which every row does: the query runs, answers, and the
+condition does nothing, the silent shape this ADR is about reached by a
+literal. The Row's field type says the column cannot be null, so a field that
+is not an optional is refused while compiling
+(`refusals/null_on_a_column_that_is_never_null.zig`,
+`refusals/not_null_on_a_column_that_is_never_null.zig`, `where.zig`'s
+`assertCanBeNull`), and `?T` is the one way to ask. It compiled before. What it
+does not look at is a column of a group's aggregate (`state.spelled`) or a
+path through a parent, which are not fields of the Row being filtered.
+
 **A list holds no null either.** `.tag = .{ .not_in = &[_]?i64{ 1, null } }` is
 `= NULL` through another door: `"tag" <> ALL('{1,NULL}')` is NULL for every
 row, so the select comes back empty, and `.in` with a null in its list never
