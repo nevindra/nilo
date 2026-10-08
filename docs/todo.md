@@ -444,10 +444,6 @@ Nothing is open at this tier.
 
 **Needs:** the issue filed against zig, `lib/std/compress/flate/Compress.zig` lines 987 and 1055. Last checked at 0.17.0, where both lines are unchanged.
 
-**Under `--no-incremental`, `nilo-dev` prunes a binary of the same name built for another target or mode, and that build then fails until its cache entry is rebuilt by hand.** After a restart it keeps the one `o/<hash>/` directory holding the binary it serves and deletes every other directory holding a file of that name ([ADR 190](./adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)), whatever target or optimize mode built it. The manifest of the deleted build stays, so the next `zig build` of that configuration is a cache hit on a file that is gone, and install fails with `FileNotFound`, on every run after. Found when `zig build examples -Dtarget=x86_64-linux-gnu` failed after a native `dev-hello` session, and reproduced with a two-file project on Zig 0.16.0 and 0.17.0 alike, so it is not the port's.
-
-**Needs:** pruning that keys on the configuration as well as the name, or removes the manifest with the directory. Last checked at 0.17.0.
-
 **A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.** With it, so is a session ticket, which is what the session resumption entry needs to turn a full handshake per reconnection into a resumption.
 
 **Needs:** the same repository. Last checked at `e04ae44`.

@@ -83,24 +83,40 @@ is not started half way through.
 
 **When that first build fails, the stale binary is removed.** Remembering its stamp as already served does not work, and was tried: a fix that puts the sources back to the ones the old binary was built from compiles, the install step finds the file on disk already right and does not write it, the stamp never moves, and the loop waits for ever beside a build that succeeded. Removed, the first build that compiles writes it, whatever it compiles to. A Ctrl-C during that build stops it the way the loop stops the watch.
 
-**Under `--no-incremental`, after every restart the stale builds are deleted.** One save leaves
+**Under `--no-incremental`, after every restart the build it replaced is deleted, and nothing else.** One save leaves
 exactly one new file in the cache — `.zig-cache/o/<hash>/<exe>`, the whole
 Debug binary, 27 MB for `examples/hello` and the size of the program for
-anything else — and Zig never removes it. So once the new server is up
-the runner walks `o/`, keeps the one directory whose copy of the binary is
-byte for byte the one it just started, and deletes every other directory
-holding a file of that name. Four saves that alternated an edit and its
-undo left the cache 0.0 MB larger, with one directory in it at every step.
+anything else — and Zig never removes it. So at every start the runner
+finds the directory whose copy of the binary is byte for byte the one it
+just started, and at every restart it deletes the directory it found the
+time before. Four saves that alternated an edit and its undo left the
+cache 0.0 MB larger, with one directory in it at every step.
 
-Deleting is safe because the directory's name is a hash of the build's
-content: an undo back to the previous version does not hit a manifest
-whose output is gone, it rebuilds into the same directory — which was
-tried before it was relied on, by deleting a build's directory, reverting
-the source to it, and building. It runs after a restart and not at the
-first start, because at a restart the build has just finished writing and
-is idle, and at the first start it is running. It runs only under
-`--no-incremental`: an incremental build patches its one directory in
-place and nothing is stale. `--keep-cache` turns it off.
+What makes that directory, and only that one, safe to delete is how Zig's
+cache names things. There is one manifest per configuration
+(`.zig-cache/h/<hash>`, the hash of the compile's options, not of its
+sources), and each names exactly one output directory, the one its
+current sources hash to. A rebuild of the same configuration rewrites the
+manifest, so the directory it named before is named by nothing, and an
+undo back to it is a miss that rebuilds into the same directory rather
+than a hit on a directory that is gone. Both were tried before they were
+relied on: an edit, an undo and a rebuild in a scratch project on Zig
+0.17.0, where the manifest's content changed and the count of manifests
+did not, and the same under a real `nilo-dev --no-incremental` session. A
+plain `zig build` and the watch's rebuilds share the manifest, so the
+first start's directory belongs to the same configuration as every
+restart's.
+
+A directory the session did not serve from is never touched, however its
+binary is named. If the served binary is in no directory, because the
+step copies or strips it on the way to `zig-out`, nothing is deleted and
+the trail is kept: missing a directory costs its megabytes, deleting a
+live one costs a build. A directory that still holds the bytes being
+served is kept too. Deleting reads nothing but the new binary to find it,
+and runs after a restart, when the build has just finished writing and is
+idle. It runs only under `--no-incremental`: an incremental build patches
+its one directory in place and nothing is stale. `--keep-cache` turns it
+off.
 
 **The build is incremental by default, on the self-hosted backend, and
 `--no-incremental` is the way out.** Measured through `nilo-dev`, from the
@@ -186,10 +202,29 @@ That is true of every save after the first, and was not of the first start, whic
 **A cache directory of the loop's own**, `--cache-dir .zig-cache/dev`,
 pruned whole on exit. Race-free by construction, and a second copy of
 everything the shared cache already holds — a cold build per machine, and
-hundreds of megabytes standing where the per-save leak was 27. Pruning by
-name in the shared cache touches only directories holding a copy of the
-one binary this loop serves, and a concurrent build of that same binary is
-the one thing nobody runs beside its dev loop.
+hundreds of megabytes standing where the per-save leak was 27.
+
+**Pruning by name: every directory holding a file called what the loop
+serves, but the one it just started.** The rule this loop shipped with, on
+the premise that the only other build of the same binary would be a
+concurrent one, which nobody runs beside their dev loop. The premise was
+about the wrong thing. A build of the same binary for another target or
+mode does not have to be running: the one from yesterday is still named by
+its own manifest, and deleting its directory made the next build of that
+configuration a cache hit on a file that was gone. `zig build examples
+-Dtarget=x86_64-linux-gnu` failed `install` with `FileNotFound` after a
+native `dev-hello` session, and on every run after until the cache was
+rebuilt; a two-file project reproduced it on Zig 0.16.0 and 0.17.0 alike.
+
+**Deleting the manifest with the directory**, so a pruned build of another
+configuration would be a miss rather than a broken hit. Nothing in the
+cache maps a directory to its manifest: the directory's name is the
+manifest's hasher carried on over the input files' digests, and the
+hasher's state before them is not in the manifest, only its digest, so the
+name cannot be recomputed from outside the compiler. **Keying the pruning
+on the configuration** fails the same way: nothing in `o/` says which
+options built it. What the loop does know is which directory it served
+from, and that is the whole of the rule.
 
 ## Consequences
 

@@ -45,12 +45,16 @@
 //! behind.** A rebuild that is not incremental writes the whole binary into a
 //! new `.zig-cache/o/<hash>/` — 27 MB for `examples/hello`, the size of
 //! the Debug binary for anything else — and Zig evicts nothing, so a day of
-//! saves is a gigabyte. After every restart the runner walks `o/`, keeps
-//! the one directory whose copy of the binary is byte for byte what it just
-//! started, and deletes the rest. Deleting is safe because the hash is of
-//! the content: an undo back to a previous version rebuilds into the same
-//! directory rather than failing on a cache hit with nothing behind it,
-//! which was tried before it was relied on. `--keep-cache` turns it off.
+//! saves is a gigabyte. At every start the runner finds the directory whose
+//! copy of the binary is byte for byte what it just started, and at every
+//! restart it deletes the one it found the time before. Nothing else: Zig
+//! keeps one manifest per configuration, the rebuild has just rewritten
+//! this one's, and so the directory it named before is named by nothing. A
+//! directory holding a binary of the same name for another target or mode
+//! is still named by its own manifest, and deleting it, which this did by
+//! name, failed that build with `FileNotFound` on every run after. An undo
+//! back to a deleted version rebuilds into the same directory, because the
+//! manifest no longer describes it. `--keep-cache` turns it off.
 //!
 //! **The old server is asked, not killed.** SIGTERM, which nilo answers by
 //! draining what is in flight (ADR 077); SIGKILL only after `drain_ms`.
@@ -78,8 +82,8 @@ const Options = struct {
     /// `--no-incremental` turns it off; `--incremental`, the flag from when
     /// it was opt-in, is still accepted and changes nothing.
     incremental: bool = true,
-    /// `--keep-cache`: leave the stale `o/<hash>/` directories where they
-    /// are.
+    /// `--keep-cache`: leave the `o/<hash>/` directories this session served
+    /// from where they are.
     prune: bool = true,
     /// `--trace`: print the binary's stamp on every poll it changes.
     trace: bool = false,
@@ -242,6 +246,8 @@ pub fn main(init: std.process.Init) !void {
     try server_argv.appendSlice(gpa, opts.server_args);
 
     const t_start = now(io);
+    var trail: Trail = .{};
+    defer trail.deinit(gpa);
     var server: ?*Running = null;
     var serving: ?Stamp = null;
     var started_once = false;
@@ -290,11 +296,11 @@ pub fn main(init: std.process.Init) !void {
                         say("started {s} (pid {d})", .{ opts.exe, server.?.pid });
                     } else {
                         say("{s} changed; restarted (pid {d}, the old one drained in {d} ms)", .{ opts.exe, server.?.pid, drained });
-                        // After a restart and not at the first start: here
-                        // the build has just finished writing and is idle,
-                        // and at the first start it is running.
-                        if (opts.prune and !opts.incremental) pruneStale(io, gpa, opts.exe);
                     }
+                    // At the first start too, where the trail is empty and
+                    // this only finds where the binary came from, so the
+                    // first restart knows what it replaced.
+                    if (opts.prune and !opts.incremental) trail.advance(io, gpa, opts.exe);
                     serving = seen;
                     pending = null;
                 } else {
@@ -386,63 +392,102 @@ fn usage() noreturn {
         \\  The build is incremental: the compiler stays resident, .zig-cache stays
         \\  flat, and a save is served in under a second. --no-incremental rebuilds
         \\  instead, every save leaves the previous binary in .zig-cache/o/, and the
-        \\  runner deletes those after each restart; --keep-cache leaves them.
+        \\  runner deletes the one it replaced after each restart; --keep-cache
+        \\  leaves them.
         \\  --trace prints the binary's size and mtime whenever they move.
         \\
     , .{});
     std.process.exit(2);
 }
 
-/// Delete every `.zig-cache/o/<hash>/` holding a copy of the served binary
-/// that is not the one just started. The cache is the build root's, and
-/// the build root is found the way `zig build` finds it: the nearest
-/// `build.zig` at or above the working directory.
-fn pruneStale(io: std.Io, gpa: std.mem.Allocator, exe: []const u8) void {
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = buildRoot(io, &root_buf) orelse return;
-    const o_path = std.fs.path.join(gpa, &.{ root, ".zig-cache", "o" }) catch return;
-    defer gpa.free(o_path);
-    var o = std.Io.Dir.cwd().openDir(io, o_path, .{ .iterate = true }) catch return;
-    defer o.close(io);
-    const served = std.Io.Dir.cwd().openFile(io, exe, .{}) catch return;
-    defer served.close(io);
-    const pruned = pruneStaleIn(io, gpa, o, std.fs.path.basename(exe), served) orelse return;
-    if (pruned.dirs > 0) say("pruned {d} stale build(s) of {s} from .zig-cache, {d} MB", .{ pruned.dirs, std.fs.path.basename(exe), pruned.bytes / 1_000_000 });
-}
+/// The `.zig-cache/o/<hash>/` directories the binary being served was found
+/// in, for `--no-incremental`. The session's own trail through the cache is
+/// the only thing it may delete, because a directory is stale only when no
+/// manifest names it and nothing outside the cache says which ones do.
+/// Zig keeps one manifest per configuration and a rebuild rewrites it, so
+/// the directory a restart replaced is named by nothing; any other
+/// directory holding a file of the same name may be the live build of
+/// another target or mode, and was deleted when this went by name.
+const Trail = struct {
+    dirs: std.ArrayList([]const u8) = .empty,
+
+    fn deinit(t: *Trail, gpa: std.mem.Allocator) void {
+        for (t.dirs.items) |d| gpa.free(d);
+        t.dirs.deinit(gpa);
+    }
+
+    /// After a start: find where the binary just started came from, delete
+    /// where the one before it came from, and remember the new place. The
+    /// cache is the build root's, and the build root is found the way
+    /// `zig build` finds it: the nearest `build.zig` at or above the
+    /// working directory.
+    fn advance(t: *Trail, io: std.Io, gpa: std.mem.Allocator, exe: []const u8) void {
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = buildRoot(io, &root_buf) orelse return;
+        const o_path = std.fs.path.join(gpa, &.{ root, ".zig-cache", "o" }) catch return;
+        defer gpa.free(o_path);
+        var o = std.Io.Dir.cwd().openDir(io, o_path, .{ .iterate = true }) catch return;
+        defer o.close(io);
+        const served = std.Io.Dir.cwd().openFile(io, exe, .{}) catch return;
+        defer served.close(io);
+        const pruned = t.advanceIn(io, gpa, o, std.fs.path.basename(exe), served) orelse return;
+        if (pruned.dirs > 0) say("pruned {d} stale build(s) of {s} from .zig-cache, {d} MB", .{ pruned.dirs, std.fs.path.basename(exe), pruned.bytes / 1_000_000 });
+    }
+
+    /// The step itself, over an `o/` directory opened for iteration. Null,
+    /// and the trail kept, when the served file cannot be read or is in no
+    /// directory: a binary the step copied or stripped on the way out is
+    /// found nowhere, and then nothing is deleted. Missing a directory
+    /// costs its megabytes; deleting a live one costs a build.
+    fn advanceIn(t: *Trail, io: std.Io, gpa: std.mem.Allocator, o: std.Io.Dir, name: []const u8, served: std.Io.File) ?Pruned {
+        var current = holding(io, gpa, o, name, served) orelse return null;
+        if (current.items.len == 0) {
+            current.deinit(gpa);
+            return null;
+        }
+        var pruned: Pruned = .{ .dirs = 0, .bytes = 0 };
+        for (t.dirs.items) |old| {
+            // Still holding the bytes being served: a rebuild that came out
+            // identical, which is not stale.
+            if (contains(current.items, old)) continue;
+            var sub = o.openDir(io, old, .{}) catch continue;
+            const size = if (sub.statFile(io, name, .{})) |st| st.size else |_| 0;
+            sub.close(io);
+            o.deleteTree(io, old) catch continue;
+            pruned.dirs += 1;
+            pruned.bytes += size;
+        }
+        t.deinit(gpa);
+        t.dirs = current;
+        return pruned;
+    }
+};
 
 const Pruned = struct { dirs: usize, bytes: u64 };
 
-/// The walk itself, over an `o/` directory opened for iteration: every
-/// subdirectory holding a file called `name` that is not byte for byte
-/// `served` is deleted. Null when the served file cannot be read.
-fn pruneStaleIn(io: std.Io, gpa: std.mem.Allocator, o: std.Io.Dir, name: []const u8, served: std.Io.File) ?Pruned {
+/// The subdirectories of `o` holding a file called `name` that is byte for
+/// byte `served`, their names owned by `gpa`. Null when the served file
+/// cannot be read.
+fn holding(io: std.Io, gpa: std.mem.Allocator, o: std.Io.Dir, name: []const u8, served: std.Io.File) ?std.ArrayList([]const u8) {
     const served_size = (served.stat(io) catch return null).size;
-
-    var stale: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (stale.items) |s| gpa.free(s);
-        stale.deinit(gpa);
-    }
-    var freed: u64 = 0;
+    var found: std.ArrayList([]const u8) = .empty;
     var it = o.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
         var sub = o.openDir(io, entry.name, .{}) catch continue;
         defer sub.close(io);
         const st = sub.statFile(io, name, .{}) catch continue;
-        if (st.kind != .file) continue;
-        if (st.size == served_size and sameBytes(io, sub, name, served)) continue;
+        if (st.kind != .file or st.size != served_size) continue;
+        if (!sameBytes(io, sub, name, served)) continue;
         const kept = gpa.dupe(u8, entry.name) catch continue;
-        stale.append(gpa, kept) catch {
-            gpa.free(kept);
-            continue;
-        };
-        freed += st.size;
+        found.append(gpa, kept) catch gpa.free(kept);
     }
-    // Deleted after the walk rather than during it, so the iterator never
-    // reads a directory being removed from under it.
-    for (stale.items) |dir_name| o.deleteTree(io, dir_name) catch {};
-    return .{ .dirs = stale.items.len, .bytes = freed };
+    return found;
+}
+
+fn contains(names: []const []const u8, name: []const u8) bool {
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
 }
 
 /// Whether the file `name` under `dir` is byte for byte `served`.
@@ -567,33 +612,107 @@ test "no exe, two exes, a flag with no value, or a flag nobody knows is usage" {
     try testing.expect(parse(a, argsOf(&.{ "nilo-dev", "--watch", "src", "a" })) == null);
 }
 
-test "pruning deletes the build directories holding another version of the binary, and nothing else" {
+/// An `o/` directory with one subdirectory per entry, each holding `app`.
+fn cacheOf(io: std.Io, d: std.Io.Dir, comptime entries: []const [2][]const u8) !void {
+    inline for (entries) |e| {
+        try d.createDirPath(io, "o/" ++ e[0]);
+        try d.writeFile(io, .{ .sub_path = "o/" ++ e[0] ++ "/app", .data = e[1] });
+    }
+}
+
+test "a restart deletes the build it replaced, and not a build of the same binary for another target" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const io = testing.io;
     const d = tmp.dir;
-    // What zig-out holds, and three cache directories: the same bytes, a
-    // stale build, and one that built something else entirely.
-    try d.writeFile(io, .{ .sub_path = "app", .data = "the served binary" });
-    try d.createDirPath(io, "o/aaaa");
-    try d.createDirPath(io, "o/bbbb");
-    try d.createDirPath(io, "o/cccc");
-    try d.writeFile(io, .{ .sub_path = "o/aaaa/app", .data = "the served binary" });
-    try d.writeFile(io, .{ .sub_path = "o/bbbb/app", .data = "an older binary!!" }); // same length, other bytes
-    try d.writeFile(io, .{ .sub_path = "o/bbbb/app_zcu.o", .data = "and its object" });
-    try d.writeFile(io, .{ .sub_path = "o/cccc/other", .data = "somebody else's build" });
+    // `gggg` is the same program built with -Dtarget, named by its own
+    // manifest. Deleting it by name was the bug: that build then failed
+    // with FileNotFound on every run.
+    try cacheOf(io, d, &.{
+        .{ "aaaa", "the first binary" },
+        .{ "bbbb", "the second binary" },
+        .{ "gggg", "built for gnu!!!" },
+    });
+    try d.writeFile(io, .{ .sub_path = "o/aaaa/app_zcu.o", .data = "and its object" });
+    var o = try d.openDir(io, "o", .{ .iterate = true });
+    defer o.close(io);
+    var trail: Trail = .{};
+    defer trail.deinit(testing.allocator);
 
+    try d.writeFile(io, .{ .sub_path = "app", .data = "the first binary" });
+    {
+        const served = try d.openFile(io, "app", .{});
+        defer served.close(io);
+        const first = trail.advanceIn(io, testing.allocator, o, "app", served).?;
+        try testing.expectEqual(@as(usize, 0), first.dirs);
+    }
+
+    try d.writeFile(io, .{ .sub_path = "app", .data = "the second binary" });
+    {
+        const served = try d.openFile(io, "app", .{});
+        defer served.close(io);
+        const pruned = trail.advanceIn(io, testing.allocator, o, "app", served).?;
+        try testing.expectEqual(@as(usize, 1), pruned.dirs);
+        try testing.expectEqual(@as(u64, "the first binary".len), pruned.bytes);
+    }
+
+    try testing.expectError(error.FileNotFound, d.access(io, "o/aaaa", .{}));
+    try d.access(io, "o/bbbb/app", .{});
+    try d.access(io, "o/gggg/app", .{});
+}
+
+test "a directory the session served from that still holds the served bytes is kept" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const d = tmp.dir;
+    try cacheOf(io, d, &.{
+        .{ "aaaa", "identical output" },
+        .{ "bbbb", "identical output" },
+    });
+    try d.writeFile(io, .{ .sub_path = "app", .data = "identical output" });
     const served = try d.openFile(io, "app", .{});
     defer served.close(io);
     var o = try d.openDir(io, "o", .{ .iterate = true });
     defer o.close(io);
-    const pruned = pruneStaleIn(io, testing.allocator, o, "app", served).?;
-    try testing.expectEqual(@as(usize, 1), pruned.dirs);
-    try testing.expectEqual(@as(u64, "an older binary!!".len), pruned.bytes);
+    var trail: Trail = .{};
+    defer trail.deinit(testing.allocator);
 
+    _ = trail.advanceIn(io, testing.allocator, o, "app", served).?;
+    const again = trail.advanceIn(io, testing.allocator, o, "app", served).?;
+    try testing.expectEqual(@as(usize, 0), again.dirs);
     try d.access(io, "o/aaaa/app", .{});
-    try d.access(io, "o/cccc/other", .{});
-    try testing.expectError(error.FileNotFound, d.access(io, "o/bbbb", .{}));
+    try d.access(io, "o/bbbb/app", .{});
+}
+
+test "a binary found in no build directory deletes nothing and keeps the trail" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    const d = tmp.dir;
+    try cacheOf(io, d, &.{.{ "aaaa", "the first binary" }});
+    var o = try d.openDir(io, "o", .{ .iterate = true });
+    defer o.close(io);
+    var trail: Trail = .{};
+    defer trail.deinit(testing.allocator);
+
+    try d.writeFile(io, .{ .sub_path = "app", .data = "the first binary" });
+    {
+        const served = try d.openFile(io, "app", .{});
+        defer served.close(io);
+        _ = trail.advanceIn(io, testing.allocator, o, "app", served).?;
+    }
+    // A step that strips the binary on its way to zig-out: what is served
+    // is in no directory, so nothing can be said about what it replaced.
+    try d.writeFile(io, .{ .sub_path = "app", .data = "stripped on install" });
+    {
+        const served = try d.openFile(io, "app", .{});
+        defer served.close(io);
+        try testing.expect(trail.advanceIn(io, testing.allocator, o, "app", served) == null);
+    }
+    try d.access(io, "o/aaaa/app", .{});
+    try testing.expectEqual(@as(usize, 1), trail.dirs.items.len);
+    try testing.expectEqualStrings("aaaa", trail.dirs.items[0]);
 }
 
 test "a stamp moves when either the size or the mtime does" {
