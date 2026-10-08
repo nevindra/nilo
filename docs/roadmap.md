@@ -57,7 +57,6 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P0](./todo.md#p0-blocks-the-next-release) · `nilo_fetch` · A call that sends a credential and is redirected to another host sends the credential there too.
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.

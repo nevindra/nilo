@@ -290,6 +290,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`Client.Settings`](./fetch.md#clientsettings)
   - [`Client.Call`](./fetch.md#clientcall)
   - [A call under a traced request](./fetch.md#a-call-under-a-traced-request)
+  - [Redirects](./fetch.md#redirects)
   - [Responses with no body](./fetch.md#responses-with-no-body)
   - [Errors](./fetch.md#errors)
   - [Compression](./fetch.md#compression)

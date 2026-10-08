@@ -31,13 +31,7 @@ Inside a tier, entries sit under their module, because **two modules touch no fi
 
 ## P0: blocks the next release
 
-### `nilo_fetch`
-
-**A call that sends a credential and is redirected to another host sends the credential there too.** `get`, `postJson` and every whole-body call, on a `Target` as much as on the client, follow up to three redirects (`fetch/fetch.zig:485`), and `std.http.Client` strips only its `privileged_headers` on a redirect to another domain. `nilo_fetch` never uses that list: a target's `authorization` goes in std's own slot and a call's `Authorization` line in `extra_headers`, and both are written again on every hop. **Reproduced** at `8f45fe0` with two `Canned` servers: the first answers `302` to `http://localhost:<port>/`, and the second receives `Authorization: Bearer …` as sent. Read in the code and not run: the same hop from `https://` to `http://` is followed, so the token also crosses in clear text. reqwest drops `authorization`, `cookie`, `proxy-authorization` and `www-authenticate` when the host or port changes, the Fetch standard Node's `fetch` follows drops `authorization` on any change of origin, and Go's `net/http` drops it outside the same domain and its subdomains. A third-party API that answers with a redirect to a file host or a CDN is all it takes.
-
-**Needs:** the redirect followed by `nilo_fetch` rather than by std, so each hop is compared with the last: a rule for what counts as another place (the origin, as reqwest and Fetch have it, which is the safe reading; std's `sameParentDomain` is Go's looser one), the credential headers dropped past it, `https` to `http` refused, a probe that fails on the code before it in both modes, and `Response` saying where the call ended, as `Exchange.Head.redirected` already does (reqwest's `Response::url`).
-
-**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+Nothing is open at this tier.
 
 ---
 

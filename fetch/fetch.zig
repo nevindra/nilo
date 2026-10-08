@@ -53,6 +53,14 @@
 //!   a sender lying about `content-length` cannot get past it.
 //! - **A Scope**, so the body comes back as a `Str` that lives exactly as long
 //!   as the request does and nobody frees anything.
+//! - **A redirect that keeps its credentials at home.** A followed redirect
+//!   is walked here, not by `std.http.Client`, which re-sends every header
+//!   it was handed and strips only a list `nilo_fetch` never fills. Past a
+//!   change of scheme, host or port the `authorization`, `cookie` and
+//!   `proxy-authorization` lines and a target's standing headers stay
+//!   behind, a hop from `https` to `http` is `error.InsecureRedirect`, and
+//!   `Response.redirected` says where the call ended
+//!   ([ADR 183](../docs/adr/183-a-redirect-is-a-decision-with-a-name.md)).
 //! - **A target**, for the service a program calls more than once: its base
 //!   URL and the headers it always wants, as a type opened once on the client
 //!   and asked for by type in a handler, with a path template whose segments
@@ -237,6 +245,11 @@ pub const Client = struct {
         /// `.refuse`, which is the default. Say `.follow` with a buffer to
         /// walk it, or `.expose` to be handed the 3xx as itself.
         RedirectRefused,
+        /// A followed redirect led from `https` to `http`. Not followed:
+        /// whatever the first answer asked for, the next request would
+        /// cross the network in the clear, and a caller who meant that
+        /// says the `http://` address itself (ADR 183).
+        InsecureRedirect,
         /// The body was longer than `max_body` and reading stopped there.
         BodyTooLarge,
         /// The body ended before the length its own head announced. A caller
@@ -483,7 +496,15 @@ pub const Client = struct {
             .timeout_ms = call.timeout_ms,
             .stall_ms = call.stall_ms,
             .redirects = .{ .follow = &redirect_buffer },
+            // A target's standing headers are written for its own origin
+            // and stay there (ADR 183).
+            .origin_only = standing.headers,
         });
+
+        // Where a followed redirect ended, written out before the redirect
+        // buffer goes: one arena allocation on a call that was redirected
+        // and none on one that was not (ADR 183).
+        const landed: ?[]const u8 = if (head.redirected) |uri| try urlIn(c.arena(), uri) else null;
 
         // The header block, kept before the body reads over it: the second
         // arena allocation of a whole-body call, beside the body's own, so
@@ -494,6 +515,7 @@ pub const Client = struct {
         return .{
             .status = head.status,
             .headers = kept,
+            .redirected = landed,
             .body = try ex.take(c, call.max_body orelse self.settings.max_body),
         };
     }
@@ -754,9 +776,22 @@ pub const Exchange = struct {
         ///
         /// Not following is the right default for anything signed: a
         /// signature is computed over one host and one path, so following a
-        /// redirect sends a request that cannot be valid at the other end —
-        /// and sends the `authorization` header there while it does it.
+        /// redirect sends a request that cannot be valid at the other end.
+        ///
+        /// **A followed redirect is walked by this file, not by std**, so
+        /// that each hop is compared with the one before it: past a change
+        /// of origin (scheme, host or port) the credentials are dropped, a
+        /// hop from `https` to `http` is `error.InsecureRedirect`, and the
+        /// method and body change the way std's did (ADR 183).
         redirects: Redirects = .refuse,
+        /// Headers, by name, that are written for the origin this call was
+        /// made to and go no further: a followed redirect to another origin
+        /// leaves them behind, beside the four every call drops there
+        /// (`authorization`, `cookie`, `proxy-authorization`,
+        /// `www-authenticate`). `Client.send` puts a Target's standing
+        /// headers here, because an `x-api-key` is a credential nilo cannot
+        /// tell from an `accept` (ADR 183). Only the names are read.
+        origin_only: []const std.http.Header = &.{},
         /// A buffer for a caller who reads the body **buffered** off
         /// `ex.reader` (`take`, `peek`, a delimiter) and for nothing else.
         /// `take`, `readInto`, `pipe` and `stream` here go from the
@@ -974,19 +1009,24 @@ pub const Exchange = struct {
         // - **Inside the same permit and the same deadline.** Both are taken
         //   above and neither is re-armed, so a retry cannot double the time
         //   budget or take a second seat at the gate.
-        const stale_limit = client.inner.connection_pool.free_size;
-        var tries: usize = 0;
-        while (true) : (tries += 1) {
-            self.bounded(attempt, .{ self, client, uri, opts }) catch |err| {
-                if (tries < stale_limit and self.nothingCameBack(err) and
-                    replayable(opts.body) and !self.expired and !self.bound.fired())
-                {
-                    self.forget();
-                    continue;
-                }
-                return self.blame(err);
-            };
-            break;
+        //
+        // **A redirect is walked here, one hop at a time**, with the same
+        // permit and the same deadline all the way: std would walk it
+        // inside `receiveHead` and re-send every header it was given, so
+        // it is told to hand every redirect back and `follow` below makes
+        // the decision (ADR 183).
+        var here = uri;
+        var hop = opts;
+        var rest = opts.redirects.buffer();
+        var left: u8 = max_redirects;
+        var owned: []const std.http.Header = &.{};
+        defer if (owned.len != 0) client.inner.allocator.free(owned);
+        try self.dispatch(client, here, hop);
+        while (opts.redirects == .follow and self.redirects()) {
+            if (left == 0) return error.TooManyHttpRedirects;
+            try self.follow(&here, &hop, &rest, &owned);
+            left -= 1;
+            try self.dispatch(client, here, hop);
         }
 
         // Read out now, because `Response.reader` deliberately invalidates
@@ -1000,14 +1040,10 @@ pub const Exchange = struct {
             .content_length = self.res.head.content_length,
             .content_type = self.res.head.content_type,
             .bytes = self.res.head.bytes,
-            // std counts the redirects it has left; fewer than it started
-            // with is a chain it walked, and `req.uri` is then the end of
-            // it, resolved into the caller's `redirect_buffer` by std's own
-            // `resolveInPlace`.
-            .redirected = if (opts.redirects == .follow and self.req.redirect_behavior.remaining() < max_redirects)
-                self.req.uri
-            else
-                null,
+            // Fewer redirects left than it started with is a chain
+            // walked, and `here` is then the end of it, resolved into the
+            // caller's `redirect_buffer` by std's own `resolveInPlace`.
+            .redirected = if (left < max_redirects) here else null,
         };
 
         // A 3xx that says where to go, under the default that made no
@@ -1039,6 +1075,195 @@ pub const Exchange = struct {
         self.inner = self.res.reader(opts.transfer_buffer);
         self.reader = if (self.stall_ms != 0) &self.tap else self.inner;
         return head;
+    }
+
+    /// One request to `uri`, sent and its head read, with the one retry onto
+    /// a connection the peer had already closed (the long comment in
+    /// `begin`). Run once for the call and once more for every redirect
+    /// followed, so each hop gets the same protection from a reaped socket.
+    fn dispatch(self: *Exchange, client: *Client, uri: std.Uri, opts: Begin) Client.Error!void {
+        const stale_limit = client.inner.connection_pool.free_size;
+        var tries: usize = 0;
+        while (true) : (tries += 1) {
+            self.bounded(attempt, .{ self, client, uri, opts }) catch |err| {
+                if (tries < stale_limit and self.nothingCameBack(err) and
+                    replayable(opts.body) and !self.expired and !self.bound.fired())
+                {
+                    self.forget();
+                    continue;
+                }
+                return self.blame(err);
+            };
+            return;
+        }
+    }
+
+    /// Whether the head just read is a redirect `follow` is to walk. Not a
+    /// 304, which has no `Location` and is an answer, and not the answer to
+    /// a HEAD, which std never followed and which is handed back as itself.
+    fn redirects(self: *const Exchange) bool {
+        const status = self.res.head.status;
+        return status.class() == .redirect and status != .not_modified and self.req.method != .HEAD;
+    }
+
+    /// Turn the redirect just read into the next request: the `Location`
+    /// resolved against where this one went, what must not cross carried no
+    /// further, and the connection it came on given back.
+    ///
+    /// **The comparison is with the hop before, and what is dropped stays
+    /// dropped.** `hop` is rewritten in place, so a chain that leaves an
+    /// origin and comes back to it does not pick the credentials up again.
+    /// The rule is `judge` and the headers are `trimmed`, so both are read
+    /// and tested apart from a socket.
+    ///
+    /// The rest is what std did, kept: a 303 becomes a GET, a 301 or 302 on
+    /// a POST does too, both without a body, and any other redirect of a
+    /// request that has a body is `error.RedirectRequiresResend`, because
+    /// the body is spent (ADR 183).
+    fn follow(
+        self: *Exchange,
+        here: *std.Uri,
+        hop: *Begin,
+        rest: *[]u8,
+        owned: *[]const std.http.Header,
+    ) Client.Error!void {
+        const head = self.res.head;
+        const said = head.location orelse return error.HttpRedirectLocationMissing;
+        if (said.len > rest.len) return error.HttpRedirectLocationOversize;
+        const location = rest.*[0..said.len];
+        @memcpy(location, said);
+        const next = here.resolveInPlace(location.len, rest) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.HttpRedirectLocationOversize,
+            else => return error.HttpRedirectLocationInvalid,
+        };
+
+        const crossing = judge(here.*, next);
+        if (crossing == .downgrade) return error.InsecureRedirect;
+
+        var next_hop = hop.*;
+        const to_get = switch (head.status) {
+            .see_other => true,
+            .moved_permanently, .found => hop.method == .POST,
+            else => false,
+        };
+        if (to_get) {
+            next_hop.method = .GET;
+            next_hop.body = .none;
+            next_hop.content_type = null;
+        } else if (hop.method.requestHasBody() or hop.body != .none) {
+            return error.RedirectRequiresResend;
+        }
+        if (crossing == .other_origin) {
+            next_hop.authorization = null;
+            next_hop.host = null;
+        }
+        const lines = try trimmed(
+            self.client.inner.allocator,
+            hop.headers,
+            hop.origin_only,
+            crossing == .other_origin,
+            to_get,
+        );
+        if (lines.ptr != hop.headers.ptr) {
+            if (owned.len != 0) self.client.inner.allocator.free(owned.*);
+            owned.* = lines;
+        }
+        next_hop.headers = lines;
+
+        // The redirect's own body is read or dropped the way any answer's
+        // is: a small one is drained and the connection kept, a large or
+        // unbounded one costs the connection (`dropIfDrainIsDearer`).
+        self.announced = head.content_length;
+        self.bounded(finish, .{self});
+        self.open = false;
+        self.announced = null;
+
+        here.* = next;
+        hop.* = next_hop;
+    }
+
+    /// What a redirect from one request's address to the next means for the
+    /// request that follows.
+    const Crossing = enum {
+        /// The same scheme, host and port: everything goes along.
+        same_origin,
+        /// Another origin: credentials stay behind.
+        other_origin,
+        /// From `https` to `http`: refused.
+        downgrade,
+    };
+
+    /// The rule for another place: the **origin**, as reqwest and the Fetch
+    /// standard have it, and not std's `sameParentDomain`, which is Go's
+    /// looser reading and sends a token to any port of the host it was
+    /// written for, and to its subdomains (ADR 183). Scheme and host
+    /// compare without regard to case, and a port left out is the scheme's
+    /// own. Hosts spelled differently (an IPv6 literal against a name, a
+    /// trailing dot) count as another origin, which is the safe side to be
+    /// wrong on.
+    fn judge(from: std.Uri, to: std.Uri) Crossing {
+        if (std.ascii.eqlIgnoreCase(from.scheme, "https") and std.ascii.eqlIgnoreCase(to.scheme, "http")) return .downgrade;
+        if (!std.ascii.eqlIgnoreCase(from.scheme, to.scheme)) return .other_origin;
+        const a = from.host orelse return .other_origin;
+        const b = to.host orelse return .other_origin;
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return .other_origin;
+        const a_text = switch (a) {
+            .raw, .percent_encoded => |text| text,
+        };
+        const b_text = switch (b) {
+            .raw, .percent_encoded => |text| text,
+        };
+        if (!std.ascii.eqlIgnoreCase(a_text, b_text)) return .other_origin;
+        if ((from.port orelse defaultPort(from.scheme)) != (to.port orelse defaultPort(to.scheme))) return .other_origin;
+        return .same_origin;
+    }
+
+    fn defaultPort(scheme: []const u8) u16 {
+        if (std.ascii.eqlIgnoreCase(scheme, "https")) return 443;
+        if (std.ascii.eqlIgnoreCase(scheme, "http")) return 80;
+        return 0;
+    }
+
+    /// `lines` less what the next hop must not carry, or `lines` itself
+    /// when nothing is in the way, which costs nothing. Past another
+    /// origin that is the credentials (`authorization`, `cookie`,
+    /// `proxy-authorization`, `www-authenticate`), the `host` the request
+    /// named for the place it left, and every name in `origin_only`; when
+    /// the body is dropped it is `content-type` and `content-length`,
+    /// which described a body that is no longer there. The one allocation
+    /// is on a hop that has something to drop, from the client's own
+    /// allocator, and `begin` frees it when the call has its head.
+    fn trimmed(
+        gpa: std.mem.Allocator,
+        lines: []const std.http.Header,
+        origin_only: []const std.http.Header,
+        other_origin: bool,
+        body_dropped: bool,
+    ) error{OutOfMemory}![]const std.http.Header {
+        var kept: usize = 0;
+        for (lines) |h| {
+            if (!leavesBehind(h.name, origin_only, other_origin, body_dropped)) kept += 1;
+        }
+        if (kept == lines.len) return lines;
+        const out = try gpa.alloc(std.http.Header, kept);
+        var i: usize = 0;
+        for (lines) |h| {
+            if (leavesBehind(h.name, origin_only, other_origin, body_dropped)) continue;
+            out[i] = h;
+            i += 1;
+        }
+        return out;
+    }
+
+    fn leavesBehind(name: []const u8, origin_only: []const std.http.Header, other_origin: bool, body_dropped: bool) bool {
+        if (body_dropped) {
+            if (std.ascii.eqlIgnoreCase(name, "content-type") or std.ascii.eqlIgnoreCase(name, "content-length")) return true;
+        }
+        if (!other_origin) return false;
+        const crossing_names = [_][]const u8{ "authorization", "cookie", "proxy-authorization", "www-authenticate", "host" };
+        for (crossing_names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return true;
+        for (origin_only) |h| if (std.ascii.eqlIgnoreCase(name, h.name)) return true;
+        return false;
     }
 
     /// Under an Engine: arm the one timer for whichever bound is nearer,
@@ -1118,10 +1343,9 @@ pub const Exchange = struct {
         const std_client = if (opts.body == .stream) &client.fresh else &client.inner;
         self.req = try std_client.request(opts.method, uri, .{
             .extra_headers = opts.headers,
-            .redirect_behavior = if (opts.redirects == .follow)
-                std.http.Client.Request.RedirectBehavior.init(max_redirects)
-            else
-                .unhandled,
+            // Always std's "pass it to the caller": a followed redirect is
+            // `follow`'s, not std's (ADR 183).
+            .redirect_behavior = .unhandled,
             .headers = .{
                 .host = slot(opts.host, given.host),
                 .authorization = slot(opts.authorization, given.authorization),
@@ -1180,10 +1404,10 @@ pub const Exchange = struct {
         // be a panic in a worker thread.
         self.send(opts) catch |err| {
             if (err != error.WriteFailed) return err;
-            return self.earlyAnswer(opts, error.WriteFailed);
+            return self.earlyAnswer(error.WriteFailed);
         };
 
-        self.res = try self.req.receiveHead(opts.redirects.buffer());
+        self.res = try self.req.receiveHead(&.{});
     }
 
     /// The write fails with `WriteFailed` after a refusal that came back
@@ -1210,9 +1434,9 @@ pub const Exchange = struct {
     /// marks it closing whatever the head says), because the request on it
     /// was left unfinished. No allocation and no syscall on a write that
     /// succeeds: this is a branch on the error path.
-    fn earlyAnswer(self: *Exchange, opts: Begin, failed: error{WriteFailed}) error{WriteFailed}!void {
+    fn earlyAnswer(self: *Exchange, failed: error{WriteFailed}) error{WriteFailed}!void {
         self.req.keep_alive = false;
-        const res = self.req.receiveHead(opts.redirects.buffer()) catch return failed;
+        const res = self.req.receiveHead(&.{}) catch return failed;
         const class = res.head.status.class();
         if (class == .success or class == .informational) {
             if (self.req.connection) |conn| conn.closing = true;
@@ -1738,6 +1962,12 @@ pub const Response = struct {
     /// `header(name)` is the way to read it; a `Response` built by hand in
     /// a test leaves it empty and every lookup then answers null.
     headers: []const u8 = "",
+    /// Where the call ended when it was redirected on the way, as one URL
+    /// in the Scope's memory, and null when the answer came from the URL
+    /// that was asked for: what `Exchange.Head.redirected` says, for the
+    /// whole-body calls. Without the userinfo and the fragment, so it is
+    /// safe to log ([ADR 183](../docs/adr/183-a-redirect-is-a-decision-with-a-name.md)).
+    redirected: ?[]const u8 = null,
     /// Request-lifetime text. It is in the Scope's arena, so it goes when the
     /// request does and nothing has to be freed — and it may not outlive the
     /// request without `.keep()`, like every other `Str`.
@@ -1769,6 +1999,14 @@ pub const Response = struct {
         });
     }
 };
+
+/// A URL as text in `arena`, without its userinfo and its fragment: the
+/// form a `Response` keeps where a redirect ended, which a caller may log.
+fn urlIn(arena: std.mem.Allocator, uri: std.Uri) error{OutOfMemory}![]const u8 {
+    var w: std.Io.Writer.Allocating = .init(arena);
+    uri.writeToStream(&w.writer, .{ .scheme = true, .authority = true, .path = true, .query = true }) catch return error.OutOfMemory;
+    return w.written();
+}
 
 /// `base` with `params` on the end of it as a query string, percent-encoded,
 /// in the Scope's memory:
@@ -2197,6 +2435,52 @@ test "text is read as text and a struct is not, which is what the two Refusals r
     try std.testing.expect(!isText(u32));
     try std.testing.expect(!isText(struct { a: u8 }));
     try std.testing.expect(!isText([]const u32));
+}
+
+test "a change of scheme, host or port is another place, and https to http is a downgrade" {
+    const judge = Exchange.judge;
+    const from = try std.Uri.parse("https://api.example.com/v1/a");
+    try std.testing.expectEqual(.same_origin, judge(from, try std.Uri.parse("https://API.example.com:443/other?x=1")));
+    try std.testing.expectEqual(.other_origin, judge(from, try std.Uri.parse("https://api.example.com:8443/v1/a")));
+    try std.testing.expectEqual(.other_origin, judge(from, try std.Uri.parse("https://files.example.com/v1/a")));
+    // std's own rule counts a parent domain as the same place; this one does not.
+    try std.testing.expectEqual(.other_origin, judge(from, try std.Uri.parse("https://example.com/")));
+    try std.testing.expectEqual(.downgrade, judge(from, try std.Uri.parse("http://api.example.com/v1/a")));
+    try std.testing.expectEqual(.downgrade, judge(from, try std.Uri.parse("http://other.test/")));
+    // The other way is an upgrade, and still another place.
+    const plain = try std.Uri.parse("http://api.example.com/");
+    try std.testing.expectEqual(.other_origin, judge(plain, try std.Uri.parse("https://api.example.com/")));
+    try std.testing.expectEqual(.same_origin, judge(plain, try std.Uri.parse("http://api.example.com:80/x")));
+}
+
+test "a hop to another place drops credentials and a target's own headers, and nothing else" {
+    const lines = [_]std.http.Header{
+        .{ .name = "Authorization", .value = "Bearer t" },
+        .{ .name = "cookie", .value = "a=b" },
+        .{ .name = "Proxy-Authorization", .value = "Basic eA==" },
+        .{ .name = "WWW-Authenticate", .value = "x" },
+        .{ .name = "X-Api-Key", .value = "k" },
+        .{ .name = "x-trace", .value = "t1" },
+        .{ .name = "content-type", .value = "application/json" },
+    };
+    const standing = [_]std.http.Header{.{ .name = "x-api-key", .value = "k" }};
+
+    // The same place with its body kept: the very slice, no allocation.
+    const same = try Exchange.trimmed(std.testing.failing_allocator, &lines, &standing, false, false);
+    try std.testing.expectEqual(@as(usize, lines.len), same.len);
+
+    // Another place: the four, the target's, and nothing it did not name.
+    const other = try Exchange.trimmed(std.testing.allocator, &lines, &standing, true, false);
+    defer std.testing.allocator.free(other);
+    try std.testing.expectEqual(@as(usize, 2), other.len);
+    try std.testing.expectEqualStrings("x-trace", other[0].name);
+    try std.testing.expectEqualStrings("content-type", other[1].name);
+
+    // A body dropped takes its description with it, and no credential.
+    const bodiless = try Exchange.trimmed(std.testing.allocator, &lines, &standing, false, true);
+    defer std.testing.allocator.free(bodiless);
+    try std.testing.expectEqual(@as(usize, 6), bodiless.len);
+    try std.testing.expectEqualStrings("Authorization", bodiless[0].name);
 }
 
 test {

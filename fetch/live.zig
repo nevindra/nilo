@@ -484,6 +484,150 @@ test "a redirect that was followed says where it ended, and one that was not say
     }.run);
 }
 
+/// Whether the request head `seen` (as `Canned.request` returns it) carries
+/// a header of this name, in any case: the client writes its own slots in
+/// lower case and the caller's lines as they were given.
+fn carries(seen: []const u8, name: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, seen, '\n');
+    while (lines.next()) |line| {
+        if (line.len > name.len and line[name.len] == ':' and std.ascii.eqlIgnoreCase(line[0..name.len], name)) return true;
+    }
+    return false;
+}
+
+test "a redirect to another origin leaves behind what a target stands behind" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            // Two servers on two ports: the same host and another port is
+            // another origin, and the first sends the call to the second.
+            var first = try Canned.open(io);
+            defer first.close();
+            var second = try Canned.open(io);
+            defer second.close();
+            var where: [96]u8 = undefined;
+            const moved = try std.fmt.bufPrint(&where, "Location: http://127.0.0.1:{d}/files/1\r\n", .{second.port});
+            first.reply("302 Found", moved, "");
+            second.reply("200 OK", "", "ok");
+
+            var client = try started(io, .{});
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            var buf: [64]u8 = undefined;
+
+            const Api = fetch.Target("api", .{});
+            var api = try Api.open(&client, .{
+                .base = try first.url(&buf),
+                .authorization = "Bearer standing",
+                .user_agent = "nilo-test",
+                .headers = &.{ .{ .name = "x-api-key", .value = "secret" }, .{ .name = "accept", .value = "application/json" } },
+            });
+
+            var served_first = try io.concurrent(Canned.serveOne, .{&first});
+            defer served_first.cancel(io) catch {};
+            var served_second = try io.concurrent(Canned.serveOne, .{&second});
+            defer served_second.cancel(io) catch {};
+            const res = try api.get(&scope, "/v1/file", .{}, .{ .headers = &.{
+                .{ .name = "Cookie", .value = "sid=1" },
+                .{ .name = "Proxy-Authorization", .value = "Basic eA==" },
+                .{ .name = "X-Trace", .value = "t1" },
+            } });
+            served_first.await(io) catch {};
+            served_second.await(io) catch {};
+            try testing.expectEqualStrings("ok", res.body.view());
+
+            // The response says where the call ended, without the userinfo.
+            var landed: [64]u8 = undefined;
+            try testing.expectEqualStrings(
+                try std.fmt.bufPrint(&landed, "http://127.0.0.1:{d}/files/1", .{second.port}),
+                res.redirected.?,
+            );
+
+            // The service the target is for saw all of it.
+            try testing.expect(carries(first.request(), "authorization"));
+            try testing.expect(carries(first.request(), "x-api-key"));
+            try testing.expect(carries(first.request(), "cookie"));
+
+            // The other origin saw none of the credentials, and still saw
+            // what is not one.
+            const seen = second.request();
+            try testing.expect(std.mem.startsWith(u8, seen, "GET /files/1 "));
+            try testing.expect(!carries(seen, "authorization"));
+            try testing.expect(!carries(seen, "x-api-key"));
+            try testing.expect(!carries(seen, "cookie"));
+            try testing.expect(!carries(seen, "proxy-authorization"));
+            try testing.expect(carries(seen, "x-trace"));
+            try testing.expect(carries(seen, "user-agent"));
+        }
+    }.run);
+}
+
+test "a call's own authorization line is left behind at another origin too" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var first = try Canned.open(io);
+            defer first.close();
+            var second = try Canned.open(io);
+            defer second.close();
+            var where: [96]u8 = undefined;
+            first.reply("302 Found", try std.fmt.bufPrint(&where, "Location: http://127.0.0.1:{d}/\r\n", .{second.port}), "");
+            second.reply("200 OK", "", "ok");
+
+            var client = try started(io, .{});
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            var buf: [64]u8 = undefined;
+
+            var served_first = try io.concurrent(Canned.serveOne, .{&first});
+            defer served_first.cancel(io) catch {};
+            var served_second = try io.concurrent(Canned.serveOne, .{&second});
+            defer served_second.cancel(io) catch {};
+            _ = try client.get(&scope, try first.url(&buf), .{ .headers = &.{.{ .name = "Authorization", .value = "Bearer mine" }} });
+            served_first.await(io) catch {};
+            served_second.await(io) catch {};
+
+            try testing.expect(carries(first.request(), "authorization"));
+            try testing.expect(!carries(second.request(), "authorization"));
+        }
+    }.run);
+}
+
+test "a redirect inside one origin keeps every credential" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.body_len = 2;
+            var served = try io.concurrent(Canned.serveRedirectThenOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            var buf: [64]u8 = undefined;
+
+            const Api = fetch.Target("api", .{});
+            var api = try Api.open(&client, .{ .base = try canned.url(&buf), .authorization = "Bearer standing", .headers = &.{.{ .name = "x-api-key", .value = "secret" }} });
+            const res = try api.get(&scope, "/start", .{}, .{ .headers = &.{.{ .name = "Cookie", .value = "sid=1" }} });
+            served.await(io) catch {};
+            var landed: [64]u8 = undefined;
+            try testing.expectEqualStrings(
+                try std.fmt.bufPrint(&landed, "http://127.0.0.1:{d}/moved", .{canned.port}),
+                res.redirected.?,
+            );
+
+            // Both requests, the one to `/start` and the one to `/moved`.
+            const seen = canned.request();
+            try testing.expectEqual(@as(usize, 2), std.mem.count(u8, seen, "GET /"));
+            try testing.expectEqual(@as(usize, 2), std.mem.count(u8, seen, "authorization: Bearer standing"));
+            try testing.expectEqual(@as(usize, 2), std.mem.count(u8, seen, "x-api-key: secret"));
+            try testing.expectEqual(@as(usize, 2), std.mem.count(u8, seen, "Cookie: sid=1"));
+        }
+    }.run);
+}
+
 // ---- the other clock: silence, not the call (ADR 056) ----
 
 test "silence after the head is a stall, told apart from the call's own clock" {
