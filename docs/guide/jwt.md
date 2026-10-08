@@ -33,8 +33,8 @@ const Claims = struct {
 fn whoIsThis(gpa: std.mem.Allocator, keys: *const jwt.Keys, token: []const u8) !Claims {
     return jwt.verify(Claims, gpa, token, .{
         .keys = keys,
-        .issuer = "https://accounts.google.com",
-        .audience = "1234-abcd.apps.googleusercontent.com",
+        .issuer = .{ .is = "https://accounts.google.com" },
+        .audience = .{ .is = "1234-abcd.apps.googleusercontent.com" },
         .now_s = @divFloor(nilo.nowMillis(), 1000),
     });
 }
@@ -51,12 +51,22 @@ fn whoIsThis(gpa: std.mem.Allocator, keys: *const jwt.Keys, token: []const u8) !
 | Field | Default | |
 |---|---|---|
 | `keys` | none | `*const jwt.Keys`, the issuer's: [below](#getting-the-issuers-keys) |
-| `issuer` | `null` | reject a token whose `iss` is not exactly this. Null skips the check, which is right only when the key set itself proves who signed |
-| `audience` | `null` | reject a token whose `aud` does not include this (your client id). Null skips it, and then a token minted for another application passes |
+| `issuer` | none | `.{ .is = "…" }` rejects a token whose `iss` is not exactly this. `.unchecked` skips the check, which is right when one key set serves several issuers |
+| `audience` | none | `.{ .is = "…" }` rejects a token whose `aud` does not include this (your client id). `.unchecked` skips it, and then a token minted for another application passes |
 | `now_s` | none | seconds since the epoch, for `exp` and `nbf` |
 | `leeway_s` | `0` | how far the two clocks may disagree, in both directions. Sixty is the usual value when the issuer is somebody else's machine |
 
-**Set both `issuer` and `audience`.** Both are optional because in some deployments the key set already settles them, but leaving them off is wrong in the ordinary case. A Google ID token minted for *somebody else's* application is signed by the same keys as one minted for yours, and `aud` is the only thing that tells them apart.
+**`issuer` and `audience` have no default, so you cannot forget them.** A call or a ring that leaves one out does not compile: `error: missing struct field: audience`, at the line that builds the options. This is what a Google ID token minted for *somebody else's* application would otherwise get through, because it is signed by the same keys as one minted for yours and `aud` is the only thing that tells them apart ([ADR 111](../adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md)).
+
+**Skipping a check is a word you write: `.unchecked`.** There is one case where it is the right word. Some issuers put no `aud` in their access tokens, and name your application in another claim instead:
+
+| Issuer | The token has | Write |
+|---|---|---|
+| Amazon Cognito, access token | `client_id`, and an `aud` only if the app asked for a resource binding | `.audience = .unchecked`, and `client_id: []const u8` in your `Claims`, compared to your app client |
+| Clerk, session token | `azp` (the page's origin), no `aud` | `.audience = .unchecked`, and compare `azp` |
+| Keycloak, access token | `aud` only for the clients the user holds a role in, unless you add an Audience mapper | add the mapper and use `.{ .is = … }`, or `.unchecked` and compare `azp` |
+
+`.unchecked` there is not "safe", it is "checked in the next line": a token minted for another app client in the same pool is signed by the same keys, and the claim that names the client is what stops it. For `issuer`, the same word is for a key set shared by several issuers, such as Microsoft's multi-tenant endpoints, where the tenant is in `iss` and you read `tid` yourself.
 
 ## Security checks that are always on
 
@@ -115,8 +125,8 @@ and in `main`:
 ```zig
 var google: jwt.Keyring = try .init(gpa, .{
     .url = "https://www.googleapis.com/oauth2/v3/certs",
-    .issuer = "https://accounts.google.com",
-    .audience = cfg.google_client_id,
+    .issuer = .{ .is = "https://accounts.google.com" },
+    .audience = .{ .is = cfg.google_client_id },
 });
 defer google.deinit();
 try app.provide(&google);

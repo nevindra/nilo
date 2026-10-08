@@ -6,7 +6,7 @@
 //! ```zig
 //! const Google = jwt.Verifier(Claims, fetch.Client);
 //!
-//! var google: jwt.Keyring = try .init(gpa, .{ .url = …, .issuer = …, .audience = … });
+//! var google: jwt.Keyring = try .init(gpa, .{ .url = …, .issuer = .{ .is = … }, .audience = .{ .is = … } });
 //! var verifier = Google.init(&google, &api);
 //! try app.provide(&verifier);
 //!
@@ -100,8 +100,8 @@ const FakeClient = struct {
 test "a Verifier verifies with the ring and refreshes through the client it holds" {
     var ring: Keyring = try .init(testing.allocator, .{
         .url = "https://issuer.example/certs",
-        .issuer = "https://accounts.example",
-        .audience = "client-1",
+        .issuer = .{ .is = "https://accounts.example" },
+        .audience = .{ .is = "client-1" },
     });
     defer ring.deinit();
     var client: FakeClient = .{ .body = vector.jwks };

@@ -18,8 +18,8 @@
 //!
 //! const claims = try jwt.verify(Claims, c.arena(), id_token, .{
 //!     .keys = &keys,
-//!     .issuer = "https://accounts.google.com",
-//!     .audience = client_id,
+//!     .issuer = .{ .is = "https://accounts.google.com" },
+//!     .audience = .{ .is = client_id },
 //!     .now_s = @divFloor(nilo.nowMillis(), 1000),   // any clock you like
 //! });
 //! ```
@@ -50,8 +50,10 @@
 //! - **Nothing in the payload is read until the signature has passed.** An
 //!   `exp` off an unverified token is a number somebody chose.
 //!   `exp` is required, because a credential with no end is not one.
-//! - **`iss` and `aud` are checked whenever you name them**, and the claims
-//!   struct does not have to mention either.
+//! - **`iss` and `aud` are checked, and you say what for.** Neither has a
+//!   default, so a call that forgets one does not compile, and skipping one
+//!   is `.unchecked` on the line that builds the options. The claims struct
+//!   does not have to mention either (ADR 111).
 //!
 //! **The arithmetic is std's.** RS256 is `std.crypto.Certificate.rsa`, which
 //! is public in Zig 0.16 and is the code that verifies a TLS certificate
@@ -92,6 +94,11 @@ pub const Key = jwks.Key;
 /// What `verify` is told: the keys, the issuer and audience to insist on,
 /// and what time it is.
 pub const Options = token_mod.Options;
+
+/// What `issuer` and `audience` are set to: `.{ .is = "…" }` to insist on a
+/// value, `.unchecked` to say the check is not wanted. There is no default
+/// and no `null`, so forgetting is a compile error.
+pub const Expect = token_mod.Expect;
 
 /// Everything `verify` can answer instead of claims.
 pub const Error = token_mod.Error;
@@ -153,8 +160,8 @@ test "the module's own example compiles and reads a token end to end" {
 
     const claims = try verify(Claims, arena.allocator(), vector.token, .{
         .keys = &keys,
-        .issuer = "https://accounts.example",
-        .audience = "client-1",
+        .issuer = .{ .is = "https://accounts.example" },
+        .audience = .{ .is = "client-1" },
         .now_s = 1_500_000_000,
     });
     try std.testing.expectEqualStrings("u-7", claims.sub);
@@ -172,7 +179,8 @@ test "an ES256 token reads end to end the same way, off the key's type alone" {
 
     const claims = try verify(Claims, arena.allocator(), vector.es256_token, .{
         .keys = &keys,
-        .issuer = "joe",
+        .issuer = .{ .is = "joe" },
+        .audience = .unchecked,
         .now_s = 1_300_000_000,
     });
     try std.testing.expectEqualStrings("joe", claims.iss);

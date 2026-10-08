@@ -4,8 +4,8 @@
 //! ```zig
 //! var google: jwt.Keyring = try .init(gpa, .{
 //!     .url = "https://www.googleapis.com/oauth2/v3/certs",
-//!     .issuer = "https://accounts.google.com",
-//!     .audience = client_id,
+//!     .issuer = .{ .is = "https://accounts.google.com" },
+//!     .audience = .{ .is = client_id },
 //! });
 //! defer google.deinit();
 //! try app.provide(&google);
@@ -74,9 +74,14 @@ pub const Keyring = struct {
         /// OIDC it is the `jwks_uri` in `/.well-known/openid-configuration`.
         url: []const u8,
         /// What `verify` insists on, for every token this ring checks. The
-        /// same three fields `jwt.Options` has, held once.
-        issuer: ?[]const u8 = null,
-        audience: ?[]const u8 = null,
+        /// same three fields `jwt.Options` has, held once. `issuer` and
+        /// `audience` have no default: a ring over Google's keys that
+        /// forgot its audience would accept an ID token minted for any
+        /// other application Google signs, so leaving one out is a compile
+        /// error and skipping one is `.unchecked`, written where it is read
+        /// (ADR 111). `.{ .is = client_id }` is the check.
+        issuer: token_mod.Expect,
+        audience: token_mod.Expect,
         leeway_s: u32 = 0,
         /// How often an unknown `kid` may trigger a fetch, at most. Sixty
         /// seconds is one refetch a minute under a flood of forged tokens,
@@ -275,8 +280,8 @@ const FakeClient = struct {
 
 const google: Keyring.Options = .{
     .url = "https://issuer.example/certs",
-    .issuer = "https://accounts.example",
-    .audience = "client-1",
+    .issuer = .{ .is = "https://accounts.example" },
+    .audience = .{ .is = "client-1" },
 };
 
 test "an empty ring answers NoSuchKey, and a loaded document makes the key findable" {
@@ -390,7 +395,8 @@ test "a fetch the issuer refuses leaves the old set in place, and a scheduled re
 test "the ring's issuer and audience are what verify insists on" {
     var ring: Keyring = try .init(testing.allocator, .{
         .url = "https://issuer.example/certs",
-        .issuer = "https://somebody.else",
+        .issuer = .{ .is = "https://somebody.else" },
+        .audience = .unchecked,
     });
     defer ring.deinit();
     try ring.load(vector.jwks);
@@ -430,4 +436,30 @@ test "a ring that remembers tokens skips the signature the second time, checks t
     try ring.load(vector.jwks);
     _ = try ring.verify(Sub, arena.allocator(), vector.token, 1_500_000_000);
     try testing.expectEqual(@as(u64, 3), ring.memo.?.misses.load(.monotonic));
+}
+
+test "a ring over a shared key set refuses a token minted for another application, unless it says .unchecked" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    // The same keys, the same issuer; only the audience the ring was built
+    // for differs, which is the whole of what tells two applications apart.
+    var other: Keyring = try .init(testing.allocator, .{
+        .url = "https://issuer.example/certs",
+        .issuer = .{ .is = "https://accounts.example" },
+        .audience = .{ .is = "client-2" },
+    });
+    defer other.deinit();
+    try other.load(vector.jwks);
+    try testing.expectError(error.WrongAudience, other.verify(Sub, arena.allocator(), vector.token, 1_500_000_000));
+
+    var anyone: Keyring = try .init(testing.allocator, .{
+        .url = "https://issuer.example/certs",
+        .issuer = .{ .is = "https://accounts.example" },
+        .audience = .unchecked,
+    });
+    defer anyone.deinit();
+    try anyone.load(vector.jwks);
+    const claims = try anyone.verify(Sub, arena.allocator(), vector.token, 1_500_000_000);
+    try testing.expectEqualStrings("u-7", claims.sub);
 }

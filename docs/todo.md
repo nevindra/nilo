@@ -37,12 +37,6 @@ Nothing is open at this tier.
 
 ## P1: belongs in the next release
 
-### `nilo_jwt`
-
-**Whether a key ring may be built without an audience.** `audience` and `issuer` default to null, so a ring over Google's keys with no `audience` accepts an ID token minted for any other application signed by the same keys. The guide says so; [ADR 044](./adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md)'s rule is that a check forgetting costs silently is enforced rather than documented, and an audience is that check for a token.
-
-**What would settle it:** the issuers in the comparison read for one whose tokens carry no audience, which is the case a required field would refuse; if none does, `audience` becomes required.
-
 ### `nilo_sql`
 
 **The SQLite half has no live test against contention.** The Wire's own tests run one process, so the case the reader and writer split exists for has a design and no test: two writers meeting, `busy_timeout` expiring, `Locked` coming back.
@@ -503,6 +497,10 @@ Nothing is open at this tier.
 **Whether a sign-in endpoint should cache a verification or just do it is not measured.** An RSA exponentiation at 2048 bits is not small.
 
 **What would settle it:** one verify of each kind, and a row in `bench/result/` for it. An afternoon.
+
+**Whether a token with no `aud` can be checked by the claim that does name the application.** `audience = .unchecked` is what a Cognito access token (`client_id`), a Clerk session token and a Keycloak token for a user with no client role (`azp`) need, and the check then moves to the caller's own `Claims`. A by-name claim check inside `nilo_jwt` would parse the payload into a `std.json.Value` tree on every verify, an allocation on the request path ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)).
+
+**What would settle it:** a measured allocation count for a registered-claims struct with one extra optional field, or a caller who forgot the comparison in their `Claims` and shipped it.
 
 ### `nilo_fetch`
 

@@ -54,8 +54,8 @@ const Program = struct {
         harness.keep(&presented);
         const claims = try jwt.verify(Claims, scratch, presented, .{
             .keys = &self.keys,
-            .issuer = "https://accounts.example",
-            .audience = "client-1",
+            .issuer = .{ .is = "https://accounts.example" },
+            .audience = .{ .is = "client-1" },
             // Inside the token's life: after its nbf, before its exp.
             .now_s = 1_759_300_000,
         });

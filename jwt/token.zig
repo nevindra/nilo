@@ -54,16 +54,34 @@ pub const Error = error{
     OutOfMemory,
 } || rs256.Error || es256.Error;
 
+/// What one registered claim has to be, said out loud. A union rather than a
+/// nullable string, so that skipping a check is a word on the line that
+/// builds the options and not a `null` that reads as a value
+/// ([ADR 111](../docs/adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md)).
+pub const Expect = union(enum) {
+    /// The claim has to be this: `iss` equal to it, or `aud` carrying it.
+    is: []const u8,
+    /// Nothing is asked of the claim, and the caller has said so.
+    unchecked,
+};
+
 pub const Options = struct {
     /// The issuer's keys. Fetching and refreshing them is the caller's —
     /// `nilo_fetch` sends the GET and `nilo_cache` holds the answer.
     keys: *const jwks.Keys,
-    /// Refuse a token whose `iss` is not this. Null skips the check, which
-    /// is only right when the key set can only have come from one issuer.
-    issuer: ?[]const u8 = null,
-    /// Refuse a token whose `aud` does not carry this. For Google this is
-    /// the OAuth client id. Null skips the check.
-    audience: ?[]const u8 = null,
+    /// What `iss` has to be. No default, so leaving it out is a compile
+    /// error naming the field rather than a check that quietly is not
+    /// there (ADR 111). `.unchecked` is for a key set shared by several
+    /// issuers, which Microsoft's multi-tenant endpoint is.
+    issuer: Expect,
+    /// What `aud` has to carry. For Google this is the OAuth client id.
+    /// No default, for the reason `issuer` has none: a Google ID token
+    /// minted for somebody else's application is signed by the same keys as
+    /// yours, and `aud` is all that tells them apart. `.unchecked` is for an
+    /// access token whose issuer puts no `aud` in it (Cognito's, Clerk's
+    /// and Keycloak's can lack one), and the check then moves to the claim
+    /// that does name the application, in your own `Claims`.
+    audience: Expect,
     /// Now, in seconds since the epoch. An argument rather than a clock, for
     /// the reason `nilo_id` takes a millisecond as one: a module with no
     /// event loop has no clock, and a test that cannot choose the time
@@ -179,12 +197,16 @@ pub fn verify(
     if (reg.nbf) |nbf| {
         if (opts.now_s + leeway < nbf) return error.NotYetValid;
     }
-    if (opts.issuer) |want| {
-        const iss = reg.iss orelse return error.WrongIssuer;
-        if (!std.mem.eql(u8, iss, want)) return error.WrongIssuer;
+    switch (opts.issuer) {
+        .is => |want| {
+            const iss = reg.iss orelse return error.WrongIssuer;
+            if (!std.mem.eql(u8, iss, want)) return error.WrongIssuer;
+        },
+        .unchecked => {},
     }
-    if (opts.audience) |want| {
-        if (!audienceCarries(reg.aud, want)) return error.WrongAudience;
+    switch (opts.audience) {
+        .is => |want| if (!audienceCarries(reg.aud, want)) return error.WrongAudience,
+        .unchecked => {},
     }
 
     // `.alloc_always`: the default for a slice input points a string with no
@@ -245,8 +267,8 @@ test "a token signed by the key in the set verifies, and the claims come back" {
 
     const claims = try verify(Claims, arena.allocator(), vector.token, .{
         .keys = &keys,
-        .issuer = "https://accounts.example",
-        .audience = "client-1",
+        .issuer = .{ .is = "https://accounts.example" },
+        .audience = .{ .is = "client-1" },
         .now_s = 1_500_000_000,
     });
     try testing.expectEqualStrings("u-7", claims.sub);
@@ -266,6 +288,8 @@ test "the claims live in the allocator handed in, not in verify's scratch" {
     const claims = try verify(Claims, testing.allocator, vector.token, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     });
     defer testing.allocator.free(claims.sub);
     defer testing.allocator.free(claims.email);
@@ -293,6 +317,8 @@ test "one flipped byte in the payload is a bad signature, not a claim" {
     try testing.expectError(error.BadSignature, verify(Claims, arena.allocator(), bad, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -310,6 +336,8 @@ test "alg none is refused before anything else is looked at" {
     try testing.expectError(error.NotAToken, verify(Claims, arena.allocator(), forged, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 
     // …and with a signature-shaped segment on the end, so it is the `alg`
@@ -318,6 +346,8 @@ test "alg none is refused before anything else is looked at" {
     try testing.expectError(error.WrongAlgorithm, verify(Claims, arena.allocator(), forged_sig, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -335,6 +365,8 @@ test "HS256 signed with the published modulus is refused" {
     try testing.expectError(error.WrongAlgorithm, verify(Claims, arena.allocator(), forged, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -351,20 +383,26 @@ test "expiry, not-yet-valid, issuer and audience each get their own answer" {
     try testing.expectError(error.Expired, verify(Claims, a, vector.token, .{
         .keys = &keys,
         .now_s = 2_000_000_001,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
     try testing.expectError(error.NotYetValid, verify(Claims, a, vector.token, .{
         .keys = &keys,
         .now_s = 999_999_999,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
     try testing.expectError(error.WrongIssuer, verify(Claims, a, vector.token, .{
         .keys = &keys,
-        .issuer = "https://accounts.google.com",
+        .issuer = .{ .is = "https://accounts.google.com" },
         .now_s = 1_500_000_000,
+        .audience = .unchecked,
     }));
     try testing.expectError(error.WrongAudience, verify(Claims, a, vector.token, .{
         .keys = &keys,
-        .audience = "some-other-client",
+        .audience = .{ .is = "some-other-client" },
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
     }));
 }
 
@@ -382,11 +420,15 @@ test "leeway covers a clock that is a minute out, and no more" {
         .keys = &keys,
         .now_s = 2_000_000_030,
         .leeway_s = 60,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     });
     try testing.expectError(error.Expired, verify(Claims, a, vector.token, .{
         .keys = &keys,
         .now_s = 2_000_000_090,
         .leeway_s = 60,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -404,6 +446,8 @@ test "a kid that is not in the set says so rather than failing the signature" {
     try testing.expectError(error.NoSuchKey, verify(Claims, arena.allocator(), vector.token, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -438,7 +482,7 @@ test "things that are not tokens" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const opts: Options = .{ .keys = &keys, .now_s = 1_500_000_000 };
+    const opts: Options = .{ .keys = &keys, .issuer = .unchecked, .audience = .unchecked, .now_s = 1_500_000_000 };
 
     for ([_][]const u8{
         "",
@@ -467,8 +511,9 @@ test "an ES256 token signed by the RFC's own key verifies, and the claims come b
 
     const claims = try verify(RfcClaims, arena.allocator(), vector.es256_token, .{
         .keys = &keys,
-        .issuer = "joe",
+        .issuer = .{ .is = "joe" },
         .now_s = 1_300_000_000,
+        .audience = .unchecked,
     });
     try testing.expectEqualStrings("joe", claims.iss);
     try testing.expect(claims.@"http://example.com/is_root");
@@ -477,11 +522,14 @@ test "an ES256 token signed by the RFC's own key verifies, and the claims come b
     try testing.expectError(error.Expired, verify(RfcClaims, arena.allocator(), vector.es256_token, .{
         .keys = &keys,
         .now_s = 1_300_819_381,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
     try testing.expectError(error.WrongIssuer, verify(RfcClaims, arena.allocator(), vector.es256_token, .{
         .keys = &keys,
-        .issuer = "jane",
+        .issuer = .{ .is = "jane" },
         .now_s = 1_300_000_000,
+        .audience = .unchecked,
     }));
 }
 
@@ -498,6 +546,8 @@ test "one flipped byte in an ES256 payload is a bad signature, not a claim" {
     try testing.expectError(error.BadSignature, verify(RfcClaims, arena.allocator(), bad, .{
         .keys = &keys,
         .now_s = 1_300_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -513,6 +563,8 @@ test "an ES256 signature sent as DER is refused by its length, not as a bad sign
     try testing.expectError(error.SignatureWrongLength, verify(RfcClaims, arena.allocator(), der, .{
         .keys = &keys,
         .now_s = 1_300_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -529,7 +581,7 @@ test "a header saying ES256 over an RSA key is a mismatch, and so is the other w
     defer arena.deinit();
     const a = arena.allocator();
 
-    _ = try verify(Claims, a, vector.token, .{ .keys = &keys, .now_s = 1_500_000_000 });
+    _ = try verify(Claims, a, vector.token, .{ .keys = &keys, .issuer = .unchecked, .audience = .unchecked, .now_s = 1_500_000_000 });
 
     // {"alg":"ES256","kid":"test-key"} — the RFC's real ES256 payload and
     // signature, pointed at the RSA key. Refused before any arithmetic.
@@ -537,6 +589,8 @@ test "a header saying ES256 over an RSA key is a mismatch, and so is the other w
     try testing.expectError(error.WrongAlgorithm, verify(Claims, a, es_over_rsa, .{
         .keys = &keys,
         .now_s = 1_300_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 
     // {"alg":"RS256","kid":"es256-key"} — the real RS256 payload and
@@ -545,6 +599,8 @@ test "a header saying ES256 over an RSA key is a mismatch, and so is the other w
     try testing.expectError(error.WrongAlgorithm, verify(Claims, a, rsa_over_ec, .{
         .keys = &keys,
         .now_s = 1_500_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 
     // And the honest header over the EC key gets as far as the signature,
@@ -554,6 +610,8 @@ test "a header saying ES256 over an RSA key is a mismatch, and so is the other w
     try testing.expectError(error.BadSignature, verify(Claims, a, es_over_ec, .{
         .keys = &keys,
         .now_s = 1_300_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -571,6 +629,8 @@ test "ES384 and every other name are refused before a key is looked up" {
     try testing.expectError(error.WrongAlgorithm, verify(Claims, arena.allocator(), forged, .{
         .keys = &keys,
         .now_s = 1_300_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
 }
 
@@ -588,5 +648,65 @@ test "a key on a curve with no branch is refused by name rather than as missing"
     try testing.expectError(error.CurveNotSupported, verify(Claims, arena.allocator(), vector.es256_token, .{
         .keys = &keys,
         .now_s = 1_300_000_000,
+        .issuer = .unchecked,
+        .audience = .unchecked,
     }));
+}
+
+test "the issuer and the audience have no default, so a call or a ring cannot leave either unsaid" {
+    const Ring = @import("keyring.zig").Keyring.Options;
+    inline for (.{ Options, Ring }) |T| {
+        const info = @typeInfo(T).@"struct";
+        inline for (info.field_names, info.field_types, info.field_attrs) |name, FT, attrs| {
+            if (comptime (std.mem.eql(u8, name, "issuer") or std.mem.eql(u8, name, "audience"))) {
+                try testing.expect(attrs.defaultValue(FT) == null);
+            }
+        }
+    }
+}
+
+test "an audience of .unchecked accepts a token with no aud, and an audience that is a value refuses it" {
+    // RFC 7515's ES256 token carries `iss` and `exp` and no `aud`: the shape
+    // of an access token whose issuer names the application in another claim.
+    var keys = try jwks.parse(testing.allocator, vector.es256_jwks);
+    defer keys.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    try testing.expectError(error.WrongAudience, verify(RfcClaims, arena.allocator(), vector.es256_token, .{
+        .keys = &keys,
+        .issuer = .{ .is = "joe" },
+        .audience = .{ .is = "client-1" },
+        .now_s = 1_300_000_000,
+    }));
+    const claims = try verify(RfcClaims, arena.allocator(), vector.es256_token, .{
+        .keys = &keys,
+        .issuer = .{ .is = "joe" },
+        .audience = .unchecked,
+        .now_s = 1_300_000_000,
+    });
+    try testing.expectEqualStrings("joe", claims.iss);
+}
+
+test "an issuer that is a value refuses another issuer's token, and .unchecked takes either" {
+    var keys = try keySet();
+    defer keys.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const Claims = struct { sub: []const u8 };
+
+    try testing.expectError(error.WrongIssuer, verify(Claims, arena.allocator(), vector.token, .{
+        .keys = &keys,
+        .issuer = .{ .is = "https://accounts.google.com" },
+        .audience = .{ .is = "client-1" },
+        .now_s = 1_500_000_000,
+    }));
+    _ = try verify(Claims, arena.allocator(), vector.token, .{
+        .keys = &keys,
+        .issuer = .unchecked,
+        .audience = .{ .is = "client-1" },
+        .now_s = 1_500_000_000,
+    });
 }

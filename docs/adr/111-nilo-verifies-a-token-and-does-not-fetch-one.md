@@ -2,6 +2,7 @@
 
 **Status:** accepted
 **Topic:** [jwt](../design/jwt.md)
+**Applies:** [ADR 044](./044-a-password-hash-is-gated-because-forgetting-is-silent.md).
 
 ## Context
 
@@ -41,7 +42,7 @@ So a key set holding an RSA key and an EC key at once, what an issuer publishes 
 
 ### Nothing is read until the signature has passed
 
-An `exp` off an unverified token is a number somebody chose, so the order in `token.zig` is: split, header, `alg`, key, signature, and only then the claims. `exp` is required; a credential with no end is not one. `iss` and `aud` are checked whenever the caller names them, and the caller's claims struct does not have to mention any of the three, the registered claims are the module's business and the struct is for the application's.
+An `exp` off an unverified token is a number somebody chose, so the order in `token.zig` is: split, header, `alg`, key, signature, and only then the claims. `exp` is required; a credential with no end is not one. `iss` and `aud` are checked against what the caller said, and the caller's claims struct does not have to mention any of the three, the registered claims are the module's business and the struct is for the application's.
 
 ```zig
 const Claims = struct {
@@ -52,13 +53,38 @@ const Claims = struct {
 
 const claims = try jwt.verify(Claims, c.arena(), id_token, .{
     .keys = &keys,
-    .issuer = "https://accounts.google.com",
-    .audience = client_id,
+    .issuer = .{ .is = "https://accounts.google.com" },
+    .audience = .{ .is = client_id },
     .now_s = @divFloor(nilo.nowMillis(), 1000),
 });
 ```
 
 Fields the token carries and the struct does not name are ignored, because a provider adding a claim is not a reason to stop signing people in. Everything about time is an argument, `now_s` and a `leeway_s` for two clocks that disagree, which is what makes an expiry testable: a test that cannot choose the time cannot test one.
+
+### The issuer and the audience are said, never defaulted
+
+**`issuer` and `audience` are `jwt.Expect`, a union with no default: `.{ .is = "…" }` insists on a value, `.unchecked` says the check is not wanted.** Leaving one out is `error: missing struct field: audience` at the line that builds the options, in `jwt.Options` and in `Keyring.Options` alike. This is [ADR 044](./044-a-password-hash-is-gated-because-forgetting-is-silent.md)'s rule applied to a token: a check whose omission costs silently is enforced rather than documented. Before this, both were `?[]const u8 = null`, and a ring over Google's keys with no `audience` accepted an ID token minted for any other application Google signs, because it is signed by the same keys; nothing failed, nothing logged, and every test written by the person who forgot it passed.
+
+**Required with an opt-out, and not simply required, because the issuers read do not all put an `aud` in the token.** The question was whether any issuer's tokens carry no audience; if none did, `audience` would be a plain required string. Read from each issuer's own documentation:
+
+| Issuer and token | Carries `aud`? | Source |
+|---|---|---|
+| Google, ID token | yes, "one of the OAuth 2.0 client IDs of your application" | [OpenID Connect](https://developers.google.com/identity/openid-connect/openid-connect) |
+| Amazon Cognito, ID token | yes, the app client id | [the access token page](https://docs.aws.amazon.com/cognito/latest/developerguide/amazon-cognito-user-pools-using-the-access-token.html), under `client_id` |
+| **Amazon Cognito, access token** | **no, unless the app asked for a resource binding**; the app client is in `client_id` | the same page: `aud` is "present only if your application requested a resource binding" |
+| **Clerk, session token** | **no**: the default claims are `azp`, `exp`, `fva`, `iat`, `iss`, `jti`, `nbf`, `sid`, `sub` and a few of Clerk's own | [Session tokens](https://clerk.com/docs/guides/sessions/session-tokens) |
+| **Keycloak, access token** | **not for every user**: the default Audience Resolve mapper adds the clients "for which user has at least one client role", so a user with none gets no `aud` until an Audience mapper is added | [`AudienceResolveProtocolMapper`](https://www.keycloak.org/docs-api/latest/javadocs/org/keycloak/protocol/oidc/mappers/AudienceResolveProtocolMapper.html); the version-19 change is reported on the [Keycloak forum](https://forum.keycloak.org/t/aud-field-in-access-token-in-keycloak-19/16757) |
+| Auth0, API access token | yes, the API identifier; with no `audience` parameter the token is opaque and there is nothing to verify | [Get access tokens](https://auth0.com/docs/secure/tokens/access-tokens/get-access-tokens) |
+| Microsoft Entra, access token | yes, "always the client ID of the API" in v2.0; the page says it "must be validated" | [Access token claims](https://learn.microsoft.com/en-us/entra/identity-platform/access-token-claims-reference) |
+| Okta, custom authorization server | yes, the audience configured for the server; the org authorization server's access tokens are opaque | [Validate access tokens](https://developer.okta.com/docs/guides/validate-access-tokens/dotnet/main/) |
+| Supabase Auth | yes, "always present … and cannot be removed" (`authenticated` or `anon`) | [JWT fields](https://supabase.com/docs/guides/auth/jwt-fields) |
+| Sign in with Apple, identity token | by the usual reading yes, the app's bundle or Services id; Apple's page did not render for the fetch, so this row is not read from the primary source | [Verifying a user](https://developer.apple.com/documentation/sign_in_with_apple/sign_in_with_apple_rest_api/verifying_a_user) |
+
+RFC 9068 makes `aud` a REQUIRED claim of a JWT access token, and three of the issuers above ship tokens that do not follow it by default. The three have a way to name the application that is not `aud`: Cognito's `client_id`, Clerk's and Keycloak's `azp`. So a required string would refuse a real, common deployment, and defaulting to null would be the hole this section closes; the caller has to choose, in a word that shows in review. `nilo` does not sign tokens of its own (a `Session(T)` is a sealed cookie, not a JWT), so there is no key of nilo's that needs an audience.
+
+**`.unchecked` is not "safe", it is "checked somewhere else".** On a token whose `aud` is absent, the replay this check stops (a token minted for application B presented to application A, signed by the same keys) is stopped by the claim that names the application, and that claim is the caller's to read from its own `Claims` (`client_id: []const u8`, then compare). Reading an arbitrary claim by name inside the module is not done here: the registered claims are a fixed struct so that `verify` parses the payload once into scratch it already owns, and a by-name check would parse into a `std.json.Value` tree on every verify, an allocation on the request path ([ADR 017](./017-the-trade-budget-has-four-axes.md)'s hard axis). It stays on the todo list as a question with that number attached.
+
+**`issuer` takes the same type, for a smaller reason.** Every token read above carries `iss` (OpenID Connect requires it of an ID token and RFC 9068 of an access token), so no issuer needs the opt-out for absence. It is needed for the opposite case: Microsoft's multi-tenant endpoints publish one key set and put the tenant in `iss` (`…/{tenant}/v2.0`), so a ring over those keys cannot name one issuer and has to say `.unchecked` and read `tid` itself. A key set that is one issuer's alone makes the check redundant rather than wrong, and redundant is the cheap side to err on. The two fields differ in how much a mistake costs (a missing `aud` is the confused deputy; a missing `iss` on a single-issuer key set is nearly nothing), and one type for both is chosen anyway: two spellings of "skip this check" would be one to remember and one to forget.
 
 ### A key set is swapped whole, and freed after its readers
 
@@ -67,8 +93,8 @@ Fields the token carries and the struct does not name are ignored, because a pro
 ```zig
 var google: jwt.Keyring = try .init(gpa, .{
     .url = "https://www.googleapis.com/oauth2/v3/certs",
-    .issuer = "https://accounts.google.com",
-    .audience = client_id,
+    .issuer = .{ .is = "https://accounts.google.com" },
+    .audience = .{ .is = client_id },
 });
 try app.provide(&google);
 try app.before(fetchKeys, .{ &google, &api });   // google.refresh(run, api, now_s)
@@ -108,6 +134,14 @@ The pin is two counters. A reader increments `crossing`, loads the pointer, incr
 
 **Fetching inside the module**, `jwt.Jwks.fetch(url)`. Puts `nilo_fetch` under `jwt/`, which `zig build layering` refuses; and it decides, rather than bounds, the policy of when a miss means fetch and when it means refuse: a caller who wants no automatic fetch calls `verify` rather than `verifyOrRefresh`.
 
+**`audience` as a plain required string.** What the todo list proposed if no issuer lacked an `aud`, and one does not: a Cognito access token carries `client_id` and no `aud`, as do Clerk's session tokens, and a required string would leave those callers inventing a value that matches nothing or giving up the module. Cognito, Clerk and Keycloak are not corners; they are three of the ones a caller asks about first.
+
+**A required `?[]const u8`, so that `.audience = null` is the opt-out.** The same compile error for forgetting, with an opt-out that reads as a value: `null` is what a reader takes for "not set yet", and a reviewer scanning a diff for a skipped check finds `.unchecked` by name and `null` only by knowing to look.
+
+**Keeping `null` as the default and logging a warning at `init`.** `std.log.err` is for a server refusing to start and `warn` is what a log line nobody reads is made of; ADR 044 says what the rule is for a check whose omission is silent, and a line in the log is a way of documenting it.
+
+**A refusal in `refusals/` for the missing field.** The compile error is Zig's own `missing struct field: audience`, which names the field and points at the declaration this ADR's doc comment sits on. `nilo_jwt` has no refusals table (there are nine, none of them this module's), and a table is a row in `build.zig` for a message that would say what Zig already says.
+
 **HS256, the EC families beyond P-256, JWE, and signing.** Signing is absent because a server issuing its own sessions has `Session(T)` sealed into a cookie and does not need a token at all. HS256 is one call to `std.crypto.auth.hmac.sha2.HmacSha256`, and it stays out because the shared-secret shape is what makes the `alg`-confusion attack possible: a module that verifies both a shared secret and a public key has to be careful about something a module that verifies only public keys cannot get wrong.
 
 ## What it costs
@@ -118,5 +152,7 @@ The pin is two counters. A reader increments `crossing`, loads the pointer, incr
 | Memory per idle connection | unchanged: a caller holds a pointer on its stack for as long as it held a `*const Keys` before |
 | Throughput and p99 | unmeasured beyond the RSA or ECDSA verify itself (a modular exponentiation, or `EcdsaP256Sha256.Signature.verify`); a `Keyring` adds three atomics on top. The roadmap still holds "whether a sign-in endpoint should cache a verification or just do it" open, waiting on that number |
 | Binary size | 0 for a program that never imports `nilo_jwt`, a linker fact rather than a promise; one that does links RS256 and ES256 both, since the choice between them is a runtime switch on the key |
+
+`Expect` moves none of the four axes. It is a tag and a slice where an optional slice was, in an options value on the stack and once in a `Keyring`; `verify` makes one more `switch` on a tag it made one `if` on a pointer for, and allocates nothing it did not. No number was measured for this, since there is no instruction an allocation count or an idle connection could notice it in; `python3 bench/release.py` is the run that would, and `bench/release/jwt.zig` has to be rewritten to the new spelling before it runs.
 
 Every failure in this module is a typed error rather than a Refusal, held by tests against a token signed by somebody else's implementation and, for ES256, against RFC 7515 Appendix A.3's own worked vectors: a vector produced by the code under test only proves the code agrees with itself, where a vector from the RFC or from an independent library checks the padding and the DigestInfo prefix against something that was not written by the code being tested.

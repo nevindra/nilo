@@ -21,8 +21,8 @@ const Claims = struct {
 fn signIn(gpa: std.mem.Allocator, keys: *const jwt.Keys, id_token: []const u8) !Claims {
     return jwt.verify(Claims, gpa, id_token, .{
         .keys = keys,
-        .issuer = "https://accounts.google.com",
-        .audience = "…apps.googleusercontent.com",
+        .issuer = .{ .is = "https://accounts.google.com" },
+        .audience = .{ .is = "…apps.googleusercontent.com" },
         .now_s = @divFloor(nilo.nowMillis(), 1000),
     });
 }
@@ -38,6 +38,7 @@ fn signIn(gpa: std.mem.Allocator, keys: *const jwt.Keys, id_token: []const u8) !
 | `key.material` | `.rsa = .{ .e, .n }` or `.ec = .{ .crv, .x, .y }`. Which one it is decides how a token signed with it is checked |
 | `key.algorithm()` | the `alg` a token signed with this key must declare: `RS256` or `ES256` |
 | `jwt.verify(Claims, gpa, token, opts)` | `!Claims`: the whole check, then the payload |
+| `jwt.Expect` | `union(enum) { is: []const u8, unchecked }`: what `issuer` and `audience` are set to. There is no default and no `null`, so a call that forgets one does not compile ([ADR 111](../adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md)) |
 | `jwt.key_sizes` | the RSA modulus lengths supported: 256, 384 and 512 bytes |
 | `jwt.curves` | the curves supported: `P-256` |
 
@@ -46,8 +47,8 @@ fn signIn(gpa: std.mem.Allocator, keys: *const jwt.Keys, id_token: []const u8) !
 | | |
 |---|---|
 | `.keys` | `*const Keys`, the issuer's |
-| `.issuer` | rejects a token whose `iss` is not this. Null skips the check |
-| `.audience` | rejects a token whose `aud` does not include this. Null skips the check |
+| `.issuer` | a `jwt.Expect`, with no default: `.{ .is = "…" }` rejects a token whose `iss` is not this, `.unchecked` skips the check |
+| `.audience` | a `jwt.Expect`, with no default: `.{ .is = "…" }` rejects a token whose `aud` does not include this, `.unchecked` skips the check, and is for an access token that names the application in another claim and carries no `aud` (Cognito's, Clerk's) |
 | `.now_s` | seconds since the epoch. An argument, not a clock |
 | `.leeway_s` | how far the two clocks may disagree, in both directions. Default `0` |
 
@@ -107,7 +108,7 @@ fn whoIsThis(c: *nilo.Ctx, google: *jwt.Keyring, api: *fetch.Client, token: []co
 
 | | |
 |---|---|
-| `jwt.Keyring.init(gpa, .{ .url, .issuer, .audience, .leeway_s, .refresh_interval_s, .remember_tokens })` | `!Keyring`, holding no keys: every verify returns `NoSuchKey` until `load` or `refresh`. `refresh_interval_s` defaults to 60. `remember_tokens` (default 0) is how many verified tokens the ring remembers by SHA-256 digest, so a token seen again skips the signature arithmetic (400 µs for ES256) but not the `exp`/`nbf`/`iss`/`aud` checks; a `load` forgets them all ([ADR 209](../adr/209-a-verified-signature-is-remembered-by-the-tokens-digest.md)) |
+| `jwt.Keyring.init(gpa, .{ .url, .issuer, .audience, .leeway_s, .refresh_interval_s, .remember_tokens })` | `!Keyring`, holding no keys: every verify returns `NoSuchKey` until `load` or `refresh`. `url`, `issuer` and `audience` are required, the last two as a `jwt.Expect`. `refresh_interval_s` defaults to 60. `remember_tokens` (default 0) is how many verified tokens the ring remembers by SHA-256 digest, so a token seen again skips the signature arithmetic (400 µs for ES256) but not the `exp`/`nbf`/`iss`/`aud` checks; a `load` forgets them all ([ADR 209](../adr/209-a-verified-signature-is-remembered-by-the-tokens-digest.md)) |
 | `ring.deinit()` | frees the set it holds |
 | `ring.load(bytes)` | parses a JWKS document and makes it the set every later verify reads; the old set is freed once its readers are done. A document that does not parse leaves the old set in place |
 | `ring.refresh(scope, client, now_s)` | `client.get(scope, url, .{})`, then `load` the body; `error.KeysNotAvailable` for anything but a 2xx, with the old set still held. `client` is anything that has `ok()` and `body.view()`, which `fetch.Client` does. Records `now_s` as the last refresh |
