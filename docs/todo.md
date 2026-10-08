@@ -81,12 +81,6 @@ Nothing is open at this tier.
 
 **Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
 
-**A file input left empty in a browser arrives as a file, so `?Upload = null` is never null from a browser, and an edit form that keeps the old file overwrites it with nothing.** HTML's form encoding sends a file input with nothing chosen as a part with `filename=""` and no bytes, and `fill` takes any part with a `filename` as the `Upload` (`http/form.zig:181`), which the test "a file field left empty by the browser is still a file" holds as correct. So `?Upload = null` is null only from curl, a required `Upload` passes with 0 bytes, and a profile form whose handler runs `if (incoming.value.avatar) |a| try a.saveTo(dir, name)` replaces the avatar with an empty file each time it is saved without a new one. `docs/guide/forms.md:104` teaches the opposite. Go's `ReadForm` stores a part with an empty `filename` as a text value, so `FormFile` answers `ErrMissingFile` and Gin, Echo and Fiber read the input as absent; actix-multipart, Rocket and poem hand over an empty file, the same trap in Rust (found by reading each one's source).
-
-**Needs:** a part with an empty `filename` and no bytes read as no file (null for `?Upload`, the "missing the file" 400 for `Upload`), the test at `http/form.zig:1137` turned round, the guide's sentence kept true, and a `CHANGELOG.md` line for a handler that relied on the empty `Upload`.
-
-**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
-
 ---
 
 ## P2: a real cost, and a smaller one

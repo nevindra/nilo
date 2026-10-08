@@ -198,6 +198,8 @@ The cookie is named `__Host-session` (`nilo.session.host_cookie_name`) when it i
 | `u.len()` | its size |
 | `u.saveTo(dir, name)` | `!void`: writes it into a [`Dir`](./streaming.md#dir) under **a name you choose** |
 
+**A file input left empty in a browser is no `Upload`.** The part it sends (an empty filename and no bytes) is dropped, so `?Upload` is null and an `Upload` field is a 400 saying the form is missing the file. A chosen file with no bytes keeps its filename and is an `Upload` of length 0; a part with an empty filename but bytes in it is an `Upload` too.
+
 **`saveTo` either replaces the file at `name` or leaves it untouched.** The bytes go to a temporary name beside it and one rename puts them in place, so a request serving that same name from the same `Dir` never reads it half-written ([ADR 097](../adr/097-a-file-is-written-by-the-engine.md)). Passing `u.filename` as the name returns `error.NameNotAllowed`; it is never resolved as a path against the directory.
 
 ## Failing

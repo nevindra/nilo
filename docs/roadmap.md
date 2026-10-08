@@ -60,7 +60,6 @@ Independent of the order: each touches files no stage of the direction above doe
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.
 - [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A file input left empty in a browser arrives as a file, so `?Upload = null` is never null from a browser, and an edit form that keeps the old file overwrites it with nothing.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A renamed struct cannot be a request body, and the reason the guide gives no longer holds.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · `Timestamp` and `Date` are in `nilo_sql`, so an HTTP-only service with a date in its body turns on `-Dsql` or carries text.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A route's deadline stops at the route: the calls it makes keep their own.

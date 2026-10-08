@@ -101,7 +101,7 @@ fn upload(incoming: nilo.Form(NewAvatar)) !nilo.Status(201, Avatar) {
 }
 ```
 
-`?Upload = null` is a file that may not have been chosen.
+`?Upload = null` is a file that may not have been chosen. **A file input left empty in a browser counts as not chosen**: the browser sends it as a part with an empty filename and no bytes, and nilo reads that as no file, so an optional `Upload` is null and a required one is a 400 saying the form is missing the file. An edit form can therefore write `if (incoming.value.avatar) |a| …` and keep the old file when nothing new was picked. A file that was chosen and happens to be empty has a filename and is still an `Upload` of 0 bytes.
 
 A form with an `Upload` in it can only arrive as multipart, so a request that is not multipart is told which encoding to send, instead of getting a "missing field" error:
 

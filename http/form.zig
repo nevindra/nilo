@@ -695,10 +695,19 @@ fn parseMultipart(arena: std.mem.Allocator, boundary: []const u8, body: []const 
             );
         }
 
-        // A part with a filename is a file even when the file is empty:
-        // that is a browser saying "the field was there and nothing was
-        // chosen", and it must not become a text field called `avatar`.
+        // A part with a filename is a file, and so is a chosen file with no
+        // bytes in it: the user picked an empty file, and that is a file.
+        //
+        // One part is neither: `filename=""` with no bytes. That is what a
+        // browser sends for a file input with nothing chosen, so it is read
+        // as the field being absent, the way Go's `FormFile`, Gin, Echo and
+        // Fiber read it. It is dropped, not kept as an empty text value as
+        // Go keeps it: a text value called `avatar` would reach any `Str`
+        // field of that name as "", which the browser did not send. An empty
+        // filename with bytes in it is a client that skipped the name, and
+        // stays a file.
         if (parameterOf(disposition, "filename")) |filename| {
+            if (filename.len == 0 and data.len == 0) continue;
             if (n_files == files.len) return tooManyParts();
             files[n_files] = .{
                 .name = name,
@@ -1134,17 +1143,89 @@ test "the bytes of a file are the body's own, not a copy of them" {
     );
 }
 
-test "a file field left empty by the browser is still a file, not a text field" {
+const browser_empty_file = "Content-Disposition: form-data; name=\"avatar\"; filename=\"\"\r\n" ++
+    "Content-Type: application/octet-stream\r\n\r\n";
+
+const WithOptionalAvatar = struct {
+    email: Str,
+    avatar: ?Upload = null,
+};
+
+test "a file field left empty by the browser is no file, so an optional Upload is null" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const filled = try read(WithAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
+    const filled = try read(WithOptionalAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
         "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
-        "Content-Disposition: form-data; name=\"avatar\"; filename=\"\"\r\n" ++
-            "Content-Type: application/octet-stream\r\n\r\n",
+        browser_empty_file,
     }));
-    try testing.expectEqualStrings("", filled.avatar.filename.view());
-    try testing.expectEqual(@as(usize, 0), filled.avatar.len());
+    try testing.expectEqualStrings("x@y.z", filled.email.view());
+    try testing.expect(filled.avatar == null);
+}
+
+test "a file field left empty by the browser is a missing file for a required Upload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    try expectFails(
+        WithAvatar,
+        arena.allocator(),
+        multipart_type,
+        comptime multipart(&.{
+            "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+            browser_empty_file,
+        }),
+        "the form is missing the file \"avatar\"",
+    );
+}
+
+test "a file the user chose with nothing in it is still a file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const filled = try read(WithOptionalAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+        "Content-Disposition: form-data; name=\"avatar\"; filename=\"empty.txt\"\r\n" ++
+            "Content-Type: text/plain\r\n\r\n",
+    }));
+    try testing.expectEqualStrings("empty.txt", filled.avatar.?.filename.view());
+    try testing.expectEqual(@as(usize, 0), filled.avatar.?.len());
+}
+
+test "a part with an empty filename but bytes in it is still a file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const filled = try read(WithOptionalAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+        "Content-Disposition: form-data; name=\"avatar\"; filename=\"\"\r\n\r\nABC",
+    }));
+    try testing.expectEqualStrings("", filled.avatar.?.filename.view());
+    try testing.expectEqualStrings("ABC", filled.avatar.?.bytes.view());
+}
+
+test "an empty file part ahead of a real one of the same name does not hide it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const filled = try read(WithOptionalAvatar, arena.allocator(), multipart_type, comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+        browser_empty_file,
+        "Content-Disposition: form-data; name=\"avatar\"; filename=\"me.png\"\r\n\r\nPNG",
+    }));
+    try testing.expectEqualStrings("me.png", filled.avatar.?.filename.view());
+}
+
+test "an empty file part is not a text value either" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const fields = try parse(arena.allocator(), .{ .multipart = "niloBoundary" }, comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"email\"\r\n\r\nx@y.z",
+        browser_empty_file,
+    }));
+    try testing.expectEqual(@as(usize, 1), fields.text.len);
+    try testing.expectEqual(@as(usize, 0), fields.files.len);
 }
 
 test "a part with no content type of its own gets the one the spec says to assume" {
