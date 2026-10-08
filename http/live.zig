@@ -1460,3 +1460,43 @@ test "a fiber app.spawn started takes the server's loop, answers a route, and wa
     try live.stop();
     try waitForCount(&writer.canceled, 1);
 }
+
+/// Background work that swallows its cancel: a job whose call the stop
+/// cancelled reads it as an ordinary failure, logs, and carries on, the
+/// way any `catch |err| log` does. Parked almost all the time in the long
+/// wait, so that is where the stop's one cancel lands.
+const Swallower = struct {
+    started: std.atomic.Value(u32) = .init(0),
+    swallowed: std.atomic.Value(u32) = .init(0),
+    gone: std.atomic.Value(u32) = .init(0),
+
+    fn run(self: *Swallower) void {
+        defer _ = self.gone.fetchAdd(1, .release);
+        _ = self.started.fetchAdd(1, .release);
+        while (true) {
+            nilo.sleep(60_000) catch {
+                _ = self.swallowed.fetchAdd(1, .release);
+            };
+            nilo.sleep(10) catch return; // the server is going
+        }
+    }
+};
+
+test "spawned work that swallowed the stop's cancel still stops at its next sleep, and the server with it" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    var work: Swallower = .{};
+    try app.spawn(Swallower.run, .{&work});
+
+    const live = try nilo.testing.Live.start(gpa, &app, .{ .threads = 1 });
+    try waitForCount(&work.started, 1);
+    // Before the fix the cancel was spent on the first wait, the second
+    // slept on as though nothing had happened, and the loop went round
+    // for good: `listen()` never returned and this was ServerDidNotStop.
+    try live.stop();
+    try testing.expectEqual(@as(u32, 1), work.swallowed.load(.acquire));
+    try testing.expectEqual(@as(u32, 1), work.gone.load(.acquire));
+}

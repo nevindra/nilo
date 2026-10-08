@@ -49,6 +49,16 @@ fn flushEvery(exporter: *Exporter) void {
 }
 ```
 
+### A swallowed cancel does not keep the server
+
+The stop reaches a spawned fiber as one cancel, and the first wait the fiber reaches spends it. Work that reads that wait's failure as an ordinary one, a cancelled S3 call logged as a storage error inside a job that then carries on, goes back to its loop with nothing left to cancel it: the `nilo.sleep` that was meant to say stop sleeps instead, the group's cancel waits for the fiber, and `listen()` never returns ([`history.md`](../history.md#a-suite-that-hangs-and-a-build-that-looks-stuck) has the case).
+
+So `spawn` and `spawnLocal` bind a task-local mark, `in_spawned_work`, around the work, and `serve` raises `cancelling_spawned` for the length of the group's cancel; `group.cancel()` waits for every task, so the flag is up for as long as any of them still runs. `nilo.sleep` in marked work answers `error.Canceled` at once while it is up, however many cancels came before. HTTP/1.1 requests are not marked, so one still waiting while the server drains keeps its wait. gRPC calls are, because `spawnLocal` starts them (`http/grpc.zig`); that changes nothing, since the flag is only up while `group.cancel()` runs, which cancels those calls anyway.
+
+**Only `sleep` reads it.** The loop above is the shape spawned work is documented to have, and its `sleep` is the wait that decides whether the loop goes round again. A swallower whose next wait is a queue, a mutex or another S3 call still waits through the stop; the contract for that is the one Zig and zio already have, and nilo uses it itself (`fetch/fetch.zig`, `s3/store.zig`): code that handles `error.Canceled` without returning it calls `nilo.io().recancel()`, so the next cancellation point fails again. The reference says so beside `sleep`.
+
+**The flag is process-wide**, with `background`'s own limit: one server per process. A second server's stop would raise it for the first one's spawned sleeps too, the same way the second would take `background` from the first.
+
 `func` may not fail: there is no request to answer and nobody to answer it, so an error has nowhere to go, and it logs instead. The two things that must not travel in are the same two `nilo.spawn` refuses to survive: a `Str`, and a fail function, which has no request to fail.
 
 The Engine's group is armed before `ready` runs rather than after, so a `ready` that fails cancels whatever it had already started, which is what "the server did not start" has to mean. `App` keeps two separate flags for this: `services_started` (ADR 180's guard, skipped when `app.start(io)` ran first) and `background_started` (set once, by whichever of `listen()`'s two callers reaches it first). They are separate because skipping the background work along with the services is exactly the bug this decision fixes: a program that calls `app.start` before `listen` still needs `listen()` to start what `app.spawn` registered.
@@ -63,6 +73,10 @@ The Engine's group is armed before `ready` runs rather than after, so a `ready` 
 
 **`app.every(ms, func, args)`.** Tempting, because the case is nearly always a schedule, but it bakes in policy that has no answer right for everybody: what happens when a tick overruns the next one, whether a missed tick is dropped or caught up, whether the first tick is at zero or at `ms`. `spawn` plus `sleep` is the loop, written where it can be read; a schedule can be built on top later without taking the primitive back. It was: a schedule is a type that makes the caller answer all three questions, and `every(ms, f)` stays refused ([ADR 161](./161-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
 
+**Leaving it to `recancel` at every catch site.** It is the right contract for code that knows it swallowed a cancel, and the reference points to it. But the swallow that hung a server was not a catch anybody could see: a library's `error.Canceled` became the caller's own `error.Storage` two functions down, and from there it is an ordinary failure. A contract every catch site has to keep is kept by most of them; one wait that refuses once the server is going covers the documented loop whatever the catch sites did.
+
+**Every wait reading the flag** — `Mutex.lock`, a `Gate`, the queues, the outbound calls. It would close the remaining case above, at the price of a load and a task-local read on every wait of every request, on the path ADR 017 counts, for a loop shape nobody is told to write. `sleep` is the wait the documented loop has.
+
 **`nilo.spawn` queueing when there is no server yet.** Would make one call do both jobs, at the price of turning a documented error into hidden state, and of `error.NoServer`, what a unit test calling a handler directly gets, quietly meaning something else at startup.
 
 ## What it costs
@@ -70,8 +84,8 @@ The Engine's group is armed before `ready` runs rather than after, so a `ready` 
 | Axis | Cost |
 |---|---|
 | Allocations per request | none: nothing on the request path is touched. `app.spawn` costs one allocation per registered function, at registration, for its arguments. |
-| Memory per idle connection | none: the fiber is per process, not per socket. It is not free, a fiber holds its stack at its high-water mark, measured at 8,673 bytes for the broadcast-writer shape that was rejected for exactly this cost, but it is paid once per ticker rather than once per connection. |
-| Throughput and p99 | none: the accept loop and the request path are unchanged. |
+| Memory per idle connection | none: the fiber is per process, not per socket. It is not free, a fiber holds its stack at its high-water mark, measured at 8,673 bytes for the broadcast-writer shape that was rejected for exactly this cost, but it is paid once per ticker rather than once per connection. The `in_spawned_work` binding adds a 40-byte `TaskLocal` node to every spawned fiber's stack for its life ([ADR 062](./062-where-a-connection-waits-is-what-it-costs.md)): once per ticker, and once per gRPC call `spawnLocal` starts, never per idle connection. |
+| Throughput and p99 | none on the request path: the accept loop is unchanged, and `nilo.sleep` adds one atomic load, the task-local read only following while a stop is under way. |
 | Binary size | paid only by a program that calls `spawn`: the trampolines are instantiated per registered function and the linker drops the list for a program that never calls it. |
 
 ## Consequences

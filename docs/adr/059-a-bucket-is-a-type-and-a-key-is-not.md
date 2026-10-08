@@ -237,7 +237,8 @@ path is XML, and a list result is a type AWS wrote rather than one the caller
 did. `COPY` goes with it, and carries its own trap for whoever adds it — S3 can
 answer a copy with **200 and an error in the body**. `LIST` came back later, as
 one bounded page and no more, when a caller brought the case
-([ADR 058](./058-most-of-an-s3-client-is-not-s3.md)); `COPY` has not.
+([ADR 058](./058-most-of-an-s3-client-is-not-s3.md)); `COPY` came back the same
+way, as `copy` and `compose`, reading its body for the 200 that is not one.
 
 One thing is worth the five extra lines: `RequestTimeTooSkewed` is the one 403
 that is not the program's fault, and S3's error body carries the server's time.
@@ -280,7 +281,8 @@ from the binary; `Range`, `getIf` and `Presigned` are headers and a struct. The 
 - **`COPY` and multipart upload go to the roadmap with their reasons
   attached**, not as gaps. The reason for both is the same sentence: they
   are where S3 stops being bytes at a key and starts being a document format.
-  `LIST` went with them and has since shipped as one page
+  `LIST` went with them, and all three have since shipped, one caller each:
+  `list` as one page, `putMultipart`, and `copy` with `compose`
   ([ADR 058](./058-most-of-an-s3-client-is-not-s3.md)).
 - **Arbitrary object metadata is refused on a performance argument**, which
   means the argument can be revisited with a measurement rather than an

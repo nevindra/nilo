@@ -14,6 +14,10 @@ A gap that is the rule. Each was looked at, priced, and kept as it is, and the e
 
 **Reopened by:** a caller whose parts are small and local enough that the bookkeeping shows up, or `bench/release.py` growing a way to measure per-byte overhead rather than per-operation cost.
 
+**`copy` and `compose` have no `bench/release/` program either**, for the same reason: their cost is the store's own copy, seconds of work inside the store against a request's bookkeeping, so instructions and allocations per operation would measure the part that does not matter. ADR 058 states their allocations and stack instead.
+
+**Reopened by:** the same thing as `putMultipart`'s entry, or a store whose copies are fast enough (metadata-only, as on AWS for a whole object) that the request's own cost becomes the cost.
+
 ### `nilo_core`
 
 **The layering step cannot tell a test import from a real one.** `zig build layering` refuses an import that is not in that module's row of the `layers` table, and `sql/db.zig` legitimately names `nilo_http` from a `test` block. Telling the two apart needs a parser rather than a scan, so the table has an `in_tests` list the step allows and does not verify. A rule with a listed exception still beats a rule in a document. This is the part of it that is weaker than the rest.

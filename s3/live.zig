@@ -573,3 +573,61 @@ test "a presigned PUT uploads from something that did not sign it, and only as a
         }
     }.run);
 }
+
+test "a copy inside the store is the same bytes at the new key" {
+    try withStore(struct {
+        fn run(store: *Store) !void {
+            var live = try Live.open(store);
+            defer live.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const from = home ++ "copy from/a key, encoded.bin";
+            const to = home ++ "copy-to.bin";
+            try live.put(&scope, from, .{ .bytes = "copied without passing through", .content_type = "application/octet-stream" });
+            defer live.delete(&scope, from) catch {};
+            try live.copy(&scope, from, to);
+            defer live.delete(&scope, to) catch {};
+
+            const got = try live.get(&scope, to);
+            try testing.expectEqualStrings("copied without passing through", got.bytes.view());
+        }
+    }.run);
+}
+
+test "compose joins objects in order into one, inside the store" {
+    try withStore(struct {
+        fn run(store: *Store) !void {
+            var live = try LiveBig.open(store);
+            defer live.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // One part at S3's floor and a short tail, as separate objects.
+            const first = try testing.allocator.alloc(u8, multipart_mod.part_min);
+            defer testing.allocator.free(first);
+            for (first, 0..) |*b, i| b.* = @truncate(i *% 13 +% (i >> 9));
+            const tail = "and the short last part";
+            const a = home ++ "compose-a.bin";
+            const b = home ++ "compose-b.bin";
+            const to = home ++ "composed.bin";
+            try live.put(&scope, a, .{ .bytes = first, .content_type = "application/octet-stream" });
+            defer live.delete(&scope, a) catch {};
+            try live.put(&scope, b, .{ .bytes = tail, .content_type = "application/octet-stream" });
+            defer live.delete(&scope, b) catch {};
+
+            try live.compose(&scope, to, &.{ a, b }, .{ .content_type = "video/mp4" });
+            defer live.delete(&scope, to) catch {};
+
+            // The joined object is what the call said it is, not the
+            // store's default type.
+            try testing.expectEqualStrings("video/mp4", (try live.head(&scope, to)).content_type.view());
+            const got = try live.get(&scope, to);
+            try testing.expectEqual(@as(u64, first.len + tail.len), got.len);
+            try testing.expect(std.mem.eql(u8, first, got.bytes.view()[0..first.len]));
+            try testing.expectEqualStrings(tail, got.bytes.view()[first.len..]);
+        }
+    }.run);
+}

@@ -160,6 +160,12 @@ const Canned = struct {
         body_prefix_len: usize = 0,
         declared_len: u64 = 0,
         verified: bool = false,
+        /// The two headers a copy is about: where it reads from, and what
+        /// the object it makes is said to be.
+        copy_source: [256]u8 = undefined,
+        copy_source_len: usize = 0,
+        content_type: [128]u8 = undefined,
+        content_type_len: usize = 0,
 
         fn methodText(self: *const Played) []const u8 {
             return self.method[0..self.method_len];
@@ -171,6 +177,20 @@ const Canned = struct {
 
         fn bodyPrefix(self: *const Played) []const u8 {
             return self.body_prefix[0..self.body_prefix_len];
+        }
+
+        fn copySource(self: *const Played) []const u8 {
+            return self.copy_source[0..self.copy_source_len];
+        }
+
+        fn contentType(self: *const Played) []const u8 {
+            return self.content_type[0..self.content_type_len];
+        }
+
+        fn keep(room: []u8, len: *usize, value: ?[]const u8) void {
+            const v = value orelse return;
+            len.* = @min(v.len, room.len);
+            @memcpy(room[0..len.*], v[0..len.*]);
         }
     };
 
@@ -208,6 +228,8 @@ const Canned = struct {
                 const body_len = @min(self.seen.body_len, kept.body_prefix.len);
                 @memcpy(kept.body_prefix[0..body_len], self.seen.bodyText()[0..body_len]);
                 kept.body_prefix_len = body_len;
+                Played.keep(&kept.copy_source, &kept.copy_source_len, self.seen.header("x-amz-copy-source"));
+                Played.keep(&kept.content_type, &kept.content_type_len, self.seen.header("content-type"));
                 self.played[self.played_count] = kept;
                 self.played_count += 1;
                 i += 1;
@@ -263,12 +285,18 @@ const Canned = struct {
         try w.print("ETag: {s}\r\n", .{self.answer.etag});
         const is_head = std.mem.eql(u8, self.seen.methodText(), "HEAD");
         if (self.answer.slow) |slow| {
-            try w.print("Content-Length: {d}\r\n\r\n", .{slow.pieces + @intFromBool(slow.hold)});
+            // With a body, the pieces are spaces ahead of it: how S3 keeps a
+            // long answer's connection alive before the document arrives.
+            try w.print("Content-Length: {d}\r\n\r\n", .{slow.pieces + @intFromBool(slow.hold) + body.len});
             try w.flush();
             if (is_head) return;
             for (0..slow.pieces) |_| {
                 try std.Io.sleep(self.io, .fromMilliseconds(slow.gap_ms), .awake);
-                try w.writeByte('x');
+                try w.writeByte(if (body.len > 0) ' ' else 'x');
+                try w.flush();
+            }
+            if (body.len > 0) {
+                try w.writeAll(body);
                 try w.flush();
             }
             // Until the client lets go, which is `EndOfStream` here.
@@ -2491,6 +2519,240 @@ test "a source smaller than one part is a plain PUT, one round trip" {
             try testing.expectEqualStrings("/files/small.bin", canned.played[0].targetText());
             try testing.expect(canned.played[0].verified);
             try testing.expectEqualStrings("three dozen bytes, give or take", canned.played[0].bodyPrefix());
+        }
+    }.run);
+}
+
+// ---- copy and compose: inside the store, and a 200 that is not one --------
+
+const copied_answer_body =
+    "<CopyObjectResult><LastModified>2026-10-05T00:00:00.000Z</LastModified>" ++
+    "<ETag>&quot;copied&quot;</ETag></CopyObjectResult>";
+
+fn partCopied(comptime etag: []const u8) []const u8 {
+    return "<CopyPartResult><LastModified>2026-10-05T00:00:00.000Z</LastModified>" ++
+        "<ETag>&quot;" ++ etag ++ "&quot;</ETag></CopyPartResult>";
+}
+
+test "a copy names its source in a signed header, and reads the body for its result" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = copied_answer_body, .content_type = "application/xml" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try files.copy(&scope, "staged/a b.bin", "items/whole.bin");
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 1), canned.played_count);
+            try testing.expect(canned.played[0].verified);
+            try testing.expectEqualStrings("PUT", canned.played[0].methodText());
+            try testing.expectEqualStrings("/files/items/whole.bin", canned.played[0].targetText());
+            try testing.expectEqualStrings("/files/staged/a%20b.bin", canned.played[0].copySource());
+        }
+    }.run);
+}
+
+test "a copy that outlasts the Store's call timeout but never goes quiet completes" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            // The store copies for 1.44 s, sending a space every 60 ms, against
+            // a call timeout of 150 ms: only the stall bound may cut a copy,
+            // or a large one fails while the store finishes it anyway.
+            canned.answer = .{
+                .body = copied_answer_body,
+                .content_type = "application/xml",
+                .slow = .{ .pieces = 24, .gap_ms = 60 },
+            };
+
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try startedWith(io, &canned, &buf, .{ .timeout_ms = 150, .stall_ms = 1000 });
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try files.copy(&scope, "staged/big.bin", "items/big.bin");
+        }
+    }.run);
+}
+
+test "a copy answered 200 with an error in the body is a failure" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{
+                &canned,
+                &[_]Answer{
+                    // The trap ADR 058 pinned to COPY: a 200 whose body says no.
+                    .{ .body = error_answer_body, .content_type = "application/xml" },
+                },
+            });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.Failed, files.copy(&scope, "a.bin", "b.bin"));
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 1), canned.played_count);
+        }
+    }.run);
+}
+
+test "a compose joins its parts by copy, says what the joined object is, and lists every part" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                .{ .body = partCopied("p1"), .content_type = "application/xml" },
+                .{ .body = partCopied("p2"), .content_type = "application/xml" },
+                .{ .body = completed_answer_body, .content_type = "application/xml" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try files.compose(&scope, "big.bin", &.{ "pieces/1", "pieces/2" }, .{ .content_type = "video/mp4" });
+
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 4), canned.played_count);
+            for (canned.played[0..4]) |step| try testing.expect(step.verified);
+            try testing.expectEqualStrings("/files/big.bin?uploads=", canned.played[0].targetText());
+            try testing.expectEqualStrings("video/mp4", canned.played[0].contentType());
+            try testing.expectEqualStrings("/files/big.bin?partNumber=1&uploadId=canned-upload", canned.played[1].targetText());
+            try testing.expectEqualStrings("/files/pieces/1", canned.played[1].copySource());
+            try testing.expectEqualStrings("/files/big.bin?partNumber=2&uploadId=canned-upload", canned.played[2].targetText());
+            try testing.expectEqualStrings("/files/pieces/2", canned.played[2].copySource());
+            try testing.expectEqualStrings(
+                "<CompleteMultipartUpload>" ++
+                    "<Part><PartNumber>1</PartNumber><ETag>\"p1\"</ETag></Part>" ++
+                    "<Part><PartNumber>2</PartNumber><ETag>\"p2\"</ETag></Part>" ++
+                    "</CompleteMultipartUpload>",
+                canned.played[3].bodyPrefix(),
+            );
+        }
+    }.run);
+}
+
+test "a part copy answered without an ETag fails there, and aborts" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                .{ .body = "<CopyPartResult><ETag></ETag></CopyPartResult>", .content_type = "application/xml" },
+                .{ .status = "204 No Content" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.Failed, files.compose(&scope, "big.bin", &.{ "pieces/1", "pieces/2" }, .{ .content_type = "video/mp4" }));
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 3), canned.played_count);
+            try testing.expectEqualStrings("DELETE", canned.played[2].methodText());
+            try testing.expectEqualStrings("/files/big.bin?uploadId=canned-upload", canned.played[2].targetText());
+        }
+    }.run);
+}
+
+test "a failed part copy aborts the join and never completes it, so the target is left as it was" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                .{ .body = initiate_answer_body, .content_type = "application/xml" },
+                .{ .body = partCopied("p1"), .content_type = "application/xml" },
+                .{ .status = "500 Internal Server Error", .error_body = error_answer_body },
+                .{ .status = "204 No Content" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.Unavailable, files.compose(&scope, "big.bin", &.{ "pieces/1", "pieces/2" }, .{ .content_type = "video/mp4" }));
+            served.await(io) catch {};
+            // Initiate, two part copies, the abort: no completion was ever
+            // sent, so no object at `big.bin` was made or replaced.
+            try testing.expectEqual(@as(usize, 4), canned.played_count);
+            try testing.expectEqualStrings("DELETE", canned.played[3].methodText());
+            for (canned.played[0..4]) |step| try testing.expect(!std.mem.eql(u8, step.targetText(), "/files/big.bin?uploadId=canned-upload") or
+                std.mem.eql(u8, step.methodText(), "DELETE"));
+        }
+    }.run);
+}
+
+test "a compose of no parts, or more than S3 joins, is refused before a socket" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.Rejected, files.compose(&scope, "big.bin", &.{}, .{ .content_type = "video/mp4" }));
+            const many = try testing.allocator.alloc([]const u8, multipart_mod.parts_max + 1);
+            defer testing.allocator.free(many);
+            @memset(many, "pieces/x");
+            try testing.expectError(error.Rejected, files.compose(&scope, "big.bin", many, .{ .content_type = "video/mp4" }));
+            try testing.expectEqual(@as(usize, 0), canned.played_count);
         }
     }.run);
 }

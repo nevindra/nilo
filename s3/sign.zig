@@ -94,6 +94,8 @@ pub const Signed = struct {
     host: []const u8,
     range: ?[]const u8 = null,
     x_amz_content_sha256: ?[]const u8 = null,
+    /// The object a CopyObject or UploadPartCopy reads: `/bucket/key`.
+    x_amz_copy_source: ?[]const u8 = null,
     x_amz_date: ?[]const u8 = null,
     x_amz_security_token: ?[]const u8 = null,
     x_amz_server_side_encryption: ?[]const u8 = null,

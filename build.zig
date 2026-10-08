@@ -1458,6 +1458,10 @@ const s3_refusals = [_]Refusal{
         .says = "bucket.putMultipart needs `.content_type` on what it reads from.",
     },
     .{
+        .name = "a_compose_without_a_content_type",
+        .says = "bucket.compose needs `.content_type` for the joined object.",
+    },
+    .{
         .name = "a_session_token_larger_than_sign_can_carry",
         .says = "s3.Bucket(\"sts\") has a `session_token_max` of 4096 bytes, and a presigned URL has room for a token of 2048 (`sign.token_max`).",
     },

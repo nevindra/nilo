@@ -584,10 +584,6 @@ Nothing is open at this tier.
 
 ### `nilo_s3`
 
-**`COPY`.** Where S3 stops being bytes at a key and starts being a document format, and it carries its own trap for whoever adds it: S3 can answer a copy with **200 and an error in the body**, so a client that checks the status is wrong.
-
-**Needs:** a caller who wants it enough to hold the XML.
-
 **Whether payloads are hashed waits on what a request costs through TLS, which is not measured.** The plaintext numbers carry a SHA-256 over every body that the HTTPS ones would not, and neither corrects the other on paper.
 
 **What would settle it:** the same runs against a MinIO with a certificate. An afternoon.

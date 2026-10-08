@@ -972,6 +972,135 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             if (!got.ok()) return self.failure(c, &ex, got);
         }
 
+        /// Copies an object to another key of this bucket inside the store:
+        /// no byte passes through here, and the copy keeps the source's
+        /// content type and headers (S3's `COPY` directive). Up to S3's
+        /// 5 GiB for one copy; larger objects are joined from parts with
+        /// `compose`. S3 can answer a copy 200 with an error in the body, so
+        /// the body is read and must say `CopyObjectResult`
+        /// ([ADR 058](../docs/adr/058-most-of-an-s3-client-is-not-s3.md)).
+        ///
+        /// The store copies while this waits, with only the Store's
+        /// `stall_ms` as a bound: S3 can keep a large copy's connection
+        /// quiet until it is done, so a store that does should be given a
+        /// `stall_ms` that long.
+        pub fn copy(self: *Self, c: anytype, from: []const u8, to: []const u8) Error!void {
+            comptime core.checkScope(@TypeOf(c), "bucket.copy");
+            var url_buf: [url_max]u8 = undefined;
+            const target = try self.urlFor(&url_buf, to);
+            const answer = try self.copyRequest(c, to, target, "", from);
+            if (std.mem.indexOf(u8, answer, "<CopyObjectResult") == null) {
+                std.log.warn("nilo_s3: `{s}` answered a copy 200 without a CopyObjectResult", .{self.name});
+                return error.Failed;
+            }
+        }
+
+        /// Joins objects of this bucket, in order, into one object at `to`,
+        /// inside the store: a multipart upload whose parts are copies
+        /// (`UploadPartCopy`), so no byte passes through here. `object`
+        /// carries what the new object is, as `putMultipart`'s source does:
+        /// `.content_type`, and optionally `.cache_control` and
+        /// `.content_disposition`; a join has no source of its own to keep
+        /// them from. S3's part rules hold: every source but the last at
+        /// least 5 MiB, each at most 5 GiB, 1 to 10,000 of them. On a
+        /// failure the upload is aborted and `to` is left as it was; the
+        /// same `stall_ms` bound as `copy` applies to every part
+        /// ([ADR 058](../docs/adr/058-most-of-an-s3-client-is-not-s3.md)).
+        pub fn compose(self: *Self, c: anytype, to: []const u8, parts: []const []const u8, object: anytype) Error!void {
+            comptime core.checkScope(@TypeOf(c), "bucket.compose");
+            comptime checkComposedObject(@TypeOf(object));
+            if (parts.len == 0 or parts.len > multipart_mod.parts_max) {
+                std.log.warn(
+                    "nilo_s3: `{s}`.compose was given {d} parts; S3 joins 1 to {d}",
+                    .{ self.name, parts.len, multipart_mod.parts_max },
+                );
+                return error.Rejected;
+            }
+            const upload_id = try self.initiateMultipart(
+                c,
+                to,
+                contentTypeOf(object.content_type),
+                optional(object, "cache_control"),
+                optional(object, "content_disposition"),
+            );
+            errdefer self.abortMultipart(c, to, upload_id);
+            const etags = c.arena().alloc([]const u8, parts.len) catch return error.OutOfMemory;
+            for (parts, etags, 1..) |from, *etag, n| etag.* = try self.copyPart(c, to, upload_id, n, from);
+            try self.completeMultipart(c, to, upload_id, etags, 0);
+        }
+
+        /// One `UploadPartCopy`: the part's ETag comes in the body.
+        fn copyPart(self: *Self, c: anytype, key: []const u8, upload_id: []const u8, part_number: usize, from: []const u8) Error![]const u8 {
+            var url_buf: [part_url_max]u8 = undefined;
+            const at = try self.urlToQuery(&url_buf, key);
+            const query = multipart_mod.partQuery(url_buf[at..], part_number, upload_id);
+            const body = try self.copyRequest(c, key, url_buf[0 .. at + query.len], query, from);
+            const open_tag = "<ETag>";
+            const start = (std.mem.indexOf(u8, body, open_tag) orelse return self.noPartEtag(part_number)) + open_tag.len;
+            const end = std.mem.indexOfPos(u8, body, start, "</ETag>") orelse return self.noPartEtag(part_number);
+            const raw = body[start..end];
+            if (raw.len == 0) return self.noPartEtag(part_number);
+            const room = c.arena().alloc(u8, listing_mod.unescapedLen(raw)) catch return error.OutOfMemory;
+            return listing_mod.unescapeInto(room, raw);
+        }
+
+        /// What `copy` and `copyPart` share: a PUT to `target` (whose
+        /// `query`, if any, is signed with it) naming `from` in
+        /// `x-amz-copy-source`. A copy's success is a document, so the body
+        /// comes back, bounded and in the Scope, for the caller to read.
+        fn copyRequest(self: *Self, c: anytype, key: []const u8, target: []const u8, query: []const u8, from: []const u8) Error![]const u8 {
+            var token_buf: [settings.session_token_max]u8 = undefined;
+            var sig: sign.Signature = .none;
+            var headers: Headers = .{};
+
+            const source = try self.copySource(c, from);
+            try self.prepare(&sig, &headers, .{
+                .method = "PUT",
+                .key = key,
+                .query = query,
+                .payload = self.store.payloadNoBody(),
+                .copy_source = source,
+                .token_buf = &token_buf,
+            });
+
+            var ex: fetch.Exchange = .idle;
+            defer ex.end();
+
+            const got = ex.begin(&self.store.client, .{
+                .method = .PUT,
+                .url = target,
+                .host = self.host,
+                .authorization = sig.value(),
+                .headers = headers.slice(),
+                .redirects = .expose,
+                // The store copies while this waits: seconds for a large
+                // object, so the stall bound and no whole-call limit. Without
+                // the explicit 0 the Store's `timeout_ms` (30 s) would apply,
+                // and a copy the store went on to finish would fail here.
+                .timeout_ms = 0,
+                .stall_ms = self.store.options.stall_ms,
+            }) catch |err| return self.blame(err);
+
+            if (!got.ok()) return self.failure(c, &ex, got);
+            const answer = ex.take(c, copy_answer_max) catch |err| return self.blame(err);
+            return answer.view();
+        }
+
+        fn noPartEtag(self: *const Self, part_number: usize) Error {
+            std.log.warn("nilo_s3: `{s}` answered part copy {d} without an ETag", .{ self.name, part_number });
+            return error.Failed;
+        }
+
+        /// `/bucket/key`, the key percent-encoded as in a path, in the Scope.
+        fn copySource(self: *Self, c: anytype, key: []const u8) Error![]const u8 {
+            if (key.len == 0) return self.refuseEmptyKey("copy");
+            const room = c.arena().alloc(u8, 2 + self.name.len + key.len * 3) catch return error.OutOfMemory;
+            var w = std.Io.Writer.fixed(room);
+            w.print("/{s}/", .{self.name}) catch return error.Failed;
+            core.percent.encodeWrite(&w, key, .path) catch return error.Failed;
+            return w.buffered();
+        }
+
         /// What is known about an object without reading it: how long it is,
         /// what it claims to be, and its ETag.
         pub fn head(self: *Self, c: anytype, key: []const u8) Error!Meta {
@@ -1436,6 +1565,8 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             content_disposition: ?[]const u8 = null,
             range: ?[]const u8 = null,
             if_none_match: ?[]const u8 = null,
+            /// `/bucket/key`, percent-encoded: the object a copy reads.
+            copy_source: ?[]const u8 = null,
             /// Canonical already — `listing.query` writes it so. Empty for
             /// every call but `list`, which is the one call here whose
             /// request is a question rather than a key.
@@ -1507,6 +1638,7 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 .content_type = req.content_type,
                 .range = req.range,
                 .x_amz_content_sha256 = req.payload,
+                .x_amz_copy_source = req.copy_source,
                 .x_amz_date = sig.date(),
                 .x_amz_security_token = signing.token,
                 .x_amz_server_side_encryption = if (settings.sse) |s| s.header() else null,
@@ -1529,6 +1661,7 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             if (req.cache_control) |v| headers.add("cache-control", v);
             if (req.content_disposition) |v| headers.add("content-disposition", v);
             if (req.range) |v| headers.add("range", v);
+            if (req.copy_source) |v| headers.add("x-amz-copy-source", v);
             if (signing.token) |v| headers.add("x-amz-security-token", v);
             if (settings.sse) |s| headers.add("x-amz-server-side-encryption", s.header());
             // Not signed, because it is a condition rather than content, and
@@ -2088,6 +2221,26 @@ fn checkSource(comptime T: type, comptime called: []const u8) void {
                     @typeName(T) ++ " has none." ++ advice,
             );
         }
+    }
+}
+
+/// The largest answer to a copy that is read: a `CopyObjectResult` or a
+/// `CopyPartResult` is an ETag and a date, well under a kilobyte.
+const copy_answer_max = 8 << 10;
+
+fn checkComposedObject(comptime T: type) void {
+    comptime {
+        const advice = "\n  compose takes what the joined object is: `.content_type`, and optionally" ++
+            " `.cache_control` and `.content_disposition`. A join has no source of its own to" ++
+            " keep them from, so S3 would otherwise give it its default type.";
+        if (@typeInfo(T) != .@"struct") @compileError(
+            "nilo: bucket.compose takes what the joined object is, and " ++ @typeName(T) ++
+                " is not one." ++ advice,
+        );
+        if (!@hasField(T, "content_type")) @compileError(
+            "nilo: bucket.compose needs `.content_type` for the joined object.\n  " ++
+                @typeName(T) ++ " has none." ++ advice,
+        );
     }
 }
 

@@ -202,6 +202,8 @@ Through v1 the model was **GoFiber**: the feel of Express on a fast engine, for 
 
 **A loop that is never idle never reaches a cancellation point** (`io.checkCancel` at the top of a worker loop), and **a read that issues another statement issues it after the first has let go**, or one request holds two pool connections.
 
+**A cancel is one signal, and a catch that turns it into its own error spends it.** cid's server stayed up after SIGTERM with every thread idle, now and then: its background worker was mid-job when the stop came, the cancel landed in an S3 call that cid reported as a storage error, the job carried on, and the worker's next `nilo.sleep`, the wait that was meant to end it, slept as if nothing had happened while `listen()` waited for it. Fifteen seconds and `/proc/*/task/*/wchan` showed sixteen idle executors and no log line from the worker's exit, which is what pointed at it. A spawned fiber's `sleep` now refuses while the server is going ([ADR 028](./adr/028-a-spawned-fiber-belongs-to-the-server.md#a-swallowed-cancel-does-not-keep-the-server)); any other wait after a swallowed cancel still needs `recancel`.
+
 **A benchmark is a machine state.** Ten thousand keep-alive connections left the ephemeral range in TIME_WAIT, which is what finally made a rare failure path in a test ordinary. Fixed port windows in two files overlapped and ran out from the sixth run; binding port 0 and reading the address back, which std had done all along, ended the port walks. `reuse_address` is refused because it sets `SO_REUSEPORT`, and two test binaries silently sharing a port is worse than one failing to bind.
 
 ## Claims that decay

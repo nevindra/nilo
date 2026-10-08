@@ -147,5 +147,7 @@ now carries `@tagName(builtin.mode)`.
   does not already name: `Post` is a concrete struct, so a mistyped field is a
   plain "no field named", and the two comptime options it leans on are already
   refused by `presign_over_seven_days` and `max_bytes_of_zero`.
-- `LIST`, `COPY` and multipart upload are still not here. This closes the one
-  gap in the module that was a hole rather than a line drawn on purpose.
+- `LIST`, `COPY` and multipart upload were not here when this was decided;
+  each shipped later with its caller ([ADR 058](./058-most-of-an-s3-client-is-not-s3.md)).
+  This closed the one gap in the module that was a hole rather than a line
+  drawn on purpose.
