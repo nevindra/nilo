@@ -434,6 +434,118 @@ Nothing is open at this tier.
 
 ---
 
+**Should a 500 from a fail function carry its message to the client?** `fail.internal("…")` sends what it is given (`http/fail.zig:186`, `http/serve.zig:1350`), as Go's `http.Error` does, while an unnamed error that reaches the mapping table becomes `internal server error`. A message written for the operator, `fail.internal("db: {s}", .{@errorName(e)})`, then reaches whoever asked. The guide now says so; what is open is whether the safer default is a 500 that never says what broke, with the message logged instead.
+
+**What would settle it:** a decision, in ADR 004, between sending the message and logging it for a 500.
+
+**`Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.** The store a route is given is a `cache.Space` in memory ([ADR 155](./adr/155-a-request-answered-once-is-answered-the-same-way-again.md)), and a payment retried during a rolling deploy is charged twice with nothing logged, which is the one thing the header exists to prevent. `Idempotent` asks its store for `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held` and nothing else (`http/idempotent.zig:268`), so a second store needs no change to it. A table in the database the program already has is the shape [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) chose for jobs, for the same reason.
+
+**Needs:** a store over a `Db` type the caller hands in, the way `job.Table(Db)` is, costing its round trip on `Idempotent` routes only, and [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)'s answer to which module it lives in.
+
+**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
+
+**`allowance` keeps its table in the process and has no seam for a shared one**, so N instances admit N times the limit ([ADR 092](./adr/092-an-allowance-is-a-table-sized-while-compiling.md), [ADR 110](./adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). express-rate-limit and the Go limiters take a Redis store. A table sized while compiling is right for one process; what is missing is where a second store would plug in.
+
+**Needs:** a store the table can be swapped for, designed against `nilo_redis` once it exists and a Postgres counter before then, with its cost per request on the routes that ask.
+
+**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
+
+**A Room belongs to one process and has no hook a bridge could use, so a chat served from two instances is two chats.** The toolkit direction in the roadmap names this case as what would show `nilo_redis`. What `http/` owes it is the hook: a `say` that a bridge also sees, and a `deliver` it can call with a message that arrived from elsewhere, at one null check per `say` when nothing is bridged. socket.io's Redis adapter and a gorilla hub over pub/sub are what a migrant has used.
+
+**Needs:** the hook, designed together with the first bridge (Postgres `LISTEN/NOTIFY` or `nilo_redis`, whichever the roadmap's measurement picks).
+
+**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
+
+**A failure is one sentence, so a client cannot mark the field that failed.** `nilo_failure(status, message)` is the only hook a failure shape has (`http/failurebody.zig`), and `Bound.fail()` joins every field that failed into one sentence in the 240-byte slot, ending in "and N more" (`http/bound.zig`). A form that wants to outline `email` parses English. [ADR 024](./adr/024-every-failure-answers-as-json.md) refused RFC 7807 (now 9457) `application/problem+json` partly because there was "nothing to put in the fields nilo actually knows"; since [ADR 034](./adr/034-a-binding-hands-its-failures-to-the-handler.md) nilo knows, for every field, its name, what was wrong and what would have worked. A plain `Form(T)` or JSON argument still reports the first field only.
+
+**Needs:** ADR 024 edited: a failure shape that can take the list of fields, copied into the arena on the failure path only, a content type of its own, and every field reported from a plain argument as well as from `Bound`, with the bytes it adds to the failure slot stated.
+
+**Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
+
+**An error from code that does not know about HTTP cannot be given a status once, for the whole App.** `fail.statusFor` is a closed `switch` (`http/fail.zig:213`): `NotFound` is a 404, a dozen parse errors are 400s, and any other error is a 500. A service layer returning `error.EmailTaken` either imports `nilo_http` to call `fail.conflict`, or every handler that calls it repeats the same `catch`. echo's `HTTPErrorHandler`, Fastify's `setErrorHandler` and Nest's exception filters are where Go and Node put that mapping, once. A middleware that catches what `next.run(c)` returns can do it today, and no page says so.
+
+**Needs:** a table the App is given (`app.errors(.{ .{ error.EmailTaken, 409, "that email is taken" } })`, or the shape a design finds better), read before the built-in one, the document naming the statuses a handler's error set shares with it; and a probe of whether an inferred error set can be read at registration on Zig 0.17, which decides whether the document can name them.
+
+**Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
+
+**A handler answers one body type, so a second status with a different shape is a sentence the document never sees.** `Status(code, T)` and `Response(T)` carry one `T`; a 409 with `{"current_version": 7}`, or a 201 beside a 200, is a `fail.*` string or a `*Ctx` route. `decided.md` accepts that "the API description names one failure" and names what reopens it: a shape that states a failure in the type. A `union(enum)` return whose arms are each a `Status(code, T)` is that shape, and Fastify's `response: { 200: A, 409: B }` is what a migrant expects of it.
+
+**Needs:** the union return designed, the document writing one response per arm, and the decided entry taken out when it lands.
+
+**Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
+
+**Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.** `fn member(id: u32, org: u32)` on `/orgs/:org/members/:id` compiles (`http/typed.zig:33`): the check counts params and types each one, and Zig keeps no argument names to compare. A tenant-scoped query then runs with the two ids swapped. chi's `URLParam(r, "id")` and Express's `req.params.id` are by name, so this is the first habit a migrant brings. A resolver cannot see path params at all ([ADR 015](./adr/015-resolved-values-are-declared-by-their-type.md)), so a middleware that loads the row for `:id` falls back to `c.param("id")`, with nothing checking that the route has one.
+
+**Needs:** `Path(struct { org: u32, id: u32 })`, read the way `Query(T)` is, its field names held against the pattern while compiling and allowed as a resolver's argument; the positional form kept, at no cost at run time.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.** `Middleware = *const fn (*Ctx, Next)` (`http/middleware.zig:59`, [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md)). nilo's own middleware works round it three ways, `cors.reading(&origins)`, `csrf.reading` and `maxBody(&limit)`, each pointing at a container-level `var`. A user's auth middleware gets its key store from `c.service(T)`, which is `?T` (`http/ctx.zig:376`), so `orelse return next.run(c)` lets every request through, and the startup check that names a missing service reads handlers and resolvers, not middleware. Go's `func Auth(db *DB) func(http.Handler) http.Handler` and a Fastify plugin's options are the habit.
+
+**Needs:** a middleware with typed arguments after `Next`, wrapped by `app.use` the way the typed layer wraps a handler, its services checked at `listen()`; after that the three `reading` forms can be services.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A renamed struct cannot be a request body, and the reason the guide gives no longer holds.** `docs/guide/responses.md:305` and [ADR 148](./adr/148-a-field-name-is-a-spelling-too.md) refuse `rename_all` or `.rename` on an input because "`std.json` picks the parser for a body". A body struct is read by nilo's own `readFields` now (`http/json.zig:443`), which compares each key with the field's name. So a camelCase front end means a second struct for every Row it posts, which is the drift ADR 148 was written against. The marker also has no way to leave a field out, so a `password_hash` on a Row is written wherever the Row is.
+
+**Needs:** `readFields` comparing against the wire name, the unknown-key and missing-key messages quoting it, ADR 148's read side edited, and a `.skip` on the marker.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.** `logger` builds a line and hands it to `std.log` (`http/logger.zig:116`), and Zig 0.17's default `logFn` writes the level and `: ` first, so `.format = .json` reaches stderr as `info: {"method":…}`; nothing in the repository sets a `logFn`. A handler's `std.log.warn` carries no request id unless it writes `c.requestId()` itself, and there is no way to leave `/healthz` out of the access log (asked for in `docs/input_from_actix.md`). slog's `With` and pino's child logger are the habit, and a log shipper that parses JSON drops every line.
+
+**Needs:** a `nilo.logFn` for `std_options` that writes the time and level in the chosen format and the request id from the fiber slot `fail` already uses, and a list of paths the logger skips.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**`Timestamp` and `Date` are in `nilo_sql`, so an HTTP-only service with a date in its body turns on `-Dsql` or carries text.** They are in `sql/types.zig` (lines 63 and 459), and `nilo_sql` exists only in a build with `.sql = true`, which fetches both database drivers. A `time.Time` or a `Date` in a request is the habit. Two layers need them, which is how a file gets into `nilo_core` ([ADR 057](./adr/057-percent-is-needed-by-two-layers.md)).
+
+**Needs:** the two value types (RFC 3339 text in and out, no calendar arithmetic) moved to `nilo_core` and re-exported where they are now.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A route's deadline stops at the route: the calls it makes keep their own.** `nilo.deadline(ms)` bounds the request's own waits ([ADR 105](./adr/105-a-route-can-say-how-long-it-has.md)), and the time left reaches a `nilo_fetch`, `nilo_sql` or `nilo_s3` call only if the handler passes `c.timeLeftMs()` by hand; none of the three reads it. Go's `context.WithTimeout` carries into `QueryContext` and `NewRequestWithContext` for nothing, so a migrant sets `deadline(2000)` and an upstream holds the request for its own default.
+
+**Needs:** the time left on the Scope the three already take ([ADR 144](./adr/144-a-scope-that-crosses-a-function-pointer.md)), each call taking the shorter of its own bound and that.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A rate limit, the access log's level and the CSP are fixed while compiling, so a deployment cannot set them from its environment.** `allowance.with(.{ .per_window, .window_s })` takes both as a comptime `u16` (`http/allowance.zig:56`), which also leaves "a million an hour" unwritable; `logger`'s level and format and `secure`'s CSP are the same. [ADR 088](./adr/088-an-origin-is-a-fact-about-the-deployment.md) moved CORS origins to run time because a deployment fact arrives through `nilo_config`, and `Limited.Limit` (`http/middleware.zig`) already holds a size as either a constant or a pointer. `allowance` also sends no `RateLimit` headers on an allowed answer, only `Retry-After` on a 429.
+
+**Needs:** the same constant-or-pointer choice for each number a deployment sets, the table's size staying comptime, and the counts widened.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**The validation types are taught under forms only, and the two largest examples check by hand.** `Text`, `Email`, `Within`, `nilo_check` and `Bound` work on a JSON body, and `docs/guide/forms.md` is the page that teaches them; `docs/guide/requests.md` shows `Bound` and none of the others. `examples/rest/main.zig` checks an email with `indexOfScalar('@')`, and `examples/orders/main.zig` has seven hand-written `fail.unprocessable` or `fail.badRequest` checks. go-playground's `validate:"min=1,email"` and zod are what a migrant looks for, and finding nothing under JSON, writes their own. `Within` takes whole numbers only, and nothing bounds a list's length.
+
+**Needs:** a section in the requests guide, the two examples using the types, and a range over a real number and a bound on a list's length if a design fits them.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A second service of the same type is refused with a bare error, and the way round it is written only in an ADR.** `error.ServiceAlreadyRegistered` (`http/service.zig:305`) names neither the type nor the remedy, where nilo's other startup refusals are sentences. The remedy, a wrapper struct per instance ([ADR 002](./adr/002-typed-handlers-are-a-thin-layer-over-ctx.md)), is not in `docs/guide/services.md`, and a primary and a replica, or two upstream clients, are a first-week need. A group's `provide` is App-wide too, which the plugin section of the routing guide does not say.
+
+**Needs:** the refusal as a sentence naming the type and the wrapper, and the recipe and the App-wide rule in the guide.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A first project is six steps before its first route, and nothing writes them.** `docs/guide/getting-started.md` has a reader run `zig init` and `zig fetch --save` with a pinned commit, replace the generated `build.zig`, delete `src/root.zig`, add two root declarations, and write fourteen lines for a `dev` step. `go mod init` and `npm create hono` are one line each.
+
+**Needs:** a build helper a dependent calls (an executable with its `run`, `dev` and `test` steps, the optimize mode passed through) and a template repository shaped like `examples/rest`; the helper is public build API that 1.0 freezes, so it is designed rather than grown.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A server in a container listens where nothing can reach it, and no page shows a container build.** `Options.address` defaults to `127.0.0.1` (`http/bulkhead.zig:266`), which is the safe default and, inside a container, a server that is up and unreachable; Go's `":8080"` binds every interface. `docs/guide/deploying.md` has no Dockerfile, no static musl build and no `FROM scratch`, and no page says which platforms are supported: CI runs `zig build test` on macOS and nothing on Windows.
+
+**Needs:** a deploying section built and run once (a static musl binary in a scratch image), a platforms table, and a line at startup when the address is loopback inside a container.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A panic ends the process, and `listen()` does not say so when the root file has no `nilo.panic` to name the request that did it.** Go's `net/http` loses one request to a panic; nilo loses every connection the process holds ([ADR 007](./adr/007-no-recover-middleware.md)), and a request that panics on every replica it is retried on takes the service down one replica at a time. `nilo.panic` names the request, and `checkRootWiring` (`http/wiring.zig`) warns about the two `std_options` lines and not about it. In ReleaseFast the same mistake is undefined behaviour, which only `docs/guide/deploying.md` says.
+
+**Needs:** the warning, with the ReleaseFast sentence beside it.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
 ## P3: no evidence yet
 
 ### `nilo_core`
@@ -523,6 +635,10 @@ Nothing is open at this tier.
 **The second arena allocation a whole-body call makes may not show up for anybody.** It is the header block kept before the body reads over it ([ADR 187](./adr/187-a-head-that-outlives-its-body.md)), a bump and a `memcpy` inside the noise of a round trip; head and body in one buffer is the shape if it does show.
 
 **What would settle it:** a caller for whom it shows.
+
+**`nilo_fetch` speaks HTTP/1.1 only, so a service that answers gRPC cannot call one.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)); a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both halves.
+
+**What would settle it:** a caller of a gRPC service, and the idle bytes of an outbound HTTP/2 connection measured before it ships.
 
 ### `nilo_job`
 
@@ -719,6 +835,48 @@ Nothing is open at this tier.
 **What would settle it:** the arena given back once `Stream` has stopped changing under the HTTP/2 request path, and a burst of handlers that wait on a service, counted against the pool at a `stack_pool.shrink_interval` of 5 s, which is zio's option and the Engine's to set.
 
 ---
+
+**Whether a pre-fork worker mode is worth what it costs is not known.** A parent that forks N workers sharing one listening socket, and starts again one that dies, would shrink a panic to a share of the connections and give the listener takeover `decided.md` asks for. It also makes every Room, cache, allowance and idempotency table one worker's, which is the multi-instance problem inside one host, and multiplies every pool.
+
+**What would settle it:** a prototype, its memory per worker and its restart time measured, set against what the multi-instance direction does to the same tables.
+
+**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
+
+**A handler that holds its thread for less than the watchdog's 250 ms is never reported, though every connection dealt to that thread waits behind it** ([ADR 013](./adr/013-handlers-must-not-block-the-thread.md), [ADR 199](./adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md)). Go preempts a goroutine and steals work across threads; a fiber here does neither, which is the design, so the gap is that nothing shows it. The watchdog already measures each stretch.
+
+**What would settle it:** the longest stretch per request kept as a histogram on the metrics page, run against [ADR 017](./adr/017-the-trade-budget-has-four-axes.md)'s 10% line.
+
+**The metrics page takes one number a name: no labels, no histogram of the application's own, no process series, and counters nilo keeps already go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig:1255`). "Orders by status" is three names, a business latency cannot be written at all, resident memory and open descriptors are missing, and the cache's hit counts, the watchdog's catches and the tracer's drops are numbers nobody scrapes. prom-client and the Go client give all of it.
+
+**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
+
+**Signing in with an identity provider is put together by hand, and the steps it needs are the ones that fail silently.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) stops at verifying the ID token. Discovery, `state`, PKCE, the code exchange and the `nonce` are the caller's, and leaving any one out still signs the user in. Every part is here (`nilo_fetch`, `jwt.Verifier`, `Session(T)`, `c.entropy`), so what is missing is the order, and ADR 111's own reason for owning verification, that being wrong is silent, holds for the order too. `golang.org/x/oauth2` with go-oidc and passport are the habit.
+
+**What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
+
+**Several files under one form field are refused.** `[]const Upload` is a compile error because "a field takes one" (`http/form.zig:532`), a reason from before a field could be a list ([ADR 132](./adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)); `<input type="file" multiple>` and multer's `upload.array` send several under one name.
+
+**What would settle it:** a caller with that form; the bound is already there in the part limit and `max_body`.
+
+**A download's `Content-Disposition` is written by hand.** RFC 6266's quoting and `filename*=` are why `FileBody` refused a `download_as` field (`http/filebody.zig`), and that difficulty argues for one correct function rather than one in every program. gin's `FileAttachment` and Express's `res.download` are the habit.
+
+**What would settle it:** the function, `nilo.contentDisposition(arena, .attachment, name)` or the shape a design prefers, tested against names that are not ASCII.
+
+**The test client has no JSON helper, and a Room's conversation between two sockets cannot be driven from a test.** `Client.post` takes the body as text (`http/testing.zig:506`) where `nilo_fetch` has `postJson`; `docs/guide/websocket.md` says frames are queued before the server runs, so a conversation between two sockets cannot be driven, and `Live` gives a port and no WebSocket client. supertest and `httptest` are the habit.
+
+**What would settle it:** `postJson`, and a WebSocket client over `Live` that reuses `Conversation`'s calls.
+
+**A base path cannot be set at run time.** Patterns and `group` prefixes are comptime, so a service behind an ingress that routes `/myapp/` differently per environment is rebuilt, or the proxy strips the prefix. `http.StripPrefix` and Express's `app.use(base, router)` take it at run time.
+
+**What would settle it:** a deployment that cannot strip the prefix in front; the shape is one comparison before matching, `c.url` adding it back, and a `servers` entry in the document.
+
+**A CORS origin is matched exactly, so `https://*.tenant.example.com` is a list nobody can write** (`http/cors.zig`, [ADR 078](./adr/078-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)). rs/cors and the `cors` package take a pattern.
+
+**What would settle it:** a multi-tenant caller, and a suffix rule that cannot be made to match a host the deployment does not own.
+
+**A write cannot be made conditional: `If-Match` and 412 are not answered.** `Versioned(T)` already names a version for `If-None-Match` ([ADR 189](./adr/189-a-version-a-handler-names-is-an-etag.md)), and the same version is what an optimistic update checks.
+
+**What would settle it:** a caller with concurrent edits to one resource.
 
 ## How this file is written
 

@@ -87,6 +87,58 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 **What would settle it:** a history replayed from its first version and from a squash to the same schema, a `CONCURRENTLY` index built on a table large enough to take seconds while writes go on, and every step's `why` matching what it locks, each held by a live test.
 
+### A failure is a type
+
+**A failure becomes something a handler states in its signature and a client can read field by field, the way a success already is.** Three decisions hold the failure side to one sentence today: a failure body is a status and a message ([ADR 024](./adr/024-every-failure-answers-as-json.md)), an error the mapping table does not name is a 500 (`fail.statusFor`), and the document names one failure an endpoint ([decided](./decided.md)). Each was right when it was made, and what has been built since has moved them: `Bound` knows every field that failed and why ([ADR 034](./adr/034-a-binding-hands-its-failures-to-the-handler.md)), and a `union(enum)` of `Status(code, T)` is the "shape that states a failure in the type" the decided entry waits for. Echo, Fastify, Nest and Hono all give an application one place to map a domain error to a status and a per-field body a form can read, so this is the gap a migrant from either side meets first after the happy path works. It costs the failure path only, and its one number to state is the bytes it adds to the failure slot.
+
+<!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
+
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A failure is one sentence, so a client cannot mark the field that failed.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · An error from code that does not know about HTTP cannot be given a status once, for the whole App.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A handler answers one body type, so a second status with a different shape is a sentence the document never sees.
+
+<!-- /gathered -->
+
+**What would settle it:** a form that marks the field that failed from the body alone, a service-layer `error.EmailTaken` answered as a 409 with no `fail` call and no `catch`, and a handler with two typed answers whose document lists both, with the success path's allocations and instructions unchanged in `bench/release.py`.
+
+### A developer from Go or Node meets no silent trap in the first week
+
+**The habits a Go or Node developer brings either work in nilo or stop the compiler, and none of them compiles and does the wrong thing.** The traps the design review at 0.7.0 found are of one kind: a path param matched by position, so two ids swap without a word; a middleware with no arguments, so its key store is a global or a lookup that fails open; a renamed struct that cannot be read back; a JSON log line that is not JSON; a route deadline that the calls it makes never hear of; a server in a container listening on loopback; a panic that takes every connection with no warning that the root cannot name the request. Around them are the things that are only slow to find: validation taught under forms, a second service of the same type, dates that live in `nilo_sql`, and six steps before the first route. Most of these change the API every user writes, so they are paid before 1.0 under principle 3 rather than carried past it.
+
+<!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
+
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A renamed struct cannot be a request body, and the reason the guide gives no longer holds.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Timestamp` and `Date` are in `nilo_sql`, so an HTTP-only service with a date in its body turns on `-Dsql` or carries text.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A route's deadline stops at the route: the calls it makes keep their own.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A rate limit, the access log's level and the CSP are fixed while compiling, so a deployment cannot set them from its environment.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · The validation types are taught under forms only, and the two largest examples check by hand.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A second service of the same type is refused with a bare error, and the way round it is written only in an ADR.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A first project is six steps before its first route, and nothing writes them.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A server in a container listens where nothing can reach it, and no page shows a container build.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A panic ends the process, and `listen()` does not say so when the root file has no `nilo.panic` to name the request that did it.
+
+<!-- /gathered -->
+
+**What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from the getting-started page with a database, a login middleware and a container, and every mistake they make is a compile error or a refusal at `listen()` naming the fix.
+
+### A second instance changes no answer
+
+**A program behind a balancer gives the same answer whichever instance a request reaches, or says at startup and in its pages that it does not.** [ADR 110](./adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md) bet on one process, and named what goes quietly wrong at two: a cache that answers by instance, an allowance that admits N times its limit, and a Room that reaches only its own sockets. `Idempotent` is the costly one, because a retry is exactly what reaches the other instance, and a rolling deploy is two instances for everybody. The bet stays the default: nothing here costs a route that does not ask. What changes is that each in-process store gets a seam a shared one plugs into, `Idempotent` first because a database it can use is already in most programs ([ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)), and that the pages say what ADR 110 promised they would. It meets the toolkit direction under Later at the Room: that direction builds the store, this one builds the hook.
+
+<!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
+
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · `allowance` keeps its table in the process and has no seam for a shared one
+- [P2](./todo.md#p2-evidence-it-matters) · `nilo_http` · A Room belongs to one process and has no hook a bridge could use, so a chat served from two instances is two chats.
+- [P3](./todo.md#p3-no-evidence-yet) · `nilo_http` · Whether a pre-fork worker mode is worth what it costs is not known.
+
+<!-- /gathered -->
+
+**What would settle it:** an `Idempotent` route answering a retry once across two instances through a rolling restart, an allowance holding its limit across two, and the chat example delivering across two, each in a live test.
+
 ## Later
 
 ### A listener can face the internet with nothing in front
