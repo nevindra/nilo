@@ -13,9 +13,16 @@ const std = @import("std");
 /// which HTTP/2 forbids (§8.2.2), plus `te`, which means something else in
 /// HTTP/1.1.
 pub fn hopByHop(name: []const u8) bool {
-    const names = [_][]const u8{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te" };
-    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
-    return false;
+    // By length first: a name is compared with the one or two of its size,
+    // where a list of six was six compares for every field of every request.
+    return switch (name.len) {
+        2 => std.mem.eql(u8, name, "te"),
+        7 => std.mem.eql(u8, name, "upgrade"),
+        10 => std.mem.eql(u8, name, "connection") or std.mem.eql(u8, name, "keep-alive"),
+        16 => std.mem.eql(u8, name, "proxy-connection"),
+        17 => std.mem.eql(u8, name, "transfer-encoding"),
+        else => false,
+    };
 }
 
 /// What a client sends before anything else, so a server knows it is not

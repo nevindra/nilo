@@ -550,7 +550,10 @@ pub const Streamer = struct {
     /// Bytes of file buffers the connection's calls hold (`Collected.file`).
     file_held: *std.atomic.Value(usize),
     can_park: bool,
-    head: *const fn (a: std.mem.Allocator, answer: *const Collected) anyerror![]const u8,
+    /// The HEADERS block of the answer, encoded into `a` from its status, its
+    /// content type, its length and `extra`, the headers the route set, which
+    /// are read where they lie and not copied (see `Collected.head_block`).
+    head: *const fn (a: std.mem.Allocator, answer: *const Collected, extra: []const Header) anyerror![]const u8,
 };
 
 /// An answer kept for the connection's fiber to frame (ADR 220): what a
@@ -580,6 +583,12 @@ pub const Collected = struct {
     /// empty when no body was handed over.
     room: []u8 = &.{},
     trailers: []const Header = &.{},
+    /// The HEADERS block of a whole answer to a request that can stream, which
+    /// is HTTP, encoded while the route's headers were still where the route
+    /// left them, so that they are read once and not copied (`fields`) and read
+    /// again to be encoded. Null where the block is made from `headers`: a
+    /// gRPC call's, and the head of a HEAD.
+    head_block: ?[]const u8 = null,
     /// The pipe the request's body arrives through, when it has one: how the
     /// framing reaches the connection to ask for a `100 Continue`.
     inbound: ?*inbound.Inbox = null,
@@ -610,7 +619,9 @@ pub const Collected = struct {
         @memcpy(block[at..], content_type);
         self.status = status;
         self.content_type = block[at..];
-        self.headers = try self.fields(extra);
+        if (self.streamer) |st| {
+            self.head_block = try st.head(self.arena, self, extra);
+        } else self.headers = try self.fields(extra);
         self.room = block[0..at];
         self.body = block[self.front..at];
         self.trailers = try self.fields(trailers);
@@ -631,8 +642,7 @@ pub const Collected = struct {
         self.status = status;
         self.length = length;
         self.content_type = try self.arena.dupe(u8, content_type);
-        self.headers = try self.fields(extra);
-        const block = try st.head(self.arena, self);
+        const block = try st.head(self.arena, self, extra);
         const box = try self.arena.create(outbound.Outbox);
         box.* = .{ .link = st.link, .arena = self.arena, .can_park = st.can_park };
         box.open(block, shape.bodyless);
@@ -738,13 +748,23 @@ pub const Collected = struct {
     /// gRPC client reads none of a browser's headers.
     fn fields(self: *Collected, list: []const Header) ![]const Header {
         var kept: usize = 0;
+        var bytes: usize = 0;
         for (list) |h| {
             if (h.name.len > 0) {
                 kept += 1;
-            } else if (self.lines) kept += std.mem.count(u8, h.value, "\r\n");
+                bytes += h.name.len + h.value.len;
+            } else if (self.lines) {
+                kept += std.mem.count(u8, h.value, "\r\n");
+                // A line's name and trimmed value are no longer than the line.
+                bytes += h.value.len;
+            }
         }
         if (kept == 0) return &.{};
+        // The entries, and every byte of their names and values, in two
+        // allocations, where a name and a value each were two a field.
         const out = try self.arena.alloc(Header, kept);
+        const store = try self.arena.alloc(u8, bytes);
+        var at: usize = 0;
         var i: usize = 0;
         for (list) |from| {
             if (from.name.len == 0) {
@@ -753,20 +773,35 @@ pub const Collected = struct {
                 while (std.mem.indexOf(u8, rest, "\r\n")) |end| : (rest = rest[end + 2 ..]) {
                     const colon = std.mem.indexOfScalar(u8, rest[0..end], ':') orelse continue;
                     out[i] = .{
-                        .name = try std.ascii.allocLowerString(self.arena, rest[0..colon]),
-                        .value = try self.arena.dupe(u8, std.mem.trim(u8, rest[colon + 1 .. end], " ")),
+                        .name = lowered(store, &at, rest[0..colon]),
+                        .value = copied(store, &at, std.mem.trim(u8, rest[colon + 1 .. end], " ")),
                     };
                     i += 1;
                 }
                 continue;
             }
             out[i] = .{
-                .name = try std.ascii.allocLowerString(self.arena, from.name),
-                .value = try self.arena.dupe(u8, from.value),
+                .name = lowered(store, &at, from.name),
+                .value = copied(store, &at, from.value),
             };
             i += 1;
         }
         return out[0..i];
+    }
+
+    /// `name` lowercased into `store` at `at.*`, which moves past it.
+    fn lowered(store: []u8, at: *usize, name: []const u8) []const u8 {
+        const to = store[at.*..][0..name.len];
+        for (name, to) |ch, *out| out.* = std.ascii.toLower(ch);
+        at.* += name.len;
+        return to;
+    }
+
+    fn copied(store: []u8, at: *usize, value: []const u8) []const u8 {
+        const to = store[at.*..][0..value.len];
+        @memcpy(to, value);
+        at.* += value.len;
+        return to;
     }
 };
 

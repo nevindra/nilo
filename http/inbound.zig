@@ -256,6 +256,14 @@ pub const Inbox = struct {
         self.wakeLocked();
     }
 
+    /// `end` for a stream whose call has not been given a fiber yet, which is
+    /// a request that arrived whole in its HEADERS frame: nothing else holds
+    /// the pipe, so there is no lock to take and no one to wake. It was a
+    /// monitor taken and a signal sent for every such request (`bench/result/http.md`).
+    pub fn endUnshared(self: *Inbox) void {
+        self.ended = true;
+    }
+
     /// The body will not be completed, and a call waiting for it is woken
     /// to say so. The first reason stands.
     pub fn fail(self: *Inbox, why: Failure) void {

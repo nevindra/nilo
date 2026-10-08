@@ -270,7 +270,7 @@ fn padding(acc: u64, bits: u32) Error!void {
 // ---- the static table (Appendix A) ----
 
 /// Appendix A: the 61 fields every HPACK encoder may name by number.
-pub const static_table = [61]Field{
+const static_entries = [61]Field{
     .{ .name = ":authority", .value = "" },
     .{ .name = ":method", .value = "GET" },
     .{ .name = ":method", .value = "POST" },
@@ -334,14 +334,88 @@ pub const static_table = [61]Field{
     .{ .name = "www-authenticate", .value = "" },
 };
 
+const static_name_bytes = blk: {
+    var n: usize = 0;
+    for (static_entries) |f| n += f.name.len;
+    break :blk n;
+};
+
+/// Every name of the static table, one after another.
+const static_blob: [static_name_bytes]u8 = blk: {
+    var bytes: [static_name_bytes]u8 = undefined;
+    var at: usize = 0;
+    for (static_entries) |f| {
+        @memcpy(bytes[at..][0..f.name.len], f.name);
+        at += f.name.len;
+    }
+    break :blk bytes;
+};
+
+/// The static table, **with its names kept in one block of memory**
+/// (`static_blob`), so that a name a decoder hands back can be told from one a
+/// client wrote by where it points (`isStaticName`) rather than by reading it.
+pub const static_table: [static_entries.len]Field = blk: {
+    var table: [static_entries.len]Field = undefined;
+    var at: usize = 0;
+    for (static_entries, &table) |f, *out| {
+        out.* = .{ .name = static_blob[at..][0..f.name.len], .value = f.value };
+        at += f.name.len;
+    }
+    break :blk table;
+};
+
+/// Whether `name` is one the static table named, which a decoder returns as it
+/// is in the table and never as a copy: so a field a client sent by index
+/// has a name that is known to be a lowercase token without being looked at.
+/// A name from anywhere else (a literal, or a slice of a test's) is not.
+pub fn isStaticName(name: []const u8) bool {
+    const start = @intFromPtr(&static_blob);
+    const at = @intFromPtr(name.ptr);
+    return at >= start and at - start < static_blob.len;
+}
+
 /// The index of the first static entry named `name`, or null. What the
 /// encoder uses so that a name it writes costs one byte rather than its
 /// length; the value is always written out.
 pub fn staticNameIndex(name: []const u8) ?u32 {
+    return static_names.get(name);
+}
+
+/// Each name the static table has, with the index of its first entry. Built
+/// while compiling: the answer is a switch on the name's length and a compare
+/// against the few of that length, where a walk down the table compared a
+/// name with up to sixty-one before it was found (`bench/result/http.md`).
+const static_names: std.StaticStringMap(u32) = blk: {
+    @setEvalBranchQuota(100_000);
+    var kvs: [static_table.len]struct { []const u8, u32 } = undefined;
+    var n: usize = 0;
     for (static_table, 1..) |f, i| {
-        if (std.mem.eql(u8, f.name, name)) return @intCast(i);
+        const seen = for (kvs[0..n]) |kv| {
+            if (std.mem.eql(u8, kv[0], f.name)) break true;
+        } else false;
+        if (!seen) {
+            kvs[n] = .{ f.name, @intCast(i) };
+            n += 1;
+        }
     }
-    return null;
+    const fixed = kvs[0..n].*;
+    break :blk std.StaticStringMap(u32).initComptime(fixed);
+};
+
+/// The static-table indices of the names an answer's head always uses, so
+/// writing them is not a lookup.
+pub const index_content_length = 28;
+pub const index_content_type = 31;
+pub const index_date = 33;
+
+comptime {
+    for (.{
+        .{ index_content_length, "content-length" },
+        .{ index_content_type, "content-type" },
+        .{ index_date, "date" },
+    }) |pair| {
+        if (!std.mem.eql(u8, static_table[pair[0] - 1].name, pair[1])) @compileError("nilo: a static-table index in hpack.zig is wrong");
+    }
 }
 
 // ---- the decoder (§3, §6) ----
@@ -560,13 +634,17 @@ pub fn writeIndexed(w: *std.Io.Writer, index: u32) std.Io.Writer.Error!void {
 /// from the static table when it is there (§6.2.2). The one representation
 /// this side writes, and why the client's table never grows on our account.
 pub fn writeLiteral(w: *std.Io.Writer, name: []const u8, value: []const u8) std.Io.Writer.Error!void {
-    if (staticNameIndex(name)) |i| {
-        try writeInt(w, 0x00, 4, i);
-    } else {
-        try w.writeByte(0x00);
-        try writeInt(w, 0x00, 7, @intCast(name.len));
-        try w.writeAll(name);
-    }
+    if (staticNameIndex(name)) |i| return writeLiteralAt(w, i, value);
+    try w.writeByte(0x00);
+    try writeInt(w, 0x00, 7, @intCast(name.len));
+    try w.writeAll(name);
+    try writeInt(w, 0x00, 7, @intCast(value.len));
+    try w.writeAll(value);
+}
+
+/// `writeLiteral` for a name the static table has, given by its index.
+pub fn writeLiteralAt(w: *std.Io.Writer, index: u32, value: []const u8) std.Io.Writer.Error!void {
+    try writeInt(w, 0x00, 4, index);
     try writeInt(w, 0x00, 7, @intCast(value.len));
     try w.writeAll(value);
 }

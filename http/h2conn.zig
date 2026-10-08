@@ -705,6 +705,8 @@ const Conn = struct {
     fn run(c: *Conn) void {
         c.deadlines.armHeader();
         const got = c.in.takeArray(h2.preface.len) catch return;
+        // What the stamp of the first frames is, which may be in the same read.
+        c.last_read_ns = bulkhead.monotonicNanos();
         // Not HTTP/2: most likely HTTP/1.1 on the wrong port, which is said
         // the only way that client can read, and the connection closed.
         if (!std.mem.eql(u8, got, h2.preface)) {
@@ -1151,9 +1153,22 @@ const Conn = struct {
 
     fn readOne(c: *Conn) ReadError!void {
         c.deadlines.armBody();
+        // The clock is read when bytes had to come off the socket for this
+        // frame, and not for each frame a read brought together: a call per
+        // HEADERS frame was 40 to 60 ns of a request
+        // (`bench/result/http.md`). What the stamp bounds is a client gone
+        // quiet, in milliseconds, which a batch's few microseconds do not
+        // move. A frame whose payload was waited for stamps again once it is
+        // read, because the next frame's head is usually in that same read
+        // and would otherwise be stamped with the time the upload began.
+        const buffered = c.in.bufferedLen();
+        const waited = buffered < h2.header_len;
         const head = h2.Header.parse(c.in.takeArray(h2.header_len) catch return error.Gone);
-        c.last_read_ns = bulkhead.monotonicNanos();
+        if (waited or c.last_read_ns == 0) c.last_read_ns = bulkhead.monotonicNanos();
         if (head.len > h2.default_max_frame) return error.FrameSize;
+        defer if (buffered < h2.header_len + head.len) {
+            c.last_read_ns = bulkhead.monotonicNanos();
+        };
 
         if (c.continuing) |s| {
             if (head.type != .continuation or head.stream != s.id) return error.Protocol;
@@ -1273,7 +1288,7 @@ const Conn = struct {
 
         const s = c.newStream(head.stream) catch return error.Internal;
         s.self_dependent = self_dependent;
-        s.headers_ns = bulkhead.monotonicNanos();
+        s.headers_ns = c.last_read_ns;
         s.collect_until_ns = c.collectUntil(s.headers_ns, c.app.max_body);
         c.streams.append(c.gpa, s) catch {
             s.destroy();
@@ -1303,6 +1318,10 @@ const Conn = struct {
         c.continuing = null;
         if (s.trailing) return c.trailersDone(s);
         const arena = s.arena.allocator();
+        // Room for the fields in one allocation, where growing a list as they
+        // arrive was three and a copy of each: a field is rarely under six
+        // bytes of block, and a block with more than that is grown as before.
+        s.fields.ensureTotalCapacity(arena, @min(s.block.items.len / 6 + 2, 32)) catch return error.Internal;
         const decoded = c.decoder.decode(s.block.items, arena, &s.fields, max_header_list) catch |err| switch (err) {
             error.Compression => return error.Compression,
             error.OutOfMemory => return error.Internal,
@@ -1642,6 +1661,9 @@ const Conn = struct {
     /// read, which are the budget's again and the client's window, and a
     /// `100 Continue` they asked for. One flag to look at when none has.
     fn service(c: *Conn) ReadError!void {
+        // A load first: `swap` is a locked instruction, and this is asked
+        // twice for every frame read, nearly always of a flag that is down.
+        if (!c.shared.attention.load(.acquire)) return;
         if (!c.shared.attention.swap(false, .acq_rel)) return;
         for (c.streams.items) |s| {
             if (s.state != .running) continue;
@@ -1860,23 +1882,24 @@ const Conn = struct {
 
         // Held to RFC 9113 §8 before anything reads it: a request that is not
         // well formed is a stream error and never reaches the App.
-        for (s.fields.items) |f| if (!validField(f)) return c.malformed(s);
-        const method = s.field(":method") orelse return c.malformed(s);
+        const found = scan(s.fields.items);
+        if (!found.fields_ok) return c.malformed(s);
+        const method = found.method orelse return c.malformed(s);
         if (std.mem.eql(u8, method, "CONNECT")) {
             // A tunnel is not a thing this server is: no `:path`, no route,
             // and extended CONNECT is not offered (RFC 9110 §9.3.6, §15.6.2).
             c.control_run = 0;
             return c.answerStatus(s, 501, "this server does not serve CONNECT");
         }
-        const path = s.field(":path") orelse return c.malformed(s);
+        const path = found.path orelse return c.malformed(s);
         if (s.grpc and !std.mem.eql(u8, method, "POST")) return c.malformed(s);
         // `OPTIONS *` is the one target that is not a path, and the empty
         // `:path` is malformed (§8.3.1).
         if (path.len == 0 or (path[0] != '/' and !(std.mem.eql(u8, method, "OPTIONS") and std.mem.eql(u8, path, "*"))))
             return c.malformed(s);
-        if (!validPseudo(s.fields.items)) return c.malformed(s);
-        if (!validConnectionFields(s.fields.items)) return c.malformed(s);
-        s.announced = announcedLength(s.fields.items) catch return c.malformed(s);
+        if (!found.pseudo_ok) return c.malformed(s);
+        if (!found.connection_ok) return c.malformed(s);
+        s.announced = if (found.has_length) (announcedLength(s.fields.items) catch return c.malformed(s)) else null;
         // A request that ends with its headers sends no body, whatever it said.
         if (!s.open and (s.announced orelse 0) != 0) return c.malformed(s);
 
@@ -1912,7 +1935,9 @@ const Conn = struct {
             s.collecting = true;
             s.inbox.collecting = true;
         }
-        if (!s.open) s.inbox.end();
+        // Before the call has a fiber, so the connection's fiber is the pipe's
+        // only user and the monitor guards nothing yet.
+        if (!s.open) s.inbox.endUnshared();
     }
 
     /// Run a call whose headers are whole: on a fiber of its own, which
@@ -1989,7 +2014,7 @@ const Conn = struct {
     fn answerStatus(c: *Conn, s: *Stream, comptime status: u16, comptime message: []const u8) ReadError!void {
         const body = comptime std.fmt.comptimePrint("{{\"error\":\"{s}\",\"status\":{d}}}", .{ message, status });
         var w: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(s.arena.allocator(), 96) catch return error.Internal;
-        writeHttpHead(&w.writer, status, "application/json", body.len, &.{}) catch return error.Internal;
+        writeHttpHead(&w.writer, status, "application/json", body.len, &.{}, true) catch return error.Internal;
         s.head_block = w.written();
         s.data = body;
         s.no_trailers = true;
@@ -2591,11 +2616,9 @@ fn readMessage(s: *Stream) !?[]const u8 {
 /// included, and no body to send.
 fn httpReply(s: *Stream, collected: *const framing.Collected) !void {
     const a = s.arena.allocator();
-    var extra: usize = 0;
-    for (collected.headers) |f| extra += f.name.len + f.value.len + 4;
-    var w: std.Io.Writer.Allocating = try .initCapacity(a, 96 + collected.content_type.len + extra);
-    try writeHttpHead(&w.writer, if (collected.status == 0) 500 else collected.status, collected.content_type, collected.length, collected.headers);
-    s.head_block = w.written();
+    // Encoded already when the route answered, from its headers where they
+    // lay (`Collected.whole`); made here from the copies a HEAD of a file kept.
+    s.head_block = collected.head_block orelse try streamedHead(a, collected, collected.headers);
     s.data = collected.body;
     if (collected.trailers.len > 0) {
         var fields: std.ArrayList(hpack.Field) = .empty;
@@ -2610,11 +2633,11 @@ fn httpReply(s: *Stream, collected: *const framing.Collected) !void {
 /// The head of a streamed answer, encoded on the call's fiber into its arena
 /// for the connection's to write: what `httpReply` makes of a whole one, with
 /// the length the stream promised, if it promised one.
-fn streamedHead(a: std.mem.Allocator, collected: *const framing.Collected) anyerror![]const u8 {
+fn streamedHead(a: std.mem.Allocator, collected: *const framing.Collected, headers: []const framing.Header) anyerror![]const u8 {
     var extra: usize = 0;
-    for (collected.headers) |f| extra += f.name.len + f.value.len + 4;
+    for (headers) |f| extra += f.name.len + f.value.len + 4;
     var w: std.Io.Writer.Allocating = try .initCapacity(a, 96 + collected.content_type.len + extra);
-    try writeHttpHead(&w.writer, if (collected.status == 0) 500 else collected.status, collected.content_type, collected.length, collected.headers);
+    try writeHttpHead(&w.writer, if (collected.status == 0) 500 else collected.status, collected.content_type, collected.length, headers, collected.lines);
     return w.written();
 }
 
@@ -2622,7 +2645,13 @@ fn streamedHead(a: std.mem.Allocator, collected: *const framing.Collected) anyer
 /// one, `content-length` when the answer has a body to measure, the route's
 /// headers with the ones HTTP/2 forbids dropped (§8.2.2), and `date` unless
 /// the route said its own (ADR 197).
-fn writeHttpHead(w: *std.Io.Writer, status: u16, content_type: []const u8, length: ?u64, headers: []const framing.Header) !void {
+///
+/// **The route's headers are read as the route set them**, names in whatever
+/// case, and written lowercase (§8.2.1), so that they are not copied first.
+/// The block `nilo.secure` keeps as one nameless entry of whole lines is read
+/// into fields when `lines` is set and left out when it is not, as
+/// `Collected.fields` does for a gRPC call.
+fn writeHttpHead(w: *std.Io.Writer, status: u16, content_type: []const u8, length: ?u64, headers: []const framing.Header, lines: bool) !void {
     // The seven statuses the static table has (RFC 7541 Appendix A), and a
     // literal for the rest.
     switch (status) {
@@ -2638,21 +2667,47 @@ fn writeHttpHead(w: *std.Io.Writer, status: u16, content_type: []const u8, lengt
             try hpack.writeLiteral(w, ":status", std.fmt.bufPrint(&text, "{d}", .{status}) catch unreachable);
         },
     }
-    if (content_type.len > 0) try hpack.writeLiteral(w, "content-type", content_type);
+    if (content_type.len > 0) try hpack.writeLiteralAt(w, hpack.index_content_type, content_type);
     if (length) |n| {
         var text: [20]u8 = undefined;
-        try hpack.writeLiteral(w, "content-length", std.fmt.bufPrint(&text, "{d}", .{n}) catch unreachable);
+        try hpack.writeLiteralAt(w, hpack.index_content_length, decimal(&text, n));
     }
     var dated = false;
     for (headers) |f| {
-        if (h2.hopByHop(f.name) or std.mem.eql(u8, f.name, "content-length")) continue;
-        if (std.mem.eql(u8, f.name, "date")) dated = true;
-        try hpack.writeLiteral(w, f.name, f.value);
+        if (f.name.len == 0) {
+            if (!lines) continue;
+            var rest = f.value;
+            while (std.mem.indexOf(u8, rest, "\r\n")) |end| : (rest = rest[end + 2 ..]) {
+                const colon = std.mem.indexOfScalar(u8, rest[0..end], ':') orelse continue;
+                try writeRouteHeader(w, rest[0..colon], std.mem.trim(u8, rest[colon + 1 .. end], " "), &dated);
+            }
+            continue;
+        }
+        try writeRouteHeader(w, f.name, f.value, &dated);
     }
     if (!dated) {
         const now = date.now();
-        try hpack.writeLiteral(w, "date", &now);
+        try hpack.writeLiteralAt(w, hpack.index_date, &now);
     }
+}
+
+/// One of the route's headers, its name lowercased, unless HTTP/2 forbids it
+/// or `content-length` has been written from the body's own length.
+fn writeRouteHeader(w: *std.Io.Writer, name: []const u8, value: []const u8, dated: *bool) !void {
+    // Names of a static table's are at most 27 bytes; a longer one is written
+    // as a literal and lowercased as it goes.
+    var buf: [32]u8 = undefined;
+    if (name.len > buf.len) {
+        try w.writeByte(0x00);
+        try hpack.writeInt(w, 0x00, 7, @intCast(name.len));
+        for (name) |ch| try w.writeByte(std.ascii.toLower(ch));
+        try hpack.writeInt(w, 0x00, 7, @intCast(value.len));
+        return w.writeAll(value);
+    }
+    const lower = std.ascii.lowerString(&buf, name);
+    if (h2.hopByHop(lower) or std.mem.eql(u8, lower, "content-length")) return;
+    if (std.mem.eql(u8, lower, "date")) dated.* = true;
+    try hpack.writeLiteral(w, lower, value);
 }
 
 /// The call's fields as the head `framing.Call` asks for: an empty request
@@ -2662,30 +2717,36 @@ fn writeHttpHead(w: *std.Io.Writer, status: u16, content_type: []const u8, lengt
 /// already read whole gets the length of that message and no `expect`, since
 /// there is nothing left to wait for.
 fn fieldHead(a: std.mem.Allocator, s: *const Stream, message_len: usize) ![]const u8 {
-    var size: usize = "\nhost: localhost\r\ncontent-length: 4294967295\r\n\r\n".len;
+    // The most it can come to: the line break, a `host` line, a field a line
+    // of its name, a colon, a space, its value and a line break, and the
+    // `content-length` of up to twenty digits and the blank line. Written by
+    // hand into one allocation of that size: through a `Writer` the same
+    // bytes were 64 ns of a request (`bench/result/http.md`).
+    var size: usize = "\nhost: localhost\r\ncontent-length: ".len + 20 + "\r\n\r\n".len;
     for (s.fields.items) |f| size += f.name.len + f.value.len + 4;
-    var w: std.Io.Writer.Allocating = try .initCapacity(a, size);
-    const out = &w.writer;
-    try out.writeByte('\n');
+    const buf = try a.alloc(u8, size);
+    var at: usize = 0;
+    buf[0] = '\n';
+    at += 1;
     // One `host`, which `http1.zig` insists on: `:authority` when the call
     // has it, over a `host` field beside it (§8.3.1).
     const authority = s.field(":authority");
     if (authority) |host| {
-        try out.writeAll("host: ");
-        try out.writeAll(host);
-        try out.writeAll("\r\n");
+        put(buf, &at, "host: ");
+        put(buf, &at, host);
+        put(buf, &at, "\r\n");
     } else if (s.field("host") == null) {
-        try out.writeAll("host: localhost\r\n");
+        put(buf, &at, "host: localhost\r\n");
     }
     // The cookies a client splits for compression are one again, `; ` between
     // them (§8.2.3).
     var cookies = false;
     for (s.fields.items) |f| if (std.mem.eql(u8, f.name, "cookie")) {
-        try out.writeAll(if (cookies) "; " else "cookie: ");
-        try out.writeAll(f.value);
+        put(buf, &at, if (cookies) "; " else "cookie: ");
+        put(buf, &at, f.value);
         cookies = true;
     };
-    if (cookies) try out.writeAll("\r\n");
+    if (cookies) put(buf, &at, "\r\n");
     for (s.fields.items) |f| {
         if (f.name.len == 0 or f.name[0] == ':') continue;
         if (authority != null and std.mem.eql(u8, f.name, "host")) continue;
@@ -2693,61 +2754,53 @@ fn fieldHead(a: std.mem.Allocator, s: *const Stream, message_len: usize) ![]cons
         if (std.mem.eql(u8, f.name, "cookie")) continue;
         if (std.mem.eql(u8, f.name, "content-length")) continue;
         if (!s.piped and std.mem.eql(u8, f.name, "expect")) continue;
-        try out.writeAll(f.name);
-        try out.writeAll(": ");
-        try out.writeAll(f.value);
-        try out.writeAll("\r\n");
+        put(buf, &at, f.name);
+        put(buf, &at, ": ");
+        put(buf, &at, f.value);
+        put(buf, &at, "\r\n");
     }
     if (s.piped) {
-        if (s.announced) |n| try out.print("content-length: {d}\r\n", .{n});
-        try out.writeAll("\r\n");
-    } else try out.print("content-length: {d}\r\n\r\n", .{message_len});
-    return w.written();
-}
-
-/// The pseudo-headers of a request as §8.3.1 and §8.1.1 have them: only
-/// `:method`, `:scheme`, `:path` and `:authority`, each at most once, all of
-/// them ahead of the regular fields, and the first three present. Anything
-/// else is a malformed request, which is a stream error and not a call.
-fn validPseudo(fields: []const hpack.Field) bool {
-    const names = [_][]const u8{ ":method", ":scheme", ":path", ":authority" };
-    var seen = [_]bool{false} ** names.len;
-    var regular = false;
-    for (fields) |f| {
-        if (f.name.len == 0 or f.name[0] != ':') {
-            regular = true;
-            continue;
-        }
-        if (regular) return false;
-        const i = for (names, 0..) |n, i| {
-            if (std.mem.eql(u8, n, f.name)) break i;
-        } else return false;
-        if (seen[i]) return false;
-        seen[i] = true;
+        if (s.announced) |n| putLength(buf, &at, n);
+        put(buf, &at, "\r\n");
+    } else {
+        putLength(buf, &at, message_len);
+        put(buf, &at, "\r\n");
     }
-    return seen[0] and seen[1] and seen[2];
+    return buf[0..at];
 }
 
+/// `bytes` at `at.*` in `buf`, which has room for them.
+inline fn put(buf: []u8, at: *usize, bytes: []const u8) void {
+    @memcpy(buf[at.*..][0..bytes.len], bytes);
+    at.* += bytes.len;
+}
+
+/// `content-length: n` and its line break.
+fn putLength(buf: []u8, at: *usize, n: u64) void {
+    put(buf, at, "content-length: ");
+    var text: [20]u8 = undefined;
+    put(buf, at, decimal(&text, n));
+    put(buf, at, "\r\n");
+}
+
+/// `n` in decimal, at the end of `text`. Not `std.fmt`, which parses a format
+/// string at run time for a number that is almost always short.
+fn decimal(text: *[20]u8, n: u64) []const u8 {
+    var i: usize = text.len;
+    var rest = n;
+    while (true) {
+        i -= 1;
+        text[i] = '0' + @as(u8, @intCast(rest % 10));
+        rest /= 10;
+        if (rest == 0) break;
+    }
+    return text[i..];
+}
 
 /// The stream a PRIORITY frame's five bytes say the stream depends on,
 /// without the exclusive bit (§6.3).
 fn dependsOn(five: *const [5]u8) u32 {
     return std.mem.readInt(u32, five[0..4], .big) & 0x7fff_ffff;
-}
-
-/// Whether no field is one HTTP/2 forbids for belonging to a connection:
-/// `connection`, `keep-alive`, `proxy-connection`, `transfer-encoding` and
-/// `upgrade`, and `te` with anything but `trailers` (§8.2.2). A request that
-/// has one is malformed.
-fn validConnectionFields(fields: []const hpack.Field) bool {
-    for (fields) |f| {
-        if (f.name.len == 0 or f.name[0] == ':') continue;
-        inline for (.{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" }) |forbidden| {
-            if (std.mem.eql(u8, f.name, forbidden)) return false;
-        }
-        if (std.mem.eql(u8, f.name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) return false;
-    }
-    return true;
 }
 
 /// The `content-length` the client sent, if any: digits only, and every one of
@@ -2765,32 +2818,207 @@ fn announcedLength(fields: []const hpack.Field) error{Malformed}!?u64 {
     return said;
 }
 
-/// A field that can be written into a head as it is: a lowercase token for a
-/// name, and a value with no line break and no NUL in it. What makes writing
-/// a call's fields as a head safe; a field that is not this is a malformed
-/// request (§8.2.1), refused before anything reads it.
-fn validField(f: hpack.Field) bool {
-    if (f.name.len == 0) return false;
-    const name = if (f.name[0] == ':') f.name[1..] else f.name;
-    if (name.len == 0) return false;
-    for (name) |ch| switch (ch) {
-        'a'...'z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
-        else => return false,
-    };
-    for (f.value) |ch| if (ch == 0 or ch == '\r' or ch == '\n') return false;
+/// The names a field may have: a lowercase token (RFC 9110 §5.6.2, with the
+/// capitals §8.2.1 forbids left out).
+const lower_token: [256]bool = blk: {
+    var t = [_]bool{false} ** 256;
+    for ('a'..'z' + 1) |ch| t[ch] = true;
+    for ('0'..'9' + 1) |ch| t[ch] = true;
+    for ("!#$%&'*+-.^_`|~") |ch| t[ch] = true;
+    break :blk t;
+};
+
+/// Whether `w` has a byte equal to `b`, eight at a time.
+inline fn hasByte(w: u64, comptime b: u8) bool {
+    const ones: u64 = 0x0101010101010101;
+    const x = w ^ (ones * b);
+    return ((x -% ones) & ~x & (ones << 7)) != 0;
+}
+
+/// A value that can be written into a head as it is: no NUL and no line break.
+fn valueClean(value: []const u8) bool {
+    var i: usize = 0;
+    while (i + 8 <= value.len) : (i += 8) {
+        const w = std.mem.readInt(u64, value[i..][0..8], .little);
+        if (hasByte(w, 0) or hasByte(w, '\r') or hasByte(w, '\n')) return false;
+    }
+    for (value[i..]) |ch| if (ch == 0 or ch == '\r' or ch == '\n') return false;
     return true;
+}
+
+/// What one pass over a request's fields finds, all of RFC 9113 §8's checks
+/// that can be made without the connection: the dispatch asks for the answers
+/// it needs in the order it needs them, so a request is refused for the same
+/// reason it was when each check was a pass of its own. The passes were five,
+/// and 8% of a `GET` (`bench/result/http.md`).
+const Scan = struct {
+    /// The first `:method` and `:path`, as `Stream.field` finds them.
+    method: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    /// Every name is a lowercase token, and no value has a NUL or a line break
+    /// in it: what makes writing the fields as a head safe (§8.2.1). The scan
+    /// stops at the first that is not, and says nothing more.
+    fields_ok: bool = true,
+    /// Only `:method`, `:scheme`, `:path` and `:authority`, each at most once,
+    /// all ahead of the regular fields, and the first three present (§8.3.1,
+    /// §8.1.1).
+    pseudo_ok: bool = true,
+    /// None is one HTTP/2 forbids for belonging to a connection: `connection`,
+    /// `keep-alive`, `proxy-connection`, `transfer-encoding`, `upgrade`, and
+    /// `te` with anything but `trailers` (§8.2.2).
+    connection_ok: bool = true,
+    /// A `content-length` is among them, to be read by `announcedLength`.
+    has_length: bool = false,
+};
+
+fn scan(fields: []const hpack.Field) Scan {
+    var r: Scan = .{};
+    // method, scheme, path, authority.
+    var seen: u4 = 0;
+    var regular = false;
+    for (fields) |f| {
+        const name = f.name;
+        if (name.len == 0) {
+            r.fields_ok = false;
+            return r;
+        }
+        const pseudo = name[0] == ':';
+        // A name the client sent by index is the static table's own, which is
+        // known to be a lowercase token: only a literal is read.
+        if (!hpack.isStaticName(name)) {
+            for (if (pseudo) name[1..] else name) |ch| if (!lower_token[ch]) {
+                r.fields_ok = false;
+                return r;
+            };
+            if (pseudo and name.len == 1) {
+                r.fields_ok = false;
+                return r;
+            }
+        }
+        if (!valueClean(f.value)) {
+            r.fields_ok = false;
+            return r;
+        }
+        if (pseudo) {
+            const bit: u4 = switch (name.len) {
+                7 => if (std.mem.eql(u8, name, ":method")) 1 else if (std.mem.eql(u8, name, ":scheme")) 2 else 0,
+                5 => if (std.mem.eql(u8, name, ":path")) 4 else 0,
+                10 => if (std.mem.eql(u8, name, ":authority")) 8 else 0,
+                else => 0,
+            };
+            if (regular or bit == 0 or seen & bit != 0) r.pseudo_ok = false;
+            seen |= bit;
+            if (bit == 1 and r.method == null) r.method = f.value;
+            if (bit == 4 and r.path == null) r.path = f.value;
+            continue;
+        }
+        regular = true;
+        switch (name.len) {
+            2 => if (std.mem.eql(u8, name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) {
+                r.connection_ok = false;
+            },
+            7 => if (std.mem.eql(u8, name, "upgrade")) {
+                r.connection_ok = false;
+            },
+            10 => if (std.mem.eql(u8, name, "connection") or std.mem.eql(u8, name, "keep-alive")) {
+                r.connection_ok = false;
+            },
+            14 => if (std.mem.eql(u8, name, "content-length")) {
+                r.has_length = true;
+            },
+            16 => if (std.mem.eql(u8, name, "proxy-connection")) {
+                r.connection_ok = false;
+            },
+            17 => if (std.mem.eql(u8, name, "transfer-encoding")) {
+                r.connection_ok = false;
+            },
+            else => {},
+        }
+    }
+    if (seen & 7 != 7) r.pseudo_ok = false;
+    return r;
 }
 
 // ---- tests ----
 
 const testing = std.testing;
 
+/// The checks as they were written one pass each, which `scan` is held to.
+const reference = struct {
+    fn validPseudo(fields: []const hpack.Field) bool {
+        const names = [_][]const u8{ ":method", ":scheme", ":path", ":authority" };
+        var seen = [_]bool{false} ** names.len;
+        var regular = false;
+        for (fields) |f| {
+            if (f.name.len == 0 or f.name[0] != ':') {
+                regular = true;
+                continue;
+            }
+            if (regular) return false;
+            const i = for (names, 0..) |n, i| {
+                if (std.mem.eql(u8, n, f.name)) break i;
+            } else return false;
+            if (seen[i]) return false;
+            seen[i] = true;
+        }
+        return seen[0] and seen[1] and seen[2];
+    }
+
+    fn validConnectionFields(fields: []const hpack.Field) bool {
+        for (fields) |f| {
+            if (f.name.len == 0 or f.name[0] == ':') continue;
+            inline for (.{ "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade" }) |forbidden| {
+                if (std.mem.eql(u8, f.name, forbidden)) return false;
+            }
+            if (std.mem.eql(u8, f.name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) return false;
+        }
+        return true;
+    }
+
+    fn validField(f: hpack.Field) bool {
+        if (f.name.len == 0) return false;
+        const name = if (f.name[0] == ':') f.name[1..] else f.name;
+        if (name.len == 0) return false;
+        for (name) |ch| switch (ch) {
+            'a'...'z', '0'...'9', '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
+            else => return false,
+        };
+        for (f.value) |ch| if (ch == 0 or ch == '\r' or ch == '\n') return false;
+        return true;
+    }
+
+    fn first(fields: []const hpack.Field, name: []const u8) ?[]const u8 {
+        for (fields) |f| if (std.mem.eql(u8, f.name, name)) return f.value;
+        return null;
+    }
+};
+
+fn expectScanAgrees(fields: []const hpack.Field) !void {
+    const got = scan(fields);
+    var all_ok = true;
+    for (fields) |f| if (!reference.validField(f)) {
+        all_ok = false;
+    };
+    try testing.expectEqual(all_ok, got.fields_ok);
+    // Nothing else is said of fields the scan stopped at.
+    if (!all_ok) return;
+    try testing.expectEqual(reference.validPseudo(fields), got.pseudo_ok);
+    try testing.expectEqual(reference.validConnectionFields(fields), got.connection_ok);
+    try testing.expectEqualDeep(reference.first(fields, ":method"), got.method);
+    try testing.expectEqualDeep(reference.first(fields, ":path"), got.path);
+    try testing.expectEqual(reference.first(fields, "content-length") != null, got.has_length);
+}
+
 test "a field is valid when its name is a lowercase token and its value has no line break" {
-    try testing.expect(validField(.{ .name = "x-trace", .value = "abc" }));
-    try testing.expect(validField(.{ .name = ":path", .value = "/a" }));
-    try testing.expect(!validField(.{ .name = "X-Trace", .value = "abc" }));
-    try testing.expect(!validField(.{ .name = "x-trace", .value = "a\r\nb" }));
-    try testing.expect(!validField(.{ .name = ":", .value = "a" }));
+    try testing.expect(scan(&.{.{ .name = "x-trace", .value = "abc" }}).fields_ok);
+    try testing.expect(scan(&.{.{ .name = ":path", .value = "/a" }}).fields_ok);
+    try testing.expect(!scan(&.{.{ .name = "X-Trace", .value = "abc" }}).fields_ok);
+    try testing.expect(!scan(&.{.{ .name = "x-trace", .value = "a\r\nb" }}).fields_ok);
+    try testing.expect(!scan(&.{.{ .name = "x-trace", .value = "a\x00b" }}).fields_ok);
+    try testing.expect(!scan(&.{.{ .name = "x-trace", .value = "0123456789abcde\nf" }}).fields_ok);
+    try testing.expect(scan(&.{.{ .name = "x-trace", .value = "0123456789abcdefghij" }}).fields_ok);
+    try testing.expect(!scan(&.{.{ .name = ":", .value = "a" }}).fields_ok);
+    try testing.expect(!scan(&.{.{ .name = "", .value = "a" }}).fields_ok);
 }
 
 test "pseudo-headers are the four, once each, ahead of the regular fields, the first three present" {
@@ -2800,10 +3028,57 @@ test "pseudo-headers are the four, once each, ahead of the regular fields, the f
         .{ .name = ":path", .value = "/a" },
         .{ .name = "te", .value = "trailers" },
     };
-    try testing.expect(validPseudo(&ok));
-    try testing.expect(!validPseudo(ok[0..2]));
-    try testing.expect(!validPseudo(&.{ ok[0], ok[3], ok[1], ok[2] }));
-    try testing.expect(!validPseudo(&.{ ok[0], ok[0], ok[1], ok[2] }));
+    try testing.expect(scan(&ok).pseudo_ok);
+    try testing.expect(!scan(ok[0..2]).pseudo_ok);
+    try testing.expect(!scan(&.{ ok[0], ok[3], ok[1], ok[2] }).pseudo_ok);
+    try testing.expect(!scan(&.{ ok[0], ok[0], ok[1], ok[2] }).pseudo_ok);
+}
+
+test "every name the static table has is a field name that the scan accepts without reading it" {
+    for (hpack.static_table) |entry| {
+        try testing.expect(hpack.isStaticName(entry.name));
+        try testing.expect(reference.validField(.{ .name = entry.name, .value = "x" }));
+    }
+    // A copy of one is not the table's, and is read.
+    try testing.expect(!hpack.isStaticName("x-trace"));
+    var copy = "content-type".*;
+    try testing.expect(!hpack.isStaticName(&copy));
+    try testing.expect(scan(&.{.{ .name = &copy, .value = "x" }}).fields_ok);
+    copy[0] = 'C';
+    try testing.expect(!scan(&.{.{ .name = &copy, .value = "x" }}).fields_ok);
+}
+
+test "one pass over the fields finds what the checks that were a pass each found" {
+    const names = [_][]const u8{ ":method", ":scheme", ":path", ":authority", ":status", ":", "te", "connection", "keep-alive", "upgrade", "proxy-connection", "transfer-encoding", "content-length", "host", "x-a", "X-A", "" };
+    const values = [_][]const u8{ "GET", "POST", "/", "trailers", "gzip", "5", "", "a\nb", "a\x00", "0123456789abcdef" };
+    var prng = std.Random.DefaultPrng.init(0x5ca9);
+    const random = prng.random();
+    var list: [8]hpack.Field = undefined;
+    var copies: [8][64]u8 = undefined;
+    for (0..20_000) |_| {
+        // Mostly pseudo-headers first and regular fields after, which is the
+        // shape that gets past the first checks, with a mix now and then.
+        const n = random.uintAtMost(usize, list.len);
+        const pseudo = random.uintAtMost(usize, n);
+        for (list[0..n], 0..) |*f, i| {
+            const pool = if (i < pseudo and random.uintLessThan(usize, 8) != 0) names[0..5] else names[5..];
+            f.* = .{ .name = pool[random.uintLessThan(usize, pool.len)], .value = values[random.uintLessThan(usize, values.len)] };
+            // Names as a decoder returns them for a field sent by index (the
+            // static table's own bytes, which the scan does not read), and
+            // copies of them (which it does), so that both paths meet the
+            // reference.
+            switch (random.uintLessThan(usize, 4)) {
+                0 => f.name = hpack.static_table[random.uintLessThan(usize, hpack.static_table.len)].name,
+                1 => {
+                    const name = hpack.static_table[random.uintLessThan(usize, hpack.static_table.len)].name;
+                    @memcpy(copies[i][0..name.len], name);
+                    f.name = copies[i][0..name.len];
+                },
+                else => {},
+            }
+        }
+        try expectScanAgrees(list[0..n]);
+    }
 }
 
 const ctx_mod = @import("ctx.zig");
@@ -6318,4 +6593,75 @@ test "an event that cannot be kept for want of memory resets its stream and noth
     defer got.deinit();
     try testing.expectEqual(h2.ErrorCode.internal_error, got.rst(1).?);
     try testing.expectEqualStrings("pong", try dataOn(&got, 3));
+}
+
+/// Bytes handed over in two pieces with a stall between them, as a socket
+/// does when a client uploads slowly: what is read is refilled into a buffer
+/// of its own, which `Reader.fixed` never does.
+const Stalled = struct {
+    rest: []const u8,
+    /// Bytes handed over before the stall.
+    first: usize,
+    stall_ns: u64,
+    stalled: bool = false,
+    reader: std.Io.Reader,
+
+    fn init(source: []const u8, first: usize, stall_ns: u64, buffer: []u8) Stalled {
+        return .{
+            .rest = source,
+            .first = first,
+            .stall_ns = stall_ns,
+            .reader = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .end = 0, .seek = 0 },
+        };
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *Stalled = @alignCast(@fieldParentPtr("reader", r));
+        if (self.rest.len == 0) return error.EndOfStream;
+        var want = self.rest.len;
+        if (self.first > 0) {
+            want = self.first;
+        } else if (!self.stalled) {
+            self.stalled = true;
+            // Spun, not slept: no Engine is running to sleep on.
+            const until = bulkhead.monotonicNanos() + self.stall_ns;
+            while (bulkhead.monotonicNanos() < until) std.atomic.spinLoopHint();
+        }
+        const dest = limit.slice(try w.writableSliceGreedy(1));
+        const n = @min(@min(dest.len, want), self.rest.len);
+        @memcpy(dest[0..n], self.rest[0..n]);
+        self.rest = self.rest[n..];
+        self.first -|= n;
+        w.advance(n);
+        return n;
+    }
+};
+
+test "a call that arrives behind a slow upload is stamped when its bytes came, not when the upload began" {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    try client.headersFor(1, "/test.Echo/Say", &.{}, false);
+    const before_data = client.buf.written().len;
+    try sendPart(&client, 1, 5005, 5000, false);
+    // The next call's HEADERS arrive in the same read as the end of the
+    // upload, so its head is already buffered when the frame before is done.
+    try client.headersFor(3, "/test.Echo/Say", &.{}, false);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var buf: [32 * 1024]u8 = undefined;
+    const stall_ns = 80 * std.time.ns_per_ms;
+    var in = Stalled.init(client.buf.written(), before_data + h2.header_len + 100, stall_ns, &buf);
+    var conn = try steppedConn(&app, &in.reader, &out.writer);
+    defer conn.deinit();
+    try conn.readFrame(); // HEADERS on 1
+    try conn.readFrame(); // DATA on 1, which waits for the rest of its payload
+    try conn.readFrame(); // HEADERS on 3, whose head was buffered by that read
+
+    const age = bulkhead.monotonicNanos() - conn.last_read_ns;
+    // The stamp was taken after the stall, not before it: a `grpc-timeout`
+    // or a body limit counted from it must not already have run out.
+    try testing.expect(age < stall_ns / 2);
 }
