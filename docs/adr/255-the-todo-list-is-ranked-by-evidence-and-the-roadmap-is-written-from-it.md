@@ -1,4 +1,4 @@
-# The todo list is ranked by evidence, and the roadmap is written from it
+# The todo list is ranked by what an entry costs, and the roadmap is written from it
 
 **Status:** accepted
 **Topic:** [docs-tooling](../design/docs-tooling.md)
@@ -17,7 +17,9 @@
 
 ## Decision
 
-**The todo list is one list in four tiers, by the evidence that an entry matters, never by who has asked for it.** P0 blocks the next release (a crash or a panic a request can reach, memory read after it is freed, data lost, a wrong answer with no error, something handed to a stranger). P1 belongs in it: wrong and loud, a cost measured on a hard axis or at least 10% of a path's time, throughput or p99, a measured multiple against a framework compared, a gap in the gate, a suspicion one probe settles that would be P0 or P1 if true, or what the next stage of the roadmap's **Now** direction needs. P2 has evidence below those lines. P3 has none yet, and its closing line says what would raise it; where that is a number, the run is an entry of its own, ranked by what the number could move. A caller is evidence, but not the only evidence and not a reason to wait.
+**The todo list is one list in four tiers, by how much an entry costs the people who use nilo or the project's own development, never by who has asked for it and never by what kind of finding it is.** P0 blocks the next release (a crash or a panic a request can reach, memory read after it is freed, data lost, a wrong answer with no error, something handed to a stranger). P1 is a cost that is large and real: a trap that compiles and gives a wrong answer to the users of a common feature, a shipped feature that does not do its job, an outage a common action causes in production, a cost on a hard axis, a design many later things will be built on, or a suspicion one probe settles that would be P0 if true; its bold claim says who meets it and what happens to them. P2 is a real cost and a smaller one, work that is meant to be done, and every defect the code was checked for is at least P2. P3 is not work put off: it is something important that may cost users with no evidence yet that it does, and its closing line names the sign that would raise it. A caller is evidence, but not the only evidence and not a reason to wait.
+
+**A small thing nobody needs now is not on the list.** It is deleted, not deferred: git keeps the text and `bench/result/` keeps any number behind it, and it is written again when the evidence that it is needed arrives. A defect is never deleted this way.
 
 **What an entry is waiting for moves from its section to its closing line.** `Needs:` when the shape of the work is known, `What would settle it:` for a question or a number, and an entry waiting on another repository names the pin it was last checked at there. Inside a tier entries sit under their module, which keeps what made the module headings worth having: two entries under different modules touch no file in common ([ADR 038](./038-a-module-sits-where-the-loop-puts-it.md)).
 
@@ -25,12 +27,13 @@
 
 **The roadmap groups its directions by when**: **Now** for the direction being built, **Alongside** for work no stage depends on and that is picked up between stages, **Next** and **Later**. It opens with a paragraph on where the framework and the toolkit are going, and makes no promise of 1.0.
 
-**The list is ranked again at each release, and a build step holds it.** The todo list carries `**Ranked at X.**`, and `docs-check` refuses it once `build.zig.zon` names another version, which cutting a release does. The ranking is redone against the numbers `bench/release.py` has just produced; a P3 a release has left exactly where it was is given a reason to stay, or moves to `decided.md` with the reason it is not coming.
+**The list is ranked again at each release, and a build step holds it.** The todo list carries `**Ranked at X.**`, and `docs-check` refuses it once `build.zig.zon` names another version, which cutting a release does. The ranking is redone against the numbers `bench/release.py` has just produced; an entry no longer needed is deleted unless it is a defect, and a P3 a release has left exactly where it was is given a reason to stay or deleted. **A direction's place in the roadmap follows its entries' tiers**: one with a P1 entry is in **Now** or **Next**, **Next** is ordered by P1 entries and then P2, and one with nothing above P3 is in **Later**.
 
 **An anchor into `todo.md`, `roadmap.md`, `decided.md`, `history.md` and `risks.md` is checked as one into a page is.** Their heads and prose are not a page's and are not held to ADR 236's five lines.
 
 ## What was rejected
 
+- **Ranking by the kind of evidence an entry had, which is what this ADR first decided.** P1 was "wrong and loud", "a gap in the gate" or "a suspicion one probe settles", and P2 included "a gap every user of a feature meets". Read back at 0.7.0, the four P1 entries were a looser OpenAPI document, a test client that accepted any head, an untested SQLite contention path and a refactor, while path params matched by position (two ids swapped with no error), a middleware that fails open and a JSON log format that is not JSON sat in P2, and two probes that would each be P0 if true (a `sql.violated` that answers wrongly) sat in P2 beside them. The tiers measured how a finding was proved, not what it did to anybody. P3 had become a place to put work for later: 50 entries, most waiting for a caller nobody expected, which is the backlog this ADR's first version set out to stop. The re-rank under the rule above put 9 entries in P1, 76 in P2 and 25 in P3, and deleted 62.
 - **A heading per todo entry, so the roadmap could link each one.** It gives every entry an anchor for free and puts about 140 headings into one file's outline, which then says no more than the bold lines already do. A `Direction:` line and a generated list hold the same link with one source and no new headings.
 - **Keeping the sections and adding a priority inside each.** The sections are what hid the HPACK row: a P1 under "waiting for a caller" still reads as waiting. What an entry needs is still on the record, on its closing line, where it does not decide where the entry sits.
 - **The roadmap listing its entries by hand, with links.** A link to an entry that has shipped is caught only if somebody runs a check on it, and a hand-kept list is the reference's heading list again, which lost four headings before `docs-index` wrote it ([ADR 236](./236-a-doc-page-says-what-it-is-and-where-its-other-layers-are.md)).
@@ -38,7 +41,7 @@
 
 ## What it costs
 
-Nothing a dependent builds: `docs-check` and `docs-index` are this repository's steps. The steps read five more files and walk the todo list once, which does not show beside the walk of every Markdown file in the repository they already make. Ranking 141 entries is judgment at the margins of each tier, and the first ranking was one person's; [rule 9 of the todo list](../todo.md#how-this-file-is-written) is where a wrong rank is corrected.
+Nothing a dependent builds: `docs-check` and `docs-index` are this repository's steps. The steps read five more files and walk the todo list once, which does not show beside the walk of every Markdown file in the repository they already make. Ranking by cost is judgment at the margins of each tier, more than ranking by the kind of evidence was, which is why a P1's bold claim has to say who meets it and what happens to them; the rankings so far were one person's, and [rule 9 of the todo list](../todo.md#how-this-file-is-written) is where a wrong rank is corrected.
 
 ## Consequences
 

@@ -93,7 +93,7 @@ Documentation is part of the change, not a follow-up:
 | something you measured, or a guess that turned out wrong | [`docs/history.md`](./docs/history.md) |
 | a benchmark you ran | [`bench/result/`](./bench/result/), one file an area |
 | a direction the framework should take, larger than one change | [`docs/roadmap.md`](./docs/roadmap.md) |
-| something left open: a defect, a decision, a question, a measurement, a fix upstream | an entry in [`docs/todo.md`](./docs/todo.md), in the tier its evidence puts it, with a `Direction:` line if it serves a direction of the roadmap |
+| something left open: a defect, a decision, a question, a measurement, a fix upstream | an entry in [`docs/todo.md`](./docs/todo.md), in the tier its cost puts it (or nowhere, if it is small and not needed now), with a `Direction:` line if it serves a direction of the roadmap |
 | something now built | delete its entry from [`docs/todo.md`](./docs/todo.md), and from [`docs/roadmap.md`](./docs/roadmap.md) when it closes a direction |
 | a question answered, or a feature refused with its reason | [`docs/decided.md`](./docs/decided.md), and out of the todo list |
 | something a user has to change | [`CHANGELOG.md`](./CHANGELOG.md), under `## Unreleased` |

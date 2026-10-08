@@ -8,14 +8,16 @@ What this document is measured against is [ADR 014](./adr/014-what-nilo-borrows-
 
 ## How to read this
 
-**One list in four tiers, by the evidence that an entry matters, never by who has asked for it.** A caller is evidence, but not the only evidence and not a reason to wait: an entry whose cost is on the record is ranked by the cost, and nothing here sits still because nobody has written in about it.
+**One list in four tiers, by how much an entry costs the people who use nilo or the project's own development, never by who has asked for it and never by what kind of finding it is.** A narrow defect a probe reproduced is not above a trap every user meets because it is easier to prove. A caller is evidence, but not the only evidence and not a reason to wait: an entry whose cost is on the record is ranked by the cost, and nothing here sits still because nobody has written in about it.
 
 | Tier | What is in it |
 |---|---|
 | [**P0**](#p0-blocks-the-next-release) | blocks the next release: a crash or a panic a request can reach, memory read after it is freed, data lost, a wrong answer with no error, or something handed to a stranger |
-| [**P1**](#p1-belongs-in-the-next-release) | belongs in the next release: wrong and loud (something that works refused, a migration that fails, a refusal naming the wrong cause); a cost measured on a hard axis, or at least 10% of a path's time, throughput or p99, or a measured multiple against a framework compared; a gap in the gate; a suspicion that one probe settles and that would be P0 or P1 if true; or what the next stage of the roadmap's **Now** direction needs |
-| [**P2**](#p2-evidence-it-matters) | evidence that it matters, below those lines: a cost measured under them, a gap every user of a feature meets, a comment or page that says what the code does not do, code to take out, or a number that would move a decision somebody makes today |
-| [**P3**](#p3-no-evidence-yet) | no evidence yet that it matters. Its closing line says what would raise it; where that is a number, the run is an entry of its own, ranked by what the number could move |
+| [**P1**](#p1-a-large-cost-and-a-real-one) | a cost that is large and real, to users or to the project: a trap that compiles and gives a wrong answer to the users of a common feature, a shipped feature that does not do its job, an outage a common action causes in production, a cost on a hard axis, a design many later things will be built on ([principle 5](../CLAUDE.md#guiding-principles)), or a suspicion one probe settles that would be P0 if true. Its bold claim says who meets it and what happens to them |
+| [**P2**](#p2-a-real-cost-and-a-smaller-one) | a real cost, and a smaller one: fewer users meet it, a way round it is on record, or it is below P1's line. It is work that is meant to be done. **Every defect the code was checked for is at least here**, however small, because a defect taken off the list is found again by the next audit |
+| [**P3**](#p3-what-may-cost-users-kept-in-view) | not work put off for later: something important that may cost users and has no evidence yet that it does, kept so it is not forgotten. Its closing line names the sign that would raise it. A feature somebody might like and a number nobody would act on are not P3 |
+
+**A small thing nobody needs now is not on the list at all**, in any tier. It is deleted rather than deferred: git keeps the text, [`bench/result/`](../bench/result/) keeps any number behind it, and when it is needed it is written again with the evidence that made it needed. A defect is never one of these.
 
 Inside a tier, entries sit under their module, because **two modules touch no file in common** ([ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)): two entries under different modules can be worked at the same time, by two people or by one person on two days. Every entry closes with what it needs: `Needs:` when the shape of the work is known and something is missing (the fix, a decision, a design, somebody else's commit), `What would settle it:` when the entry is a question or a number. **A box** means a benchmark machine rather than the shared two-core vCPU most of the numbers so far were taken on; **an afternoon** is a run on the machine at hand.
 
@@ -23,46 +25,87 @@ Inside a tier, entries sit under their module, because **two modules touch no fi
 
 **An entry waiting on somebody else's repository is the line to distrust.** This repository has been wrong about a blocker seven times, and each time the code it was waiting for already did the thing ([history](./history.md)): the latest was the pg.zig pin, whose two commits had reached lalinsky's `master` while the pull request that asked for them sat open. Nothing downstream ever re-tests a blocker, so each such entry names the pin it was last checked at, and is re-tested before it is repeated.
 
-**Ranked at 0.7.0.** The tiers were last set against the code and the numbers at that version, and [rule 9](#how-this-file-is-written) says when they are set again.
-
-**The next release needs Zig 0.17, and 0.7.0 is the last on 0.16.** The latest stable release only, on one branch: the people this is aimed at download Zig, run `zig build`, and give up if it fails, and they are not going to go hunting for the right branch. Every new Zig release brings a few awkward weeks, made worse by zio following a branch-per-version pattern too: at 0.17 its tags stayed on the 0.16 line and only `main` built.
+**Ranked at 0.7.0.** The tiers were last set against the code and the numbers at that version, by what each entry costs ([ADR 255](./adr/255-the-todo-list-is-ranked-by-evidence-and-the-roadmap-is-written-from-it.md)), and [rule 9](#how-this-file-is-written) says when they are set again.
 
 ---
 
 ## P0: blocks the next release
 
-Nothing is open at this tier.
+### `nilo_fetch`
+
+**A call that sends a credential and is redirected to another host sends the credential there too.** `get`, `postJson` and every whole-body call, on a `Target` as much as on the client, follow up to three redirects (`fetch/fetch.zig:485`), and `std.http.Client` strips only its `privileged_headers` on a redirect to another domain. `nilo_fetch` never uses that list: a target's `authorization` goes in std's own slot and a call's `Authorization` line in `extra_headers`, and both are written again on every hop. **Reproduced** at `8f45fe0` with two `Canned` servers: the first answers `302` to `http://localhost:<port>/`, and the second receives `Authorization: Bearer …` as sent. Read in the code and not run: the same hop from `https://` to `http://` is followed, so the token also crosses in clear text. reqwest drops `authorization`, `cookie`, `proxy-authorization` and `www-authenticate` when the host or port changes, the Fetch standard Node's `fetch` follows drops `authorization` on any change of origin, and Go's `net/http` drops it outside the same domain and its subdomains. A third-party API that answers with a redirect to a file host or a CDN is all it takes.
+
+**Needs:** the redirect followed by `nilo_fetch` rather than by std, so each hop is compared with the last: a rule for what counts as another place (the origin, as reqwest and Fetch have it, which is the safe reading; std's `sameParentDomain` is Go's looser one), the credential headers dropped past it, `https` to `http` refused, a probe that fails on the code before it in both modes, and `Response` saying where the call ended, as `Exchange.Head.redirected` already does (reqwest's `Response::url`).
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
 
 ---
 
-## P1: belongs in the next release
+## P1: a large cost, and a real one
+
+### `nilo_job`
+
+**One cancelled child future stops every worker, and the queue stays stopped until the process restarts.** A run that returns `error.Canceled`, which is what a job gets by `try`ing a child future it cancelled, is read as the server going (`job/job.zig:1020`): the row is released and `stopping` is set for every worker (`:1043`), so a job that races two calls and cancels the loser halts the whole queue, and nothing tells it apart from a shutdown.
+
+**Needs:** `going` read from the worker's own cancellation only, with a test whose job cancels a child while a second job still runs after it.
 
 ### `nilo_sql`
 
-**The SQLite half has no live test against contention.** The Wire's own tests run one process, so the case the reader and writer split exists for has a design and no test: two writers meeting, `busy_timeout` expiring, `Locked` coming back.
+**An index on a big live Postgres table cannot be built without blocking its writes.** Every version is one transaction, and Postgres refuses `CREATE INDEX CONCURRENTLY` inside one, so a generated `create_index` on an existing table takes a lock that makes every write to it wait until the build finishes. On a table of a few thousand rows that is milliseconds; on one of fifty million it is an outage. The step's `why` says so today, and that is a warning rather than a way out. The way out is a step that runs outside its version's transaction and is recorded in the ledger on its own, because a `CONCURRENTLY` build that fails halfway leaves an invalid index behind that has to be dropped before the next attempt.
 
-**Needs:** a harness — a build step that stands up a second writer, which here is a second process on the same file rather than a socket.
+**Needs:** a decision on how a step outside the transaction is recorded when the version around it fails. A table that size to test it on is one the test generates.
+
+**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
+
+**Adding a column with a foreign key to an existing table stops `db generate`, and the only way past it is editing `snapshot.zon` by hand.** Both dialects refuse it as a Problem here, though `addMissingColumns` does it: a new column is all NULL, so `ADD COLUMN` then `ADD CONSTRAINT … NOT VALID` cannot fail on old rows. While a Problem stands, `generate` writes nothing, and the step it suggests does not move the snapshot, so the same Problem comes back (`migrations.zig:394`, `migrate.zig:1704`). The Problem's sentence that SQLite needs a rebuild is wrong for a new column, which `ADD COLUMN … REFERENCES` takes.
+
+**Needs:** the new column's key written by the diff, and a way for an accepted Problem to be recorded in the snapshot.
+
+**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
+
+**Whether a failed statement's Problem can be overwritten before it is recorded, which would make `sql.violated` answer false for a unique that was hit.** `told` runs before the deferred `drain` (`db.zig:3243` against `:3252`, and the same in `fillScalar`, `only` and `rawTotalBehind`), and a drain can suspend: Postgres reads up to a megabyte off the socket, and `pool.release` may dial. Another fiber on the same thread can then overwrite `recent`, and `sql.violated` answers false for a unique that was hit. ADR 117 rests on there being no suspension point there.
+
+**What would settle it:** a probe with two fibers on one executor, or `told` moved after the drain, which makes the question moot.
+
+**Whether SQLite's `Problem` can carry the previous statement's message, which would make `sql.violated` true for a constraint that was not hit.** `intsFit` and `floatsKept` fail before SQLite is called (`sqlite.zig:783`), and `said` then reads `lastError()` (`:909`), which after a reset holds the last statement's error. An INSERT refused on `users.email` followed on the writer by an oversized `u64` would make `sql.violated(c, User, .{.email})` true.
+
+**What would settle it:** a probe of that pair, or `said` reading `errmsg` only for an error that came from SQLite.
 
 ### `nilo_http`
 
-**The OpenAPI document is looser than the server.** An unsigned integer gets `minimum: 0` and no `maximum`, although a `u8` refuses 256 with a 400, and a field with a default or a `?T` is marked not required in a response schema, although the writer always sends it, so a generated client null-checks every one.
+**`Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.** The store a route is given is a `cache.Space` in memory ([ADR 155](./adr/155-a-request-answered-once-is-answered-the-same-way-again.md)), and a payment retried during a rolling deploy is charged twice with nothing logged, which is the one thing the header exists to prevent. `Idempotent` asks its store for `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held` and nothing else (`http/idempotent.zig:268`), so a second store needs no change to it. A table in the database the program already has is the shape [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) chose for jobs, for the same reason.
 
-**Needs:** `maximum` taken from the type, and `required` in a response schema meaning "always written".
+**Needs:** a store over a `Db` type the caller hands in, the way `job.Table(Db)` is, costing its round trip on `Idempotent` routes only, and [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)'s answer to which module it lives in.
 
-**The test `Client` accepts a request head of any size.** Its reader is `Reader.fixed` over the whole request, and `readHead` refuses a head only once it fills the buffer, so a test sending a large cookie or many headers passes where a server answers 431. Its cookie jar also keeps a cookie deleted by `Expires` alone and ignores the `__Host-` and `__Secure-` rules a browser applies.
+**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
 
-**Needs:** the test reader given the server's read-buffer size, and the jar honouring a past `Expires` and the two prefixes.
+**Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.** `fn member(id: u32, org: u32)` on `/orgs/:org/members/:id` compiles (`http/typed.zig:33`): the check counts params and types each one, and Zig keeps no argument names to compare. A tenant-scoped query then runs with the two ids swapped. chi's `URLParam(r, "id")` and Express's `req.params.id` are by name, so this is the first habit a migrant brings. A resolver cannot see path params at all ([ADR 015](./adr/015-resolved-values-are-declared-by-their-type.md)), so a middleware that loads the row for `:id` falls back to `c.param("id")`, with nothing checking that the route has one.
 
-**One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is now one comptime rule (`http/field.zig`), and a number described in a query and not in JSON is still open. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
+**Needs:** `Path(struct { org: u32, id: u32 })`, read the way `Query(T)` is, its field names held against the pattern while compiling and allowed as a resolver's argument; the positional form kept, at no cost at run time.
 
-**Needs:** the shape of each shared piece decided — one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the prefix matcher next.
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
 
-**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
+**A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.** `Middleware = *const fn (*Ctx, Next)` (`http/middleware.zig:59`, [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md)). nilo's own middleware works round it three ways, `cors.reading(&origins)`, `csrf.reading` and `maxBody(&limit)`, each pointing at a container-level `var`. A user's auth middleware gets its key store from `c.service(T)`, which is `?T` (`http/ctx.zig:376`), so `orelse return next.run(c)` lets every request through, and the startup check that names a missing service reads handlers and resolvers, not middleware. Go's `func Auth(db *DB) func(http.Handler) http.Handler` and a Fastify plugin's options are the habit.
 
+**Needs:** a middleware with typed arguments after `Next`, wrapped by `app.use` the way the typed layer wraps a handler, its services checked at `listen()`; after that the three `reading` forms can be services.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.** `logger` builds a line and hands it to `std.log` (`http/logger.zig:116`), and Zig 0.17's default `logFn` writes the level and `: ` first, so `.format = .json` reaches stderr as `info: {"method":…}`; nothing in the repository sets a `logFn`. A handler's `std.log.warn` carries no request id unless it writes `c.requestId()` itself, and there is no way to leave `/healthz` out of the access log (asked for in `docs/input_from_actix.md`). slog's `With` and pino's child logger are the habit, and a log shipper that parses JSON drops every line.
+
+**Needs:** a `nilo.logFn` for `std_options` that writes the time and level in the chosen format and the request id from the fiber slot `fail` already uses, and a list of paths the logger skips.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A file input left empty in a browser arrives as a file, so `?Upload = null` is never null from a browser, and an edit form that keeps the old file overwrites it with nothing.** HTML's form encoding sends a file input with nothing chosen as a part with `filename=""` and no bytes, and `fill` takes any part with a `filename` as the `Upload` (`http/form.zig:181`), which the test "a file field left empty by the browser is still a file" holds as correct. So `?Upload = null` is null only from curl, a required `Upload` passes with 0 bytes, and a profile form whose handler runs `if (incoming.value.avatar) |a| try a.saveTo(dir, name)` replaces the avatar with an empty file each time it is saved without a new one. `docs/guide/forms.md:104` teaches the opposite. Go's `ReadForm` stores a part with an empty `filename` as a text value, so `FormFile` answers `ErrMissingFile` and Gin, Echo and Fiber read the input as absent; actix-multipart, Rocket and poem hand over an empty file, the same trap in Rust (found by reading each one's source).
+
+**Needs:** a part with an empty `filename` and no bytes read as no file (null for `?Upload`, the "missing the file" 400 for `Upload`), the test at `http/form.zig:1137` turned round, the guide's sentence kept true, and a `CHANGELOG.md` line for a handler that relied on the empty `Upload`.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
 
 ---
 
-## P2: evidence it matters
+## P2: a real cost, and a smaller one
 
 ### Every module
 
@@ -71,10 +114,6 @@ Nothing is open at this tier.
 **Needs:** the read-back, one module at a time, and a decision on each name the code and the page disagree about: document it, or take it out of the surface.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
-
-**Some ADRs only correct an older one.** [ADR 221](./adr/221-an-adr-is-the-rule-in-force-and-a-topic-page-joins-them.md) makes a revision an edit to the ADR it revises, and the ADRs numbered before that rule still include corrections filed under a number of their own, so the rule in force is read in two files.
-
-**Needs:** which ADRs are corrections rather than decisions, each folded into the one it corrects with its reasoning moved under "What was rejected", and the numbers kept as pointers so no link breaks.
 
 ### `nilo_config`
 
@@ -90,17 +129,9 @@ Nothing is open at this tier.
 
 ### `nilo_cache`
 
-**The shard lock spins on a write and never backs off.** `while (l.held.swap(true, .acquire))` (`store.zig:371`) bounces the line between waiting cores, and a holder preempted by the OS leaves the waiters burning their timeslice; the module's own soak tests run more threads than cores. The refusal path also takes the lock only to bump an atomic counter (`store.zig:1107`). Not measured.
-
-**Needs:** test-and-test-and-set with a yield after some spins, the refusal's lock dropped, and both measured under contention.
-
 **Small things that say the wrong thing.** `open` answers `error.TooSmall` when a shard would exceed 4 GiB (`store.zig:890`); `flat.zig:44`, `space.zig:107` and the `cache_value_over_the_ceiling` refusal still say a bucket's four ways are a cache line, where it is eight; `registerSpace` is documented as not thread-safe while the guide calls `Space.open` from handlers, so two at once race on `n_spaces`.
 
 **Needs:** each corrected, the refusal's `.says` with its text, and `registerSpace` made safe to call twice for one name.
-
-**Counting a read costs 4.2% on eight threads and 7.0% on one.** The increment has to be atomic now that a read holds no lock, and there is no cheaper exact version: per-thread counter lanes were built with a thread-local and with a lane hashed off the stack address, and measured 1.5% better on eight threads and 3% worse on one ([`bench/result/cache.md`](../bench/result/cache.md)). quick_cache's answer is to put its counters behind a cargo feature that is off by default. Doing the same here is a build flag and a documented default, not a measurement.
-
-**Needs:** whether `Stats` may be absent.
 
 ### `nilo_fetch`
 
@@ -110,25 +141,52 @@ Nothing is open at this tier.
 
 **Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
 
-**What an outbound call costs through TLS is read off buffer sizes, not measured.** 59,151 bytes per HTTPS connection is std's number read out of its buffer sizes, 3.6× plain HTTP if it holds.
+**A form-encoded body, which every OAuth token endpoint takes, is written by hand.** The code exchange and the client-credentials grant are `application/x-www-form-urlencoded` (RFC 6749 §4.1.3, §4.4.2), and `nilo_fetch` has `postJson` and `withQuery` but no form body, so a caller encodes each field and writes the `content-type` line, the work `postJson` was added to take away ([ADR 061](./adr/061-a-fitting-borrows-the-loop.md)). `client_secret_basic` beside it has a trap of its own: the id and the secret are form-encoded before they are joined and base64-encoded (RFC 6749 §2.3.1), and a secret with a `+` or a `:` in it fails only at the provider. reqwest has `.form()` and `.basic_auth()`, Go `url.Values` and `SetBasicAuth`. The [sign-in entry](#p2-a-real-cost-and-a-smaller-one) under `nilo_http` would be built on both.
 
-**What would settle it:** the measurement beside `zig build smoke-tls -Dnetwork`, which already reaches a real endpoint. An afternoon.
+**Needs:** `postForm` and `putForm` on the client and on `Target`, written by `queryLen` and `queryWrite` in one allocation sized exactly, with `withQuery`'s field types and Refusals; and a basic-auth value built the RFC's way.
 
-**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
+**A call cannot go through an egress proxy or trust a private certificate authority, though `std.http.Client` does both.** std has `http_proxy`, `https_proxy` and `ca_bundle` on the client; `Client.Settings` names none of them, and the way round is to reach into `client.inner` and `client.fresh` by hand, which nothing documents. A service in a network whose only way out is a proxy, or calling an internal one whose certificate a company CA signed, cannot be written without it. std reads no `NO_PROXY`. reqwest has `Proxy` with a no-proxy list and `add_root_certificate`.
+
+**Needs:** `Settings.proxy`, given explicitly rather than read from the environment by default, with a list of hosts that skip it; `Settings.roots`, the system's or a bundle the caller loaded; both set on both std clients; and the binary cost in ADR 017's running total.
+
+**A call worth retrying is retried by a loop each caller writes, and the loop the guide teaches retries a POST.** `nilo_fetch` refuses a retry policy because how many times and how long between are facts about the other service (`fetch/fetch.zig:83`), and the guide's answer is three lines: a loop, a `nilo.sleep`, and a `switch` on the errors worth another try (`docs/guide/fetch.md:361`). Those three lines are where the traps are. A POST sent again charges twice unless it carries an `Idempotency-Key`; a sleep with no jitter sends every caller back at the same instant; `Retry-After` is read and capped by hand or not at all; and a loop with no budget turns a service's bad minute into three times its load, the thundering herd the refusal names as its reason. The numbers are the caller's, and the mechanism is the same for everybody: tower's retry budget allows retries up to a fraction of recent calls (20% by default) and the AWS SDKs keep a retry quota for the same purpose, go-retryablehttp reads `Retry-After`, and Stripe's own clients put an `Idempotency-Key` on a POST before they retry it. `nilo_s3` has no retry either, so its `Throttled` reaches every caller where an AWS SDK tries three times. No ADR holds the refusal; it is in the module's header, the guide and the reference.
+
+**Needs:** a `.retry` on `fetch.Target`'s options with the caller's numbers (times, a backoff with jitter, a budget), only idempotent methods retried unless the call carries an `Idempotency-Key` or the type says how to make one, `Retry-After` read and capped, a `.stream` body under a `.retry` refused while compiling, an ADR saying which half is the caller's and which is the mechanism's, `nilo_s3`'s `Throttled` and `Unavailable` put through it, and one `Backoff` shared with `job.Retry`, which for two sibling modules means [ADR 057](./adr/057-percent-is-needed-by-two-layers.md)'s answer to whether it belongs in `nilo_core`.
+
+**Direction:** [A call to another service survives that service's bad minute](./roadmap.md#a-call-to-another-service-survives-that-services-bad-minute)
 
 ### `nilo_job`
 
-**Inputs nothing refuses.** `every(0)` makes a worker busy-loop and `every` of a huge period overflows; `Backoff.exponential` with `from_ms = 0` stays at zero and has no jitter, so a downstream outage retries every row at the same instant; one `Canceled` propagated from a child future sets `stopping` for every worker (`job.zig:846`); dead rows are never purged from `Memory`, which fills up and answers `QueueFull`.
 
-**Needs:** `every(0)` and `from_ms = 0` refused at compile time with a refusal file each, a jitter option, a cancelled child told apart from shutdown, and a purge for `Memory`'s dead rows.
+**Inputs nothing refuses.** `every(0)` makes a worker busy-loop and `every` of a huge period overflows; `Backoff.exponential` with `from_ms = 0` stays at zero and has no jitter, so a downstream outage retries every row at the same instant; dead rows are never purged from `Memory`, which fills up and answers `QueueFull`, and `Table.sweep` deletes `done` rows only (`job/table.zig:350`), so a `Table`'s dead rows stay for good.
 
-**A schedule is UTC.** `0 3 * * *` is three in the morning in Greenwich, and a program in Jakarta writes `0 20 * * *` with a comment. A time zone is a table of rules that changes twice a year and a dependency to carry it.
+**Needs:** `every(0)` and `from_ms = 0` refused at compile time with a refusal file each, a jitter option (the `Backoff` the `nilo_fetch` retry entry shares), a purge for `Memory`'s dead rows, and a `sweep` that can take dead rows older than a moment.
 
-**Needs:** tzdata without a dependency: the rules for the zones a program names, embedded while compiling, priced on the binary axis.
+**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
 
-**A bulk enqueue may slow every claim, because the claim sorts the whole due backlog.** `ORDER BY priority, run_at LIMIT 1` over `(state, run_at)` sorts every due row; probing each priority on an index of `(state, priority, run_at)` would not, and [ADR 214](./adr/214-a-job-says-how-urgent-it-is.md)'s finding that the wide index is slower was for that one ordering, not for one `ORDER BY run_at LIMIT 1` a priority. The `nilo_job` audit at `1738286` ran both once in a scratch container and wrote nothing down, and `SKIP LOCKED` is refused inside a `UNION ALL`, so the shape is up to three statements or a CTE a priority.
+**A schedule is UTC.** `0 3 * * *` is three in the morning in Greenwich, and a program in Jakarta writes `0 20 * * *` with a comment. A time zone is a table of rules that changes twice a year and a dependency to carry it. A zone with daylight saving also has an hour each year that never happens and one that happens twice, so `0 2 * * *` in `Europe/Berlin` needs an answer to both; Vixie cron runs a skipped tick right after the jump and a repeated one once. Go embeds the whole database with `time/tzdata` (about 450 KB), and Rust's `chrono-tz` compiles it in with a filter for the zones a program names.
 
-**What would settle it:** both shapes on Postgres at a backlog of 1, 50k and 200k due rows beside 300k done ones, into [`job.md`](../bench/result/job.md), and ADR 214 edited in place with the result. An afternoon.
+**Needs:** tzdata without a dependency: the rules for the zones a program names, embedded while compiling, priced on the binary axis; and the skipped and repeated hour answered by a declaration a kind in such a zone must make, the way `overlap` and `missed` are ([ADR 161](./adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
+
+**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
+
+**A job whose work is a write to the same database cannot commit the write and its `done` together, so a crash between the two does the work again.** Delivery is at least once, and `done` is its own statement after `run` returns (`job/table.zig:227`). A run that inserts a row and loses its process before `done` is claimed again when its lease passes and inserts the row a second time; the reference's answer is a `run` safe to call twice, which for a write means a unique key of the caller's own on every table a job touches. river closes it for this case with `JobCompleteTx`: the row is marked done inside the transaction that does the work, so both commit or neither does. The fence it needs is already here: `done` matches `state = 'running' AND attempts = ?` (`:221`), so a worker whose lease lapsed would find its `done` matching nothing and roll back rather than commit a second copy. What it costs is a pool connection held for the whole of `run`.
+
+**Needs:** a `run` that asks for a `*Db.Tx` given one, with the row's `done` written in it before the commit and a `done` that matches nothing rolling it back; a Refusal on `job.Memory`; a failed `run` rolled back and then retried as now; the connection held for the length of `run` stated in [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md); and a live test in which a lease lapses mid-run and the late transaction commits nothing.
+
+**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
+
+**A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.** `workers` bounds the whole queue (`job.Settings`), and the reference's answer for a limit per kind is a `nilo.Gate` inside `run`, which waits while holding its worker: four rows of a kind gated to one leave three workers parked on the Gate and the other kinds unserved. river gives each queue its own `MaxWorkers`, and asynq weights its queues. The claim already names the kinds it takes (`kind IN (…)`, [ADR 215](./adr/215-a-worker-claims-only-what-it-can-run.md)), so a kind at its limit can be left out of the claim rather than taken and parked.
+
+**Needs:** `pub const max_running` on a kind, held per process by leaving a full kind out of the claim; on SQLite, where the kinds are one parameter each and their count is fixed while compiling, a full kind sent as a name no row has; and whether a limit across instances is wanted, which is a count inside the claim and costs every claim.
+
+**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
+
+**`within` remembers a push in one process, so the same push sent to two instances inside the window runs twice.** `.within` takes any value with `putIfAbsent` and `del` (`job/job.zig:481`), and the only one that exists is a `cache.Space`, which is per instance. `unique` still holds across instances while the first row is queued or running, because it is an index in the table; the window after it finishes is the part that does not, and a rolling deploy is two instances. river keeps that window in the table (`UniqueOpts.ByPeriod`), and asynq in Redis.
+
+**Needs:** the store the `Idempotent` entry builds over the caller's `Db`, which has the two calls `within` asks for, or the unique key kept past `done` in `nilo_jobs` for a kind that asks, whichever that store's design picks.
+
+**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
 
 ### `nilo_s3`
 
@@ -145,6 +203,10 @@ Nothing is open at this tier.
 **Needs:** every `x-amz-*` header on the wire required in `SignedHeaders`, the harness bounded, and the stale text corrected.
 
 ### `nilo_sql`
+
+**The SQLite half has no live test against contention.** The Wire's own tests run one process, so the case the reader and writer split exists for has a design and no test: two writers meeting, `busy_timeout` expiring, `Locked` coming back.
+
+**Needs:** a harness — a build step that stands up a second writer, which here is a second process on the same file rather than a socket.
 
 **A `Date` read through `db.raw` or a composed statement checks only that the value is four bytes wide.** A typed read knows its column is a `date` from the schema, but `tx.raw(Row, "SELECT n FROM t")` with `n int4` into a `Date` field reads the integer as a count of days since 2000, and says nothing. Checking the column's type OID (1082) would refuse it, and would also refuse a domain over `date`, which reaches the client under its own OID.
 
@@ -166,12 +228,6 @@ Nothing is open at this tier.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
-**An index on a big live Postgres table cannot be built without blocking its writes.** Every version is one transaction, and Postgres refuses `CREATE INDEX CONCURRENTLY` inside one, so a generated `create_index` on an existing table takes a lock that makes every write to it wait until the build finishes. On a table of a few thousand rows that is milliseconds; on one of fifty million it is an outage. The step's `why` says so today, and that is a warning rather than a way out. The way out is a step that runs outside its version's transaction and is recorded in the ledger on its own, because a `CONCURRENTLY` build that fails halfway leaves an invalid index behind that has to be dropped before the next attempt.
-
-**Needs:** a decision on how a step outside the transaction is recorded when the version around it fails. A table that size to test it on is one the test generates.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
 **Nothing reports how the pool is doing.** `app.metrics` counts requests, statuses and durations ([ADR 079](./adr/079-the-route-table-is-the-registry.md)); a `Db` counts nothing. Connections in use, how long a caller waited for one, statements run, and how many the pool threw away are the questions an operator asks first when a service slows down, and the last of them is already reachable — `postgres.dirtyConnections()` parses it out of pg.zig's own metrics text and is marked test-facing because nothing else reveals it.
 
 **Needs:** a shape that does not become a second metrics registry. `app.metrics` is the shape and a `Db` is a Service, which knows nothing about an App — so where the numbers meet is the question, not how to count them.
@@ -179,10 +235,6 @@ Nothing is open at this tier.
 **A Row over an attached SQLite database has nowhere to `ATTACH` it.** A schema in `nilo_table` means an attached database there ([ADR 055](./adr/055-the-second-dialect-is-the-test-of-the-seam.md)), and `ATTACH` is per connection — but the Wire holds a writer and a pool of readers, opens them itself, and `db.exec("ATTACH …")` reaches the writer alone. The introspection then asks a reader that has never heard the name, which is how the test for the schema-qualified `sqlite_master` found this: it attaches on every `conns[i].handle` by hand, and a program cannot.
 
 **Needs:** a statement list run on every connection at open — which is also where a `PRAGMA` of the caller's own would go.
-
-**A pool-wide `statement_timeout` rides in the startup packet, and nothing upstream blocks it any more.** It is the only way a plain `db.select` gets a deadline without a second round trip ([ADR 043](./adr/043-a-deadline-needs-a-connection-you-hold.md)). The pin has sent `startup_parameters` since lalinsky's `2907296`, and a URL's `options=` already rides on it ([ADR 239](./adr/239-a-live-test-skips-on-a-laptop-and-fails-on-ci.md)), so what is left is `Db.Opts.statement_timeout_ms` handed to the same map, for a program that sets its ceiling in code rather than in the URL.
-
-**Needs:** a live test that a statement past the number comes back `error.TimedOut` on a connection nobody set anything on, and that a reconnect sends it again.
 
 **A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.** The migrator compares a unique `ignoring_case` and not its operator class, so an existing database never gets the new index and its prefix search still scans on Postgres.
 
@@ -236,12 +288,6 @@ Nothing is open at this tier.
 
 **Needs:** a refusal on SQLite, or the SQLite column ordered by the enum's position.
 
-**A Problem from the diff has no way out but editing `snapshot.zon` by hand.** While one stands, `generate` writes nothing, and the step it suggests does not move the snapshot, so the same Problem comes back (`migrations.zig:394`, `migrate.zig:1704`). The common case is a new column with a foreign key to an existing table, which both dialects refuse here and `addMissingColumns` does; a new column is all NULL, so `ADD COLUMN` then `ADD CONSTRAINT … NOT VALID` cannot fail on old rows. The Problem's sentence that SQLite needs a rebuild is wrong for a new column, which `ADD COLUMN … REFERENCES` takes.
-
-**Needs:** the new column's key written by the diff, and a way for an accepted Problem to be recorded in the snapshot.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
 **Case folding outside ASCII differs between the two databases.** SQLite's `LIKE` and `NOCASE` fold ASCII only (`dialect.zig:1110`, `:1199`); Postgres's `ILIKE` and `lower()` fold Unicode (`:613`). `.ieq = "ÉLISE@x.id"` matches `élise@x.id` on Postgres and not on SQLite, and a `NOCASE` unique keeps both. ADR 055 asks for a difference like this to be refused or written down, and the reference says only that SQLite folds ASCII.
 
 **Needs:** whether the SQLite half is refused for non-ASCII text or the difference is written on both pages.
@@ -258,39 +304,25 @@ Nothing is open at this tier.
 
 **Needs:** a yes.
 
-**Declarations that nothing uses.** `table.columnList` (`table.zig:2077`), `ddl.dropTable` (`ddl.zig:280`), `Tx.w` (`db.zig:2344`), `strList` (`db.zig:5100`, covered by `mappedList`), `ListForm.expanded` and `.unsupported` (`dialect.zig:61`), `Unique.sameAs` and `Index.sameAs` (`table.zig:179`, `:234`), and `sql.table_marker`, a string no Zig program can use as a declaration name. Used only by tests: `where.each` and `where.paramCount` (whose comment says a Wire binds this way, and `valuesOf` does), `Plan.needsBackfill`, `Chain.headHash`, `Outcome.wasHeld`, and `sqlite.labelsOf`, which exists because `assertWire` asks for it. `Dialect.nulls` answers an optional that is never null in either dialect, so `noNullsOrder` and its four call sites cannot be reached. The top-level `…For` constants can be `on(Postgres)`'s, with the two `on()` lacks added.
-
-**Needs:** a yes, and the names that are public decided with the read-back of the public surface.
-
-**Whether a failed statement's Problem can be overwritten before it is recorded.** `told` runs before the deferred `drain` (`db.zig:3243` against `:3252`, and the same in `fillScalar`, `only` and `rawTotalBehind`), and a drain can suspend: Postgres reads up to a megabyte off the socket, and `pool.release` may dial. Another fiber on the same thread can then overwrite `recent`, and `sql.violated` answers false for a unique that was hit. ADR 117 rests on there being no suspension point there.
-
-**What would settle it:** a probe with two fibers on one executor, or `told` moved after the drain, which makes the question moot.
-
-**Whether SQLite's `Problem` can carry the previous statement's message.** `intsFit` and `floatsKept` fail before SQLite is called (`sqlite.zig:783`), and `said` then reads `lastError()` (`:909`), which after a reset holds the last statement's error. An INSERT refused on `users.email` followed on the writer by an oversized `u64` would make `sql.violated(c, User, .{.email})` true.
-
-**What would settle it:** a probe of that pair, or `said` reading `errmsg` only for an error that came from SQLite.
-
 **Whether `describe` pays five round trips on every raw call behind a pooler.** `DEALLOCATE nilo_describe` is sent after the `ROLLBACK` (`postgres.zig:1476`), in a transaction of its own, which pgbouncer in transaction mode may route to another server connection. The statement is left behind on the first, the next describe there fails on `42P05`, and `vetRaw` (`db.zig:770`) keeps trying. ADR 233 says it costs a round trip only while the statement beside it is failing too.
 
 **What would settle it:** a run behind pgbouncer in transaction mode, or the `DEALLOCATE` sent before the `ROLLBACK`.
 
-**Whether one request can pay for re-dialling the whole pool after Postgres restarts.** Each connection found hung up is released as failed (`postgres.zig:456`, `giveBack` at `:1519`), and pg.zig dials its replacement inside `release`, synchronously and with cancellation held off. One request can pay the pool's size in TCP, TLS and authentication, and its deadline cannot cut it short.
-
-**What would settle it:** a live test that restarts Postgres under a pool of ten and times the first request after.
-
-**Nobody knows why the arena's `async-db` profile reads 66k req/s with neither the server nor Postgres busy.** It runs at 874% of sixty-four CPUs, 3.9 ms a query for a 0.1 ms scan. Decoding is 116 µs of nilo's 284 µs a request and none of the wait ([`sql.md` §12](../bench/result/sql.md#12-the-arenas-query-at-one-connection)); the suspect is pg.zig's one pool mutex taken twice a request by 1,024 fibers on 64 threads, which two threads cannot convoy. The arena's rerun with stealing off (ADR 199) read 59.7k with the p99 at 245–362 ms from 50, which is what a fiber queued on a mutex that no other thread can now run looks like, and does not yet name the lock ([`http.md`](../bench/result/http.md#the-arenas-two-readings-and-what-changed-between-them)).
-
-**What would settle it:** `bench-sql-server`'s three `/async-db*` routes under `wrk -c1024`, pool 256 then 32, Postgres on `--network host`, on a box.
-
-**What `nilo_sql` costs a dependent's build has no number at all.** Every query is settled while compiling, and ADR 017 has no axis for compile time. Each call site's anonymous literal instantiates its statement, `valuesOf` and `fill`, `Tx` doubles them, and several eval quotas grow with the square of the schema (`table.zig:456`, `:2151`).
-
-**What would settle it:** `bench/result/build.md` extended: a schema of 10, 50 and 100 tables with one and ten call sites a table, cold and after one edit. An afternoon.
-
-**Every SQLite program chooses whether a statement hops or runs in the fiber, with no number to choose by** ([ADR 064](./adr/064-a-file-has-no-socket-to-wait-on.md)). A hop and a cached read both cost a few microseconds, so `.in_fiber` is plausibly faster for a lookup service and fatal for one that scans.
-
-**What would settle it:** both, unloaded and behind the pool ([`sql.md` §2](../bench/result/sql.md) is why both); `bench-sql` has the unloaded `.in_fiber` half, and `bench/sql_server.zig` on a SQLite `Db` is the rest, on a box.
-
 ### `nilo_http`
+
+**The OpenAPI document is looser than the server.** An unsigned integer gets `minimum: 0` and no `maximum`, although a `u8` refuses 256 with a 400, and a field with a default or a `?T` is marked not required in a response schema, although the writer always sends it, so a generated client null-checks every one.
+
+**Needs:** `maximum` taken from the type, and `required` in a response schema meaning "always written".
+
+**The test `Client` accepts a request head of any size.** Its reader is `Reader.fixed` over the whole request, and `readHead` refuses a head only once it fills the buffer, so a test sending a large cookie or many headers passes where a server answers 431. Its cookie jar also keeps a cookie deleted by `Expires` alone and ignores the `__Host-` and `__Secure-` rules a browser applies.
+
+**Needs:** the test reader given the server's read-buffer size, and the jar honouring a past `Expires` and the two prefixes.
+
+**One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is now one comptime rule (`http/field.zig`), and a number described in a query and not in JSON is still open. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
+
+**Needs:** the shape of each shared piece decided — one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the prefix matcher next.
+
+**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
 **A gRPC stop test fails when the machine is busy, so a red gate can be a false one.** `a server stop that lands in a burst of calls ends the connection promptly` (`http/grpc_live.zig`) asserts the stop took under 2.5 s against handlers that sleep 4 s. It failed once in a `test-all -Dsql` on the shared two-core vCPU, while the gate's other compilations ran beside it, and the same test binary then passed three runs out of three on the idle machine. A bound measured on wall time is a bound on the scheduler as much as on the stop.
 
@@ -302,17 +334,9 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**A message read as JSON is still about 10 to 25 ns slower than a plain struct of the same shape.** The first cut of this entry was 39 to 46 ns; `message.codecIn` took about 20 to 30 of it by answering the common `application/json` with one sixteen-byte compare in place of finding the end of the line, trimming it and walking the media type a byte at a time ([`bench/result/http.md`](../bench/result/http.md#a-message-is-told-from-json-by-sixteen-bytes)). What is left is the lookup of the line itself, which costs about 4 times in a request what it does in a loop of its own, and the `Codec` in the wrapper.
-
-**What would settle it:** a lookup that does not search: the head parser already walks every field, and ADR 256's rejected cut classed the `Content-Type` there for 1.6 KB in every program. A form of that which exists only when the App has a message route would take the rest: the head parser noting the `Content-Type` (a byte on `http1.Request`) in a program with a message route and not in any other.
-
 **A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.** A message read or written as JSON is nilo's JSON ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), so a `[]const u8` declared `.bytes` in its `wire` table goes out as the bytes themselves and is read back the same way. A Connect client speaking JSON sends and expects base64 there, and the two would disagree without either refusing. Field names and 64-bit integers do not have the problem: a Connect client reads both of nilo's spellings.
 
 **What would settle it:** a decision between writing a `.bytes` field as base64 in a message's JSON, with the document saying so, and refusing JSON for a message that has one; either held by a test with a Connect client's bytes.
-
-**Whether a gRPC listener should keep an HPACK table, to stop decoding the same strings every call.** With the table advertised at 0 every field arrives as a literal and its Huffman is decoded afresh, 125 to 137 ns of a 772 to 826 ns call in process, 16% of it, and about 2.3% of a real server's CPU for a client that Huffman-codes its fields (5.4% for all of HPACK), after the decoder went to two symbols a lookup ([`bench/result/http.md`](../bench/result/http.md#two-huffman-symbols-a-lookup)). What is left only a table of the client's own takes away, and that is idle memory, the hard axis: at the default 4,096 bytes a decoder keeps what the client inserts, up to the whole table per connection for a Collector that indexes a fresh `grpc-timeout` every call ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)).
-
-**What would settle it:** the resident bytes per idle connection at a table of 4,096 and of a few hundred, measured against the Collector and a library called by hand, beside what each saves of a call; a table ships only if ADR 017's idle figure for a gRPC connection is restated with it.
 
 **Several comments and pages describe code that is no longer there.** `bulkhead.zig`'s header lists a six-parameter `serve` (it has eight) under `src/engine/` (it is `http/engine/`), and leaves out `Peer`'s fields, `spawnLocal`, `Wake.rawIdle` and `Binding`, which a second Engine has to provide; `proxies.zig` says a `Forwarded` header is walked, and nothing reads it; the `accept` comment in `zio.zig` says a failure raises the stop flag; `middleware.zig`'s header and [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md) use `std.time.Timer`, which Zig 0.16 removed; a link in `ctx.zig` says ADR 155 and points at 156.
 
@@ -360,9 +384,9 @@ Nothing is open at this tier.
 
 **Needs:** the union read through `innerRead`, with a test sending `"1_0"` to an arm.
 
-**Multipart, streamed.** `Form(T)` reads a multipart body whole, bounded by `max_body` ([ADR 030](./adr/030-a-form-is-the-body-read-by-another-rule.md)), which is right for a form with a photo in it and wrong for a 2 GB video. The streaming version wants a parser that resumes across reads and an `Upload` that is a reader rather than bytes; it inherits nothing from `sendfile`, because sending is a descriptor handed to the kernel and receiving is a parser holding its place.
+**Multipart, streamed: an upload holds the whole body in the arena, so a route raised to `maxBody(50 << 20)` holds up to 50 MB for each upload in flight.** `Form(T)` reads a multipart body whole, bounded only by `max_body` ([ADR 030](./adr/030-a-form-is-the-body-read-by-another-rule.md)), which is right for a form with a photo in it and wrong for a 2 GB video. Every Go and Rust framework compared bounds the memory instead (read in each one's source): Go's `ReadForm`, and so Gin and Echo, keeps a file in memory up to 32 MB and writes the rest to a temp file, Fiber through fasthttp at 16 MB; actix-multipart's and Rocket's `TempFile` stream a file to disk as it arrives, actix under two budgets, a total and a memory one (50 MiB and 2 MiB); axum hands each field to the handler as a stream; poem spools every upload to disk however small. actix declares a limit per field on the type (`#[multipart(limit = "2 KiB")]`) and Rocket per extension (`file/jpg`). The streaming version wants a parser that resumes across reads; an `Upload` that is bytes in the arena up to a threshold and a file past it; `saveTo` a rename where it can be, because Rocket's `persist_to` fails across filesystems and falls back to a copy; a limit per field declared on the field; and every limit counted on the bytes that arrive, not on `Content-Length`, since poem's `SizeLimit` reads only the header and refuses a chunked body. It inherits nothing from `sendfile`, because sending is a descriptor handed to the kernel and receiving is a parser holding its place.
 
-**What would settle it:** somebody designing it. Until then the answer is `c.bodyStream()`, which holds nothing and makes the framing the handler's problem.
+**What would settle it:** a design held to ADR 017's axes, saying the arena's high-water mark per upload and where the parser's state sits while the fiber parks ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)), with the threshold and the temp directory as options. Until then the answer is `c.bodyStream()`, which holds nothing and makes the framing the handler's problem, or `bucket.presignPost` ([ADR 112](./adr/112-a-browser-uploads-with-a-form-rather-than-a-link.md)), which keeps the bytes off the server.
 
 **Direction:** [A stream is one shape](./roadmap.md#a-stream-is-one-shape)
 
@@ -377,28 +401,6 @@ Nothing is open at this tier.
 **What a stop does to the calls a reused HTTP/2 fiber has queued has no test that fails without it.** A fiber that finishes a call takes the next one waiting ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)), and three things keep that safe at a stop: a yield hands its cancel back instead of swallowing it (zio's `yield` consumes a pending cancel, shown by a standalone zio program and not by a test here), the calls still queued when a stop is requested are turned away rather than run, and a spawn that fails at a stop answers every queued call. The test "a server stop that lands in a burst of calls ends the connection promptly" in `http/grpc_live.zig` passes with all three taken out, because the window is microseconds wide, and the fallback for `InvalidPlacement` (a work-stealing configuration) is not run by any test, because the suite cannot build one ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting)). The change was reviewed once; the review of the fixes it asked for was not finished.
 
 **What would settle it:** a test that places the stop: a handler that blocks on a flag until `app.shutdown()` has been requested, so the calls behind it are known to be queued when the stop lands, seen to fail with each of the three taken out; and a second review of `h2conn.zig`'s `runner`, `finishNext`, `rendezvous` and `spawnRunner`.
-
-**A request on HTTP/2 could enter the App as its decoded fields, and the most that saves is about 90 ns of 820.** `fieldHead` is 15 to 21 ns a call (repeated 99 times in a scratch build) and the parse of the head it builds is 73 ns, so 11% of a request in process, 7% of a server's CPU at `-m 10` and 3.5% at `-m 1`; the cost is a second representation of the head in `Ctx`, `typed.zig` and `message.zig`, and ADR 253's refusals as one validation over a field list that HTTP/1.1's parser would also have to produce ([`http.md`](../bench/result/http.md#what-running-a-call-on-the-connections-fiber-would-buy-on-http2-and-what-the-head-built-for-the-app-costs)).
-
-**What would settle it:** a cheaper way to give `Ctx` its fields than a rewrite of the parser, or a profile in which the two together are more than the 11%.
-
-**A gRPC call's latency under load has a spread of 3 to 4 times its median, and one cause is in zio's run queue, which nilo does not own.** At 1,024 connections with 100 streams each the median is 71 ms (what Little's law gives for 102,400 in flight at 1.1M req/s) and p99 430 to 550 ms, with a worst call of 0.84 to 1.07 s against tonic's 1.07 s in the same harness; the 1.4 s and 3.8 s of the first record do not reproduce. zio's ring of 256 tasks moves its oldest half to an overflow queue refilled 64 a tick, so a task's wait follows where it landed and not its age; a ring of 16,384 made p50 110 and p99 115 ms, and cost 25 to 30% of throughput at 1,024 connections ([`http.md`](../bench/result/http.md#where-a-grpc-calls-worst-latency-comes-from)).
-
-**What would settle it:** zio offering a run queue with bounded unfairness (the ring size as an option would do), and a measurement of whether the throughput it costs is worth the tail on a workload with a latency target.
-
-**Whether one acceptor per executor is past the knee on a machine with many threads is not measured there** ([ADR 200](./adr/200-every-executor-accepts.md)). dusty measured 12 and 24 accept loops losing 20–40% on one request per connection against 5, on 24 threads; at 8 threads on the 9700X log2's 3 gained 2–4% there and lost 5–6% at ten requests per connection ([`http.md`](../bench/result/http.md#how-many-acceptors-eight-threads-want)).
-
-**What would settle it:** the same sweep, acceptors at threads, 2×log2 and log2, on 24 threads or more, with one and ten requests per connection, on a box.
-
-**Whether the 32-lane scans hold on aarch64 is not measured.** `scan.lanes` and `json.zig`'s escape scan are 32 lanes, which on aarch64 is two NEON registers, and every head-parsing and JSON figure is from one x86-64 box.
-
-**What would settle it:** `zig build run` and `bench/bench.sh` on the M1 Pro that has already run the cache and the build. An afternoon.
-
-**What a connection inside a request holds now that `read_buffer` is 16 KiB is arithmetic, not a reading.** The idle figure is unchanged by construction (ADR 062 gives the pages back), and the active one is two pages more on paper ([ADR 196](./adr/196-a-head-is-mostly-cookies-and-sixteen-kilobytes-of-them.md)).
-
-**What would settle it:** `bench/mem.py --hold` against `bench-stream-server`, the one server that holds connections mid-request, at 8 and at 16. An afternoon.
-
-**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
 
 **A `-Dtls` build parks 96 bytes past a page boundary, which costs 4,109 bytes on every idle connection of its plain listener, and a `-Dhttp2` build sits 64 bytes under it.** In the `park-check` program, read with a store-only probe that is not in the tree, the plain park is at 2,505 (288 under the 2,793 where a second page starts), 2,729 with `-Dhttp2`, 2,889 with `-Dtls` and 2,937 with both ([`http.md`](../bench/result/http.md#what-a-connections-task-costs-how-a-stack-buffer-costs-at-idle-and-how-close-the-park-sits-to-a-page), [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)). The `-Dtls` page is the inliner's, not TLS's: `Bridge.run` is a real call in the plain entry, and `always_inline` on it did not give the page back. The same pooling question is open beside it: arguments under zio's 384-byte pool size would take 115 bytes more off an HTTP/1.1 connection and cost an h2c one about 390, and why is not known.
 
@@ -416,12 +418,6 @@ Nothing is open at this tier.
 
 **Needs:** the issue filed against zig, `lib/std/compress/flate/Compress.zig` lines 987 and 1055. Last checked at 0.17.0, where both lines are unchanged.
 
-**A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.** With it, so is a session ticket, which is what the session resumption entry needs to turn a full handshake per reconnection into a resumption.
-
-**Needs:** the same repository. Last checked at `e04ae44`.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
 **The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.** It is upstream's `main`, the Zig 0.17 line, plus two commits: one signs an RSA key through its CRT form, 13.7 ms of handshake CPU down to 2.6 ([the run](../bench/result/http.md#what-an-rsa-certificate-costs-a-handshake)), and one adds the server's `offload` option, which runs the signature off the executor ([ADR 217](./adr/217-a-handshakes-signature-is-computed-off-the-executor.md)). The first was merged into `zig-0.16.x` as #59 and not into `main`. Once both merge into `main`, the pin moves to upstream's commit and the fork is not used again.
 
 **Needs:** [ianic/tls.zig#61](https://github.com/ianic/tls.zig/pull/61) and [#62](https://github.com/ianic/tls.zig/pull/62) merged. Last checked at `1d1dda2`.
@@ -432,17 +428,9 @@ Nothing is open at this tier.
 
 **Needs:** [lalinsky/pg.zig#23](https://github.com/lalinsky/pg.zig/pull/23) and [lalinsky/xsync.zig#1](https://github.com/lalinsky/xsync.zig/pull/1) merged. Last checked at `c205ebd`.
 
----
-
 **Should a 500 from a fail function carry its message to the client?** `fail.internal("…")` sends what it is given (`http/fail.zig:186`, `http/serve.zig:1350`), as Go's `http.Error` does, while an unnamed error that reaches the mapping table becomes `internal server error`. A message written for the operator, `fail.internal("db: {s}", .{@errorName(e)})`, then reaches whoever asked. The guide now says so; what is open is whether the safer default is a 500 that never says what broke, with the message logged instead.
 
 **What would settle it:** a decision, in ADR 004, between sending the message and logging it for a 500.
-
-**`Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.** The store a route is given is a `cache.Space` in memory ([ADR 155](./adr/155-a-request-answered-once-is-answered-the-same-way-again.md)), and a payment retried during a rolling deploy is charged twice with nothing logged, which is the one thing the header exists to prevent. `Idempotent` asks its store for `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held` and nothing else (`http/idempotent.zig:268`), so a second store needs no change to it. A table in the database the program already has is the shape [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) chose for jobs, for the same reason.
-
-**Needs:** a store over a `Db` type the caller hands in, the way `job.Table(Db)` is, costing its round trip on `Idempotent` routes only, and [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)'s answer to which module it lives in.
-
-**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
 
 **`allowance` keeps its table in the process and has no seam for a shared one**, so N instances admit N times the limit ([ADR 092](./adr/092-an-allowance-is-a-table-sized-while-compiling.md), [ADR 110](./adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). express-rate-limit and the Go limiters take a Redis store. A table sized while compiling is right for one process; what is missing is where a second store would plug in.
 
@@ -474,27 +462,9 @@ Nothing is open at this tier.
 
 **Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
 
-**Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.** `fn member(id: u32, org: u32)` on `/orgs/:org/members/:id` compiles (`http/typed.zig:33`): the check counts params and types each one, and Zig keeps no argument names to compare. A tenant-scoped query then runs with the two ids swapped. chi's `URLParam(r, "id")` and Express's `req.params.id` are by name, so this is the first habit a migrant brings. A resolver cannot see path params at all ([ADR 015](./adr/015-resolved-values-are-declared-by-their-type.md)), so a middleware that loads the row for `:id` falls back to `c.param("id")`, with nothing checking that the route has one.
-
-**Needs:** `Path(struct { org: u32, id: u32 })`, read the way `Query(T)` is, its field names held against the pattern while compiling and allowed as a resolver's argument; the positional form kept, at no cost at run time.
-
-**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
-
-**A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.** `Middleware = *const fn (*Ctx, Next)` (`http/middleware.zig:59`, [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md)). nilo's own middleware works round it three ways, `cors.reading(&origins)`, `csrf.reading` and `maxBody(&limit)`, each pointing at a container-level `var`. A user's auth middleware gets its key store from `c.service(T)`, which is `?T` (`http/ctx.zig:376`), so `orelse return next.run(c)` lets every request through, and the startup check that names a missing service reads handlers and resolvers, not middleware. Go's `func Auth(db *DB) func(http.Handler) http.Handler` and a Fastify plugin's options are the habit.
-
-**Needs:** a middleware with typed arguments after `Next`, wrapped by `app.use` the way the typed layer wraps a handler, its services checked at `listen()`; after that the three `reading` forms can be services.
-
-**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
-
 **A renamed struct cannot be a request body, and the reason the guide gives no longer holds.** `docs/guide/responses.md:305` and [ADR 148](./adr/148-a-field-name-is-a-spelling-too.md) refuse `rename_all` or `.rename` on an input because "`std.json` picks the parser for a body". A body struct is read by nilo's own `readFields` now (`http/json.zig:443`), which compares each key with the field's name. So a camelCase front end means a second struct for every Row it posts, which is the drift ADR 148 was written against. The marker also has no way to leave a field out, so a `password_hash` on a Row is written wherever the Row is.
 
 **Needs:** `readFields` comparing against the wire name, the unknown-key and missing-key messages quoting it, ADR 148's read side edited, and a `.skip` on the marker.
-
-**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
-
-**A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.** `logger` builds a line and hands it to `std.log` (`http/logger.zig:116`), and Zig 0.17's default `logFn` writes the level and `: ` first, so `.format = .json` reaches stderr as `info: {"method":…}`; nothing in the repository sets a `logFn`. A handler's `std.log.warn` carries no request id unless it writes `c.requestId()` itself, and there is no way to leave `/healthz` out of the access log (asked for in `docs/input_from_actix.md`). slog's `With` and pino's child logger are the habit, and a log shipper that parses JSON drops every line.
-
-**Needs:** a `nilo.logFn` for `std_options` that writes the time and level in the chosen format and the request id from the fiber slot `fail` already uses, and a list of paths the logger skips.
 
 **Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
 
@@ -546,184 +516,6 @@ Nothing is open at this tier.
 
 **Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
 
-## P3: no evidence yet
-
-### `nilo_core`
-
-**A per-thread entropy pool, if a number ever justifies one.** `c.entropy` reaches the operating system on every call: 56ns on a kernel serving `getrandom` from a vDSO and roughly twenty times that on one that does not ([ADR 042](./adr/042-entropy-belongs-to-the-loop.md)). A CSPRNG seeded once per thread would remove it, and costs stored state, a fork hazard and a seeding moment.
-
-**Needs:** a workload where it shows.
-
-**A limiting allocator shared across requests.** An allocator that counts live bytes and the peak with atomics and refuses with `OutOfMemory` past a limit, reserving with a compare-and-swap so a refused request never disturbs a neighbour's smaller one, would give a process-wide cap on bounded work such as decompressing a body or building a response, perhaps with a per-request child ("this request may use 64 MiB of the process's 512"). A port of a log search found it at about 100 lines with nothing specific to that program, and it lives there for now. Nothing in `core/` or `http/` is one today; the per-request arena is bounded by `max_body` and `arena_keep`, which is a different number.
-
-**Needs:** a second caller that wants an aggregate cap across concurrent requests, and the cost on the allocation axis stated first ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)): a feature that adds an allocation to a path that did not ask for it does not ship.
-
-**Where `convert` belongs.** Turning text into a type is what a Core wants, but `convert.zig` reaches the Bulkhead to say a request failed. Either its failures come back as a value the caller turns into a 400, or it stays in the App layer and Core gets a smaller converter under the same rules. Two candidates have already come and gone: `nilo_config` is not a second caller, because sharing means naming `nilo_core` and giving up a plain `zig test` ([ADR 039](./adr/039-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md)); `percent.zig` went to Core without answering this, because neither direction of percent coding can fail ([ADR 057](./adr/057-percent-is-needed-by-two-layers.md)).
-
-**What would settle it:** a caller in the App or Service layer. One below cannot afford to reach for it, which is what both false starts proved.
-
-### `nilo_config`
-
-**A name that is not the field's own.** `database_url` reads `DATABASE_URL` and there is no way to say otherwise, so a platform that already owns a name — `PGURL`, or `PORT` meaning something else in the same container — has to be met by renaming the field. A marker in the reader's own struct is the shape the rest of nilo uses (`nilo_table`, `nilo_resolve`), and the work is one comptime lookup.
-
-**Needs:** a caller who cannot rename the field.
-
-**A prefix is per reading, not per Config.** `fromWith(T, .{ .prefix = … })` has to be written at each call, so two places reading one Config can disagree about it. Making the prefix part of the type would fix that and cost `Read(T)` its one-type-per-`T` property.
-
-**Needs:** a caller who has actually disagreed with themselves.
-
-### `nilo_pw`
-
-**A password longer than a page costs what it is.** Argon2 hashes the whole input, so a client posting a megabyte gets a megabyte hashed. `max_body` bounds it at one megabyte by default and the Gate bounds how many at once, so it is not an opening. But everybody else truncates at 72 bytes or pre-hashes with SHA-512, and nilo does neither.
-
-**Needs:** which of the two.
-
-**Whether a memory-bound deployment gets bcrypt.** It is in `std`, it costs zero heap against argon2id's 19 MiB, and it is 2.6× slower for the trouble ([ADR 044](./adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md) has the numbers). The trade is real for a small machine holding many connections.
-
-**What would settle it:** somebody on one.
-
-**Whether a second factor belongs here.** TOTP (RFC 6238) is HMAC-SHA1 over a counter derived from the clock, a base32 secret, and a window; forty lines, and the trap is quiet: a code accepted twice inside its own thirty-second window is a replay, and a verifier that forgets to record the last counter it accepted passes every test. The same argument that put `pw.Token` here applies ([ADR 044](./adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md)). Against it is that the audience is narrower, and that the enrolment half (a QR code, a provisioning URI) is a page rather than a function.
-
-**What would settle it:** an application that is asked for a second factor.
-
-### `nilo_cache`
-
-**A value of `[]const u8` is the only shape that is not flat.** A struct with a `[]const u8` field in it is refused by name, and the caller encodes it. The shape that would fix it — writing the slices' bytes after the fixed part and pointing them back into the caller's buffer on the way out — is known and is maybe 120 lines of comptime.
-
-**Needs:** a caller for whom JSON into a bytes Space is not enough.
-
-**Where the 60% between nilo and quick_cache on eight threads goes is not known.** The levers named so far are each a few percent ([`cache.md`](../bench/result/cache.md)).
-
-**What would settle it:** `perf` on both binaries, not another guess, on a box.
-
-**Whether a bucket should have sixteen ways rather than eight is not measured.** Two cache lines touched, against better retention at load.
-
-**What would settle it:** the retention curve and the read cost, both swept across ways, on a box where the read cost is not mostly memory latency.
-
-### `nilo_jwt`
-
-**Only 2048, 3072 and 4096 bits of RSA, and only P-256 of EC.** A key size with no branch is `error.KeySizeNotSupported` and a curve with none is `error.CurveNotSupported`, rather than a best effort. ES384 is the same twenty lines over `EcdsaP384Sha384`; ES512 wants P-521, which std does not carry; Ed25519 (`EdDSA`) is a different key type again.
-
-**Needs:** an issuer that publishes one, which none in the comparison does.
-
-**Whether nilo signs a token for a client that cannot hold a cookie.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) refuses signing because a server issuing its own sessions has `Session(T)`, and that holds for a browser. The client it does not obviously hold for is a native mobile application talking to the same API, where a bearer token is the convention and a cookie jar is a thing the developer has to go and find. HS256 sign and verify is forty lines; a signer here would have to be a type that cannot be handed an RSA public key as its secret, which is a Refusal rather than a runtime check.
-
-**What would settle it:** a client that genuinely cannot hold a cookie, brought with the reason, since "the convention is a bearer token" is not one.
-
-**Whether a sign-in endpoint should cache a verification or just do it is not measured.** An RSA exponentiation at 2048 bits is not small.
-
-**What would settle it:** one verify of each kind, and a row in `bench/result/` for it. An afternoon.
-
-**Whether a token with no `aud` can be checked by the claim that does name the application.** `audience = .unchecked` is what a Cognito access token (`client_id`), a Clerk session token and a Keycloak token for a user with no client role (`azp`) need, and the check then moves to the caller's own `Claims`. A by-name claim check inside `nilo_jwt` would parse the payload into a `std.json.Value` tree on every verify, an allocation on the request path ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)).
-
-**What would settle it:** a measured allocation count for a registered-claims struct with one extra optional field, or a caller who forgot the comparison in their `Claims` and shipped it.
-
-### `nilo_fetch`
-
-**An `Exchange` cannot be begun on a target.** `Exchange.begin` takes the client and a URL, and a target's `url(c, path, args)` is the URL — so the streamed call reaches the base and the template, and not the standing headers or the target's own gate. The shape is a `begin` on the target that takes a path and hands the Exchange the `Standing` the whole-body calls already pass ([ADR 061](./adr/061-a-fitting-borrows-the-loop.md)).
-
-**Needs:** a caller who streams from a service that has standing headers, since a signed request sets its own and an unsigned download has none.
-
-**A certificate bundle is loaded per client, not per process.** `std.http.Client` rescans the system roots the first time it makes an HTTPS request. One client per program is the shape the docs push, so this has not bitten, but two would pay twice and nothing says so at the call site.
-
-**Needs:** a caller who genuinely wants two clients.
-
-**Whether retries belong anywhere.** How many times, how long between, and what counts as a failure are facts about somebody else's service. A caller who knows them can write three lines. A default that guesses them turns one outage into a thundering herd.
-
-**What would settle it:** a shape that takes the policy as a type rather than a number, which is the same test every other feature here has had to pass.
-
-**The second arena allocation a whole-body call makes may not show up for anybody.** It is the header block kept before the body reads over it ([ADR 187](./adr/187-a-head-that-outlives-its-body.md)), a bump and a `memcpy` inside the noise of a round trip; head and body in one buffer is the shape if it does show.
-
-**What would settle it:** a caller for whom it shows.
-
-**`nilo_fetch` speaks HTTP/1.1 only, so a service that answers gRPC cannot call one.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)); a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both halves.
-
-**What would settle it:** a caller of a gRPC service, and the idle bytes of an outbound HTTP/2 connection measured before it ships.
-
-### `nilo_job`
-
-**`stats` is three numbers for the whole queue.** What an operator wants on a dashboard is how old the oldest `queued` row is (the lag) and the counts by kind, so that a thousand queued thumbnails and one queued invoice do not read as the same number. One more query, run only when asked.
-
-**Needs:** a dashboard.
-
-**`job.Memory` scans its slots.** 3–6 µs a claim over a few thousand fixed slots under a spin lock. Fine for a test and for the small program it is for; a heap would be 200 ns and an allocation-free heap somebody writes.
-
-**Needs:** a memory queue big enough to notice.
-
-**A worker started under `app.start(io)` and never `listen()`ed is a worker nobody stops.** `serveOn(io)` for a worker process returns when cancelled, and cancelling it is the caller's — there is no signal handler here, because the one in `http/` belongs to the server. A worker binary writes the four lines that catch SIGTERM and cancel the future.
-
-**Needs:** a caller who has written those four lines twice.
-
-**Whether a job has a result.** `status(id)` says `done` and not what came of it: the URL of the export, how many rows the import took, the thumbnail's key. Today every "is it ready?" route builds a table of its own to hold that. A `pub const Result = T` on the kind, a `result` column written as JSON when `run` returns one, and `jobs.result(scope, id)` to read it is the shape; the cost is a column that is null on most rows.
-
-**What would settle it:** a caller whose second table exists only to answer that route.
-
-**Whether a job may say how many of it run at once.** "At most two calls to the payment provider in flight" is a `nilo.Gate` inside `run` today, which works and is invisible to the queue: a third row is claimed, waits at the gate, and holds a worker while it does. A per-kind ceiling the claim respected would leave the worker free.
-
-**What would settle it:** a caller with a provider that rate-limits harder than their workers count.
-
-**Whether a claim should take ten rows rather than one is not measured.** A Postgres claim is 1.2 ms across a Docker port ([`job.md`](../bench/result/job.md)), and the price of ten is ten rows held by a worker that may die.
-
-**What would settle it:** `bench-job` extended to several workers, on a box.
-
-**Whether `LISTEN/NOTIFY` is worth a pool connection held open is not known.** A push wakes a worker in the same process ([ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)), so `poll_ms` is only the latency of a row a *second* binary pushed.
-
-**What would settle it:** who is running two processes on one queue, and what they wait.
-
-**Whether sixteen workers on one SQLite file cost the lock is not measured.** A single claimer handing rows over a channel takes fifteen of them off it, and ADR 160 chose the wake without measuring the lock.
-
-**What would settle it:** a queue on one SQLite file with more workers than cores, on a box.
-
-### `nilo_s3`
-
-**Whether payloads are hashed waits on what a request costs through TLS, which is not measured.** The plaintext numbers carry a SHA-256 over every body that the HTTPS ones would not, and neither corrects the other on paper.
-
-**What would settle it:** the same runs against a MinIO with a certificate. An afternoon.
-
-**Whether caller-set `x-amz-meta-*` headers cost enough to refuse is not priced.** SigV4 signs a sorted header list: a fixed set makes it a constant, and letting a caller add one puts a sort in every request.
-
-**What would settle it:** the sort, priced, brought by a caller who wants the feature.
-
-### `nilo_sql`
-
-**Children are one level deep, and only through a reference of one column.** A Row's `[]const C` field is read by one statement for every parent, keyed by each parent's position in a list of one value apiece ([ADR 218](./adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md)); a child with children of its own is refused, and so is a reference of several columns. The second is the list carrying a row of values per parent (`unnest` takes several arrays, `json_each` a list of lists), and the first is the same pass run once more per level over the children just read.
-
-**Needs:** a caller with a screen that nests three deep, or a table keyed by a tenant and an id that has children.
-
-**There is no upsert of many rows.** `insertMany` is one statement over `unnest` on Postgres and an upsert is one row; `unnest` plus `ON CONFLICT` is the same statement with the upsert's tail.
-
-**Needs:** the call's name beside `insertMany`, and whether it answers the rows it wrote.
-
-**`.now` is a default and a `.set`, not an insert value.** An insert that wants the database's clock needs a migration default or a bound `Timestamp.now()`, which is the application's clock.
-
-**Needs:** whether `.now` may stand in an insert's value struct, and what the field's type says when it does.
-
-**Two reads copy more than they need.** A `[]const Uuid` column costs one allocation an element and a copy, where the sixteen bytes could be read straight out of the array payload into one list, and a Postgres row larger than the connection's buffer is placed in the arena by pg.zig and then kept again column by column.
-
-**Needs:** a number from a list screen of uuids, and a caller with rows that size.
-
-**A read pays two small costs it could skip.** A count over children used in `.where` is written twice, in `WHERE` and in the select list, and Postgres runs the identical subplans twice; a `LATERAL` join computes it once ([sql.md §26](../bench/result/sql.md#26-small-costs-a-read-pays)). A grouped Row reaching one table through `nilo_through` and through an aggregate's filter joins it twice under two aliases.
-
-**Needs:** the `LATERAL` form for Postgres and what SQLite writes instead, and one join shared by a through and a filter that reach the same table.
-
-**Files import each other in two rings.** `types` and `wire` import each other, and `ordering`, `shape`, `statement`, `table` and `where` form one ring: `table` reaches `where` for three clock helpers, `ordering` reaches `statement` for `Direction` and `Tie`, and `shape` and `statement` share seventeen names. `assertDialect` (`dialect.zig:1573`) does not check `has_extensions`, `has_functions`, `view_repeatable_head` or `script_stop_on_error`, which `migrate.zig` and `migrations.zig` read, and `migrate.zig:908` compares `D.name` with `"sqlite"` where a capability belongs.
-
-**Needs:** whether the rings are worth breaking, and the four capabilities added to `assertDialect`.
-
-**Whether a statement under `.hop` should step a batch of rows a hop is not measured.** `next()` hops once per row (`sqlite.zig:938`), and [`sql.md` §15](../bench/result/sql.md#15-a-statement-under-hop-with-a-thread-of-its-own) measured a `find`, an insert and a slow query, never a scan.
-
-**What would settle it:** a scan of ten thousand rows under `.hop` against `.in_fiber`, then against a batch of 64 a hop. An afternoon.
-
-**What the write half of the ten-way comparison costs under contention is not measured.** `live.zig` proves `.update_nowait` and `.update_skip_locked` do what they say, and nothing says what either costs, or where `FOR UPDATE SKIP LOCKED` stops scaling as a queue.
-
-**What would settle it:** the harness, which exists, on a box where the generator, the database and ten candidates are not sharing eight cores.
-
-**A fiber that queues for the SQLite writer it already holds is told it might be, not that it is.** The wait is bounded ([ADR 107](./adr/107-a-wait-for-a-connection-has-a-bound.md)) and ends in a `TimedOut` naming the likely cause; telling that apart from an honestly busy database needs to know which fiber holds the writer.
-
-**Needs:** `std.Io` handing a Service a fiber identity, or a design that gets one without it. Last checked at 0.16.0.
-
-### `nilo_http`
-
 **A JSON body could be read 2.2 to 2.8 times faster by a reader written for its type, with no `std.json.Scanner` under it, and nothing about it is decided.** A prototype that goes from the body's bytes straight to the caller's struct read a plain object in 45 ns where the shipped reader takes 125, and a tagged one in 58 where it takes 150; a whole request with a 13-byte body went from 380 to 300 ns, because the body is about 85 ns of it. Its differential run of 800,000 reads against `std.json` found no input one accepted and the other refused. It costs 3.2 to 3.5 KB in a program that reads JSON and a second JSON grammar that has to agree with std's for ever, which is the cost `jsonmark.zig`'s header names ([`spike/json-reader/`](../spike/json-reader/README.md), [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md)).
 
 **What would settle it:** a decision on the prototype in `spike/json-reader/`; then the three tests it fails on the current tree (two tagged-union refusals and a message's allocation count, named in its README) passing, the differential test made a build step on `test`, the 400 sentences of `ctx.zig` run against it, `use_first` and `use_last` rebuilt, and the compile time of the examples measured before and after.
@@ -731,6 +523,142 @@ Nothing is open at this tier.
 **The figures of the second HTTP optimisation round were measured with two other benchmarks on the same machine.** The fiber reuse on HTTP/2, the idle connection's 512 bytes, the tagged union read once and the TLS page margin were each timed under a shared lock and pinned to their own cores, but beside builds and tests that shared the L3; the first round's figures were measured again serially before they went on the record, and these were not ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting), [`http.md`](../bench/result/http.md#a-tagged-union-is-read-once-when-its-tag-comes-first)). The idle bytes are counts, not timings, and do not depend on it.
 
 **What would settle it:** the `h2load -m 10` rows, the gRPC rows at 32 to 1,024 connections and the tagged-union profile rows run again on a quiet machine, before (`514e8c1`) against after, interleaved, each binary from one path.
+
+**The metrics page takes one number a name: no labels, no histogram of the application's own, no process series, and counters nilo keeps already go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig:1255`). "Orders by status" is three names, a business latency cannot be written at all, resident memory and open descriptors are missing, and the cache's hit counts, the watchdog's catches and the tracer's drops are numbers nobody scrapes. prom-client and the Go client give all of it.
+
+**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
+
+**Signing in with an identity provider is put together by hand, and the steps it needs are the ones that fail silently.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) stops at verifying the ID token. Discovery, `state`, PKCE, the code exchange and the `nonce` are the caller's, and leaving any one out still signs the user in. Every part is here (`nilo_fetch`, `jwt.Verifier`, `Session(T)`, `c.entropy`), so what is missing is the order, and ADR 111's own reason for owning verification, that being wrong is silent, holds for the order too. `golang.org/x/oauth2` with go-oidc and passport are the habit.
+
+**What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
+
+**Several files under one form field are refused, and a single `Upload` field sent several keeps the first without a word.** `[]const Upload` is a compile error because "a field takes one" (`http/form.zig:534`), a reason from before a field could be a list ([ADR 132](./adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)). `<input type="file" multiple>` sends several parts under one name, and `Fields.file` (`http/form.zig:181`) hands the first to an `Upload` field and drops the rest, so the handler saves one photo of five and the browser shows success. Every framework compared reads the list: Gin and Echo bind `[]*multipart.FileHeader`, actix-multipart and Rocket `Vec<TempFile>`, poem `Vec<Upload>` bounded by `max_items`; actix also lets the type say what a second value does (`duplicate_field = "deny"`).
+
+**Needs:** `[]const Upload` collected in the order sent, bounded by `max_parts` and `max_body`, described as an array of `format: binary`; and a second file under a single `Upload` field a 400 naming it rather than a file dropped.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**The multipart parser is the one parser of untrusted bytes that no fuzzer reaches.** `zig build fuzz` sends request heads and `--frames` sends HTTP/2 frames, and neither builds a multipart body (`http/fuzz.zig` names none). `parseMultipart` (`http/form.zig:615`) is slicing by hand over the body, where a slip is a panic a request reaches in ReleaseSafe and undefined behaviour in ReleaseFast, and the one defect found in it so far, a search for a blank line to the end of the body once per part, was found by the audit at `39896d2` rather than by a run.
+
+**Needs:** a `--forms` mode generating multipart bodies (a boundary inside a file, bare LF, a part never closed, quoted and unquoted parameters, `filename*`, part counts either side of `max_parts`) that checks each is a `Fields` whose slices lie inside the body or a 400, never a panic.
+
+**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
+
+**A client that sends its session as a bearer token, a native mobile application most often, has nothing in nilo to sign in with, and the way round it on record is the trap.** A Go or Node developer issues a JWT at login; nilo signs none ([ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md)), and [`decided.md`](./decided.md) tells them to write `HmacSha256` themselves, where a signature compared with `std.mem.eql` compiles and leaks by timing. What they need already exists and is better than an HS256 token: `nilo.session.seal` and `open` (`http/session.zig:394`, `:431`) make an encrypted, expiring value in base64 that an `Authorization: Bearer` header carries, with no `alg` to confuse. It is reachable only as a cookie: `Session(T)` reads `__Host-session` and nothing else, the key sits in `Ctx`'s private `_session_key`, and the public `open` takes no fallback secrets, so a bearer token read by hand stops opening the day the secret rotates ([ADR 225](./adr/225-a-fallback-session-secret-opens-and-never-seals.md)). No guide page says any of this.
+
+**Needs:** a typed way for a handler to take the session from `Authorization: Bearer` with the secret and fallbacks `listen()` was given, and to answer one in a body, designed beside `Session(T)` rather than as a second session; a section in `docs/guide/sessions.md` with the `/me` route a client reads its claims from, since the token is opaque to it; and `decided.md`'s HS256 entry pointing there instead of at a hand-written HMAC.
+
+**Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+---
+
+## P3: what may cost users, kept in view
+
+### `nilo_cache`
+
+**The shard lock spins on a write and never backs off.** `while (l.held.swap(true, .acquire))` (`store.zig:371`) bounces the line between waiting cores, and a holder preempted by the OS leaves the waiters burning their timeslice; the module's own soak tests run more threads than cores. The refusal path also takes the lock only to bump an atomic counter (`store.zig:1107`). Not measured.
+
+**Needs:** test-and-test-and-set with a yield after some spins, the refusal's lock dropped, and both measured under contention.
+
+### `nilo_jwt`
+
+**Only 2048, 3072 and 4096 bits of RSA, and only P-256 of EC.** A key size with no branch is `error.KeySizeNotSupported` and a curve with none is `error.CurveNotSupported`, rather than a best effort. ES384 is the same twenty lines over `EcdsaP384Sha384`; ES512 wants P-521, which std does not carry; Ed25519 (`EdDSA`) is a different key type again.
+
+**Needs:** an issuer that publishes one, which none in the comparison does.
+
+**A service that calls an API asking for a JWT it signed itself has nothing here to sign one with.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) refuses signing because a server issuing its own sessions has `Session(T)`, and that holds for every client of its own, bearer ones included (the P2 entry on a session as a bearer token). It does not hold when the verifier is somebody else: a Google service account's assertion and a GitHub App's token are RS256, APNs and Sign in with Apple's `client_secret` are ES256, a LiveKit access token is HS256. Signing alone widens nothing `verify` checks, as long as `verify` keeps refusing `HS256`. ES256 and HS256 are std's `EcdsaP256Sha256` and `HmacSha256`; RS256 is not, because std 0.17 carries RSA verification only, so it would be private-key arithmetic this module says it does not write.
+
+**What would settle it:** a program that calls such an API, brought with which algorithm it asks for; ES256 or HS256 first, and RS256 only with a reason to own the RSA it needs.
+
+**Direction:** [The toolkit grows by the jobs people have](./roadmap.md#the-toolkit-grows-by-the-jobs-people-have)
+
+**Whether a token with no `aud` can be checked by the claim that does name the application.** `audience = .unchecked` is what a Cognito access token (`client_id`), a Clerk session token and a Keycloak token for a user with no client role (`azp`) need, and the check then moves to the caller's own `Claims`. A by-name claim check inside `nilo_jwt` would parse the payload into a `std.json.Value` tree on every verify, an allocation on the request path ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)).
+
+**What would settle it:** a measured allocation count for a registered-claims struct with one extra optional field, or a caller who forgot the comparison in their `Claims` and shipped it.
+
+### `nilo_fetch`
+
+**What an outbound call costs through TLS is read off buffer sizes, not measured.** 59,151 bytes per HTTPS connection is std's number read out of its buffer sizes, 3.6× plain HTTP if it holds.
+
+**What would settle it:** the measurement beside `zig build smoke-tls -Dnetwork`, which already reaches a real endpoint. An afternoon.
+
+**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
+
+**`nilo_fetch` speaks HTTP/1.1 only, so a service that answers gRPC cannot call one.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)); a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both halves.
+
+**What would settle it:** a caller of a gRPC service, and the idle bytes of an outbound HTTP/2 connection measured before it ships.
+
+**Whether a `Target` should stop calling a service that is failing, rather than wait out its timeout on every call.** A `Target`'s `max_in_flight` is a bulkhead: it bounds how many calls wait on a sick service, but each still waits its whole `timeout_ms`, and the handler behind it holds its fiber and its stack meanwhile ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)). A breaker answers at once while the service is down; sony/gobreaker and failsafe-go are what a Go migrant used. A retry budget takes away much of the reason for one, because it stops the load multiplying, so this stays open until the budget has met an outage.
+
+**What would settle it:** a service behind a `Target` timing out for a minute under load, with the retry budget built, measured for the fibers and bytes the waiting calls hold; and if that number is the problem, a breaker per `Target`, opt-in, its state in the type's value, answering `error.CircuitOpen` and shown by `nilo_ready`.
+
+**Direction:** [A call to another service survives that service's bad minute](./roadmap.md#a-call-to-another-service-survives-that-services-bad-minute)
+
+### `nilo_job`
+
+**A bulk enqueue may slow every claim, because the claim sorts the whole due backlog.** `ORDER BY priority, run_at LIMIT 1` over `(state, run_at)` sorts every due row; probing each priority on an index of `(state, priority, run_at)` would not, and [ADR 214](./adr/214-a-job-says-how-urgent-it-is.md)'s finding that the wide index is slower was for that one ordering, not for one `ORDER BY run_at LIMIT 1` a priority. The `nilo_job` audit at `1738286` ran both once in a scratch container and wrote nothing down, and `SKIP LOCKED` is refused inside a `UNION ALL`, so the shape is up to three statements or a CTE a priority.
+
+**What would settle it:** both shapes on Postgres at a backlog of 1, 50k and 200k due rows beside 300k done ones, into [`job.md`](../bench/result/job.md), and ADR 214 edited in place with the result. An afternoon.
+
+**A row another process pushed waits up to `poll_ms` for a worker, a second by default, because nothing tells the workers it arrived.** `push` wakes a worker in its own process only, so a web process pushing to a separate worker process reaches it on the next poll, and lowering `poll_ms` buys the latency with one claim per worker per interval on an idle queue (`job.Settings`). river listens on Postgres `LISTEN/NOTIFY` and polls as a fallback. The roadmap already wants a `LISTEN/NOTIFY` listener measured for the Room bridge, and one held connection serving both is the shape to price.
+
+**What would settle it:** a deployment whose web and worker processes are split and whose users wait on a job, and the cost of one held `LISTEN` connection measured beside the poll.
+
+**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
+
+### `nilo_s3`
+
+**A file over 5 GiB, or one sent over a connection that drops, cannot be uploaded from a browser straight to the bucket.** `presignPost` is one POST, which S3 caps at 5 GiB and which starts again from nothing when it fails, and `putMultipart` streams through this process. Uppy's S3 multipart plugin and the AWS SDKs hand the browser a presigned `UploadPart` URL a part, so a large upload resumes from its last part and never touches the server. The server's half is four calls: create the upload, presign a part, list the parts, complete. A presigned part carries no size condition, so the bound has to be checked at completion, from the parts' sizes, before the object exists.
+
+**What would settle it:** a caller whose users upload video or archives from a browser, with the completion-time check designed first.
+
+**A large object is uploaded one part at a time.** `putMultipart` holds one `part_bytes` buffer and one stream share for its whole life ([`s3.md`](./reference/s3.md#bucket-calls)), so it moves at one connection's speed, where the AWS SDK's upload manager sends five parts at once by default. Parts in flight cost a buffer each, 8 MiB times their count. Whether one connection is the bound on a real uplink is not measured.
+
+**What would settle it:** `putMultipart` timed against S3 from a host with more uplink than one connection reaches, with one, two and four parts in flight, into [`s3.md`](../bench/result/s3.md).
+
+### `nilo_sql`
+
+**Whether one request can pay for re-dialling the whole pool after Postgres restarts.** Each connection found hung up is released as failed (`postgres.zig:456`, `giveBack` at `:1519`), and pg.zig dials its replacement inside `release`, synchronously and with cancellation held off. One request can pay the pool's size in TCP, TLS and authentication, and its deadline cannot cut it short.
+
+**What would settle it:** a live test that restarts Postgres under a pool of ten and times the first request after.
+
+**Nobody knows why the arena's `async-db` profile reads 66k req/s with neither the server nor Postgres busy.** It runs at 874% of sixty-four CPUs, 3.9 ms a query for a 0.1 ms scan. Decoding is 116 µs of nilo's 284 µs a request and none of the wait ([`sql.md` §12](../bench/result/sql.md#12-the-arenas-query-at-one-connection)); the suspect is pg.zig's one pool mutex taken twice a request by 1,024 fibers on 64 threads, which two threads cannot convoy. The arena's rerun with stealing off (ADR 199) read 59.7k with the p99 at 245–362 ms from 50, which is what a fiber queued on a mutex that no other thread can now run looks like, and does not yet name the lock ([`http.md`](../bench/result/http.md#the-arenas-two-readings-and-what-changed-between-them)).
+
+**What would settle it:** `bench-sql-server`'s three `/async-db*` routes under `wrk -c1024`, pool 256 then 32, Postgres on `--network host`, on a box.
+
+**What `nilo_sql` costs a dependent's build has no number at all.** Every query is settled while compiling, and ADR 017 has no axis for compile time. Each call site's anonymous literal instantiates its statement, `valuesOf` and `fill`, `Tx` doubles them, and several eval quotas grow with the square of the schema (`table.zig:456`, `:2151`).
+
+**What would settle it:** `bench/result/build.md` extended: a schema of 10, 50 and 100 tables with one and ten call sites a table, cold and after one edit. An afternoon.
+
+**Every SQLite program chooses whether a statement hops or runs in the fiber, with no number to choose by** ([ADR 064](./adr/064-a-file-has-no-socket-to-wait-on.md)). A hop and a cached read both cost a few microseconds, so `.in_fiber` is plausibly faster for a lookup service and fatal for one that scans.
+
+**What would settle it:** both, unloaded and behind the pool ([`sql.md` §2](../bench/result/sql.md) is why both); `bench-sql` has the unloaded `.in_fiber` half, and `bench/sql_server.zig` on a SQLite `Db` is the rest, on a box.
+
+### `nilo_http`
+
+**A gRPC call's latency under load has a spread of 3 to 4 times its median, and one cause is in zio's run queue, which nilo does not own.** At 1,024 connections with 100 streams each the median is 71 ms (what Little's law gives for 102,400 in flight at 1.1M req/s) and p99 430 to 550 ms, with a worst call of 0.84 to 1.07 s against tonic's 1.07 s in the same harness; the 1.4 s and 3.8 s of the first record do not reproduce. zio's ring of 256 tasks moves its oldest half to an overflow queue refilled 64 a tick, so a task's wait follows where it landed and not its age; a ring of 16,384 made p50 110 and p99 115 ms, and cost 25 to 30% of throughput at 1,024 connections ([`http.md`](../bench/result/http.md#where-a-grpc-calls-worst-latency-comes-from)).
+
+**What would settle it:** zio offering a run queue with bounded unfairness (the ring size as an option would do), and a measurement of whether the throughput it costs is worth the tail on a workload with a latency target.
+
+**Whether one acceptor per executor is past the knee on a machine with many threads is not measured there** ([ADR 200](./adr/200-every-executor-accepts.md)). dusty measured 12 and 24 accept loops losing 20–40% on one request per connection against 5, on 24 threads; at 8 threads on the 9700X log2's 3 gained 2–4% there and lost 5–6% at ten requests per connection ([`http.md`](../bench/result/http.md#how-many-acceptors-eight-threads-want)).
+
+**What would settle it:** the same sweep, acceptors at threads, 2×log2 and log2, on 24 threads or more, with one and ten requests per connection, on a box.
+
+**Whether the 32-lane scans hold on aarch64 is not measured.** `scan.lanes` and `json.zig`'s escape scan are 32 lanes, which on aarch64 is two NEON registers, and every head-parsing and JSON figure is from one x86-64 box.
+
+**What would settle it:** `zig build run` and `bench/bench.sh` on the M1 Pro that has already run the cache and the build. An afternoon.
+
+**What a connection inside a request holds now that `read_buffer` is 16 KiB is arithmetic, not a reading.** The idle figure is unchanged by construction (ADR 062 gives the pages back), and the active one is two pages more on paper ([ADR 196](./adr/196-a-head-is-mostly-cookies-and-sixteen-kilobytes-of-them.md)).
+
+**What would settle it:** `bench/mem.py --hold` against `bench-stream-server`, the one server that holds connections mid-request, at 8 and at 16. An afternoon.
+
+**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
+
+**A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.** With it, so is a session ticket, which is what the session resumption entry needs to turn a full handshake per reconnection into a resumption.
+
+**Needs:** the same repository. Last checked at `e04ae44`.
+
+**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
 **A HEADERS frame on an HTTP/2 stream the connection has already forgotten ends the connection.** A stream at or below the highest id seen and no longer in the table is answered with a connection `PROTOCOL_ERROR` (`h2conn.zig`, `onHeaders`). RFC 9113 §5.1 allows that for a stream closed long ago, but a client's trailers in flight when the server answered early and forgot the stream would take every other stream on the connection down with it. With the dynamic table at 0 the block costs nothing to decode and ignore, which a stream reset but still running already does (stage 6.1).
 
@@ -748,25 +676,11 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**More than one certificate on a listener, chosen by SNI.** One `CertKeyPair` per listener today. Two names on one certificate is the answer for most of the cases; the one it does not cover is two tenants whose certificates cannot share a file.
-
-**Needs:** that deployment.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
-**An extra listener that asked the kernel for a port cannot say which one it got.** `boundPort()` answers for `port`, the first listener, and an entry in `also` with `.port = 0` binds fine and reports nothing ([ADR 213](./adr/213-a-server-answers-on-more-than-one-address.md)). It costs the tests something already: they give a second listener a unix path rather than a port, because a path is knowable and a kernel-chosen port is not. The shape is `boundPorts()` returning the lot, or `boundPort(n)`.
-
-**Needs:** somebody who binds more than one listener to port 0 outside a test, or a test here that cannot be written with a path.
-
 **A stream is never compressed, and neither is an event stream; and gzip is the only coding.** `app.compress` gzips a whole body on a compressor borrowed for the CPU it takes and handed back before the socket is written, which is what keeps one compressor per thread enough ([ADR 211](./adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md)). A stream has no whole body and would hold its compressor across every write, so its shape is a second pool larger than the thread count and chunked framing; an event stream must never be buffered and stays out on principle. Brotli and zstd were measured and refused ([`decided.md`](./decided.md)); a faster `std.flate` is the entry waiting on zig.
 
 **Needs:** a caller streaming something text and large enough that the bandwidth matters.
 
 **Direction:** [A stream is one shape](./roadmap.md#a-stream-is-one-shape)
-
-**A `testing.Conversation` does not share a `testing.Client`'s cookie jar.** A test that signs in over HTTP and then opens a socket copies the cookie across with `setHeader` by hand ([ADR 091](./adr/091-a-websocket-route-can-be-driven-from-a-test.md)).
-
-**Needs:** a second test that has had to copy it.
 
 **A gRPC connection's message budget is not an option.** The budget is `max_body`, or the largest limit a route raised to with `nilo.maxBody` (at least 64 KiB), and a call is charged its compressed bytes, its inflated copy and the copy its route reads it into, so a Collector sending 4 MB batches gets about two running at a time per connection at `max_body` 16 MiB and the rest wait ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md#what-the-budget-does-to-an-opentelemetry-collector)). Waiting replaced the refusal and made a small budget slow rather than lossy; a budget sized from the caller's batches is what would let more run at once.
 
@@ -776,65 +690,11 @@ Nothing is open at this tier.
 
 **Needs:** a decision to decode zstd request bodies, and a caller sending them that cannot be told to send gzip; then the flag's cost in stripped `ReleaseFast` bytes and the allocation the decoded body takes, measured the way ADR 248 measured libdeflate.
 
-**`nilo.blocking.forEach`: fan-out that counts against the pool's limit.** A blocking call that splits CPU-bound work across threads of its own escapes the pool's ceiling ([the guide](./guide/services.md#a-blocking-call-that-fans-out)). The shape that would keep it inside is `nilo.blocking.forEach(n, ctx, work)` running `work(i)` on pool workers under the same limit, so a burst of searches cannot take more than the pool allows. `nilo.blocking` is a function today and would have to become something that can carry a declaration, and a task that waits for its own children on the pool it runs on can deadlock it once every worker is a waiting parent, which is the part the design has to answer.
-
-**Needs:** a second caller that fans out inside a blocking call, and a measurement of how many threads a burst of such calls takes at the pool's ceiling against what the caller's own per-call cap leaves.
-
-**What `permessage-deflate` would cost per connection is not weighed**, against the 4,669 bytes an idle one holds.
-
-**What would settle it:** a compressor per connection, weighed. An afternoon.
-
-**Whether `app.metrics`' shared atomics and `Stop.in_flight`'s two read-modify-writes cost anything on many cores is not known.** Four interleaved pairs put the metrics inside the noise on two cores, which is the weakest place to look for cache-line contention, and whether response bytes and sockets should be counted too waits on the same number. Per-thread lanes for `Stop.in_flight` measured −1.1% on the same two cores with the sign changing, and the arithmetic caps the gain at 1–2% of sixteen cores ([`http.md`](../bench/result/http.md#what-the-two-atomics-a-request-always-makes-cost-on-two-cores)).
-
-**What would settle it:** the same pair on eight cores, both counters at once, on a box. The fix is already named for both: shard per executor, pad to 64 bytes, sum at scrape or at drain.
-
-**Whether `keep_bytes = 64 KiB` a thread is the right size is not known.** Every WebSocket figure is a 64-byte payload that never leaves the first page; a 60 KiB message at a thousand a second is where `scratch.zig` starts refusing spares.
-
-**What would settle it:** the interpretation of `bench/compare/wsload/` with `-payload`, whose run exists. An afternoon.
-
-**What kernel TLS would buy a TLS listener is not measured.** The library has a `Ktls` mode in which the kernel does the record layer after the handshake, so the 33 KB of buffers go away and every read and write is one syscall shorter. The buffers already cost nothing at idle ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)), so the win is the page and the half microsecond a request, if it is a win.
-
-**What would settle it:** `bench-tls-server` with `Ktls` against without, `bench/mem.py --tls` and `wrk` over `https://`, on a Linux kernel with `tls` loaded.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
-**0.05–0.1% of short-lived connections log "handler … failed after answering: WriteFailed", and whose fault it is is not known.** It is a response, or a WebSocket's 101, written to a socket the client had already reset, under a client (`gcannon -r 10`) that resets only after reading its tenth answer: 403 in 879K connections on HTTP, 934 in 794K on WebSocket, 163 in 435K on the one-acceptor build, so older than ADR 200. gcannon's own `read` error count is the same order and not the same number ([`http.md`](../bench/result/http.md#a-reset-between-frames-is-a-client-that-has-gone)). If it is the client's, the line is still ADR 022's misreport on a reset rather than a timeout.
-
-**What would settle it:** `tcpdump` on one such connection, both sides, or gcannon with `--json` for the per-error breakdown against the server's count. An afternoon.
-
 **A ClientHello split across two records is refused by the TLS listener rather than reassembled** ([tls.zig#36](https://github.com/ianic/tls.zig/issues/36)). Every client ADR 212 tried sends it whole; the one that does not, or a middlebox that fragments, gets a failed handshake rather than a slow one.
 
 **Needs:** [ianic/tls.zig](https://github.com/ianic/tls.zig), `handshake_server.zig`. Last checked at `e04ae44` on `zig-0.16.x`.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
-**Plain HTTP sent to a TLS port is held as a 12 KB record that never finishes rather than refused on sight.** A record's length is read before its content type is checked, and the header deadline is what ends it, which is why `header_timeout_ms` bounds the handshake ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)).
-
-**Needs:** the same repository, `record.zig`. Last checked at `e04ae44`.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
-**A file on HTTP/2 over plain TCP has no `sendfile`.** Its pieces are read into frames ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)); a frame header written and its payload sent from the file would take the copy out for h2c, which is a proxy's upstream and not where a browser meets a static-heavy site.
-
-**What would settle it:** a deployment that serves files to a proxy over h2c, and the cost on record: a 64 MiB file over h2c is 3.2 GB/s against HTTP/1.1 `sendfile`'s 6.7 to 7.3 on loopback, one stream, with the file read 64 KiB at a time ([`bench/result/http.md`](../bench/result/http.md#what-a-request-on-http2-costs-when-its-answer-is-a-pipe)).
-
-**Priorities on HTTP/2 are ignored.** Answers ready at once are written in stream order; a browser says which matter first with RFC 9218's `priority` field, and nginx and h2o follow it, so a page whose images are ready before its CSS paints later than it would.
-
-**What would settle it:** the page load in Chromium over HTTP/2 that stage 7 put on record ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)) run again with RFC 9218's urgency honoured and without, its largest contentful paint on record; on loopback the page's nineteen requests are inside the spread of HTTP/1.1's, so it needs a page whose images are ready before its CSS.
-
-**A Connect client's `Connect-Timeout-Ms` is not read.** A gRPC call's `grpc-timeout` becomes the request's deadline ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)); a Connect call names its own the same way in milliseconds, and nilo answers it with the route's deadline or none, so a client that gave up is still worked for. Its failures already go out in Connect's shape ([ADR 257](./adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)), `deadline_exceeded` included once a deadline fires.
-
-**What would settle it:** a Connect client that sets a timeout against a message route, or a decision to read the header where a message route reads its `Content-Type`, with the cost on a route that has none measured.
-
-**A Connect GET is a 405.** Connect lets a side-effect-free unary call be a GET with the message in the query (`?message=…&encoding=json`, base64 for protobuf), so a browser or CDN can cache it; a message route registered with `app.post` answers it as any route answers a verb it was not registered for. A method registered with `app.get` reads a message from the query's fields, not from `message=`.
-
-**What would settle it:** a caller whose Connect client is set to use GET, or a design for reading `message=` that does not put a branch on every GET.
-
-**A burst of handed-over event streams on HTTP/2 holds 5.2 to 5.7 KB a stream, where one that stays holds 4.8, and the stack pool still keeps 8 KiB for every fiber that was alive at once.** [`http.md`](../bench/result/http.md#the-spread-of-a-handed-over-stream-is-the-engines-stack-pool) explained a spread of 6 to 12 KB: ten thousand streams opened in a burst kept four to six thousand handler fibers alive together, and zio's pool keeps their stacks for a minute and more. A fiber that finishes a call now takes the connection's next waiting one ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)), so a burst of handlers that return at once is one fiber's work: 100 streams a connection measured 7.9 KB at 1,000 and 8.1 at 10,000 before, 5.2 and 5.7 after ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting)). What is left is the arena and the `Stream` of a handed-over stream (at most 1.4 KB of the 4.8, held by the `Outbox`, `Http2Events` and `Replay` list that live in it), and a burst whose handlers park, which still needs a fiber each.
-
-**What would settle it:** the arena given back once `Stream` has stopped changing under the HTTP/2 request path, and a burst of handlers that wait on a service, counted against the pool at a `stack_pool.shrink_interval` of 5 s, which is zio's option and the Engine's to set.
-
----
 
 **Whether a pre-fork worker mode is worth what it costs is not known.** A parent that forks N workers sharing one listening socket, and starts again one that dies, would shrink a panic to a share of the connections and give the listener takeover `decided.md` asks for. It also makes every Room, cache, allowance and idempotency table one worker's, which is the multi-instance problem inside one host, and multiplies every pool.
 
@@ -846,38 +706,6 @@ Nothing is open at this tier.
 
 **What would settle it:** the longest stretch per request kept as a histogram on the metrics page, run against [ADR 017](./adr/017-the-trade-budget-has-four-axes.md)'s 10% line.
 
-**The metrics page takes one number a name: no labels, no histogram of the application's own, no process series, and counters nilo keeps already go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig:1255`). "Orders by status" is three names, a business latency cannot be written at all, resident memory and open descriptors are missing, and the cache's hit counts, the watchdog's catches and the tracer's drops are numbers nobody scrapes. prom-client and the Go client give all of it.
-
-**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
-
-**Signing in with an identity provider is put together by hand, and the steps it needs are the ones that fail silently.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) stops at verifying the ID token. Discovery, `state`, PKCE, the code exchange and the `nonce` are the caller's, and leaving any one out still signs the user in. Every part is here (`nilo_fetch`, `jwt.Verifier`, `Session(T)`, `c.entropy`), so what is missing is the order, and ADR 111's own reason for owning verification, that being wrong is silent, holds for the order too. `golang.org/x/oauth2` with go-oidc and passport are the habit.
-
-**What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
-
-**Several files under one form field are refused.** `[]const Upload` is a compile error because "a field takes one" (`http/form.zig:532`), a reason from before a field could be a list ([ADR 132](./adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)); `<input type="file" multiple>` and multer's `upload.array` send several under one name.
-
-**What would settle it:** a caller with that form; the bound is already there in the part limit and `max_body`.
-
-**A download's `Content-Disposition` is written by hand.** RFC 6266's quoting and `filename*=` are why `FileBody` refused a `download_as` field (`http/filebody.zig`), and that difficulty argues for one correct function rather than one in every program. gin's `FileAttachment` and Express's `res.download` are the habit.
-
-**What would settle it:** the function, `nilo.contentDisposition(arena, .attachment, name)` or the shape a design prefers, tested against names that are not ASCII.
-
-**The test client has no JSON helper, and a Room's conversation between two sockets cannot be driven from a test.** `Client.post` takes the body as text (`http/testing.zig:506`) where `nilo_fetch` has `postJson`; `docs/guide/websocket.md` says frames are queued before the server runs, so a conversation between two sockets cannot be driven, and `Live` gives a port and no WebSocket client. supertest and `httptest` are the habit.
-
-**What would settle it:** `postJson`, and a WebSocket client over `Live` that reuses `Conversation`'s calls.
-
-**A base path cannot be set at run time.** Patterns and `group` prefixes are comptime, so a service behind an ingress that routes `/myapp/` differently per environment is rebuilt, or the proxy strips the prefix. `http.StripPrefix` and Express's `app.use(base, router)` take it at run time.
-
-**What would settle it:** a deployment that cannot strip the prefix in front; the shape is one comparison before matching, `c.url` adding it back, and a `servers` entry in the document.
-
-**A CORS origin is matched exactly, so `https://*.tenant.example.com` is a list nobody can write** (`http/cors.zig`, [ADR 078](./adr/078-one-allow-origin-header-means-the-list-is-matched-not-formatted.md)). rs/cors and the `cors` package take a pattern.
-
-**What would settle it:** a multi-tenant caller, and a suffix rule that cannot be made to match a host the deployment does not own.
-
-**A write cannot be made conditional: `If-Match` and 412 are not answered.** `Versioned(T)` already names a version for `If-None-Match` ([ADR 189](./adr/189-a-version-a-handler-names-is-an-etag.md)), and the same version is what an optimistic update checks.
-
-**What would settle it:** a caller with concurrent edits to one resource.
-
 ## How this file is written
 
 Nine rules. They are why the file has the shape it has, and adding to it means matching them.
@@ -886,7 +714,7 @@ Nine rules. They are why the file has the shape it has, and adding to it means m
 
 **2. Nothing decided is in here either.** An answer that is the answer, a question closed so it is not re-derived, a feature refused with its reason, goes to [`decided.md`](./decided.md), and a risk with no mechanism under it yet goes to [`risks.md`](./risks.md#open). This file is what is still open.
 
-**3. An entry is in one tier, by the evidence that it matters, and under its module.** The tiers are the table in [How to read this](#how-to-read-this). An entry is ranked by what it costs, measured or reproduced, and never by whether somebody has asked: an entry nobody can show matters yet is P3, not gone and not waiting. A module with nothing in a tier has no heading there, because an empty heading says nothing; a tier with nothing in it keeps its heading and says so, because an empty P0 is news.
+**3. An entry is in one tier, by what it costs, and under its module.** The tiers are the table in [How to read this](#how-to-read-this). An entry is ranked by who meets it and what it does to them or to the project, and never by whether somebody has asked or by how it was found. Before an entry is added, ask whether it is needed now: if it is not, and it is neither a defect nor something important that may cost users, it is not added. A module with nothing in a tier has no heading there, because an empty heading says nothing; a tier with nothing in it keeps its heading and says so, because an empty P0 is news.
 
 **4. An entry opens with the whole claim, in bold**, and closes with one line: `Needs:` when the shape of the work is known, `What would settle it:` when the entry is a question or a number. An entry waiting on somebody else's repository names it, and the pin it was last checked at, on that line. Somebody who reads only the bold lines has to come away with the right idea of what is outstanding, and somebody who reads only the closing lines has to know what to bring. Neither is optional and neither is prose.
 
@@ -898,6 +726,6 @@ Nine rules. They are why the file has the shape it has, and adding to it means m
 
 **8. A number carries a link to where it was measured.** [`bench/result/`](../bench/result/) is the record. A figure with no run behind it decays into a claim, and a claim in a roadmap gets planned against, which is worse than a wrong number in a changelog.
 
-**9. The whole list is ranked again at each release.** Cutting one bumps the version in `build.zig.zon`, and `docs-check` refuses this file until its `Ranked at` line names the new one, so the ranking is redone against the numbers `bench/release.py` has just produced. Every entry is read against the tiers again: a P3 whose closing line has come true moves up, an entry the numbers have overtaken moves down, and a P3 that a release has left exactly where it was is given a reason to stay or moved to `decided.md` with the reason it is not coming.
+**9. The whole list is ranked again at each release.** Cutting one bumps the version in `build.zig.zon`, and `docs-check` refuses this file until its `Ranked at` line names the new one, so the ranking is redone against the numbers `bench/release.py` has just produced. Every entry is read against the tiers again: a P3 whose closing line has come true moves up, an entry the numbers have overtaken moves down, and one that is no longer needed is deleted, unless it is a defect. A P3 that a release has left exactly where it was is given a reason to stay or deleted; a refusal with its reason goes to `decided.md` instead (rule 2).
 
 Adding a module means a heading for it under whichever tiers have entries for it, and nothing else: there is no index to keep in step.
