@@ -657,6 +657,15 @@ inline fn sameName(a: []const u8, b: []const u8) bool {
 /// loop it made the lookup of an absent name slower: the loop lost its
 /// registers to a path it takes once.
 pub fn findHeader(head: []const u8, name: []const u8) ?[]const u8 {
+    const colon = findHeaderColon(head, name) orelse return null;
+    return valueAfter(head, colon);
+}
+
+/// Where the `:` of the first header called `name` is, which is `findHeader`
+/// before it reads the value, for a caller that wants to look at the first
+/// bytes of the value without finding the end of its line (`message.codecIn`).
+/// The same rules, the same reliance on the head ending at its blank line.
+pub inline fn findHeaderColon(head: []const u8, name: []const u8) ?usize {
     if (name.len == 0) return null;
     const first = name[0] | 0x20;
     var i: usize = 0;
@@ -667,7 +676,7 @@ pub fn findHeader(head: []const u8, name: []const u8) ?[]const u8 {
             const colon = at + name.len;
             if (colon >= head.len or head[colon] != ':') continue;
             if (!sameName(head[at..colon], name)) continue;
-            return valueAfter(head, colon);
+            return colon;
         }
     }
     return null;
@@ -677,7 +686,7 @@ pub fn findHeader(head: []const u8, name: []const u8) ?[]const u8 {
 /// line's end, without the CR and without the spaces and tabs at either end.
 /// Out of `findHeader` so its loop keeps its registers, which the lookup is
 /// measured to lose when this is inlined into it (see `findHeader`).
-noinline fn valueAfter(head: []const u8, colon: usize) []const u8 {
+pub noinline fn valueAfter(head: []const u8, colon: usize) []const u8 {
     var start = colon + 1;
     var end = lineEnd(head, start);
     if (end > start and head[end - 1] == '\r') end -= 1;

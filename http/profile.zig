@@ -257,6 +257,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     headerLookups();
     contentTypeLookups();
     try messageRoutes(gpa);
+    try taggedReads(gpa);
     // A call is answered through the framing only a `-Dhttp2` build has
     // (ADR 220), so without the flag there is no gRPC call to time.
     if (comptime @import("nilo_build").http2) {
@@ -430,6 +431,85 @@ fn messageRoutes(gpa: std.mem.Allocator) !void {
             if (rep > 0 and took < best) best = took;
         }
         std.debug.print("  {s:<40}{d:>5}ns\n", .{ r[0], best / message_rounds });
+    }
+}
+
+// ---- an internally tagged union read from a body (ADR 016) ----
+//
+// A thousand elements, read as an array, once with each element a tagged
+// value, once with the same fields and no tag, so the difference is what the
+// discriminator costs. `jsonmark.zig`'s header said it cost nothing per
+// request, which was true of the write half and was never measured for the
+// read.
+
+const tagged_rounds = 300;
+const tagged_count = 1000;
+
+const Click = struct { id: u32, x: i32, y: i32, label: []const u8 };
+
+const Event = union(enum) {
+    pub const nilo_json = .{ .tag = "kind" };
+    pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+
+    click: Click,
+    key: struct { id: u32, code: u32, shift: bool = false },
+    idle,
+};
+
+fn taggedBody(gpa: std.mem.Allocator, comptime shape: enum { first, last, plain, mixed }) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    try out.writer.writeByte('[');
+    for (0..tagged_count) |i| {
+        if (i > 0) try out.writer.writeByte(',');
+        switch (shape) {
+            .first => try out.writer.print("{{\"kind\":\"click\",\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\"}}", .{ i, i % 900, i % 700 }),
+            .last => try out.writer.print("{{\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\",\"kind\":\"click\"}}", .{ i, i % 900, i % 700 }),
+            .plain => try out.writer.print("{{\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\"}}", .{ i, i % 900, i % 700 }),
+            .mixed => if (i % 3 == 0)
+                try out.writer.print("{{\"kind\":\"key\",\"id\":{d},\"code\":{d}}}", .{ i, i % 200 })
+            else if (i % 3 == 1)
+                try out.writer.writeAll("{\"kind\":\"idle\"}")
+            else
+                try out.writer.print("{{\"kind\":\"click\",\"id\":{d},\"x\":{d},\"y\":{d},\"label\":\"button\"}}", .{ i, i % 900, i % 700 }),
+        }
+    }
+    try out.writer.writeByte(']');
+    return out.written();
+}
+
+fn taggedReads(gpa: std.mem.Allocator) !void {
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    const first = try taggedBody(scratch.allocator(), .first);
+    const last = try taggedBody(scratch.allocator(), .last);
+    const plain = try taggedBody(scratch.allocator(), .plain);
+    const mixed = try taggedBody(scratch.allocator(), .mixed);
+
+    var read_arena = std.heap.ArenaAllocator.init(gpa);
+    defer read_arena.deinit();
+    std.debug.print("\nOne array of {d} objects read as a body (nilo's reader, no request around it):\n\n", .{tagged_count});
+    inline for (.{
+        .{ "untagged, the control", []const Click, plain },
+        .{ "tagged, the tag first", []const Event, first },
+        .{ "tagged, the tag last", []const Event, last },
+        .{ "tagged, three variants, the tag first", []const Event, mixed },
+    }) |row| {
+        var best: u64 = std.math.maxInt(u64);
+        for (0..reps + 1) |rep| {
+            const started = clock();
+            for (0..tagged_rounds) |_| {
+                const value = try json_mod.parseLeaky(row[1], read_arena.allocator(), row[2], .{});
+                sink += value.len;
+                _ = read_arena.reset(.{ .retain_with_limit = 256 * 1024 });
+            }
+            const took = clock() - started;
+            if (rep > 0 and took < best) best = took;
+        }
+        std.debug.print("  {s:<40}{d:>7}ns  {d:>5.1}ns an object\n", .{
+            row[0],
+            best / tagged_rounds,
+            @as(f64, @floatFromInt(best)) / tagged_rounds / tagged_count,
+        });
     }
 }
 

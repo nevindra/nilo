@@ -2451,7 +2451,7 @@ fn protoAnswer(c: *Ctx, spelling: anytype, value: anytype) !?[]const u8 {
 /// JSON within 4% of a plain struct where this is 12%. Here it is code only
 /// in a handler with a message in its signature (ADR 256).
 fn codecOf(c: *Ctx, spelling: *message.Codec) message.Codec {
-    if (spelling.* == .unread) spelling.* = message.codecOf(message.contentTypeIn(c._head));
+    if (spelling.* == .unread) spelling.* = message.codecIn(c._head);
     return spelling.*;
 }
 

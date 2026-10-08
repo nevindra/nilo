@@ -345,9 +345,9 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**A message read as JSON is about 44 ns slower than a plain struct of the same shape, and the read of its `Content-Type` is a third of that.** `Ctx.header` now looks only at the lines that start with the name's letter (`http1.findHeader`: 21 ns to 6 for the third line of a short head in a loop of its own, 120 to 34 for the last of a browser's fifteen), and the message row went from 72 to 77 ns above the control to 41 to 47 ([`bench/result/http.md`](../bench/result/http.md#a-header-is-looked-for-by-the-lines-that-can-hold-it)). The rest, about 30 ns, is not a read of the head: a route whose `Content-Type` is handed back as a constant the compiler cannot see through is still 26 to 30 ns above the control, so it is what choosing a spelling costs (the `Codec` kept in the wrapper, `mediaType` and `codecOf` run on the value, the branches in `readBody` and `protoAnswer` that a plain struct has none of), and ADR 256's first cut measured a message as JSON at the control's own figure before that choice existed.
+**A message read as JSON is still about 10 to 25 ns slower than a plain struct of the same shape.** The first cut of this entry was 39 to 46 ns; `message.codecIn` took about 20 to 30 of it by answering the common `application/json` with one sixteen-byte compare in place of finding the end of the line, trimming it and walking the media type a byte at a time ([`bench/result/http.md`](../bench/result/http.md#a-message-is-told-from-json-by-sixteen-bytes)). What is left is the lookup of the line itself, which costs about 4 times in a request what it does in a loop of its own, and the `Codec` in the wrapper.
 
-**What would settle it:** the message row against the control in `zig build profile`, interleaved and pinned, with `message.codecOf` and the wrapper's branches taken out one at a time to see which of them the 30 ns is, and whichever is cheaper kept only where it adds no code to a program with no message.
+**What would settle it:** a lookup that does not search: the head parser already walks every field, and ADR 256's rejected cut classed the `Content-Type` there for 1.6 KB in every program. A form of that which exists only when the App has a message route would take the rest: the head parser noting the `Content-Type` (a byte on `http1.Request`) in a program with a message route and not in any other.
 
 **A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.** A message read or written as JSON is nilo's JSON ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), so a `[]const u8` declared `.bytes` in its `wire` table goes out as the bytes themselves and is read back the same way. A Connect client speaking JSON sends and expects base64 there, and the two would disagree without either refusing. Field names and 64-bit integers do not have the problem: a Connect client reads both of nilo's spellings.
 
@@ -399,9 +399,9 @@ Nothing is open at this tier.
 
 **Needs:** a guide section showing `grpc.health.v1.Health/Check` as an ordinary route, and a decision on server reflection.
 
-**A number inside a map or a `std.json.Value` field is still read by `std.json`'s grammar.** `"1_0"` there is 10, where [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md) refuses it everywhere else in a body, because a type with its own `jsonParse` is handed to `std.json.innerParse` unchanged. The write half is closed: a float that is not finite is `null` on every path out ([ADR 096](./adr/096-a-byte-that-is-not-text-is-not-a-string.md)).
+**A number inside an externally tagged union, `std.json`'s own encoding of one, is still read by `std.json`'s grammar.** `{"a":"1_0"}` into a union with an `a: u32` arm is 10 there, where [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md) refuses it everywhere else in a body, because `json.innerRead` hands a union with no `jsonParse` to `std.json.innerParse` unchanged (found by reading the code; no test sends it yet). A map and a tuple are read by the rule now, and a `std.json.Value` never needed it: it keeps a string a string and a number too large for a float as its text.
 
-**Needs:** the map and `Value` paths read through the number rule every other field is, with a test sending `"1_0"` to each.
+**Needs:** the union read through `innerRead`, with a test sending `"1_0"` to an arm.
 
 **Multipart, streamed.** `Form(T)` reads a multipart body whole, bounded by `max_body` ([ADR 030](./adr/030-a-form-is-the-body-read-by-another-rule.md)), which is right for a form with a photo in it and wrong for a 2 GB video. The streaming version wants a parser that resumes across reads and an `Upload` that is a reader rather than bytes; it inherits nothing from `sendfile`, because sending is a descriptor handed to the kernel and receiving is a parser holding its place.
 
@@ -420,10 +420,6 @@ Nothing is open at this tier.
 **Whether one acceptor per executor is past the knee on a machine with many threads is not measured there** ([ADR 200](./adr/200-every-executor-accepts.md)). dusty measured 12 and 24 accept loops losing 20–40% on one request per connection against 5, on 24 threads; at 8 threads on the 9700X log2's 3 gained 2–4% there and lost 5–6% at ten requests per connection ([`http.md`](../bench/result/http.md#how-many-acceptors-eight-threads-want)).
 
 **What would settle it:** the same sweep, acceptors at threads, 2×log2 and log2, on 24 threads or more, with one and ten requests per connection, on a box.
-
-**What reading an internally tagged union costs is not measured, and `jsonmark.zig`'s header says it costs nothing per request.** Each tagged value is passed over four times (`skipValue`, the discriminator scan, `parseFromSliceLeaky`, `refuseUnknown`), two of them building a `std.json.Scanner`; the header's claim is true only on the write side.
-
-**What would settle it:** an array of a thousand tagged values, against the same array untagged; `http.md` has the write side (248–317 → 88–95 ns across six runs) and nothing for the read. An afternoon.
 
 **Whether the 32-lane scans hold on aarch64 is not measured.** `scan.lanes` and `json.zig`'s escape scan are 32 lanes, which on aarch64 is two NEON registers, and every head-parsing and JSON figure is from one x86-64 box.
 

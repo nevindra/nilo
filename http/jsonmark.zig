@@ -41,12 +41,29 @@
 //!
 //! ## What it costs
 //!
-//! Nothing per request and nothing per connection: the marker is read while
-//! compiling and every name it produces is a comptime string. On the write
-//! side it is a saving rather than a cost, because `covers` is answered for the
-//! whole value — one union field anywhere used to send the entire response to
-//! `std.json`, strings included. A 374-byte alert rule went 258ns → 93ns, and a
-//! 104-byte one 85ns → 25ns ([`bench/result/http.md`](../bench/result/http.md)).
+//! Nothing per connection, and on the write side nothing per request: the
+//! marker is read while compiling and every name it produces is a comptime
+//! string. On the write side it is a saving, because `covers` is answered for
+//! the whole value: one union field anywhere used to send the entire response
+//! to `std.json`, strings included. A 374-byte alert rule went 258ns → 93ns, and
+//! a 104-byte one 85ns → 25ns ([`bench/result/http.md`](../bench/result/http.md)).
+//!
+//! **The read side was never free, and this header said it was.** A thousand
+//! tagged objects of four fields took 494 ns each against 123 for the same
+//! fields untagged: each was passed over four times (`skipValue`, the
+//! discriminator scan, the variant's fields, the unknown-key check), two of
+//! them with a scanner of their own. The discriminator is nearly always the
+//! first key, and then the variant is known before a field is read, so the
+//! object is read once, straight into the variant: 149 ns, 1.2 times the
+//! untagged. A body with the tag anywhere else is read twice, 280 ns. Every
+//! refusal is the same either way: the same bodies are refused, and a body
+//! with one mistake gets the same message. A body with two mistakes may name
+//! the other one first (the first in field order now, where the old reader
+//! named the first of its passes), so `MissingField` can become
+//! `UnknownField` and a client could read a different 400 sentence
+//! (`readOpening`, `readAnywhere`, and the tests that send each mistake both
+//! ways round); the numbers are in
+//! [`bench/result/http.md`](../bench/result/http.md#a-tagged-union-is-read-once-when-its-tag-comes-first).
 
 const std = @import("std");
 const naming = @import("names.zig");
@@ -912,12 +929,15 @@ fn Reader(comptime T: type) type {
 
             if (comptime m.tag == null) return readRenamed(gpa, source, options);
 
-            // An internally tagged object cannot be read in one pass: the
-            // variant is not known until the discriminator turns up, and it may
-            // turn up after fields that belong to it. So the object is looked
-            // at twice.
+            // The variant is not known until the discriminator turns up, and
+            // it is nearly always the first key. When it is, and every variant
+            // is a plain struct, the object is read once, straight into the
+            // variant (`readOpening`); when it is not, the discriminator is
+            // found by one pass and the fields are read by a second
+            // (`readAnywhere`); a union with a variant of another shape takes
+            // `fromSpan`, which looks at the object four times.
             //
-            // Over a complete input the bytes are already in memory, so the
+            // Over a complete input the bytes are already in memory, so a
             // second look costs a scan and nothing else.
             if (comptime @TypeOf(source) == *std.json.Scanner) {
                 // Peeking is what puts the cursor on the value's first byte.
@@ -937,6 +957,18 @@ fn Reader(comptime T: type) type {
                     else => {},
                 }
                 const start = source.cursor;
+                // **The discriminator is almost always the first key**, which
+                // is how every client and every encoder in this repository
+                // writes it, and then the variant is known before a field of
+                // it is read: the object is read once, straight into the
+                // variant, where the general way below passes over it four
+                // times. A body that opens any other way takes the general
+                // way, so what is accepted and what is refused does not
+                // depend on which of the two read it.
+                if (comptime singlePass()) {
+                    if (opensWithTag(source.input[start..])) return readOpening(gpa, source, options);
+                    return readAnywhere(gpa, source, start, options);
+                }
                 try source.skipValue();
                 return fromSpan(gpa, source.input[start..source.cursor], options);
             }
@@ -945,6 +977,147 @@ fn Reader(comptime T: type) type {
             // looked at twice, and `std.json.Value` is what holds it.
             const held = try std.json.innerParse(std.json.Value, gpa, source, options);
             return fromValue(gpa, held, options);
+        }
+
+        /// Whether the read that takes the discriminator first applies to
+        /// `T`: every variant that carries something is a plain struct, with
+        /// no field of the discriminator's name, so the struct reader can take
+        /// the object from the second key on.
+        fn singlePass() bool {
+            comptime {
+                const key = of(T).?.tag.?;
+                for (key) |ch| if (ch == '"' or ch == '\\' or ch < 0x20) return false;
+                for (@typeInfo(T).@"union".fields) |f| {
+                    if (f.type == void) continue;
+                    if (@typeInfo(f.type) != .@"struct") return false;
+                    if (@typeInfo(f.type).@"struct".is_tuple) return false;
+                    if (@import("json.zig").readsItself(f.type)) return false;
+                    if (@hasField(f.type, key)) return false;
+                }
+                return true;
+            }
+        }
+
+        /// Whether `input`, which starts on an object's `{`, goes on with the
+        /// discriminator's key, a colon and the quote that opens its value,
+        /// white space allowed between. A guess about the bytes and nothing
+        /// more: the scanner reads them properly after.
+        fn opensWithTag(input: []const u8) bool {
+            const quoted = comptime "\"" ++ of(T).?.tag.? ++ "\"";
+            var i: usize = 1;
+            if (input.len < 1 or input[0] != '{') return false;
+            while (i < input.len and isSpace(input[i])) i += 1;
+            if (!std.mem.startsWith(u8, input[i..], quoted)) return false;
+            i += quoted.len;
+            while (i < input.len and isSpace(input[i])) i += 1;
+            if (i >= input.len or input[i] != ':') return false;
+            i += 1;
+            while (i < input.len and isSpace(input[i])) i += 1;
+            return i < input.len and input[i] == '"';
+        }
+
+        /// One object, read once: its first key is the discriminator, so the
+        /// rest of it is the fields of the variant that names (`opensWithTag`).
+        /// Every refusal the general way makes is made here: a variant that
+        /// does not exist, a key the variant has not got, a discriminator
+        /// twice, a field missing.
+        fn readOpening(
+            gpa: std.mem.Allocator,
+            source: *std.json.Scanner,
+            options: std.json.ParseOptions,
+        ) std.json.ParseError(std.json.Scanner)!T {
+            _ = try source.next();
+            _ = try source.next();
+            const value = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
+            const arm = switch (value) {
+                inline .string, .allocated_string => |slice| slice,
+                else => return error.UnexpectedToken,
+            };
+            return variantOf(true, gpa, source, arm, options);
+        }
+
+        /// An object whose discriminator may be anywhere: found by one pass
+        /// that also takes the object off `source`, and the variant's fields
+        /// read by a second over the same bytes, where the general way
+        /// (`fromSpan`) makes four. A discriminator twice is refused by the
+        /// first pass, wherever the two sit.
+        fn readAnywhere(
+            gpa: std.mem.Allocator,
+            source: *std.json.Scanner,
+            start: usize,
+            options: std.json.ParseOptions,
+        ) std.json.ParseError(std.json.Scanner)!T {
+            const key = comptime of(T).?.tag.?;
+            if (.object_begin != try source.next()) return error.UnexpectedToken;
+
+            var found: ?[]const u8 = null;
+            while (true) {
+                const token = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
+                const name = switch (token) {
+                    inline .string, .allocated_string => |slice| slice,
+                    .object_end => break,
+                    else => return error.UnexpectedToken,
+                };
+                if (!std.mem.eql(u8, name, key)) {
+                    try source.skipValue();
+                    continue;
+                }
+                if (found != null) return error.DuplicateField;
+                const value = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
+                found = switch (value) {
+                    inline .string, .allocated_string => |slice| slice,
+                    else => return error.UnexpectedToken,
+                };
+            }
+            const arm = found orelse return error.MissingField;
+
+            var again = std.json.Scanner.initCompleteInput(gpa, source.input[start..source.cursor]);
+            defer again.deinit();
+            _ = try again.next();
+            return variantOf(false, gpa, &again, arm, options);
+        }
+
+        /// The variant `arm` names, read from `source`, which is on the key
+        /// after the discriminator when `first` and on the first key of the
+        /// object otherwise.
+        fn variantOf(
+            comptime first: bool,
+            gpa: std.mem.Allocator,
+            source: *std.json.Scanner,
+            arm: []const u8,
+            options: std.json.ParseOptions,
+        ) std.json.ParseError(std.json.Scanner)!T {
+            const key = comptime of(T).?.tag.?;
+
+            // What is inside a variant is not held to the variant's own keys,
+            // which are checked at its top and only there (ADR 016).
+            var inner = options;
+            inner.ignore_unknown_fields = true;
+
+            inline for (@typeInfo(T).@"union".fields, comptime wireNames(T)) |f, on_the_wire| {
+                if (std.mem.eql(u8, arm, on_the_wire)) {
+                    if (f.type == void) {
+                        while (true) {
+                            const token = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
+                            const name = switch (token) {
+                                inline .string, .allocated_string => |slice| slice,
+                                .object_end => return @unionInit(T, f.name, {}),
+                                else => return error.UnexpectedToken,
+                            };
+                            if (std.mem.eql(u8, name, key)) {
+                                if (first) return error.DuplicateField;
+                            } else if (!options.ignore_unknown_fields) return error.UnknownField;
+                            try source.skipValue();
+                        }
+                    }
+                    return @unionInit(T, f.name, try @import("json.zig").readFields(f.type, key, first, gpa, source, options, inner));
+                }
+            }
+            return error.InvalidEnumTag;
+        }
+
+        fn isSpace(ch: u8) bool {
+            return ch == ' ' or ch == '\t' or ch == '\r' or ch == '\n';
         }
 
         /// An enum, or a union that renames its variants without tagging them.
@@ -1487,6 +1660,68 @@ test "a variant with no payload is a tag on its own" {
 }
 
 const parseLeakyBody = @import("json.zig").parseLeaky;
+
+test "a tagged variant is refused the same way whether its tag opens the object or comes after its fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = @import("json.zig").parseLeaky;
+
+    // Each pair is one mistake, spelled with the tag first and then last.
+    const Pair = struct { first: []const u8, last: []const u8, err: anyerror };
+    const cases = [_]Pair{
+        .{ .err = error.UnknownField, .first = "{\"signal\":\"logs\",\"query\":\"q\",\"cont\":5}", .last = "{\"query\":\"q\",\"cont\":5,\"signal\":\"logs\"}" },
+        .{ .err = error.UnknownField, .first = "{\"signal\":\"queued\",\"extra\":1}", .last = "{\"extra\":1,\"signal\":\"queued\"}" },
+        .{ .err = error.InvalidEnumTag, .first = "{\"signal\":\"traces\",\"query\":\"q\"}", .last = "{\"query\":\"q\",\"signal\":\"traces\"}" },
+        .{ .err = error.MissingField, .first = "{\"signal\":\"logs\"}", .last = "{\"count_over\":2,\"signal\":\"logs\"}" },
+        .{ .err = error.MissingField, .first = "{\"query\":\"q\"}", .last = "{\"query\":\"q\"}" },
+        .{ .err = error.DuplicateField, .first = "{\"signal\":\"logs\",\"signal\":\"logs\",\"query\":\"q\"}", .last = "{\"query\":\"q\",\"signal\":\"logs\",\"signal\":\"logs\"}" },
+        .{ .err = error.DuplicateField, .first = "{\"signal\":\"queued\",\"signal\":\"logs\"}", .last = "{\"signal\":\"logs\",\"query\":\"q\",\"signal\":\"queued\"}" },
+        .{ .err = error.DuplicateField, .first = "{\"signal\":\"logs\",\"query\":\"q\",\"query\":\"r\"}", .last = "{\"query\":\"q\",\"query\":\"r\",\"signal\":\"logs\"}" },
+        .{ .err = error.UnexpectedToken, .first = "{\"signal\":7,\"query\":\"q\"}", .last = "{\"query\":\"q\",\"signal\":7}" },
+        .{ .err = error.UnexpectedToken, .first = "{\"signal\":\"logs\",\"query\":5}", .last = "{\"query\":5,\"signal\":\"logs\"}" },
+        .{ .err = error.InvalidNumber, .first = "{\"signal\":\"logs\",\"query\":\"q\",\"count_over\":\"1_0\"}", .last = "{\"query\":\"q\",\"count_over\":\"1_0\",\"signal\":\"logs\"}" },
+        .{ .err = error.UnexpectedToken, .first = "[\"signal\"]", .last = "\"logs\"" },
+    };
+    for (cases) |c| {
+        try testing.expectError(c.err, body(Condition, a, c.first, .{}));
+        try testing.expectError(c.err, body(Condition, a, c.last, .{}));
+    }
+
+    // And the same bodies read through a union held by a struct and a list,
+    // which is where a body meets one.
+    const Rule = struct { id: u32, conditions: []const Condition };
+    const ok = try body(Rule, a,
+        \\{"id":1,"conditions":[{"signal":"logs","query":"a"},{ "query" : "b", "count_over":3, "signal" : "logs" },{"signal":"queued"},{"signal":"metrics","metric_name":"m","threshold":1.5}]}
+    , .{});
+    try testing.expectEqual(@as(usize, 4), ok.conditions.len);
+    try testing.expectEqualStrings("a", ok.conditions[0].logs.query);
+    try testing.expectEqual(@as(u32, 3), ok.conditions[1].logs.count_over);
+    try testing.expectEqualStrings("queued", @tagName(ok.conditions[2]));
+    try testing.expectEqual(@as(f64, 1.5), ok.conditions[3].metrics.threshold);
+    try testing.expectError(error.UnknownField, body(Rule, a,
+        \\{"id":1,"conditions":[{"signal":"logs","query":"a"},{"signal":"logs","query":"a","oops":1}]}
+    , .{}));
+    // Unknown keys are skipped, in a void variant too, when the caller says so.
+    const lax = try body(Condition, a, "{\"signal\":\"queued\",\"x\":[1,{\"y\":2}]}", .{ .ignore_unknown_fields = true });
+    try testing.expectEqualStrings("queued", @tagName(lax));
+}
+
+test "a key inside what a variant holds is not held to the variant's keys, tag first or last" {
+    const Inner = struct { n: u8 };
+    const Wrapped = union(enum) {
+        pub const nilo_json = .{ .tag = "kind" };
+        pub const jsonParse = parseFor(@This());
+        box: struct { inside: Inner },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = try parseLeakyBody(Wrapped, a, "{\"kind\":\"box\",\"inside\":{\"n\":1,\"stray\":2}}", .{});
+    const last = try parseLeakyBody(Wrapped, a, "{\"inside\":{\"n\":1,\"stray\":2},\"kind\":\"box\"}", .{});
+    try testing.expectEqual(@as(u8, 1), first.box.inside.n);
+    try testing.expectEqual(@as(u8, 1), last.box.inside.n);
+}
 
 test "a struct that says .ignore has a mark that says so, and one that does not, does not" {
     const Loose = struct {

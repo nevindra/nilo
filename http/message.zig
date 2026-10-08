@@ -133,6 +133,32 @@ pub fn fieldIn(head: []const u8, comptime name: []const u8) ?[]const u8 {
     return http1.findHeader(head, name);
 }
 
+/// `codecOf(contentTypeIn(head))` for a request head, written for the one
+/// answer almost every request gives. **A JSON body is the common case, so the
+/// first sixteen bytes of the value are compared whole against
+/// `application/json`** (the letters folded, as RFC 9110 §8.3.1 has it) and
+/// that is the answer without finding where the line ends, trimming it, or
+/// walking the media type a byte at a time; anything else takes the slow way,
+/// which is the answer by definition. A value that starts with
+/// `application/json` can be none of protobuf's names, whatever follows.
+/// Measured in `bench/result/http.md` (a message's Content-Type, ADR 256).
+pub fn codecIn(head: []const u8) Codec {
+    const colon = http1.findHeaderColon(head, "content-type") orelse return .json;
+    var at = colon + 1;
+    while (at < head.len and (head[at] == ' ' or head[at] == '\t')) at += 1;
+    if (at + 16 <= head.len and isApplicationJson(head[at..][0..16])) return .json;
+    return codecOf(http1.valueAfter(head, colon));
+}
+
+/// Whether sixteen bytes are `application/json` in any case, in one compare.
+inline fn isApplicationJson(bytes: *const [16]u8) bool {
+    const V = @Vector(16, u8);
+    const v: V = bytes.*;
+    const upper = (v -% @as(V, @splat('A'))) < @as(V, @splat(26));
+    const folded = @select(u8, upper, v | @as(V, @splat(0x20)), v);
+    return @reduce(.And, folded == @as(V, "application/json".*));
+}
+
 /// Which spelling of a message a request's `Content-Type` names. Protobuf
 /// only under one of its names; anything else is JSON, the way every other
 /// struct is read whatever its label, so `curl -d` (which says
@@ -319,6 +345,31 @@ test "a request's content type names protobuf, and anything else, none included,
     try testing.expectEqual(Codec.json, codecOf("application/jsonx"));
     try testing.expectEqual(Codec.json, codecOf("application\x0fjson"));
     try testing.expectEqual(Codec.json, codecOf(""));
+}
+
+test "codecIn answers what codecOf of the found value does, for every shape of value" {
+    const values = [_][]const u8{
+        "application/json",            "Application/JSON",         "application/json; charset=utf-8",
+        "application/jsonx",           "application/json\t",       "application/proto",
+        "application/protobuf",        "APPLICATION/X-PROTOBUF",   "application/grpc",
+        "application/grpc+proto",      "application/grpc+json",    "text/plain",
+        "application\x0fjson",         "application/jso",          "",
+        "  application/json",          "\tapplication/proto ; x=1", "application/json ",
+        "application@json",
+    };
+    for (values) |v| {
+        for ([_][]const u8{ "", "X-A: b\r\n", "X-A: b\r\nX-B: c\r\nX-C: d\r\n" }) |extra| {
+            var buf: [256]u8 = undefined;
+            const head = try std.fmt.bufPrint(&buf, "POST /s HTTP/1.1\r\n{s}Content-Type:{s}\r\nHost: t\r\n\r\n", .{ extra, v });
+            try testing.expectEqual(codecOf(contentTypeIn(head)), codecIn(head));
+        }
+    }
+    try testing.expectEqual(Codec.json, codecIn("POST /s HTTP/1.1\r\nHost: t\r\n\r\n"));
+    try testing.expectEqual(Codec.json, codecIn(""));
+    // A field block, its request line empty, the way an HTTP/2 call's is.
+    try testing.expectEqual(Codec.grpc, codecIn("\nhost: t\r\ncontent-type: application/grpc\r\n\r\n"));
+    // A value that ends the head before sixteen bytes are there.
+    try testing.expectEqual(Codec.proto, codecIn("\ncontent-type: application/proto\r\n\r\n"));
 }
 
 test "the first Content-Type in a head is found whatever its case, and a name that only starts like it is not" {

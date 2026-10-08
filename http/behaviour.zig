@@ -10999,7 +10999,7 @@ test "a second discriminator in a tagged body is a 400 naming the key" {
 const Queue = struct {
     steps: []const Step,
 
-    /// Every variant a plain struct.
+    /// Every variant a plain struct: the tag-first reader applies.
     const Step = union(enum) {
         pub const nilo_json = .{ .tag = "signal" };
         pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
@@ -11012,7 +11012,7 @@ const Queue = struct {
 const Pairs = struct {
     steps: []const Step,
 
-    /// A variant that is a tuple.
+    /// A variant that is a tuple: the general reader applies.
     const Step = union(enum) {
         pub const nilo_json = .{ .tag = "signal" };
         pub const jsonParse = @import("jsonmark.zig").parseFor(@This());

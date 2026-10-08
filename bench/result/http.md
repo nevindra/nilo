@@ -3702,6 +3702,65 @@ The todo entry that [a body read as what its type says](#a-body-read-as-what-its
 
 **The decision it moved:** `Ctx.header` stays a read of the head with no list built, and is that lookup; the todo entry became the 30 ns that is not the read. **Can it be pushed further:** a head of a browser's size is 34 ns, about 0.8 ns a sixteen-byte load, and a build for a target with AVX2 (`-Dcpu`) was not tried, where a load would be 32 bytes; the lookup for a short head is 6 ns and what is left in it was not taken apart. The next gain on the message row is in the spelling's own cost, in [`todo.md`](../../docs/todo.md).
 
+## A message is told from JSON by sixteen bytes
+
+The todo entry that [a header is looked for by the lines that can hold it](#a-header-is-looked-for-by-the-lines-that-can-hold-it) left: a message read as JSON was 39 to 46 ns above a plain struct of the same shape, 14 of which that entry put on the lookup and about 30 on "choosing a spelling". **The questions: which of the pieces the 30 ns is, and what makes it cheaper without adding code to a program that has no message route.**
+
+**Machine and builds.** AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.16.0, `-Dtarget=x86_64-linux-gnu`, `ReleaseFast`, every binary copied to one fixed path and run as `env -i PATH=/usr/bin taskset -c 2 ./nilo-profile` under the shared bench lock, three to four rounds interleaved. Before is `514e8c1` with this entry's `http/profile.zig`; each variant below is `514e8c1` with one edit to `typed.zig`'s `codecOf`. The gap is read inside one binary (message row minus control row), because the control row moves 355 to 370 ns from build to build with the layout.
+
+**Taking the choice out one piece at a time** (the message row, "one POST whose body is two numbers"):
+
+| variant | message minus control |
+|---|---|
+| shipped (`findHeader`, `mediaType`, `codecOf`, the branches) | 39 to 46 ns |
+| `codecOf` returns a constant `.json`, nothing looked up | 8 ns |
+| the header is found and the result thrown away | 36 to 41 ns |
+| the header is found twice | about 75 ns |
+| no lookup, `codecOf` on a slice of the head at a fixed place | 17 to 18 ns |
+
+**So the branches in `readBody` and `protoAnswer`, and the `Codec` in the wrapper, cost 8 ns, and the other 30 to 38 is the lookup and the classification, each of which costs three to four times what its loop row says** (`findHeader` 7 ns in a loop, 35 to 41 a call in a request; `codecOf` 4 ns, 17). A request is one pass through a few thousand other branches, where a loop repeats one head and every branch is predicted.
+
+**What was built.** `message.codecIn(head)`: `http1.findHeaderColon` (`findHeader` is it followed by `valueAfter`, the same code), then the first bytes of the value, spaces skipped, compared against `application/json` in one sixteen-byte vector compare with the letters folded; a match is `.json` whatever follows, since a media type that starts with those sixteen bytes can be none of protobuf's names, and any other value takes `codecOf(valueAfter(…))` as before. A test holds `codecIn` to `codecOf(contentTypeIn(…))` for nineteen values, three head shapes each.
+
+| row, best of five, three rounds | before | after |
+|---|---|---|
+| a plain struct, as JSON (the control) | 375 to 382 ns | 366 to 373 ns |
+| a message, as JSON | 414 to 421 ns | 383 to 395 ns |
+| gap | 39 ns | 10 to 27 ns |
+
+**Size**, stripped `ReleaseFast`, before then after: `example-hello` 1,013,872 to 1,013,872 (no change), `example-rest` 1,221,752 to 1,221,832 (+80), `example-orders` 1,392,696 to 1,392,872 (+176); the default build is byte-identical, and the message code stays absent from it (`codecIn` is reached only from a handler with a message in its signature). **Allocations:** none; `behaviour.zig`'s budget test holds. **Idle memory:** no connection or `Ctx` field changed, and `example-hello` is the same size to the byte; `bench/mem.py` was not run.
+
+**Held by:** `zig build test` and `test-all` (exit 0), the h1 fuzzer in ReleaseSafe on a new seed (`zig build fuzz -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -- --iterations 1000000 --seed 0x2c9d17e4a6b3`, every property held).
+
+**The decision it moved:** the message row's gap to the control is 10 to 27 ns, down from 39. **Can it be pushed further:** 8 ns is the branches, so the floor of this design is about 10; the rest is the lookup of a line in a head, which a head parser that noted the `Content-Type` as it went past would make free, at the 1.6 KB in every program ADR 256 turned down. A variant that gates that on a message route being registered was not tried, and would need `serve.zig`.
+
+## A tagged union is read once when its tag comes first
+
+`jsonmark.zig`'s header said an internally tagged union costs nothing per request, true of the write half and never measured for the read. `Reader.fromSpan` passed over each tagged object four times: `skipValue` to find its end, a scan for the discriminator, the variant's fields by `json.parseLeaky`, and a scan for unknown keys, two of them with a `std.json.Scanner` of their own. **The question: what a tagged value costs against the same fields untagged, and how much of that is passes.**
+
+**Machine and builds.** As above. A new `zig build profile` section, "one array of 1000 objects read as a body", reads an array of a thousand objects of four fields (`id`, `x`, `y`, `label`) with `json.parseLeaky`, no request around it: untagged, tagged with the tag first, tagged with the tag last, and three variants (a click, a key with two fields, one with none) with the tag first. Before is `514e8c1` with that profile; after has the change. Four rounds interleaved.
+
+| row | before | after |
+|---|---|---|
+| untagged, the control | 123 to 126 ns an object | 119 to 125 |
+| tagged, the tag first | 493 to 523 | 145 to 152 |
+| tagged, the tag last | 496 to 520 | 278 to 290 |
+| tagged, three variants, the tag first | 314 to 331 | 94 to 97 |
+
+**A tagged object was 4 times its untagged self and is 1.2 times it with the tag first**, a 3.3-fold cut, and 1.8-fold with the tag last. The mixed row, which includes variants with fewer fields, is 3.4-fold.
+
+**What was built.** When every variant that carries fields is a plain struct with no field of the tag's name (decided while compiling, `Reader.singlePass`), a byte look at the start of the object asks whether it opens with `"tag":"`. If it does, `readOpening` takes the `{`, the key and the value off the scanner and hands the rest of the object to `json.readFields` with the variant the value names: one pass, the struct reader `innerRead` already used, taught that a key by the discriminator's name is the discriminator twice (`DuplicateField`). If it does not, `readAnywhere` finds the discriminator in one pass that also takes the object off the source (a second one is `DuplicateField`, none is `MissingField`) and reads the variant's fields from a second scanner over the same bytes, the discriminator skipped. A type whose variant is anything else (its own `jsonParse`, a tuple) keeps `fromSpan`. **Unknown keys are refused at the variant's top and ignored below it, as before**, and the thing the guess is wrong about costs nothing because the scanner reads the bytes properly after it.
+
+**Commands:** `zig build profile -Dtarget=x86_64-linux-gnu`, the "one array of 1000 objects" rows, each binary copied to a fixed path and run as `env -i PATH=/usr/bin taskset -c 2 ./nilo-profile` under the bench lock, before and after interleaved.
+
+**Refusals:** the same bodies are refused and a body with one mistake gets the same message. A body with two mistakes may now name the other first (the first in field order, where the old reader named the first of its passes): in 127,000 mutated bodies the error named differed, `MissingField` for `UnknownField` and, where `DuplicateField` or `SyntaxError` changed, the 400 sentence with it.
+
+**Held by:** a test that sends twelve mistakes each with the tag first and with the tag last (unknown key, void variant with a key, a variant that does not exist, a field missing, the tag missing, the tag twice in both orders, a field twice, the tag not a string, a field the wrong kind, `"1_0"` in a count, a body that is not an object), a union in a list in a struct, and a nested unknown key; `zig build test` and `test-all` exit 0.
+
+**Size:** `example-rest` +80 and `example-orders` +176 together with the change above (no tagged union in `hello`); allocations none beyond the scanner's, which allocates only for a string with an escape.
+
+**The decision it moved:** the header's claim is corrected with the number, and the todo entry is closed. **Can it be pushed further:** the tag-first row is 25 ns above its untagged control, which is the scanner `std.json` tokenizes with. A reader that leaves it was prototyped in a scratch copy (2.2 to 2.8 times faster on these rows, +3.4 KB) and is not on the record until it has a harness in the repository and the user's approval.
+
 ## A Connect client told its failure
 
 The second piece of the framing's fourth stage ([ADR 257](../../docs/adr/257-a-connect-client-is-told-its-failure-in-connect-words.md)): a request carrying `Connect-Protocol-Version: 1` that fails is answered in Connect's error shape, in a program with a message route. **The question: what every program pays for a choice on the failure path that only some programs use, and where to put it so that is least.**

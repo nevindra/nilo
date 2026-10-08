@@ -333,6 +333,12 @@ pub fn innerRead(
         }
         return .{ .value = try innerRead(T.nilo_patch, gpa, source, options) };
     }
+    // A map has a `jsonParse` of `std.json`'s, which would read a number
+    // inside it by Zig's literal grammar, so it is read here instead
+    // (ADR 084). A `std.json.Value` is left to `std.json` on purpose: it keeps
+    // a string a string, and a number too large for a float as the text it
+    // was written in (`number_string`), so no number in it is ever guessed.
+    if (comptime mapValue(T)) |V| return readMap(T, V, gpa, source, options);
     // A type that parses itself, and `Str`, are the type's to read.
     if (comptime T == Str or readsItself(T)) return std.json.innerParse(T, gpa, source, options);
 
@@ -365,51 +371,15 @@ pub fn innerRead(
             else => return try innerRead(o.child, gpa, source, options),
         },
         .@"struct" => |s| {
-            if (comptime s.is_tuple) return std.json.innerParse(T, gpa, source, options);
-            comptime @setEvalBranchQuota(convert.budget(s.fields));
+            if (comptime s.is_tuple) {
+                if (.array_begin != try source.next()) return error.UnexpectedToken;
+                var r: T = undefined;
+                inline for (s.fields, 0..) |field, i| r[i] = try innerRead(field.type, gpa, source, options);
+                if (.array_end != try source.next()) return error.UnexpectedToken;
+                return r;
+            }
             if (.object_begin != try source.next()) return error.UnexpectedToken;
-
-            var r: T = undefined;
-            var seen = [_]bool{false} ** s.fields.len;
-
-            while (true) {
-                const name_token = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
-                const name = switch (name_token) {
-                    inline .string, .allocated_string => |slice| slice,
-                    .object_end => break,
-                    else => return error.UnexpectedToken,
-                };
-
-                inline for (s.fields, 0..) |field, i| {
-                    if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
-                    if (std.mem.eql(u8, field.name, name)) {
-                        if (seen[i]) switch (options.duplicate_field_behavior) {
-                            .use_first => {
-                                // Read and dropped: the type check is the point.
-                                _ = try innerRead(field.type, gpa, source, options);
-                                break;
-                            },
-                            .@"error" => return error.DuplicateField,
-                            .use_last => {},
-                        };
-                        @field(r, field.name) = try innerRead(field.type, gpa, source, options);
-                        seen[i] = true;
-                        break;
-                    }
-                } else {
-                    if (options.ignore_unknown_fields or comptime mark.ignoresUnknown(T)) {
-                        try source.skipValue();
-                    } else {
-                        return error.UnknownField;
-                    }
-                }
-            }
-            inline for (s.fields, 0..) |field, i| {
-                if (!seen[i]) {
-                    if (field.defaultValue()) |default| @field(r, field.name) = default else return error.MissingField;
-                }
-            }
-            return r;
+            return readFields(T, null, false, gpa, source, options, options);
         },
         .array => |a| {
             if (comptime a.child == u8) return std.json.innerParse(T, gpa, source, options);
@@ -439,8 +409,126 @@ pub fn innerRead(
     }
 }
 
+/// The fields of an object whose `{` has been taken, read into `T`.
+///
+/// **`tag` is a tagged union's discriminator that the caller has already read**
+/// (`jsonmark.zig`), so a key by that name that no field of `T` claims is not an
+/// unknown field: it is the discriminator again, which is refused when
+/// `tag_again`, and skipped when the caller read the object once to find it
+/// and is reading it a second time. `options` is what the object itself is
+/// held to and `nested` what everything inside its fields is: a variant's
+/// payload is checked for unknown keys here and not below, which is the
+/// reading a tagged variant has always had (ADR 016).
+pub fn readFields(
+    comptime T: type,
+    comptime tag: ?[]const u8,
+    comptime tag_again: bool,
+    gpa: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+    nested: std.json.ParseOptions,
+) std.json.ParseError(@TypeOf(source.*))!T {
+    const s = @typeInfo(T).@"struct";
+    comptime @setEvalBranchQuota(convert.budget(s.fields));
+
+    var r: T = undefined;
+    var seen = [_]bool{false} ** s.fields.len;
+
+    while (true) {
+        const name_token = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
+        const name = switch (name_token) {
+            inline .string, .allocated_string => |slice| slice,
+            .object_end => break,
+            else => return error.UnexpectedToken,
+        };
+
+        inline for (s.fields, 0..) |field, i| {
+            if (field.is_comptime) @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ field.name);
+            if (std.mem.eql(u8, field.name, name)) {
+                if (seen[i]) switch (options.duplicate_field_behavior) {
+                    .use_first => {
+                        // Read and dropped: the type check is the point.
+                        _ = try innerRead(field.type, gpa, source, nested);
+                        break;
+                    },
+                    .@"error" => return error.DuplicateField,
+                    .use_last => {},
+                };
+                @field(r, field.name) = try innerRead(field.type, gpa, source, nested);
+                seen[i] = true;
+                break;
+            }
+        } else {
+            if (comptime tag) |t| if (std.mem.eql(u8, name, t)) {
+                if (comptime tag_again) return error.DuplicateField;
+                try source.skipValue();
+                continue;
+            };
+            if (options.ignore_unknown_fields or comptime mark.ignoresUnknown(T)) {
+                try source.skipValue();
+            } else {
+                return error.UnknownField;
+            }
+        }
+    }
+    inline for (s.fields, 0..) |field, i| {
+        if (!seen[i]) {
+            if (field.defaultValue()) |default| @field(r, field.name) = default else return error.MissingField;
+        }
+    }
+    return r;
+}
+
+/// What a `std.json.ArrayHashMap(V)` holds, or null for any other type.
+fn mapValue(comptime T: type) ?type {
+    comptime {
+        if (@typeInfo(T) != .@"struct" or !@hasField(T, "map")) return null;
+        const M = @FieldType(T, "map");
+        if (@typeInfo(M) != .@"struct" or !@hasDecl(M, "Entry")) return null;
+        if (!@hasField(M.Entry, "value_ptr")) return null;
+        const V = @typeInfo(@FieldType(M.Entry, "value_ptr")).pointer.child;
+        return if (T == std.json.ArrayHashMap(V)) V else null;
+    }
+}
+
+/// `std.json.ArrayHashMap(V).jsonParse` with `innerRead` reading each value, so
+/// a number in a map is spelled the way every other number in a body is
+/// (ADR 084). The same walk, the same allocations, the same refusals.
+fn readMap(
+    comptime T: type,
+    comptime V: type,
+    gpa: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) std.json.ParseError(@TypeOf(source.*))!T {
+    var map: std.StringArrayHashMapUnmanaged(V) = .empty;
+    errdefer map.deinit(gpa);
+
+    if (.object_begin != try source.next()) return error.UnexpectedToken;
+    while (true) {
+        const token = try source.nextAlloc(gpa, options.allocate.?);
+        switch (token) {
+            inline .string, .allocated_string => |key| {
+                const slot = try map.getOrPut(gpa, key);
+                if (slot.found_existing) switch (options.duplicate_field_behavior) {
+                    .use_first => {
+                        _ = try innerRead(V, gpa, source, options);
+                        continue;
+                    },
+                    .@"error" => return error.DuplicateField,
+                    .use_last => {},
+                };
+                slot.value_ptr.* = try innerRead(V, gpa, source, options);
+            },
+            .object_end => break,
+            else => return error.UnexpectedToken,
+        }
+    }
+    return .{ .map = map };
+}
+
 /// Whether a type reads itself, which is the one thing `std.json` asks of it.
-fn readsItself(comptime T: type) bool {
+pub fn readsItself(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct", .@"union", .@"enum" => std.meta.hasFn(T, "jsonParse"),
         else => false,
@@ -1071,6 +1159,31 @@ test "a body refuses what std.json refuses, and what its numbers are spelled wro
     try testing.expectError(error.Overflow, parseLeaky(Reading, a, "{\"id\":4294967296}", .{}));
     // A quoted number that is spelled like a number is still one.
     try testing.expectEqual(@as(u32, 10), (try parseLeaky(Reading, a, "{\"id\":\"10\"}", .{})).id);
+}
+
+test "a number in a map or a tuple is read, and one in a dynamic value is never guessed, by the rule every other field is by the rule every other field is" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Counts = struct { by_name: std.json.ArrayHashMap(u8), pair: struct { u8, f64 } = .{ 0, 0 }, any: ?std.json.Value = null };
+
+    const ok = try parseLeaky(Counts, a, "{\"by_name\":{\"a\":1,\"b\":\"10\"},\"pair\":[2,0.5],\"any\":{\"n\":[1,2.5,\"1_0\"]}}", .{});
+    try testing.expectEqual(@as(u8, 10), ok.by_name.map.get("b").?);
+    try testing.expectEqual(@as(u8, 2), ok.pair[0]);
+    // A string in a dynamic value is a string, and is not read as a number.
+    try testing.expectEqualStrings("1_0", ok.any.?.object.get("n").?.array.items[2].string);
+
+    try testing.expectError(error.InvalidNumber, parseLeaky(Counts, a, "{\"by_name\":{\"a\":\"1_0\"}}", .{}));
+    try testing.expectError(error.InvalidNumber, parseLeaky(Counts, a, "{\"by_name\":{\"a\":\"+7\"}}", .{}));
+    try testing.expectError(error.InvalidNumber, parseLeaky(Counts, a, "{\"by_name\":{},\"pair\":[\"1_0\",1]}", .{}));
+    try testing.expectError(error.InvalidNumber, parseLeaky(Counts, a, "{\"by_name\":{},\"pair\":[1,\"nan\"]}", .{}));
+    try testing.expectError(error.Overflow, parseLeaky(Counts, a, "{\"by_name\":{\"a\":300}}", .{}));
+    // A number too large for a float stays the text it was written in.
+    const huge = try parseLeaky(Counts, a, "{\"by_name\":{},\"any\":[1e999]}", .{});
+    try testing.expectEqualStrings("1e999", huge.any.?.array.items[0].number_string);
+    try testing.expectError(error.DuplicateField, parseLeaky(Counts, a, "{\"by_name\":{\"a\":1,\"a\":2}}", .{}));
+    try testing.expectError(error.UnexpectedToken, parseLeaky(Counts, a, "{\"by_name\":[1]}", .{}));
+    try testing.expectError(error.UnexpectedToken, parseLeaky(Counts, a, "{\"by_name\":{},\"pair\":[1]}", .{}));
 }
 
 test "a repeated key is found at any depth, and a body without one has none" {

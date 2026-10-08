@@ -46,8 +46,9 @@ an `i128` and the cast is out of range.
 `std.json` has no hook for a number, so `json.parseLeaky` is the walk it makes
 over a struct, an optional, a list and a fixed array, with the integer and the
 float leaf swapped for `spelledAsNumber` followed by `parseInt` or `parseFloat`.
-What it does not enter, a type with its own `jsonParse` or a map, it hands back
-to `std.json.innerParse` unchanged. The consequences, each the query's rule:
+A map (`std.json.ArrayHashMap`) and a tuple are walked the same way, so their numbers
+are read by the rule; what it does not enter, a type with its own `jsonParse` or an
+externally tagged union, it hands back to `std.json.innerParse` unchanged. The consequences, each the query's rule:
 
 - A quoted number is still a number if it is spelled like one (`"10"`), and
   `"1_0"`, `"+7"`, `"nan"` and `"0x1p3"` are refused.
@@ -144,6 +145,8 @@ the clients whose JSON writer spells a count as a float. Refused because the
 query refuses it, and "the same grammar" is the point; the client's fix is one
 character.
 
-**A number inside a type the walk does not enter** (a `std.json.Value`, a map)
-still goes by `std.json`'s rules. It is the gap kept, not an oversight: a typed
-field is what this decision is about.
+**A number inside a type the walk does not enter** (an externally tagged union)
+still goes by `std.json`'s rules, and a `std.json.Value` was never a gap: it keeps
+a string a string, and a number that is not a finite float as the text it was
+written in. A map was one until `readMap`, which reads each value through the
+same walk, and a tuple likewise.
