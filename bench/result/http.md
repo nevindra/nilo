@@ -4524,6 +4524,52 @@ Over TLS nilo is already ahead. Cleartext, it spends twice the CPU a request; JS
 
 **What it decided.** The override leaves the entry and the entry sets the cap to 0 until the cap's HTTP/2 behaviour is settled. Three pieces of work follow, each measured against this table: a held static file that follows the disk, a request on HTTP/2 that does not cost twice the leader's, and JSON. Projected onto the board by these ratios, nilo would sit about seventh in the framework league's HTTP/2 composite; third needs static near swerver's, baseline-h2c at about 75% of its, and json-h2c at about two thirds.
 
+## Where the arena's json-h2c profile spends 10 us a request, and what a JSON answer written once takes off (ADR 278)
+
+**What was run.** The arena entry (`base`: PR 1539's entry with the `.work_stealing` override removed and `.max_requests_per_connection = 0`, built against `01ca862` plus the uncommitted work of ADR 272 to 275, never rebuilt) against the same entry built against this tree plus the diff of ADR 278 (`jp`), through the rig in `scratchpad/ab` (`run.sh`: server on cpus 0-3,8-11, the board's `h2load` image on 4-7,12-15, `-i json-h2c-uris.txt -p h2c -m 32 -t 8`, 5 s, 1,024 connections unless said). µs of server CPU a request is the server's `utime + stime` over requests answered; req/s is not quoted because other agents were compiling on the same machine and it moved 400k to 780k between runs of one binary. Profiles by sampling: the entry built unstripped, `gdb -p` attached 60 to 80 times a run with `thread apply all bt`, threads parked in `io_uring_enter` or in the thread pool dropped (`prof.sh`, `an.py`; `ptrace_scope` is 1, so the server is launched by a small script that sets `PR_SET_PTRACER_ANY`). The in-process figure is `bench/json_listing.zig`: the 50-item dataset's shape, the seven counts the board rotates through, 3,719 bytes on average, instructions from `perf_event_open` user-space, minimum and median of 21 rounds of 5,000 requests. AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0.
+
+**The contract.** `site/content/docs/test-profiles/h2/json-h2c/implementation.md`: `GET /json/{count}?m={multiplier}` answers the first `count` of 50 dataset items, each with `total = price * quantity * m`, in `{items, count}`, as `application/json`, serialised per request; counts 1, 5, 10, 15, 25, 40, 50. The entry's handler (`jsonItems`, `base/src/main.zig`) does that and nothing else: it reads the dataset once, copies `count` items into the arena with the derived field, and returns the struct; the framework serialises it. It does no work the contract does not ask for, and nothing in this change rearranges it.
+
+**Where the 10.2 us goes** (base, 1,024 connections, `-m 32`; a plain `/baseline2` costs 2.45 us on the same rig, so about 7.7 us is the route). Of the samples that were not an idle thread, about 430 to 560 over 60 to 80 attaches, shares rounded:
+
+| what | share of samples |
+|---|---|
+| `__munmap` + `__mmap`, from `ArenaAllocator.reset` in `h2conn.Stream.recycle` and from the arena growing under the answer's writer | 20% |
+| `memcpy` (the runtime's, `copyBlocks`/`copyFixedLength`), most of it the writer's, and page-faulted pages of the fresh mappings | 12% |
+| the JSON writer itself (`nextEscape`, `writeEscaped`, `utf8ValidateSlice`, `printIntAny`, `Writer.write`, `writeByte`) | about 17% |
+| task spawn per request (`StackPool.acquire`/`release`, mutex), `serveRequest`, hpack, `h2conn` | the rest |
+
+The user:system split of the server's CPU time was 60:40. Written down because it was the premise to check: the `mmap` is not the answer's size. An arena node that cannot grow is replaced by one 1.5 times the previous node plus the request, the stream's arena keeps `spare_arena_keep` = 4,096 bytes between requests, and a request that allocates the handler's items (up to 5.6 KB), the answer's buffer and its doublings reaches nodes past 32 KiB, which `SmpAllocator` does not serve from its slabs. It reproduces in neither of the in-process runs: `bench/json_listing.zig` with one arena kept at 4,096, with the seven counts in rotation and with the items copied in, shows no backing allocation, because its arena grows once and one stream sees every size.
+
+**The in-process writer.** `bench/json_listing.zig`, `taskset -c 5`, ReleaseFast:
+
+| | ns a request (min) | instructions |
+|---|---|---|
+| before (`Allocating`, field-at-a-time writer) | 1,452 to 1,533 | 47,900 |
+| scalar fields as one reservation (key literal, digit pairs, plain ASCII in one copy) | 623 | 23,100 |
+| and the runtime's `memcpy` replaced by overlapped moves for short text | 586 | 21,000 |
+
+**Through the rig**, three interleaved pairs, µs of server CPU a request at 1,024 connections:
+
+| | base | ADR 278 |
+|---|---|---|
+| buffer only (before the writer change), three pairs | 10.93, 11.04, 10.80 | 10.42, 10.34, 10.36 |
+| buffer and writer, run 1 | 10.44, 10.03, 10.59 | 7.71, 7.98, 8.14 |
+| buffer and writer, run 2 (a loaded machine) | 10.57, 10.84 | 8.52, 8.83 |
+| buffer and writer, run 3 | 10.15, 10.81, 10.88 | 8.62, 8.37, 8.59 |
+| 4,096 connections, one pair | 11.32 | 9.20 |
+| `/baseline2` h2c, 1,024, one pair (control, no JSON) | 3.20 | 2.79 (noise: nothing under it changed) |
+
+So the buffer is worth about 0.5 us (-4.5%) and the writer about 2 us. `h2load` reported 0 failed, 0 errored, 0 timeout in every run.
+
+**What a bigger arena keep would take off, measured in a scratch copy of the tree and not in the tree** (`spare_arena_keep` in `http/h2conn.zig` set to 32,768 in a copy under the scratchpad; the worktree's `h2conn.zig` is untouched, it belongs to the HTTP/2 scheduling change): base with the keep alone, 10.24, 10.10 to 7.91, 7.96 us; ADR 278 plus the keep, 7.08, 6.75, 6.90 us against base 10.57 to 10.84 in the same round, peak memory 124 to 182 MB against 224 to 286. The sampling of that build has `__munmap` at 1% and the task spawn's mutex as the largest line that is not JSON. That is a decision about memory held by busy connections (every pooled stream keeps its arena, up to 32 of them a connection) that was not measured here and not taken; the number is for whoever takes it.
+
+**Tried and lost.** `json_hint` of 16,384 instead of 512: 12.94, 13.04 us against 10.34, 10.13 (every request then asks a 4 KiB-keeping arena for a 16 KiB node, and gives it back).
+
+**The decision it moved.** Build ADR 278: the answer is written once in a buffer the thread keeps and copied once, and scalars are written a field at a time as one reservation. `zig build test-http` passes, with new tests that every string length 0 to 80 with each special byte at each position, every integer width at both ends, bools, enums and lists of them, and writers with buffers of 0, 1, 7, 24 and 64 bytes produce exactly `std.json`'s bytes. It does not reach the leader: ADR 278 plus the keep is 6.8 to 7.1 us against swerver's 4.5, and the remaining difference is the per-request task spawn (`StackPool` mutex, about 10% of samples) and the 2.45 us a plain HTTP/2 request costs.
+
+**Can it be pushed further.** The writer is at about 21,000 instructions for 3.7 KB, 5.6 a byte, of which a share is the 16 fields of an item each paying a reservation check; a writer that reserves an item's worst-case size once and writes unchecked would roughly halve it again, at the price of a worst-case bound per type that `covers` would have to compute (strings have none), so it was not built. Non-ASCII text still takes `utf8ValidateSlice` and `nextEscape`, two passes.
+
 ## A GOAWAY ends an h2load run, and `Connection: close` does not
 
 **What was run.** `a94221f`, 2026-10-09, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0. `zig build examples -Dhttp2 -Doptimize=ReleaseFast`, `example-hello` on 127.0.0.1:8787 (16 threads, the logger on), with one cap for both protocols at its default of 1,000 as ADR 275 first shipped it. The board's load generators from their images, `--network host`, not pinned: `h2load` (nghttp2 1.59.0) and `wrk`.

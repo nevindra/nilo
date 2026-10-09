@@ -801,12 +801,12 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
         if (comptime covers(Inner)) return writeValue(Inner, w, value.value);
         return stringify(w, value.value);
     }
-    if (T == Str) return writeText(w, value.view());
-    if (comptime isByteSlice(T)) return writeText(w, value);
+    if (T == Str) return writeStringAfter("", w, value.view());
+    if (comptime isByteSlice(T)) return writeStringAfter("", w, value);
 
     switch (@typeInfo(T)) {
-        .bool => return w.writeAll(if (value) "true" else "false"),
-        .int, .comptime_int => return w.printInt(value, 10, .lower, .{}),
+        .bool => return if (value) literal(w, "true") else literal(w, "false"),
+        .int, .comptime_int => return writeIntAfter("", w, value),
         // Spelled the way serde_json spells it, not the way `std.json` does:
         // `1.0` and not `1`, `1e+16` and not seventeen digits, and `null` for
         // a value JSON has no spelling for, where `std.json` writes the bare
@@ -838,12 +838,12 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
             w.writeAll("null"),
 
         .array, .pointer => {
-            try w.writeByte('[');
-            for (value, 0..) |item, i| {
-                if (i > 0) try w.writeByte(',');
-                try writeValue(@TypeOf(item), w, item);
-            }
-            return w.writeByte(']');
+            if (value.len == 0) return literal(w, "[]");
+            // The bracket or the comma goes out with the element that follows
+            // it, which for text and numbers is one reservation and one copy.
+            try writeValueAfter("[", @TypeOf(value[0]), w, value[0]);
+            for (value[1..]) |item| try writeValueAfter(",", @TypeOf(item), w, item);
+            return literal(w, "]");
         },
 
         .@"union" => {
@@ -902,17 +902,193 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
             inline for (s.field_names, s.field_types) |f_name, f_type| {
                 if (comptime mark.skipped(m, f_name)) continue;
                 // The brace or comma, the quoted name and the colon are one
-                // string settled while compiling.
-                try w.writeAll(comptime (if (!opened) "{\"" else ",\"") ++
-                    mark.wire(f_name, m) ++ "\":");
+                // string settled while compiling, and a scalar value follows
+                // it in the same copy (ADR 278).
+                try writeValueAfter(comptime (if (!opened) "{\"" else ",\"") ++
+                    mark.wire(f_name, m) ++ "\":", f_type, w, @field(value, f_name));
                 opened = true;
-                try writeValue(f_type, w, @field(value, f_name));
             }
-            if (comptime !opened) return w.writeAll("{}");
-            return w.writeByte('}');
+            if (comptime !opened) return literal(w, "{}");
+            return literal(w, "}");
         },
 
         else => comptime unreachable,
+    }
+}
+
+// ---- the fast path of a covered value (ADR 278) ----
+//
+// A struct's keys, its commas and braces are settled while compiling, so what
+// is left at run time is the values. What cost on the arena's `json-h2c`
+// profile was not the arithmetic but the calls: a field was a `writeAll` for
+// its key, a `writeByte`, a `writeAll` and a `writeByte` for a string, a
+// `printInt` for a number, each through the writer's checks and a `memcpy`
+// whose length it did not know. A scalar field is now one reservation on the
+// writer: the key literal (a copy of a length known at compile time, which is
+// moves and no call), then the value written straight into the buffer.
+//
+// **The writer may be too small to reserve in**, an unbuffered one or an
+// `Allocating` that has not grown yet, and then every function here does what
+// the code before it did, through `writeAll`, so the bytes and the errors are
+// the same on a writer of any size.
+
+/// `n` bytes at the end of the writer's buffer, or null when its buffer cannot
+/// hold that many and the caller should write the long way.
+inline fn room(w: *std.Io.Writer, n: usize) std.Io.Writer.Error!?[]u8 {
+    if (n > w.buffer.len) return null;
+    return try w.writableSliceGreedy(n);
+}
+
+/// A string known while compiling: moves of a fixed length, not a call.
+inline fn literal(w: *std.Io.Writer, comptime text: []const u8) std.Io.Writer.Error!void {
+    if (w.buffer.len - w.end >= text.len) {
+        @memcpy(w.buffer[w.end..][0..text.len], text);
+        w.end += text.len;
+        return;
+    }
+    return w.writeAll(text);
+}
+
+/// `prefix`, then `value`: the one place a scalar's literal and its text meet.
+fn writeValueAfter(comptime prefix: []const u8, comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error!void {
+    if (comptime T == Str) return writeStringAfter(prefix, w, value.view());
+    if (comptime !writesItsOwnScalar(T) and mark.documentOf(T) == null) {
+        if (comptime isByteSlice(T)) return writeStringAfter(prefix, w, value);
+        switch (@typeInfo(T)) {
+            .int => return writeIntAfter(prefix, w, value),
+            .bool => return if (value) literal(w, prefix ++ "true") else literal(w, prefix ++ "false"),
+            .@"enum" => |e| if (comptime e.mode == .exhaustive) switch (value) {
+                inline else => |tag| return literal(w, comptime prefix ++ "\"" ++ mark.wire(@tagName(tag), mark.of(T)) ++ "\""),
+            },
+            else => {},
+        }
+    }
+    try literal(w, prefix);
+    return writeValue(T, w, value);
+}
+
+/// An integer of at most 64 bits after `prefix`, in decimal.
+fn writeIntAfter(comptime prefix: []const u8, w: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
+    const T = @TypeOf(value);
+    if (comptime T == comptime_int or @typeInfo(T).int.bits > 64) {
+        try literal(w, prefix);
+        return w.printInt(value, 10, .lower, .{});
+    }
+    // Twenty digits is the longest a u64 has, and a sign.
+    const dst = (try room(w, prefix.len + 21)) orelse {
+        try literal(w, prefix);
+        return w.printInt(value, 10, .lower, .{});
+    };
+    @memcpy(dst[0..prefix.len], prefix);
+    w.advance(prefix.len + decimal(dst[prefix.len..], value));
+}
+
+/// `value` as decimal digits at the start of `dst`, which holds at least 21
+/// bytes. The count of digits is found first, so each pair of digits is
+/// written once, where it belongs, with no copy afterwards.
+fn decimal(dst: []u8, value: anytype) usize {
+    const negative = value < 0;
+    var a: u64 = @abs(value);
+    const sign: usize = @intFromBool(negative);
+    if (negative) dst[0] = '-';
+    var digits: usize = 1;
+    var probe = a;
+    while (probe >= 10) : (probe /= 10) digits += 1;
+    var i = sign + digits;
+    const end = i;
+    while (a >= 100) : (a /= 100) {
+        i -= 2;
+        dst[i..][0..2].* = std.fmt.digits2(@intCast(a % 100));
+    }
+    if (a >= 10) {
+        i -= 2;
+        dst[i..][0..2].* = std.fmt.digits2(@intCast(a));
+    } else {
+        i -= 1;
+        dst[i] = '0' + @as(u8, @intCast(a));
+    }
+    return end;
+}
+
+/// `prefix`, then `text` as a JSON string. Text that needs nothing done to it
+/// (printable ASCII with no quote and no backslash, which is nearly all of it)
+/// goes out in one copy with its quotes; anything else is `writeText`'s.
+fn writeStringAfter(comptime prefix: []const u8, w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    if (plainAscii(text)) {
+        const n = prefix.len + text.len + 2;
+        if (try room(w, n)) |dst| {
+            @memcpy(dst[0..prefix.len], prefix);
+            dst[prefix.len] = '"';
+            copyShort(dst[prefix.len + 1 ..][0..text.len], text);
+            dst[n - 1] = '"';
+            w.advance(n);
+            return;
+        }
+    }
+    try literal(w, prefix);
+    return writeText(w, text);
+}
+
+/// `@memcpy` for the lengths a name or a tag has. A call into the runtime's
+/// `memcpy` is a branch on the length and a loop for a dozen bytes; two loads
+/// and two stores that overlap in the middle are the same copy for any length
+/// from one block to two. Longer text is copied in blocks with the same
+/// overlapped last block, and the runtime's `memcpy` is for neither.
+inline fn copyShort(dst: []u8, src: []const u8) void {
+    std.debug.assert(dst.len == src.len);
+    const n = src.len;
+    if (n >= 16) {
+        var i: usize = 0;
+        while (n - i > 16) : (i += 16) dst[i..][0..16].* = src[i..][0..16].*;
+        dst[n - 16 ..][0..16].* = src[n - 16 ..][0..16].*;
+    } else if (n >= 8) {
+        const head = src[0..8].*;
+        const tail = src[n - 8 ..][0..8].*;
+        dst[0..8].* = head;
+        dst[n - 8 ..][0..8].* = tail;
+    } else if (n >= 4) {
+        const head = src[0..4].*;
+        const tail = src[n - 4 ..][0..4].*;
+        dst[0..4].* = head;
+        dst[n - 4 ..][0..4].* = tail;
+    } else if (n > 0) {
+        dst[0] = src[0];
+        dst[n / 2] = src[n / 2];
+        dst[n - 1] = src[n - 1];
+    }
+}
+
+/// Whether every byte of `text` is one a JSON string carries as it is and UTF-8
+/// has nothing to say about: 0x20 to 0x7e, other than `"` and `\`. One answer
+/// for the whole run, so a long string is a handful of vector compares, and
+/// the last block is read overlapping the one before it, which a yes or no
+/// can afford and a copy could not.
+fn plainAscii(text: []const u8) bool {
+    if (text.len >= 32) return plainBlocks(32, text);
+    if (text.len >= 16) return plainBlocks(16, text);
+    if (text.len >= 8) return plainBlocks(8, text);
+    for (text) |c| if (!plainByte(c)) return false;
+    return true;
+}
+
+inline fn plainByte(c: u8) bool {
+    return c >= 0x20 and c < 0x7f and c != '"' and c != '\\';
+}
+
+inline fn plainBlocks(comptime n: usize, text: []const u8) bool {
+    const V = @Vector(n, u8);
+    const quote: V = @splat('"');
+    const backslash: V = @splat('\\');
+    const low: V = @splat(0x20);
+    const high: V = @splat(0x7f);
+    var i: usize = 0;
+    while (true) {
+        const at = @min(i, text.len - n);
+        const block: V = text[at..][0..n].*;
+        const bad = (block == quote) | (block == backslash) | (block < low) | (block >= high);
+        if (@reduce(.Or, bad)) return false;
+        if (at + n >= text.len) return true;
+        i += n;
     }
 }
 
@@ -2204,4 +2380,90 @@ fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
         break :blk final;
     };
     return &built;
+}
+
+test "a string of any length with any byte in any place is what std.json writes (ADR 278)" {
+    // Every length from 0 to 80 crosses the 8, 16 and 32 byte blocks of the
+    // plain-text check and the lengths `copyShort` branches on, and each
+    // special byte is put at every position, first and last included, because
+    // the last block of a check overlaps the one before it.
+    const specials = [_][]const u8{ "\"", "\\", "\x00", "\x1f", "\n", "\x7f", "\x80", "\xc3\xa9", "\xff", "\xe2\x82\xac" };
+    var text: [96]u8 = undefined;
+    for (0..81) |len| {
+        @memset(text[0..len], 'a');
+        try expectSame(text[0..len]);
+        for (specials) |special| {
+            if (special.len > len) continue;
+            for (0..len - special.len + 1) |at| {
+                @memcpy(text[at..][0..special.len], special);
+                try expectSame(.{ .s = @as([]const u8, text[0..len]), .n = @as(u8, 1) });
+                @memset(text[at..][0..special.len], 'a');
+            }
+        }
+    }
+}
+
+test "an integer of any width is what std.json writes, at both ends of its range (ADR 278)" {
+    inline for (.{ u8, i8, u16, i16, u32, i32, u64, i64 }) |T| {
+        const odd = [_]u64{ 0, 1, 9, 10, 99, 100, 101, 999, 1000, 65_535, 4_294_967_295 };
+        for (odd ++ .{ 0 }) |raw| {
+            const v: T = @bitCast(@as(@Int(.unsigned, @bitSizeOf(T)), @truncate(raw)));
+            try expectSame(v);
+        }
+        for ([_]T{ std.math.maxInt(T), std.math.minInt(T) }) |v| {
+            try expectSame(v);
+            // A list of bytes is text, and covered by the test above.
+            if (comptime T == u8 or T == i8) try expectSame(.{ .a = v }) else try expectSame(.{ .a = v, .b = [_]T{ v, v } });
+        }
+    }
+    try expectSame(.{ .wide = @as(u128, std.math.maxInt(u128)), .low = @as(i128, std.math.minInt(i128)) });
+}
+
+test "booleans, enums and lists of them follow a key in the same bytes std.json writes (ADR 278)" {
+    const Colour = enum { red, green };
+    const Row = struct { on: bool, off: bool, c: Colour, many: []const Colour, flags: []const bool, none: []const u8 };
+    try expectSame(Row{ .on = true, .off = false, .c = .green, .many = &.{ .red, .green, .red }, .flags = &.{ true, false }, .none = "" });
+    try expectSame(Row{ .on = false, .off = true, .c = .red, .many = &.{}, .flags = &.{}, .none = "x" });
+}
+
+test "a writer too small to reserve in gets the same bytes, and a failing one the same error (ADR 278)" {
+    const Row = struct { id: i64, name: []const u8, tags: []const []const u8, ok: bool };
+    const row: Row = .{ .id = -1234567890123, .name = "a name that is longer than the buffer below", .tags = &.{ "x", "y" }, .ok = true };
+
+    const Sink = struct {
+        list: std.ArrayList(u8) = .empty,
+        writer: std.Io.Writer,
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", w);
+            self.list.appendSlice(testing.allocator, w.buffered()) catch return error.WriteFailed;
+            w.end = 0;
+            var n: usize = 0;
+            for (data[0 .. data.len - 1]) |bytes| {
+                self.list.appendSlice(testing.allocator, bytes) catch return error.WriteFailed;
+                n += bytes.len;
+            }
+            for (0..splat) |_| {
+                self.list.appendSlice(testing.allocator, data[data.len - 1]) catch return error.WriteFailed;
+                n += data[data.len - 1].len;
+            }
+            return n;
+        }
+    };
+    // Sizes from none at all (every call takes the long way) to one that
+    // holds a field but not the whole answer.
+    for ([_]usize{ 0, 1, 7, 24, 64 }) |size| {
+        var buffer: [64]u8 = undefined;
+        var sink: Sink = .{ .writer = .{ .buffer = buffer[0..size], .vtable = &.{ .drain = Sink.drain } } };
+        defer sink.list.deinit(testing.allocator);
+        try write(&sink.writer, row);
+        try sink.writer.flush();
+        try sink.list.appendSlice(testing.allocator, sink.writer.buffered());
+        var want: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer want.deinit();
+        try std.json.Stringify.value(row, .{}, &want.writer);
+        try testing.expectEqualStrings(want.written(), sink.list.items);
+    }
+    var tiny: [8]u8 = undefined;
+    var fixed = std.Io.Writer.fixed(&tiny);
+    try testing.expectError(error.WriteFailed, write(&fixed, row));
 }

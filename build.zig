@@ -5447,6 +5447,32 @@ pub fn build(b: *std.Build) void {
             .dependOn(&run.step);
     }
 
+    // What `json.write` costs on the arena's json-h2c answer (a
+    // measurement; `bench/json_listing.zig` says what).
+    const bench_json_listing = b.addExecutable(.{
+        .name = "nilo-bench-json-listing",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/json_listing.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{
+                .name = "json",
+                .module = b.createModule(.{
+                    .root_source_file = b.path("http/json.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "nilo_core", .module = nilo_core }},
+                }),
+            }},
+        }),
+    });
+    {
+        const run = b.addRunArtifact(bench_json_listing);
+        run.addPassthruArgs();
+        b.step("bench-json-listing", "Time json.write on the json-h2c answer, ns and instructions a request")
+            .dependOn(&run.step);
+    }
+
     // **What fraction of lookups the cache answers, which is the number the
     // other one cannot see** (ADR 109). `bench-cache` draws its keys
     // uniformly at random, and under uniform random every eviction policy

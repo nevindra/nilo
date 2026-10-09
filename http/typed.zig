@@ -63,6 +63,7 @@ const bound_mod = @import("bound.zig");
 const filebody = @import("filebody.zig");
 const bytebody = @import("bytebody.zig");
 const json_mod = @import("json.zig");
+const jsonbuf_mod = @import("jsonbuf.zig");
 const many_mod = @import("many.zig");
 const mark = @import("jsonmark.zig");
 const ownbody = @import("ownbody.zig");
@@ -1026,10 +1027,8 @@ fn renderAnswer(c: *Ctx, spelling: anytype, result: anytype) !Rendered {
         kind = .text;
         body = present;
     } else {
-        var out: std.Io.Writer.Allocating = try .initCapacity(c._arena, ctx_mod.json_hint);
-        try json_mod.write(&out.writer, present);
+        body = try jsonbuf_mod.render(c._arena, present);
         kind = .json;
-        body = out.written();
     }
 
     return .{

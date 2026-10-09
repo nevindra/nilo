@@ -19,6 +19,7 @@ const field_mod = @import("field.zig");
 const framing_mod = @import("framing.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
+const jsonbuf_mod = @import("jsonbuf.zig");
 const many_mod = @import("many.zig");
 const jsonmark = @import("jsonmark.zig");
 const password_mod = @import("password.zig");
@@ -2323,18 +2324,16 @@ pub const Ctx = struct {
 
     /// Serialise `value` to JSON (through the request arena) and send it.
     ///
-    /// The buffer starts at `json_hint` rather than at nothing, so a
-    /// response of ordinary size is assembled in one allocation instead of
-    /// a handful of doublings. Overshooting costs nothing: the arena is
-    /// emptied when the request ends either way.
+    /// The answer is written into a buffer the thread keeps and copied into
+    /// the arena once, at exactly its length, so the arena sees one
+    /// allocation whatever the size and none of the doublings a growing
+    /// buffer makes (ADR 278, `jsonbuf.zig`).
     ///
     /// The serialising itself is `json.write`, which produces exactly what
     /// `std.json` would and is several times quicker at it for the shapes a
     /// handler returns.
     pub fn sendJson(self: *Ctx, status: u16, value: anytype) !void {
-        var out: std.Io.Writer.Allocating = try .initCapacity(self._arena, json_hint);
-        try json_mod.write(&out.writer, value);
-        try sendOwned(self, status, "application/json", out.written());
+        try sendOwned(self, status, "application/json", try jsonbuf_mod.render(self._arena, value));
     }
 
     /// Answer with an open file, without ever holding it in memory

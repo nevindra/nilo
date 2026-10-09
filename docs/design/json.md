@@ -57,6 +57,7 @@ nilo writes a struct with its own generated writer (the struct is "covered") unl
 | [166](../adr/166-a-body-field-that-parses-itself.md) | A body field is read through `jsonParseFor`, backed by `nilo_parse`; `nilo_expects` |
 | [168](../adr/168-one-field-can-be-spelled-on-its-own.md) | `.rename`: one field named on its own, alongside `.rename_all`; `.unknown_fields = .ignore` |
 | [251](../adr/251-json-that-does-not-fit-can-be-a-422.md) | `.misfit = 422`: a body type answers JSON of the wrong shape with a 422, and text that is not JSON stays a 400 |
+| [278](../adr/278-a-json-answer-is-written-in-one-buffer-and-copied-once.md) | An answer is written into a buffer the thread keeps and copied into the arena once; a scalar field is one reservation |
 
 Related topics: the tagged-union encoding and the API document built from the same markers are [ADR 016](../adr/016-the-api-description-comes-from-the-signatures.md); the wider conversion rules, including `nilo_parse` and `nilo_expects` outside a JSON body, are [request-input](request-input.md); the response wrappers a JSON value is sent through (`?T`, `Status`, `Response`) and types that write something other than JSON are [responses](responses.md).
 

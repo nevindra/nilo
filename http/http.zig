@@ -1057,6 +1057,7 @@ test {
     _ = @import("engine/zio.zig");
     _ = @import("fuzz.zig");
     _ = @import("json.zig");
+    _ = @import("jsonbuf.zig");
     _ = @import("jsonfloat.zig");
     _ = @import("jsonmark.zig");
     _ = @import("scan.zig");

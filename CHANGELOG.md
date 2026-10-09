@@ -99,6 +99,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ### Changed
 
+- **A JSON answer is written into a buffer the thread keeps and copied into the request arena once, at its length, and a scalar field is one copy** where `sendJson` and a typed handler's answer grew an `Allocating` writer by doubling and wrote a field in several calls. The bytes are the same; nothing to change. On the arena's `json-h2c` profile, 3.7 KB of JSON a request, server CPU went from 10.4 to 7.7 to 8.5 us a request, and the writer alone from 1,450 to 586 ns ([ADR 278](docs/adr/278-a-json-answer-is-written-in-one-buffer-and-copied-once.md)).
 - **`Exchange.take`, and so every whole-body call on `nilo_fetch`, reads a body that announced its `content-length` into exactly that many bytes**, where it grew a buffer by doubling. A call now holds 2,042 bytes less on each idle connection that made it (8,852 to 6,810 at 10,000 connections), and a body that ends short of its announced length is `error.BodyTooShort`. Nothing to change in your code; a program that dials out through `nilo_fetch` is 1,888 bytes larger.
 
 ### Fixed

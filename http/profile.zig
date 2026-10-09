@@ -13,6 +13,7 @@ const std = @import("std");
 const http1 = @import("http1.zig");
 const ctx_mod = @import("ctx.zig");
 const json_mod = @import("json.zig");
+const jsonbuf_mod = @import("jsonbuf.zig");
 const str_mod = @import("nilo_core");
 const fail = @import("fail.zig");
 const clock = @import("bulkhead.zig").monotonicNanos;
@@ -169,9 +170,8 @@ fn matchRoute() void {
 }
 
 fn serialiseBody() void {
-    var w = std.Io.Writer.Allocating.initCapacity(arena.allocator(), ctx_mod.json_hint) catch unreachable;
-    json_mod.write(&w.writer, Db.find(undefined, 7).?) catch unreachable;
-    sink += w.written().len;
+    const body = jsonbuf_mod.render(arena.allocator(), Db.find(undefined, 7).?) catch unreachable;
+    sink += body.len;
     _ = arena.reset(.{ .retain_with_limit = arena_keep });
 }
 
