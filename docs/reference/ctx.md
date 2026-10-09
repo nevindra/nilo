@@ -14,7 +14,7 @@ This page covers reading a request, answering it, its cookies, session and uploa
 |---|---|
 | `c.method` | `.GET`, `.POST`, … |
 | `c.path()` | `Str`: the path, without the query string |
-| `c.param(name)` | `?Str`, percent-decoded. `"*"` for a catch-all |
+| `c.param(name)` | `?Str`, percent-decoded after the route matched, so `%2F` stays inside its segment and decodes to `/`. `"*"` for a catch-all |
 | `c.routeName()` | `?[]const u8`: the `operationId` of the route that matched, as the API description prints it: what `app.named` gave it, or the derived `getUsersId`. Null when nothing matched: a 404, a 405, a static file. For a middleware holding one authorisation table over every route ([ADR 162](../adr/162-a-middleware-can-learn-which-route-it-is-in-front-of.md)) |
 | `c.query(name)` | `?Str`, percent-decoded, `+` as space |
 | `c.queries()` | an iterator over every query parameter, in arrival order: `while (it.next()) \|q\|`, `q.name` and `q.value` are `Str`. A name sent twice appears twice |

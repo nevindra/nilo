@@ -27,7 +27,7 @@ fn member(p: nilo.Path(Member)) u32 {
 }
 ```
 
-The fields can be a `u32`, `i64`, `f64`, `bool`, an enum, a type carrying `nilo_parse`, or a `Str` for the text as it arrived; never optional, because a param on a route that matched is always there. A value that doesn't convert is a 400 saying which param and what was expected, and your handler doesn't run. Values are percent-decoded before conversion. A field that names no param of the route, and a param of the route with no field, stop the compiler with a sentence naming the route (a handler holding a `*Ctx` may leave params out and read them with `c.param`).
+The fields can be a `u32`, `i64`, `f64`, `bool`, an enum, a type carrying `nilo_parse`, or a `Str` for the text as it arrived; never optional, because a param on a route that matched is always there. A value that doesn't convert is a 400 saying which param and what was expected, and your handler doesn't run. Values are percent-decoded before conversion, and the decoding happens after the route matched, so an encoded slash (`%2F`) stays inside its one segment instead of splitting it: `/files/a%2Fb` matches `/files/:name` and `name` is `a/b`. A field that names no param of the route, and a param of the route with no field, stop the compiler with a sentence naming the route (a handler holding a `*Ctx` may leave params out and read them with `c.param`).
 
 A `*` as the last segment matches the whole rest of the path and is the field `@"*"`: `p: nilo.Path(struct { repo: nilo.Str, @"*": nilo.Str })`. A `*Ctx` handler reads it with [`c.param("*")`](../reference/ctx.md#reading).
 
