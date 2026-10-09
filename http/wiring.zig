@@ -15,6 +15,7 @@ const service_mod = @import("service.zig");
 const mw = @import("middleware.zig");
 const pathparams = @import("pathparams.zig");
 const static_mod = @import("static.zig");
+const follow_mod = @import("follow.zig");
 const proxies_mod = @import("proxies.zig");
 const openapi = @import("openapi.zig");
 const compress_mod = @import("compress.zig");
@@ -245,6 +246,13 @@ pub fn resolveChains(self: *App) !void {
     if (self.docs_set) |*set| self.docs_chains = try chainsFor(self, set);
     try self.static_chains.ensureTotalCapacityPrecise(self.gpa, self.static_sets.items.len);
     for (self.static_sets.items) |*set| {
+        // A followed directory's chains belong to its generations, which the
+        // follower makes with the same function (ADR 277).
+        if (set.follower) |f| {
+            try f.attach(followHooks(self));
+            self.static_chains.appendAssumeCapacity(&.{});
+            continue;
+        }
         self.static_chains.appendAssumeCapacity(try chainsFor(self, set));
     }
     try sizeMetrics(self);
@@ -301,6 +309,31 @@ pub fn sizeMetrics(self: *App) !void {
     table.exposed = self.exposed.items;
     // The App counts this already, to know what a stop has to wait for.
     table.in_flight = &self.stop.in_flight;
+}
+
+fn followHooks(self: *App) follow_mod.Hooks {
+    return .{ .host = self, .chains = followChains, .free = followFree };
+}
+
+fn followChains(host: *anyopaque, set: *const static_mod.Set) anyerror!follow_mod.Chains {
+    const app: *App = @ptrCast(@alignCast(host));
+    return @ptrCast(try chainsFor(app, set));
+}
+
+fn followFree(host: *anyopaque, chains: follow_mod.Chains) void {
+    const app: *App = @ptrCast(@alignCast(host));
+    freeChainList(app, @ptrCast(chains));
+}
+
+/// Start the thread of every directory that follows the disk, once the
+/// chains are resolved and the server is about to accept (ADR 277).
+pub fn startFollowing(self: *App) !void {
+    for (self.static_sets.items) |*set| if (set.follower) |f| try f.start();
+}
+
+/// Stop them, before the services and the sets they read are given back.
+pub fn stopFollowing(self: *App) void {
+    for (self.static_sets.items) |*set| if (set.follower) |f| f.halt();
 }
 
 /// The chain for every file in `set`, in the set's own order, so a

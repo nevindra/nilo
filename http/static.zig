@@ -48,6 +48,7 @@ const std = @import("std");
 const accept_mod = @import("accept.zig");
 const compress_mod = @import("compress.zig");
 const bulkhead = @import("bulkhead.zig");
+const follow_mod = @import("follow.zig");
 
 pub const Options = struct {
     /// Served for a path ending in `/`. Empty turns that off.
@@ -167,9 +168,10 @@ pub const Options = struct {
     /// build before last is then served to every browser for a script that
     /// has changed. Here a `.gz` is checked against the plain file it sits
     /// beside (its trailer carries the CRC-32 and the length of what it
-    /// compressed), a sibling older than the file, or not smaller than it, is
-    /// ignored, and each one ignored is said in one line at load. Brotli has
-    /// no such trailer, so a `.br` is held to the modification time alone.
+    /// compressed), a sibling not smaller than the file is ignored, and each
+    /// one ignored is said in one line at load. Brotli has no such trailer,
+    /// so a `.br` is held to the modification time alone: one older than its
+    /// file is ignored.
     ///
     /// What it takes from the tree: a `X.br` or `X.gz` whose `X` is in the
     /// tree and is a type worth compressing (`compressible`) is a sibling,
@@ -183,6 +185,26 @@ pub const Options = struct {
     /// place for a client that takes gzip and not brotli (every browser over
     /// plain HTTP). `compress = false` turns off the copy and not this.
     precompressed: bool = true,
+
+    /// Keep what is held in step with the directory while the server runs
+    /// (ADR 277): replace a file, or its `.br` and `.gz`, add one or remove
+    /// one, and the next response carries it. **Off by default**, because
+    /// what `app.static` says is that the tree is read once and a restart is
+    /// how it changes (ADR 009), and a program that ships an image does not
+    /// want a thread, a descriptor and a tree that can change under it.
+    ///
+    /// Nothing is added to a request: one background thread watches the
+    /// directory (inotify on Linux, a `stat` of every file each
+    /// `follow_poll_ms` anywhere else and as the backstop where inotify says
+    /// nothing), builds the new tree beside the one being served and swaps
+    /// them, and a response that began on the old tree finishes on it.
+    follow: bool = false,
+    /// The longest a change can go unnoticed: how often the directory is
+    /// walked and every file `stat`ed on the watching thread, whatever
+    /// inotify has or has not said. A tree of tens of thousands of files
+    /// wants a larger number; a change is picked up at once where the OS
+    /// tells, and within this where it does not (a network or FUSE mount).
+    follow_poll_ms: u32 = 1000,
 
     /// Files smaller than this are served as they are.
     ///
@@ -469,8 +491,21 @@ pub const Set = struct {
     /// from the binary, where they cost nothing to keep and cannot be
     /// given back.
     owns_bytes: bool = true,
+    /// What the walk saw of the tree, one number: every listed file's path,
+    /// size, modification time and inode, summed, so that the order they were
+    /// found in does not matter. A followed directory is reloaded when a
+    /// fresh walk gives another one (ADR 277).
+    fingerprint: u64 = 0,
+    /// Set on the entry `App` keeps for a followed directory, whose own
+    /// `files` are empty: the files are the follower's generations, and a
+    /// request asks it for one (`Follower.acquire`).
+    follower: ?*follow_mod.Follower = null,
 
     pub fn deinit(self: *Set) void {
+        if (self.follower) |f| {
+            self.follower = null;
+            f.destroy();
+        }
         for (self.files) |f| freeFile(self.gpa, f, self.owns_bytes);
         self.gpa.free(self.files);
         self.gpa.free(self.prefix);
@@ -756,17 +791,42 @@ pub fn load(
     options: Options,
     absent: Absent,
 ) LoadError!Set {
-    std.debug.assert(url_prefix.len > 0 and url_prefix[0] == '/');
-
     // A throwaway blocking I/O instance, unrelated to the Engine that will
     // serve requests. Nothing from here survives into the request path,
     // which is exactly why static files need nothing from the Bulkhead.
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
-    const io = threaded.io();
+    return loadOn(threaded.io(), gpa, url_prefix, dir_path, options, absent);
+}
+
+/// Whether the calling thread is the one that reloads a followed directory
+/// (ADR 277), where a directory that cannot be read is a warning and the old
+/// one goes on being served, and not the line that says the server is about
+/// to stop.
+pub threadlocal var reloading: bool = false;
+
+/// What `load` says of a problem with a directory that is there: an `err` at
+/// startup, where the process is about to stop, and a `warn` on the thread
+/// that reloads, where it is not and the zig test runner fails a run on any
+/// `err` line.
+fn complain(comptime fmt: []const u8, args: anytype) void {
+    if (reloading) std.log.warn(fmt, args) else std.log.err(fmt, args);
+}
+
+/// `load` on an `Io` the caller owns, which is how the thread that follows a
+/// directory reads it again without making one each time.
+pub fn loadOn(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    url_prefix: []const u8,
+    dir_path: []const u8,
+    options: Options,
+    absent: Absent,
+) LoadError!Set {
+    std.debug.assert(url_prefix.len > 0 and url_prefix[0] == '/');
 
     var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
-        if (absent == .reported) std.log.err(
+        if (absent == .reported) complain(
             "nilo: static directory \"{s}\" could not be opened ({s}) — " ++
                 "the path is relative to the working directory the server runs in",
             .{ dir_path, @errorName(err) },
@@ -784,7 +844,7 @@ pub fn load(
     // alternative is a lazily opened directory on the request path and a
     // branch to go with it.
     const serving = bulkhead.Dir.open(dir_path) catch |err| {
-        if (absent == .reported) std.log.err(
+        if (absent == .reported) complain(
             "nilo: static directory \"{s}\" could not be held open ({s}) — " ++
                 "the path is relative to the working directory the server runs in",
             .{ dir_path, @errorName(err) },
@@ -817,21 +877,13 @@ pub fn load(
     var packed_total: usize = 0;
     var sibling_total: usize = 0;
     var spilled_files: usize = 0;
-    var skipped_dotfiles: usize = 0;
-    // Links the walk passed over, named once at the end: the first few and a
-    // count (ADR 009). A link is not a file the walk listed, so nothing is
-    // served for it and a reader of the directory would otherwise find out
-    // from a 404.
-    var skipped_links: usize = 0;
-    var link_names: std.ArrayList(u8) = .empty;
-    defer link_names.deinit(gpa);
 
     // `.reload` is the threshold set to zero and nothing else, so there is one
     // spill rule below rather than two (see `Options.reload`). Said out loud
     // at load, because a directory answering from the disk on every request is
     // not what anybody wants in production and the line is how they find out.
     const spill_over: usize = if (options.reload) 0 else options.max_file_bytes;
-    if (options.reload) {
+    if (options.reload and !reloading) {
         std.log.warn(
             "nilo: static directory \"{s}\" is serving every file from the disk (.reload) — " ++
                 "an open, a stat and a read per request, and no gzipped copies. " ++
@@ -844,48 +896,11 @@ pub fn load(
     // is a file of its own or the brotli form of `app.js`, and whether
     // `app.js` is then held or spilled decides how its form is kept (ADR 273).
     // The first only names and stats, which is all a spilled file ever gets.
-    var found: std.ArrayList(Found) = .empty;
-    defer {
-        for (found.items) |f| gpa.free(f.path);
-        found.deinit(gpa);
-    }
-
-    var walker = try dir.walk(gpa);
-    defer walker.deinit();
-
-    while (walker.next(io) catch |err| {
-        std.log.err(
-            "nilo: static directory \"{s}\" could not be walked ({s})",
-            .{ dir_path, @errorName(err) },
-        );
-        return error.StaticReadFailed;
-    }) |entry| {
-        if (entry.kind == .sym_link) {
-            skipped_links += 1;
-            if (skipped_links <= max_named_links) {
-                if (link_names.items.len > 0) try link_names.appendSlice(gpa, ", ");
-                try link_names.print(gpa, "\"{s}\"", .{entry.path});
-            }
-            continue;
-        }
-        if (entry.kind != .file) continue;
-        if (!options.dotfiles and hasDotSegment(entry.path)) {
-            skipped_dotfiles += 1;
-            continue;
-        }
-
-        // Asked before anything is read, which is the whole point: a file
-        // over the line must not be read even once, or startup on a
-        // directory of videos costs a pass over every one of them.
-        const stat = entry.dir.statFile(io, entry.basename, .{}) catch |err| {
-            std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
-            return error.StaticReadFailed;
-        };
-        const relative = try gpa.dupe(u8, entry.path);
-        errdefer gpa.free(relative);
-        toForwardSlashes(relative);
-        try found.append(gpa, .{ .path = relative, .size = stat.size, .mtime_ns = stat.mtime.nanoseconds });
-    }
+    var walked: Walked = .{};
+    defer walked.deinit(gpa);
+    try walkTree(gpa, io, dir, dir_path, options, &walked);
+    const found = &walked.found;
+    set.fingerprint = fingerprintOf(found.items);
 
     var ignored: Ignored = .{};
     defer ignored.names.deinit(gpa);
@@ -896,7 +911,7 @@ pub fn load(
 
         var url_buf: [max_url]u8 = undefined;
         const url = join(&url_buf, url_prefix, f.path) orelse {
-            std.log.err("nilo: static file \"{s}\" has a path longer than {d} bytes", .{ f.path, max_url });
+            complain("nilo: static file \"{s}\" has a path longer than {d} bytes", .{ f.path, max_url });
             return error.StaticUrlTooLong;
         };
 
@@ -1000,10 +1015,10 @@ pub fn load(
     }
     ignored.say(dir_path);
 
-    if (skipped_links > 0) std.log.warn(
+    if (walked.links > 0) std.log.warn(
         "nilo: static directory \"{s}\" holds {d} symlink(s) that are not served: {s}{s}. " ++
             "A link is never followed out of the tree (ADR 009); copy the file in to serve it.",
-        .{ dir_path, skipped_links, link_names.items, if (skipped_links > max_named_links) " and more" else "" },
+        .{ dir_path, walked.links, walked.link_names.items, if (walked.links > max_named_links) " and more" else "" },
     );
 
     // Handed over, so the list is empty and its `errdefer` above has nothing
@@ -1014,14 +1029,14 @@ pub fn load(
     if (options.spa_fallback.len > 0) {
         var buf: [max_url]u8 = undefined;
         const url = join(&buf, url_prefix, options.spa_fallback) orelse {
-            std.log.err(
+            complain(
                 "nilo: the SPA fallback URL \"{s}\" + \"{s}\" is longer than {d} bytes",
                 .{ url_prefix, options.spa_fallback, max_url },
             );
             return error.StaticUrlTooLong;
         };
         set.fallback = set.lookup(url) orelse {
-            std.log.err(
+            complain(
                 "nilo: the SPA fallback \"{s}\" is not in \"{s}\" — " ++
                     "the name is relative to the directory, e.g. \"index.html\"",
                 .{ options.spa_fallback, dir_path },
@@ -1040,8 +1055,9 @@ pub fn load(
     // memory budget and the second one is not in that budget at all — it is
     // one descriptor each, and only while a response is being written.
     std.log.info(
-        "nilo: loaded {d} static file(s) ({d} bytes held{f}{f}) from \"{s}\" onto \"{s}\"{f}{s}",
+        "nilo: {s} {d} static file(s) ({d} bytes held{f}{f}) from \"{s}\" onto \"{s}\"{f}{s}",
         .{
+            if (reloading) "reloaded" else "loaded",
             set.files.len,
             held_total,
             GzipNote{ .bytes = packed_total },
@@ -1049,10 +1065,110 @@ pub fn load(
             dir_path,
             url_prefix,
             SpillNote{ .files = spilled_files, .over = options.max_file_bytes },
-            if (skipped_dotfiles > 0) " (dotfiles skipped)" else "",
+            if (walked.dotfiles > 0) " (dotfiles skipped)" else "",
         },
     );
     return set;
+}
+
+/// What the first pass of `load` collected: the files, and what it passed over.
+const Walked = struct {
+    found: std.ArrayList(Found) = .empty,
+    /// Links the walk passed over, named once at the end: the first few and a
+    /// count (ADR 009). A link is not a file the walk listed, so nothing is
+    /// served for it and a reader of the directory would otherwise find out
+    /// from a 404.
+    links: usize = 0,
+    link_names: std.ArrayList(u8) = .empty,
+    dotfiles: usize = 0,
+
+    fn deinit(self: *Walked, gpa: std.mem.Allocator) void {
+        for (self.found.items) |f| gpa.free(f.path);
+        self.found.deinit(gpa);
+        self.link_names.deinit(gpa);
+    }
+};
+
+/// The first pass, which only names and stats: what `load` builds from, and
+/// all a followed directory's watcher needs to know whether anything changed.
+fn walkTree(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    dir_path: []const u8,
+    options: Options,
+    walked: *Walked,
+) LoadError!void {
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+
+    while (walker.next(io) catch |err| {
+        complain(
+            "nilo: static directory \"{s}\" could not be walked ({s})",
+            .{ dir_path, @errorName(err) },
+        );
+        return error.StaticReadFailed;
+    }) |entry| {
+        if (entry.kind == .sym_link) {
+            walked.links += 1;
+            if (walked.links <= max_named_links) {
+                if (walked.link_names.items.len > 0) try walked.link_names.appendSlice(gpa, ", ");
+                try walked.link_names.print(gpa, "\"{s}\"", .{entry.path});
+            }
+            continue;
+        }
+        if (entry.kind != .file) continue;
+        if (!options.dotfiles and hasDotSegment(entry.path)) {
+            walked.dotfiles += 1;
+            continue;
+        }
+
+        // Asked before anything is read, which is the whole point: a file
+        // over the line must not be read even once, or startup on a
+        // directory of videos costs a pass over every one of them.
+        const stat = entry.dir.statFile(io, entry.basename, .{}) catch |err| {
+            complain("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
+            return error.StaticReadFailed;
+        };
+        const relative = try gpa.dupe(u8, entry.path);
+        errdefer gpa.free(relative);
+        toForwardSlashes(relative);
+        try walked.found.append(gpa, .{
+            .path = relative,
+            .size = stat.size,
+            .mtime_ns = stat.mtime.nanoseconds,
+            .inode = @intCast(stat.inode),
+        });
+    }
+}
+
+/// One number for what a walk found: a hash of each file's path, size,
+/// modification time and inode, added together, so the order a directory
+/// lists them in does not change it. A file replaced by a rename has a new
+/// inode and one written in place a new modification time, and a file added
+/// or removed is a term more or fewer (ADR 277).
+fn fingerprintOf(found: []const Found) u64 {
+    var sum: u64 = 0;
+    for (found) |f| {
+        var h = std.hash.Wyhash.init(0);
+        h.update(f.path);
+        h.update(std.mem.asBytes(&f.size));
+        h.update(std.mem.asBytes(&f.mtime_ns));
+        h.update(std.mem.asBytes(&f.inode));
+        sum +%= h.final();
+    }
+    return sum;
+}
+
+/// The fingerprint of `dir_path` as it is now, without reading a file: the
+/// follower's question each time something may have changed (ADR 277).
+pub fn scan(io: std.Io, gpa: std.mem.Allocator, dir_path: []const u8, options: Options) LoadError!u64 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return error.StaticDirNotFound;
+    defer dir.close(io);
+    var walked: Walked = .{};
+    defer walked.deinit(gpa);
+    try walkTree(gpa, io, dir, dir_path, options, &walked);
+    return fingerprintOf(walked.found.items);
 }
 
 /// What the first pass of `load` knows about a file: where it is, how big,
@@ -1062,6 +1178,7 @@ const Found = struct {
     path: []u8,
     size: u64,
     mtime_ns: i96,
+    inode: u64 = 0,
     /// A plain file is listed. A `.br` or `.gz` that is the form of a file
     /// beside it is not, whether or not it turned out usable.
     role: Role = .plain,
@@ -1113,7 +1230,7 @@ const Ignored = struct {
 /// Match every `X.br` and `X.gz` in `found` (sorted here by path) with the
 /// `X` beside it, when `X` is a type worth compressing, and mark it a sibling
 /// of `X`. One that cannot be used, because it is not smaller than `X` or is
-/// older than it, is marked all the same and `ignored` says so; the
+/// a `.br` older than it, is marked all the same and `ignored` says so; the
 /// contents of a `.gz` are checked once its bytes are read.
 fn pairSiblings(gpa: std.mem.Allocator, found: []Found, ignored: *Ignored) !void {
     std.sort.pdq(Found, found, {}, lessByPath);
@@ -1128,9 +1245,14 @@ fn pairSiblings(gpa: std.mem.Allocator, found: []Found, ignored: *Ignored) !void
             try ignored.note(gpa, f.path, "not smaller than the file beside it");
             continue;
         }
-        // Make's rule. A build writes the file and then its forms, so a form
-        // older than the file was left by an earlier build.
-        if (f.mtime_ns < plain.mtime_ns) {
+        // Make's rule, for the form with nothing else to check it by. A build
+        // writes the file and then its forms, so a `.br` older than the file
+        // was left by an earlier build. A `.gz` is not held to it: its trailer
+        // says exactly which bytes it compresses, and `load` checks that
+        // against the file once both are read, so a `.gz` written before its
+        // file (a deploy that copies in either order, a checkout, `cp -p`) is
+        // used when it is the file's and ignored when it is not (ADR 273).
+        if (named.coding == .br and f.mtime_ns < plain.mtime_ns) {
             try ignored.note(gpa, f.path, "older than the file beside it");
             continue;
         }
@@ -1169,14 +1291,14 @@ fn spilledSibling(gpa: std.mem.Allocator, found: []const Found, at: ?usize) !?Fi
 fn readHeld(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, limit: u64) LoadError![]u8 {
     return dir.readFileAlloc(io, path, gpa, .limited64(limit)) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
-        std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ path, @errorName(err) });
+        complain("nilo: static file \"{s}\" could not be read ({s})", .{ path, @errorName(err) });
         return error.StaticReadFailed;
     };
 }
 
 fn checkTotal(held_total: usize, max_total_bytes: usize, dir_path: []const u8) LoadError!void {
     if (held_total <= max_total_bytes) return;
-    std.log.err(
+    complain(
         "nilo: static directory \"{s}\" is over the {d} byte total limit, " ++
             "gzipped and precompressed copies counted — raise .max_total_bytes, " ++
             "or pass .compress = false",
@@ -1188,7 +1310,7 @@ fn checkTotal(held_total: usize, max_total_bytes: usize, dir_path: []const u8) L
 /// Whether `gz` is a gzip of exactly `plain`: the magic, and the CRC-32 and
 /// the length mod 2^32 its last eight bytes carry. This is what makes a stale
 /// `.gz` detectable, which brotli's format has no equivalent of (ADR 273).
-fn gzipMatches(gz: []const u8, plain: []const u8) bool {
+pub fn gzipMatches(gz: []const u8, plain: []const u8) bool {
     if (gz.len < 18 or gz[0] != 0x1f or gz[1] != 0x8b) return false;
     const crc = std.mem.readInt(u32, gz[gz.len - 8 ..][0..4], .little);
     const size = std.mem.readInt(u32, gz[gz.len - 4 ..][0..4], .little);
@@ -1490,7 +1612,7 @@ fn sortByUrl(files: []File) void {
 
 /// Whether `path` sits under `prefix`, on a segment boundary — so a
 /// prefix of `/app` covers `/app/x` but not `/apple`.
-fn underPrefix(prefix: []const u8, path: []const u8) bool {
+pub fn underPrefix(prefix: []const u8, path: []const u8) bool {
     if (std.mem.eql(u8, prefix, "/")) return true;
     if (!std.mem.startsWith(u8, path, prefix)) return false;
     return path.len == prefix.len or path[prefix.len] == '/';
@@ -1516,7 +1638,7 @@ fn toForwardSlashes(url: []u8) void {
 }
 
 /// Whether any segment of a relative path starts with a dot.
-fn hasDotSegment(rel_path: []const u8) bool {
+pub fn hasDotSegment(rel_path: []const u8) bool {
     var start: usize = 0;
     for (rel_path, 0..) |ch, i| {
         if (ch == '/' or ch == '\\') {
@@ -1990,6 +2112,7 @@ test "a file with no compressed copy asks for the plain one whatever the client 
 
 const App = @import("app.zig").App;
 const nilo_testing = @import("testing.zig");
+const wiring = @import("wiring.zig");
 
 /// A directory of real files, written for one test and removed after it.
 /// The path is relative to the working directory, which is what `load` and
@@ -2405,6 +2528,79 @@ test "reload leaves every file on the disk, however small it is" {
     const second = try client.get(&app, "/page.html");
     try testing.expectEqualStrings("<p>two, longer</p>", second.body);
     try testing.expect(!std.mem.eql(u8, before, second.header("ETag").?));
+}
+
+/// The longest a test waits for a followed directory to be noticed: the thread
+/// answers in a few hundred milliseconds and this is where a failure gives up.
+const follow_wait_ms = 5000;
+
+fn followNap() void {
+    std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
+}
+
+/// GET `path` until it answers `status` with `body`, and fail past the bound.
+fn getUntil(client: *nilo_testing.Client, app: *App, path: []const u8, status: u16, body: []const u8) !void {
+    const since = bulkhead.monotonicNanos();
+    while ((bulkhead.monotonicNanos() - since) / std.time.ns_per_ms < follow_wait_ms) : (followNap()) {
+        const answer = try client.get(app, path);
+        if (answer.status == status and std.mem.eql(u8, answer.body, body)) return;
+    }
+    return error.NeverFollowed;
+}
+
+test "a directory that follows the disk answers a file replaced, added or removed, and one that does not follow keeps what it read" {
+    const gpa = testing.allocator;
+    var tree = try TmpTree.init(gpa, &.{
+        .{ "app.css", "body{one}" },
+        .{ "gone.css", "gone" },
+    });
+    defer tree.deinit(gpa);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", tree.path, .{ .follow = true, .follow_poll_ms = 100 });
+    try app.resolveChains();
+    try wiring.startFollowing(&app);
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+    try getUntil(&client, &app, "/app.css", 200, "body{one}");
+
+    try tree.tmp.dir.writeFile(testing.io, .{ .sub_path = "app.css", .data = "body{two}" });
+    try getUntil(&client, &app, "/app.css", 200, "body{two}");
+
+    try tree.tmp.dir.writeFile(testing.io, .{ .sub_path = "new.css", .data = "new" });
+    try getUntil(&client, &app, "/new.css", 200, "new");
+
+    try tree.tmp.dir.deleteFile(testing.io, "gone.css");
+    const since = bulkhead.monotonicNanos();
+    while ((client.get(&app, "/gone.css") catch unreachable).status == 200) : (followNap()) {
+        if ((bulkhead.monotonicNanos() - since) / std.time.ns_per_ms > follow_wait_ms) return error.NeverFollowed;
+    }
+    // A 404 naming the path, the answer for any file that is not there.
+    const missing = try client.get(&app, "/gone.css");
+    try testing.expectEqual(@as(u16, 404), missing.status);
+}
+
+test "a directory read without follow is the tree as it was at startup, whatever the disk does" {
+    const gpa = testing.allocator;
+    var tree = try TmpTree.init(gpa, &.{.{ "app.css", "body{one}" }});
+    defer tree.deinit(gpa);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStatic("/", tree.path);
+    try app.resolveChains();
+    try wiring.startFollowing(&app);
+    try testing.expect(app.static_sets.items[0].follower == null);
+
+    try tree.tmp.dir.writeFile(testing.io, .{ .sub_path = "app.css", .data = "body{two}" });
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+    var waited: u32 = 0;
+    while (waited < 400) : (waited += 20) followNap();
+    const answer = try client.get(&app, "/app.css");
+    try testing.expectEqualStrings("body{one}", answer.body);
 }
 
 test "a set with no directory closes cleanly, and one with a directory gives it back" {

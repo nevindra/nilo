@@ -1079,6 +1079,8 @@ test {
     _ = @import("scan.zig");
     _ = @import("accept.zig");
     _ = @import("static.zig");
+    _ = @import("follow.zig");
+    _ = @import("lease.zig");
     _ = @import("encoded.zig");
     _ = @import("router.zig");
     _ = @import("url.zig");

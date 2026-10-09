@@ -107,6 +107,7 @@ const grpc = @import("grpc.zig");
 const date = @import("date.zig");
 const inbound = @import("inbound.zig");
 const outbound = @import("outbound.zig");
+const Lease = @import("lease.zig").Lease;
 
 /// What a gRPC connection asks of the App, handed over by `app.zig` rather
 /// than named here. This file sits outside the App's core (`http_core` in
@@ -542,6 +543,11 @@ const Stream = struct {
     /// connection's to forget once the round is over.
     ev_failed: bool = false,
 
+    /// What keeps a followed static directory's generation alive while `data`
+    /// is written from where it lies, given back when the stream is let go of
+    /// (ADR 277). Null for every answer whose body is in the arena.
+    lease: ?*Lease = null,
+
     // The answer, filled by the call's fiber.
     head_block: []const u8 = "",
     data: []const u8 = "",
@@ -592,6 +598,7 @@ const Stream = struct {
 
     fn destroy(s: *Stream) void {
         s.leaveEvents();
+        if (s.lease) |held| held.release();
         if (s.out != null) _ = s.shared.streaming.fetchSub(1, .release);
         s.inbox.deinit();
         s.arena.deinit();
@@ -603,6 +610,7 @@ const Stream = struct {
     /// is as `create` leaves it.
     fn recycle(s: *Stream) void {
         s.leaveEvents();
+        if (s.lease) |held| held.release();
         if (s.out != null) _ = s.shared.streaming.fetchSub(1, .release);
         _ = s.arena.reset(.{ .retain_with_limit = spare_arena_keep });
         s.inbox.recycle(s.app.max_body);
@@ -2861,6 +2869,9 @@ fn answer(s: *Stream, in_flight: *fail.InFlight) !void {
         .head = streamedHead,
     };
     s.app.handle(s.app.ptr, a, &lifetime, in_flight, call, &collected, s.peer, s.until_ns);
+    // Handed to the stream before anything else can fail, so that the count a
+    // borrowed body took is given back exactly once (ADR 277).
+    s.lease = collected.lease;
     lifetime.end();
     if (!s.grpc) {
         // Written already, a piece at a time: nothing is left to frame.
@@ -5365,6 +5376,88 @@ test "a body of 20 KB reaches an HTTP/2 client whole when the bytes were the han
     const held = try windowedBody(&app, "/files/f.bin", null);
     defer testing.allocator.free(held);
     try testing.expect(std.mem.eql(u8, &file, held));
+}
+
+// ---- a followed directory replaced while a stream is still writing a file of it (ADR 277) ----
+
+const FollowedFixture = struct {
+    var tmp: ?*nilo_testing.TmpDir = null;
+    var follower: ?*@import("follow.zig").Follower = null;
+    var old: ?*@import("follow.zig").Gen = null;
+    /// What the stream's generation looked like after the directory had been
+    /// replaced and the thread had swapped, taken while the stream was
+    /// mid-write.
+    var swapped = false;
+    var old_kept = false;
+    var old_untouched = false;
+    var new_bytes: [owned_len]u8 = undefined;
+    var old_bytes: [owned_len]u8 = undefined;
+
+    fn replaceAndWait() void {
+        const f = follower.?;
+        tmp.?.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = &new_bytes }) catch return;
+        var waited: u32 = 0;
+        while (f.swaps.load(.acquire) == 0 and waited < 5000) : (waited += 20) {
+            std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
+        }
+        swapped = f.swaps.load(.acquire) > 0;
+        // Several looks of the thread later, with the stream still holding
+        // the file's first 1,000 bytes written and the rest to go.
+        std.Io.sleep(testing.io, .fromMilliseconds(300), .awake) catch {};
+        const gen = old.?;
+        old_kept = f.freed.load(.acquire) == 0 and gen.lease.held() == 1;
+        old_untouched = std.mem.eql(u8, gen.set.files[0].contents.held.bytes, &old_bytes);
+    }
+};
+
+test "a file of a followed directory that a stream is still writing is not freed or changed when the directory is replaced, and is freed after" {
+    const previous = quiet();
+    defer testing.log_level = previous;
+    var tree = nilo_testing.tmpDir();
+    defer tree.cleanup();
+    for (&FollowedFixture.old_bytes, 0..) |*b, i| b.* = @intCast('A' + i % 26);
+    for (&FollowedFixture.new_bytes, 0..) |*b, i| b.* = @intCast('a' + i % 26);
+    try tree.dir.writeFile(testing.io, .{ .sub_path = "f.bin", .data = &FollowedFixture.old_bytes });
+    var path_buf: [128]u8 = undefined;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.staticWith("/files", try tree.path(&path_buf, ""), .{ .follow = true, .follow_poll_ms = 100 });
+    try app.resolveChains();
+    const follower = app.static_sets.items[0].follower.?;
+    try @import("wiring.zig").startFollowing(&app);
+
+    FollowedFixture.tmp = &tree;
+    FollowedFixture.follower = follower;
+    FollowedFixture.old = follower.live.load(.acquire);
+    FollowedFixture.swapped = false;
+    FollowedFixture.old_kept = false;
+    FollowedFixture.old_untouched = false;
+    defer FollowedFixture.follower = null;
+
+    const body = try windowedBody(&app, "/files/f.bin", FollowedFixture.replaceAndWait);
+    defer testing.allocator.free(body);
+
+    // The stream finished with the bytes it began with, from a generation that
+    // outlived the swap while it was being read.
+    try testing.expect(FollowedFixture.swapped);
+    try testing.expect(FollowedFixture.old_kept);
+    try testing.expect(FollowedFixture.old_untouched);
+    try testing.expect(std.mem.eql(u8, &FollowedFixture.old_bytes, body));
+
+    // The stream is let go of, and the thread frees the generation at its next
+    // look: the count is back to nothing and then the memory is.
+    try testing.expectEqual(@as(u32, 0), FollowedFixture.old.?.lease.held());
+    var waited: u32 = 0;
+    while (follower.freed.load(.acquire) == 0 and waited < 5000) : (waited += 20) {
+        std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
+    }
+    try testing.expect(follower.freed.load(.acquire) > 0);
+
+    // And the next request is the new file.
+    const fresh = try windowedBody(&app, "/files/f.bin", null);
+    defer testing.allocator.free(fresh);
+    try testing.expect(std.mem.eql(u8, &FollowedFixture.new_bytes, fresh));
 }
 
 test "a HEAD has the head a GET would, content-length included, and no DATA" {

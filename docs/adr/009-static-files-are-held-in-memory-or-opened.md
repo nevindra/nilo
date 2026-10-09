@@ -11,7 +11,7 @@ So the choice was never "disk or memory". It was between adding file IO to the B
 
 ## Decision
 
-**A directory is read once, at `listen()`, into memory owned by the App. A file over `max_file_bytes` is the one exception: it stays in the list with its size, its modification time and the path the walk produced, and a request opens it and sends it from the disk.** `app.static("/", "public")` walks the directory once; lookup is a binary search over URLs sorted at load.
+**A directory is read once, at `listen()` (and, only when `follow` is set, again whenever the disk changes: [ADR 277](./277-a-static-directory-can-follow-the-disk-and-a-response-finishes-on-the-tree-it-began-on.md)), into memory owned by the App. A file over `max_file_bytes` is the one exception: it stays in the list with its size, its modification time and the path the walk produced, and a request opens it and sends it from the disk.** `app.static("/", "public")` walks the directory once; lookup is a binary search over URLs sorted at load.
 
 ### What holding the bytes buys
 

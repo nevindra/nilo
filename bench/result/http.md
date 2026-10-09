@@ -4632,3 +4632,18 @@ The 40-byte rows differ by 0.2 instructions in 684, and the 16 KiB ranges overla
 **Binary.** `.text` of the echo server is 1,212,963 bytes before and 1,213,187 after (+224 bytes, the connection loop above).
 
 **What it decided.** The move stands: one copy of the framing in Core. Nothing here is a reason to keep a second one in the server. The Autobahn suite (`bash bench/autobahn/run.sh`) on the changed tree reads as it did before the move: 301 cases, 294 OK, the four 6.4.x NON-STRICT and the three 9.x INFORMATIONAL, 0 failed. The framing tests in `http/websocket.zig` (every one that was not a pure table of bytes, which went to `core/ws_frame.zig` with the code) pass in Debug and ReleaseSafe.
+
+## A static directory that follows the disk
+
+**What was run.** The HttpArena rig of the entry above, static-h2 (TLS, 20 files with `.br` and `.gz` twins, `Accept-Encoding: br;q=1, gzip;q=0.8`, `-m 32`), at 256 and 1,024 connections, `h2load` under `flock bench.lock`, interleaved runs of three builds of one tree (HEAD `01ca862` plus the uncommitted work of the unreleased tree and the ADR 277 diff): `base` (the entry as it was, `.reload`), `sdisk` (held, no `.reload`, not following: the lower bound a follower can approach) and `sfollow` (`.{ .follow = true }`, the one-line change in the entry's `src/main.zig`). Machine: the one above, load average 24 to 66 from other builds during the runs, so the figure is server CPU microseconds a request, not req/s.
+
+| connections | `base` (`.reload`) | `sdisk` (held, stale) | `sfollow` | h2c control (same files) |
+|---|---|---|---|---|
+| 256 | 44.3 to 52.6 µs | 22.7 to 23.2 | 22.8 to 23.4 | 8.7 |
+| 1,024 | 51.7 to 53.9 | not run | 28.3 to 28.9 | not run |
+
+**The validator** (`static_staleness_probe` by hand: replace a file and its twins with same-length bytes, wait, read) passed in five cases, the board's order among them, answering the new bytes after 111 to 219 ms. Idle connections: `bench/mem.py --h2`, marginal 8,687 bytes a connection for `base` and `sfollow`; `park-check` unchanged. Binary, stripped `ReleaseFast`: 2,572,688 (`sdisk`) to 2,598,720 (`sfollow`) bytes.
+
+**Where the rest of the gap is.** `sfollow` is half of `base` and 2.5 times swerver's 9.26 µs. The h2c control with the same files costs 8.7 µs, so what is left is TLS: the average body is 15.9 KB, and std's AES-GCM runs at about 2.1 GB/s alone and about 1.1 GB/s a thread with an SMT sibling busy, which is about 14 µs of the 22.8. tls.zig writes two records a DATA frame (a short header record and the payload) and copies the cleartext into the record buffer before encrypting in place; neither is the larger part (wider AES features were tried in `gcm.zig`, a microbench, and did not move it). That is an AEAD in the pinned tls.zig fork, not in static, and not changed here.
+
+**The decision it moved.** The entry serves `/data/static` with `.follow = true` and drops `.reload`; ADR 277 is the design; the default stays off. **Can it be pushed further:** the TLS cost above is the whole remaining difference to the leader, and a faster AES-GCM in tls.zig is the lever; keeping unchanged files between generations (not needed for 1.7 MB) matters only for trees of tens of megabytes.

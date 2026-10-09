@@ -19,6 +19,8 @@ const str_mod = @import("nilo_core");
 const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 const static_mod = @import("static.zig");
+const follow_mod = @import("follow.zig");
+const lease_mod = @import("lease.zig");
 const compress_mod = @import("compress.zig");
 const watchdog = @import("watchdog.zig");
 const scratch = @import("scratch.zig");
@@ -558,6 +560,11 @@ pub noinline fn serveRequest(
     // it out again is a second place to get it wrong (ADR 079).
     defer record.finish(c.answered() orelse 0);
 
+    // The count a followed directory's generation is held by, given back on
+    // every way out: what a stream borrowed of it took a count of its own
+    // before this runs (ADR 277).
+    defer if (c._lease) |held| held.release();
+
     // The request's span, opened before the chain so a middleware's time is
     // the request's, and kept on every way out for the reason the counting
     // above is: the status is settled only here (ADR 247). An App that does
@@ -616,6 +623,7 @@ pub noinline fn serveRequest(
         // the one the budget test used to step around rather than
         // measure (ADR 017).
         c._static_file = found.file;
+        c._lease = found.lease;
         terminal = serveStaticFile;
         chain = found.chain;
         record.at(metrics_mod.static_file);
@@ -783,7 +791,17 @@ pub fn runHandover(served: *Served) void {
 pub const StaticHit = struct {
     file: *const static_mod.File,
     chain: []const mw.Middleware,
+    /// The count a followed directory's generation is held by while this
+    /// request reads from it (ADR 277). Null for a directory that is read
+    /// once, whose files nothing ever replaces. The request gives it back
+    /// when it is done with the file, and a stream that borrowed the body
+    /// takes another before that (`Ctx.putWhole`).
+    lease: ?*lease_mod.Lease = null,
 };
+
+fn followed(found: follow_mod.Found) StaticHit {
+    return .{ .file = found.file, .chain = @ptrCast(found.chain()), .lease = &found.gen.lease };
+}
 
 /// The static file `path` names, if any set holds one. Only GET and
 /// HEAD: a POST to a `.css` is a mistake, and answering it with the
@@ -803,6 +821,11 @@ pub fn findStatic(self: *const App, c: *const Ctx, path: []const u8) ?StaticHit 
         .fetch_mode = if (c.header("Sec-Fetch-Mode")) |h| h.view() else null,
     };
     for (self.static_sets.items, 0..) |*set, i| {
+        if (set.follower) |f| {
+            if (!f.under(path)) continue;
+            if (f.acquireFallback(path, asked)) |found| return followed(found);
+            continue;
+        }
         if (set.fallbackFor(path, asked)) |file| return hitIn(self, i, set, file);
     }
     return null;
@@ -819,6 +842,11 @@ pub fn findStaticFile(self: *const App, method: http1.Method, path: []const u8) 
         if (set.find(path)) |file| return hit(file, self.docs_chains, set.indexOf(file));
     }
     for (self.static_sets.items, 0..) |*set, i| {
+        if (set.follower) |f| {
+            if (!f.under(path)) continue;
+            if (f.acquire(path)) |found| return followed(found);
+            continue;
+        }
         if (set.find(path)) |file| return hitIn(self, i, set, file);
     }
     return null;

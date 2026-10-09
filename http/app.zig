@@ -20,6 +20,7 @@ const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
 const typedmw = @import("typedmw.zig");
 const static_mod = @import("static.zig");
+const follow_mod = @import("follow.zig");
 const proxies_mod = @import("proxies.zig");
 const openapi = @import("openapi.zig");
 const budget = @import("budget.zig");
@@ -637,12 +638,30 @@ pub const App = struct {
         opts: static_mod.Options,
         absent: static_mod.Absent,
     ) !void {
-        const set = try static_mod.load(self.gpa, url_prefix, dir_path, opts, absent);
-        errdefer {
-            var mutable = set;
-            mutable.deinit();
+        var set = try static_mod.load(self.gpa, url_prefix, dir_path, opts, absent);
+        if (!opts.follow) {
+            errdefer set.deinit();
+            try self.static_sets.append(self.gpa, set);
+            return;
         }
-        try self.static_sets.append(self.gpa, set);
+        // A directory that follows the disk is kept by a follower, which owns
+        // every generation of it; what the App lists is an entry that holds
+        // the prefix and the follower and no files (ADR 277).
+        var owned = true;
+        errdefer if (owned) set.deinit();
+        const follower = try follow_mod.Follower.create(self.gpa, set, url_prefix, dir_path, opts);
+        owned = false;
+        var entry: static_mod.Set = .{
+            .gpa = self.gpa,
+            .prefix = &.{},
+            .files = &.{},
+            .fallback = null,
+            .index = opts.index,
+            .follower = follower,
+        };
+        errdefer entry.deinit();
+        entry.prefix = try self.gpa.dupe(u8, url_prefix);
+        try self.static_sets.append(self.gpa, entry);
     }
 
     /// Serve files the binary carries, the way `static` serves a directory
@@ -1552,6 +1571,7 @@ pub const App = struct {
         // file.
         try self.runBefore(io);
         try self.checkServiceHooks(io);
+        try wiring.startFollowing(self);
     }
 
     /// Finish building the services that could not be finished before the
@@ -1627,6 +1647,7 @@ pub const App = struct {
         try self.runBefore(io);
         try self.checkServiceHooks(io);
         try self.startBackground(io);
+        try wiring.startFollowing(self);
     }
 
     /// Run what every service declared as `nilo_check`, once, after the
@@ -1737,6 +1758,7 @@ pub const App = struct {
     /// stops at the first failure, so a `Db` that came up before the one
     /// that refused the boot is holding a pool nobody will ever ask for.
     fn serverStopping(self: *App) void {
+        wiring.stopFollowing(self);
         self.services.stopAll();
     }
 

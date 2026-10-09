@@ -9651,6 +9651,59 @@ fn expectStaticAllocatesNothing(app: *App, request: []const u8) !void {
     try testing.expectEqual(@as(usize, 0), counting.allocs);
 }
 
+test "serving a file of a directory that follows the disk allocates nothing, middleware included" {
+    // The lease is two atomic operations on a word in the generation and the
+    // chain is the generation's own (ADR 277): nothing is allocated on the
+    // request path to follow the disk.
+    var tmp = nilo_testing.tmpDir();
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "app.css", .data = test_css });
+    var path_buf: [128]u8 = undefined;
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.staticWith("/", try tmp.path(&path_buf, ""), .{ .follow = true });
+    try expectStaticAllocatesNothing(
+        &app,
+        "GET /app.css HTTP/1.1\r\nHost: example.dev\r\nConnection: keep-alive\r\n\r\n",
+    );
+    const follower = app.static_sets.items[0].follower.?;
+    try testing.expectEqual(@as(u32, 0), follower.live.load(.acquire).?.lease.held());
+}
+
+test "a file a followed directory gained after startup is wrapped by the middleware scoped to where it sits" {
+    // The chains are made for each generation, with the files it has: a chain
+    // worked out once for the files of startup would leave a file added later
+    // without the check scoped to its directory, silently (ADR 277, ADR 008).
+    var tmp = nilo_testing.tmpDir();
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "app.css", .data = test_css });
+    var path_buf: [128]u8 = undefined;
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.staticWith("/", try tmp.path(&path_buf, ""), .{ .follow = true, .follow_poll_ms = 100 });
+    try app.useOn("/private", passThrough);
+    try app.resolveChains();
+    try wiring.startFollowing(&app);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    try tmp.dir.createDirPath(testing.io, "private");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "private/x.css", .data = test_css });
+    var waited: u32 = 0;
+    while ((try client.get(&app, "/private/x.css")).status != 200) : (waited += 20) {
+        if (waited > 5000) return error.NeverFollowed;
+        std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
+    }
+    pass_through_runs = 0;
+    const answer = try client.get(&app, "/private/x.css");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqual(@as(usize, 1), pass_through_runs);
+    // And the file that was there at startup is not under it.
+    pass_through_runs = 0;
+    _ = try client.get(&app, "/app.css");
+    try testing.expectEqual(@as(usize, 0), pass_through_runs);
+}
+
 test "a middleware scoped below a static prefix still runs, and still costs nothing" {
     // The case that decided this is resolved per file rather than per set.
     // A set has one prefix, so one chain for the whole of it would be the

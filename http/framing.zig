@@ -47,6 +47,7 @@ const hpack = @import("hpack.zig");
 const http1 = @import("http1.zig");
 const inbound = @import("inbound.zig");
 const outbound = @import("outbound.zig");
+const Lease = @import("lease.zig").Lease;
 pub const http2_built = @import("nilo_build").http2;
 
 pub const Header = http1.Header;
@@ -168,6 +169,18 @@ pub const Framing = union(enum) {
                 return c.wholeKept(status, content_type, body, head_only, extra, trailers.list)
             else
                 return c.whole(status, content_type, body, head_only, extra, trailers.list),
+        }
+    }
+
+    /// Say that the answer just handed over left its body where it lay, in
+    /// memory a followed directory may replace, and that `lease` is what keeps
+    /// it: HTTP/2 holds the count until the stream is let go of, because the
+    /// connection's fiber writes the body after the call has returned. Nothing
+    /// on HTTP/1.1, which wrote it before it returned (ADR 277).
+    pub fn pin(self: *Framing, lease: *Lease) void {
+        switch (self.*) {
+            .http1 => {},
+            .http2 => |c| if (comptime !http2_built) unreachable else c.pin(lease),
         }
     }
 
@@ -609,6 +622,10 @@ pub const Collected = struct {
     streamer: ?Streamer = null,
     /// The pipe a streamed answer is written through, once its head is out.
     outbox: ?*outbound.Outbox = null,
+    /// What keeps the generation of a followed static directory alive while
+    /// the connection's fiber writes a body that was not copied, taken by
+    /// `pin` and handed to the stream (ADR 277).
+    lease: ?*Lease = null,
 
     // `whole` and `head` are `noinline` because the HTTP/1.1 answer pays
     // for them otherwise. Inlined into `Framing.whole`, which every answer
@@ -655,6 +672,15 @@ pub const Collected = struct {
         self.headers = try self.fields(extra);
         self.body = body;
         self.trailers = try self.fields(trailers);
+    }
+
+    /// Count `lease` against this answer if its body was left where it lies:
+    /// a body that was copied into the arena is the arena's, and one that is
+    /// not is the directory's (ADR 277).
+    fn pin(self: *Collected, held: *Lease) void {
+        if (self.room.len != 0 or self.body.len == 0 or self.lease != null) return;
+        held.retain();
+        self.lease = held;
     }
 
     noinline fn head(self: *Collected, status: u16, content_type: []const u8, len: u64, extra: []const Header) !void {

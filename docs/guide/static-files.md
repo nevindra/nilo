@@ -128,7 +128,7 @@ A client that sends `Accept-Encoding: gzip, deflate, br` gets the `.br`, one tha
 What to know:
 
 - **The siblings are not files.** `/app.js.br` is a 404: its bytes are held once, as a form of `app.js`. A tree that publishes `notes.txt.gz` to be downloaded beside `notes.txt` passes `.precompressed = false`. A `.gz` beside a PNG is a file, because a PNG is not worth compressing.
-- **A stale sibling is not served.** A `.gz` is checked against the file it sits beside (its trailer carries the CRC-32 of what it compressed); a `.br` has no such check and is held to the modification time, so one older than its file is ignored. Either way the startup log names it: `holds 1 precompressed file(s) that are not served: "app.js.br" (older than the file beside it)`.
+- **A stale sibling is not served.** A `.gz` is checked against the file it sits beside (its trailer carries the CRC-32 of what it compressed), and its age does not matter; a `.br` has no such check and is held to the modification time, so one older than its file is ignored. Either way the startup log names it: `holds 1 precompressed file(s) that are not served: "app.js.br" (older than the file beside it)`.
 - **Each form has its own ETag and every answer for the file says `Vary: Accept-Encoding`**, the plain one and the 304 too. A request for a `Range` gets the plain bytes.
 - **It costs the bytes it holds.** On a six-file, 1.4 MB front end the siblings were 273,497 bytes more than nilo's own gzip copy ([the run](../../bench/result/http.md#a-file-a-build-compressed-is-held-beside-the-file)); brotli was 17.7% smaller on the wire than nilo's gzip. The startup line counts them: `(2034416 bytes held, 333516 of them gzipped copies, 279412 of them precompressed files)`.
 - **A file over `max_file_bytes` takes its siblings from the disk**, the way it is served from the disk itself.
@@ -230,6 +230,12 @@ fn mountFrontend(app: *nilo.App, files: []const nilo.static.Embedded) !void {
 
 and calls `mountFrontend(&app, &@import("frontend").files)`. Vite and Vue write `assets/` with a hash in each name; Create React App writes `static/`, and a flat bundle can be matched by `.suffix = ".js"`. A reload on `/users/42` is the page, and a `fetch('/api/typo')` is a 404 with no catch-all route to write, because only a request that says it is a navigation gets the page. The `examples/embedded` program is this, built and tested with the rest of the examples.
 
+## Following the disk
+
+**`staticWith(.{ .follow = true })` keeps the files in memory and replaces them when the disk changes.** Replace `app.js`, its `.br` or `.gz`, add a file or remove one, and the next response after nilo notices carries it. On Linux it notices in tens of milliseconds (`inotify`); elsewhere, and on a filesystem that raises no events, it looks at the tree every `follow_poll_ms` (default 1,000). Use it where files are replaced under a running server: a directory a deploy tool writes into, a bind mount changed from the host.
+
+It is off by default. A directory read once at startup is a set of URLs a deploy can reason about, and following costs one thread per directory, one `inotify` descriptor (a per-user limit), and a tree that can be read half way through an in-place deploy. A tree is read again as a whole, so what a file is never depends on a neighbour from another write; a response already being written finishes on the tree it began on; a tree that cannot be read keeps the last good one and warns once. A reload costs what the start did, on a thread that serves nothing, so a tree of tens of megabytes wants `follow_poll_ms` raised. A directory replaced by renaming it is found by the periodic look, not at once. Unlike `.reload`, it keeps the gzipped and precompressed copies, which is the difference between 22.8 and 44.3 µs a request on the HTTP/2 board profile ([ADR 277](../adr/277-a-static-directory-can-follow-the-disk-and-a-response-finishes-on-the-tree-it-began-on.md)).
+
 ## Reloading files during development
 
 **`staticWith(.{ .reload = true })` holds nothing in memory**: every file stays on disk and is opened per request, so you can edit files under a running server.
@@ -247,6 +253,6 @@ A production build is written once and the server starts after it, so all the na
 
 ## The limits
 
-**The set of file names is fixed at startup.** Without `.reload`, so are the bytes: changing a file means restarting the process, which a deploy does anyway. An embedded tree goes one step further: changing a file means rebuilding the binary.
+**The set of file names is fixed at startup.** Without `.reload` or `.follow`, so are the bytes: changing a file means restarting the process, which a deploy does anyway. An embedded tree goes one step further: changing a file means rebuilding the binary.
 
 Static files are not middleware. The file set holds state, so it is a final handler that the middleware chain wraps like any other route. Your logger sees static requests, and CORS applies to them.

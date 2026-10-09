@@ -28,6 +28,7 @@ const scan = @import("scan.zig");
 const sendfile_mod = @import("sendfile.zig");
 const service_mod = @import("service.zig");
 const static_mod = @import("static.zig");
+const lease_mod = @import("lease.zig");
 const stream_mod = @import("stream.zig");
 const url_mod = @import("url.zig");
 const proxies_mod = @import("proxies.zig");
@@ -250,6 +251,10 @@ pub const Ctx = struct {
     /// Set by App when the path names a file in a static set, so the
     /// terminal handler does not have to look it up a second time.
     _static_file: ?*const static_mod.File = null,
+    /// The count that keeps the generation of a followed static directory
+    /// alive while `_static_file` is read, given back by `serve.handleRequest`
+    /// when the request is done (ADR 277).
+    _lease: ?*lease_mod.Lease = null,
     /// The methods that do answer this path, when the one asked for does
     /// not. Set by App only on the way to a 405, which is the one answer
     /// that has to list them.
@@ -2130,6 +2135,9 @@ pub const Ctx = struct {
         self._head_written = true;
         self._body_ended = true;
         try self._framing.whole(status, content_type, response_body, kept, self.method == .HEAD, self.keepAlive(), self.extraHeaders(), self.trailersOut());
+        // A stream that was left the bytes of a followed file where they lie
+        // holds the generation they are in until it is let go of (ADR 277).
+        if (self._lease) |held| self._framing.pin(held);
     }
 
     /// Keep a whole answer for the chain's end, copied unless it outlives the
