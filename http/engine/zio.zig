@@ -187,10 +187,34 @@ pub const Stop = struct {
     /// starts and stops.
     in_flight: std.atomic.Value(u32) = .init(0),
 
-    /// Safe from any thread, and from a signal handler — one atomic store
-    /// is all it does.
+    /// The doorbell of the `serve` running now, rung by `request` so that
+    /// a stop is seen at once rather than at the next poll. Null outside
+    /// `serve`, which owns the doorbell on its stack.
+    bell: std.atomic.Value(?*zio.ev.Async) = .init(null),
+    /// Callers of `request` between their load of `bell` and the end of
+    /// their `notify`, which `serve` waits out before its doorbell goes.
+    ringing: std.atomic.Value(u32) = .init(0),
+
+    /// Safe from any thread, and from a signal handler: three atomics and
+    /// the doorbell's `notify`, which takes no lock either (an atomic, and
+    /// an eventfd write, a kevent or a pipe write as the backend has it;
+    /// the same shape as libuv's `uv_async_send`). The poll in `serve` is
+    /// still there underneath, so a ring that went missing would be late,
+    /// not lost.
     pub fn request(self: *Stop) void {
-        self.requested.store(true, .release);
+        self.requested.store(true, .seq_cst);
+        _ = self.ringing.fetchAdd(1, .seq_cst);
+        defer _ = self.ringing.fetchSub(1, .release);
+        if (self.bell.load(.seq_cst)) |bell| bell.notify();
+    }
+
+    /// No more rings: called by `serve` before its doorbell leaves the
+    /// stack. A `request` that already loaded it is waited out, which is
+    /// a few instructions, and a signal handler interrupting this thread
+    /// finishes before the wait resumes.
+    fn retire(self: *Stop) void {
+        self.bell.store(null, .seq_cst);
+        while (self.ringing.load(.acquire) != 0) std.atomic.spinLoopHint();
     }
 
     pub fn isRequested(self: *const Stop) bool {
@@ -351,12 +375,15 @@ const Accepting = struct {
     }
 };
 
-/// How often `serve` looks up to see whether a stop was asked for.
+/// How often `serve` looks up to see whether a stop was asked for, or a
+/// listener failed, without having been told.
 ///
-/// Polling rather than waking the loop directly: a signal handler may not
-/// touch a wait queue. One timer per server, five times a second, is not a
-/// cost worth avoiding — and a fifth of a second is below what anybody
-/// notices after pressing Ctrl-C.
+/// A stop rings `Stop.bell`, so this is the net under it rather than the
+/// way a stop is seen, and a listener's failure is seen here. Until the
+/// doorbell, it was the only way: a signal handler may not touch a wait
+/// queue, so a stop waited for the next of these, and every server a test
+/// started and stopped was a fifth of a second of the suite, eight seconds
+/// of it in all (bench/result/build.md).
 ///
 /// Until ADR 200 this was the timeout on every `accept`, so that the one
 /// accept loop could look at the flag between connections. Now that there
@@ -2542,12 +2569,24 @@ pub fn serve(
         }
     }
 
-    // The main fiber's only job from here is to notice a stop. It cannot be
-    // woken for one — a signal handler may not touch a wait queue — so it
-    // looks five times a second, and then cancels the acceptors, which is
-    // the one thing that ends their `accept`.
+    // The main fiber's only job from here is to notice a stop, and then
+    // cancel the acceptors, which is the one thing that ends their `accept`.
+    // A stop rings the doorbell, which a signal handler may do where it may
+    // not touch a wait queue; the wait times out five times a second for a
+    // listener's failure, and for a ring that never came.
+    var bell = zio.ev.Async.init();
+    var rung = zio.CompletionQueue.init();
+    defer rung.cancelAll(.discard);
+    if (rung.submit(&bell.c)) |_| stop.bell.store(&bell, .seq_cst) else |_| {}
+    defer stop.retire();
     while (!stop.isRequested() and !shared.failed()) {
-        zio.sleep(.fromMilliseconds(accept_poll_ms)) catch break;
+        const rang = rung.waitTimeout(.fromMilliseconds(accept_poll_ms)) catch |err| switch (err) {
+            error.Timeout => continue,
+            error.Canceled, error.Closed => break,
+        };
+        // Armed again, so the next ring is heard too: a request that rang
+        // before the flag it set was visible here.
+        rung.submit(rang) catch break;
     }
     acceptors.cancel();
     // Nothing is accepting, so nothing should be listening: left open for

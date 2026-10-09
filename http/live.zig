@@ -946,6 +946,42 @@ test "a socket left behind by a server that is gone does not stop the next one" 
     try testing.expect(std.mem.startsWith(u8, answer.head, "HTTP/1.1 200 "));
 }
 
+test "a stop asked for by shutdown ends listen at once, not at the server's next look for one" {
+    // `serve` used to see a stop only when its 200 ms poll came round, so
+    // `listen()` returned up to a fifth of a second after `shutdown()`. The
+    // doorbell rings it now. The fastest of three is what is held, so a
+    // machine busy for one of them does not fail it, and a poll does: each
+    // stop here lands 50 ms into a 200 ms wait.
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var fastest_ms: i64 = std.math.maxInt(i64);
+    for (0..3) |_| {
+        var where = try SocketDir.init(gpa, "bell.sock");
+        defer where.deinit(gpa);
+        var app = nilo.App.init(gpa);
+        defer app.deinit();
+
+        var serving: ServingOnPath = .{ .app = &app, .path = where.path };
+        const thread = try std.Thread.spawn(.{}, ServingOnPath.run, .{&serving});
+        waitForServer(gpa, &serving) catch |err| {
+            if (serving.bound.load(.acquire)) app.shutdown();
+            thread.join();
+            return err;
+        };
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+
+        const asked = std.Io.Clock.awake.now(io);
+        app.shutdown();
+        thread.join();
+        fastest_ms = @min(fastest_ms, asked.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds());
+    }
+    try testing.expect(fastest_ms < 100);
+}
+
 test "spawning with no server says so, and the App is what remembers instead" {
     // `nilo.spawn` is "now" and there is no now: nothing is listening, so
     // there is no group to be owned by and no shutdown to be cut off by.

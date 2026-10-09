@@ -69,10 +69,20 @@ Three things change with it, and each is smaller than it sounds:
 
 - **Acceptors wait with no timeout and are cancelled.** The 200 ms
   `accept` timeout existed so that the one loop could poll the stop flag.
-  Now the main fiber polls it — `zio.sleep(200 ms)` in a loop, one timer
-  per server instead of a race group and a timer per connection accepted —
-  and on seeing it cancels the acceptors' group, which is what ends a
-  pending `accept` cleanly. The group is cancelled before the connections'
+  Now the main fiber waits for it, and on seeing it cancels the acceptors'
+  group, which is what ends a pending `accept` cleanly. A stop rings a
+  doorbell (`Stop.bell`, a `zio.ev.Async` in a `CompletionQueue` the main
+  fiber drives), so it is seen at once; the wait times out every 200 ms for
+  a listener's failure and as a net under a ring, one timer per server
+  instead of a race group and a timer per connection accepted. `notify` is
+  atomics and one eventfd write, a kevent or a pipe write, with no lock,
+  which is what lets a signal handler ring it where it may not touch a wait
+  queue; a `request` that loaded the doorbell is waited out before it
+  leaves the stack. The first version only polled, `zio.sleep(200 ms)`,
+  and a stop waited for the next look: up to a fifth of a second on every
+  `shutdown()`, and eight seconds of the Debug suite, a fifth of a second
+  for each server a test started and stopped
+  ([the run](../../bench/result/build.md#where-zig-build-test-waits-on-zig-017)). The group is cancelled before the connections'
   group and before the listener is closed, so no `accept` is ever pending
   on a socket being taken away, which is the hazard the old comment named.
 - **`Capacity.take` is a compare-and-swap.** It was a load and an
