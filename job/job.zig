@@ -52,6 +52,15 @@
 //! call twice — the same rule a webhook handler already lives by — and the
 //! guide says so on its first page.
 //!
+//! **Transactional completion** narrows that for the one write a queue can
+//! see. A `run` that takes the Db's `*Db.Tx` is given a transaction the
+//! worker began, and the row's `done` is written in it under the same fence
+//! before the commit, so the run's database writes and its `done` commit
+//! together or neither does. The run itself is still at least once: an email
+//! sent from inside it can go out twice, and that wants an idempotency key,
+//! which a `Tick.id` is stable enough to be. It needs a store in the database
+//! ([ADR 160](../docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)).
+//!
 //! ## Where it sits
 //!
 //! A **Fitting**: it borrows the loop and owns no destination
@@ -64,9 +73,10 @@
 //!
 //! ## What it is not
 //!
-//! Not a workflow engine, not a rate limiter for a job kind — `nilo.Gate`
-//! inside `run` is that — and not exactly-once. `docs/todo.md` carries
-//! each of those with what it is waiting for. A kind does say how urgent it
+//! Not a workflow engine, not a rate limiter for a job kind (`nilo.Gate`
+//! inside `run` is that), and not exactly-once: only the writes to the
+//! queue's own database commit with `done`. `docs/todo.md` carries each of
+//! those with what it is waiting for. A kind does say how urgent it
 //! is, and the claim takes the most urgent due row (ADR 214), which is as
 //! far towards a priority queue as this goes: three levels, no ageing, no
 //! preemption.
@@ -297,7 +307,7 @@ pub fn Jobs(comptime options: anytype) type {
     const DepsNow: ?type = if (deps_is_fn) null else deps_option;
     const StatusSpace = if (@hasField(Options, "status")) options.status else void;
 
-    comptime checkKinds(&kinds, DepsNow);
+    comptime checkKinds(&kinds, DepsNow, Store);
     comptime checkStore(Store);
     comptime checkStatus(StatusSpace);
 
@@ -317,7 +327,7 @@ pub fn Jobs(comptime options: anytype) type {
         /// this and every entry point names it. One declaration, so a
         /// Refusal is reported once however many of them are analysed.
         const late_checked: bool = blk: {
-            if (deps_is_fn) checkLate(&kinds, Deps);
+            if (deps_is_fn) checkLate(&kinds, Deps, Store);
             break :blk true;
         };
 
@@ -398,6 +408,24 @@ pub fn Jobs(comptime options: anytype) type {
         reseeded_at: std.atomic.Value(i64) = .init(not_seeded),
 
         const not_seeded = std.math.minInt(i64);
+
+        /// Where a transactional run's transaction lives while it runs: on
+        /// the worker's stack, begun inside the run's deadline and ended by
+        /// the worker, never by the run (ADR 160). A kind that asks for none
+        /// has an empty struct here and pays nothing.
+        const TxSlot = struct {
+            tx: Store.Tx = undefined,
+            open: bool = false,
+        };
+        fn SlotOf(comptime K: type) type {
+            return if (transactional(K)) TxSlot else struct {};
+        }
+        const any_transactional = blk: {
+            for (kinds) |K| {
+                if (transactional(K)) break :blk true;
+            }
+            break :blk false;
+        };
         /// How long a schedule may be dead before it is queued again. A
         /// constant and not an option: the cost is one insert per scheduled
         /// kind per interval, and what a user would tune is how long a
@@ -421,6 +449,9 @@ pub fn Jobs(comptime options: anytype) type {
             /// `job.Memory` is full. Nothing was written over.
             QueueFull,
             OutOfMemory,
+            /// A queue with a transactional kind was started with as many
+            /// workers as the Db has connections (ADR 160).
+            PoolTooSmall,
         };
 
         /// `status` is the opened Space when `options.status` names one, and
@@ -465,6 +496,7 @@ pub fn Jobs(comptime options: anytype) type {
         /// `Io` is what `serve` runs the workers on and the limits are what
         /// bound one run in time (ADR 056).
         pub fn nilo_start(self: *Self, io: std.Io, limits: core.Limits) !void {
+            try self.checkPool();
             self.io = io;
             self.limits = limits;
         }
@@ -740,15 +772,50 @@ pub fn Jobs(comptime options: anytype) type {
                 std.log.scoped(.nilo_job).err("serve: not started — `listen()` or `app.start(io)` has not run, so there is no loop to run workers on", .{});
                 return;
             };
-            self.serveOn(io) catch {};
+            self.serveOn(io) catch |err| switch (err) {
+                error.Canceled => {},
+                error.PoolTooSmall => std.log.scoped(.nilo_job).err("serve: not starting, the pool is too small for this many workers", .{}),
+            };
+        }
+
+        /// A queue with a transactional kind refuses to start with as many
+        /// workers as the Db has connections. Each such run pins a connection
+        /// from `begin` to the commit, and a claim needs one as well, so with
+        /// every worker inside a run the claims of the rest, and the `done`
+        /// of each, wait for a connection none of them will give back.
+        ///
+        /// **On SQLite the count is not what limits you, the one writer is**:
+        /// `BEGIN IMMEDIATE` takes it, so a transactional run serialises
+        /// every claim and every other write in the program for its length,
+        /// whatever the pool holds, and `workers` above one buys no
+        /// concurrency for such a kind. The same comparison is kept there
+        /// (`poolSize` is at least two) because it is the one rule a reader
+        /// has to learn, and the real cost is stated where the kind declares
+        /// its `timeout_ms` (ADR 160).
+        fn checkPool(self: *Self) error{PoolTooSmall}!void {
+            if (comptime !any_transactional or !@hasDecl(Store, "poolSize")) return;
+            const connections = self.store.poolSize();
+            if (self.settings.workers >= connections) {
+                // `warn`, because the refusal is the returned error: a
+                // test's runner counts an `err` line as a failed run, and
+                // `serve` says it at `err` where the program is refusing
+                // to start (ADR 160).
+                std.log.scoped(.nilo_job).warn(
+                    "{d} workers and {d} connections: a transactional run holds one for its whole length, " ++
+                        "so the claims and the `done`s would wait for one nobody gives back. Fewer workers, or a larger pool",
+                    .{ self.settings.workers, connections },
+                );
+                return error.PoolTooSmall;
+            }
         }
 
         /// The same loop on an `Io` of the caller's, for a worker process with
         /// no server in it. Returns when cancelled.
-        pub fn serveOn(self: *Self, io: std.Io) std.Io.Cancelable!void {
+        pub fn serveOn(self: *Self, io: std.Io) (std.Io.Cancelable || error{PoolTooSmall})!void {
             comptime {
                 _ = late_checked;
             }
+            try self.checkPool();
             self.serving.store(true, .release);
             self.shutdown.store(false, .release);
             self.lone.store(false, .release);
@@ -1043,10 +1110,13 @@ pub fn Jobs(comptime options: anytype) type {
             // is nothing to wait with, and the run is unbounded as it was.
             var timed_out = false;
             var outcome: anyerror!void = undefined;
+            // A transactional run's transaction, begun inside `call` so the
+            // deadline covers the wait for a connection, and ended here.
+            var slot: SlotOf(K) = .{};
             if (self.limits.engineless() and timeout_ms != 0 and self.io != null) {
-                outcome = self.callTask(K, value, scope, tick, timeout_ms, &timed_out);
+                outcome = self.callTask(K, value, scope, tick, &slot, timeout_ms, &timed_out);
             } else {
-                outcome = self.call(K, value, scope, tick);
+                outcome = self.call(K, value, scope, tick, &slot);
                 // Asked once, here, and the deadline taken off in the same
                 // breath: `fired` consumes its answer, so a second question
                 // would be told no, and the deadline would otherwise still be
@@ -1081,8 +1151,19 @@ pub fn Jobs(comptime options: anytype) type {
             defer if (self.io) |io| {
                 _ = io.swapCancelProtection(protected.?);
             };
+            // Registered after the protection above, so it runs inside it: a
+            // transaction nobody ended (a path added later, a `return` above)
+            // is rolled back here and never left holding a connection.
+            defer if (comptime transactional(K)) {
+                if (slot.open) slot.tx.deinit();
+            };
             if (outcome) |_| {
-                if (!self.settled(claimed.id, "done", self.store.done(scope, claimed.id, claimed.attempts, clock.now()))) return;
+                if (comptime transactional(K)) {
+                    // `done` and the run's writes commit together or not at
+                    // all; a `false` here is a lapsed lease, and nothing
+                    // is left to do about the row (ADR 160).
+                    if (!self.completeIn(K, scope, claimed, &slot, clock)) return;
+                } else if (!self.settled(claimed.id, "done", self.store.done(scope, claimed.id, claimed.attempts, clock.now()))) return;
                 self.note(claimed.id, .done, claimed.attempts);
                 // The clock read again, not `now`: under a worker the next
                 // tick is counted from when this one ended, which is what
@@ -1090,6 +1171,14 @@ pub fn Jobs(comptime options: anytype) type {
                 if (comptime scheduled(K)) self.pushNext(K, scope, clock.now());
                 return;
             } else |err| {
+                // A failed run leaves none of its writes behind, whatever
+                // the failure was and however far it got. Rolled back before
+                // anything is written about the row, which is then written
+                // outside the transaction as for any kind: the failure is
+                // never recorded in the transaction the run poisoned (ADR 160).
+                if (comptime transactional(K)) {
+                    if (slot.open) slot.tx.rollback();
+                }
                 if (going) {
                     // The row never ran to the end, so it goes back
                     // untouched; whoever starts next takes it.
@@ -1105,6 +1194,49 @@ pub fn Jobs(comptime options: anytype) type {
                 // ([ADR 179](../docs/adr/179-a-run-can-say-its-failure-is-final.md)).
                 self.failedAttempt(K, scope, claimed, name, !timed_out and isFinal(K, err), clock);
             }
+        }
+
+        /// The end of a transactional run that did not fail: `done` written in
+        /// the run's own transaction, then the commit. `true` when both
+        /// happened, and the caller does what follows a `done`. `false` when
+        /// they did not, and what became of the row has been dealt with here.
+        ///
+        /// A `done` that matches nothing is the lease having lapsed and a
+        /// second worker holding the row: the transaction is rolled back, so
+        /// the writes of the run that lost the claim never exist, and it is
+        /// logged at `warn` as `settled` does. A store error, or a COMMIT
+        /// that errors, is a failed attempt like any other (`failedAttempt`).
+        /// **If a COMMIT errored after it had landed**, say the connection
+        /// dropped as the answer came back, the row is `done`, and the fenced
+        /// `retry` or `dead` that follows matches nothing: it is logged and
+        /// does no harm, and the work was written once.
+        fn completeIn(self: *Self, comptime K: type, scope: anytype, claimed: Claimed, slot: *TxSlot, clock: Clock) bool {
+            // A run that ended the transaction itself (`tx.commit()` inside
+            // `run`) has already kept its writes, so `doneIn` would fail on a
+            // finished transaction and the retry would write them a second
+            // time. Its success is recorded the way a plain kind's is, which
+            // is the at-least-once rule and never worse than it.
+            if (comptime @hasField(Store.Tx, "finished")) {
+                if (slot.tx.finished) {
+                    std.log.scoped(.nilo_job).warn("\"{s}\" row {d}: `run` ended the transaction it was given, so done is written on its own; the worker commits it (ADR 160)", .{ K.nilo_job, claimed.id });
+                    return self.settled(claimed.id, "done", self.store.done(scope, claimed.id, claimed.attempts, clock.now()));
+                }
+            }
+            const held = self.store.doneIn(&slot.tx, scope, claimed.id, claimed.attempts, clock.now()) catch |err| {
+                slot.tx.rollback();
+                self.failedAttempt(K, scope, claimed, @errorName(err), false, clock);
+                return false;
+            };
+            if (!held) {
+                slot.tx.rollback();
+                std.log.scoped(.nilo_job).warn("row {d} is no longer this worker's, so done did nothing and the run's writes were rolled back", .{claimed.id});
+                return false;
+            }
+            slot.tx.commit() catch |err| {
+                self.failedAttempt(K, scope, claimed, @errorName(err), false, clock);
+                return false;
+            };
+            return true;
         }
 
         /// What an attempt that failed becomes: dead when it was the last one
@@ -1202,20 +1334,20 @@ pub fn Jobs(comptime options: anytype) type {
         /// the caller reads: `Canceled` goes back to the queue untouched, and
         /// anything else keeps the cancellation pending with `recancel` so
         /// the loop still sees it.
-        fn callTask(self: *Self, comptime K: type, value: K, scope: anytype, tick: Tick, timeout_ms: u32, timed_out: *bool) anyerror!void {
+        fn callTask(self: *Self, comptime K: type, value: K, scope: anytype, tick: Tick, slot: *SlotOf(K), timeout_ms: u32, timed_out: *bool) anyerror!void {
             const io = self.io.?;
             const Task = struct {
-                fn run(me: *Self, v: K, on: @TypeOf(scope), t: Tick, done: *std.atomic.Value(u32), loop: std.Io) anyerror!void {
+                fn run(me: *Self, v: K, on: @TypeOf(scope), t: Tick, s: *SlotOf(K), done: *std.atomic.Value(u32), loop: std.Io) anyerror!void {
                     defer {
                         done.store(1, .release);
                         loop.futexWake(u32, &done.raw, 1);
                     }
-                    return me.call(K, v, on, t);
+                    return me.call(K, v, on, t, s);
                 }
             };
             var done: std.atomic.Value(u32) = .init(0);
-            var future = io.concurrent(Task.run, .{ self, value, scope, tick, &done, io }) catch
-                return self.call(K, value, scope, tick);
+            var future = io.concurrent(Task.run, .{ self, value, scope, tick, slot, &done, io }) catch
+                return self.call(K, value, scope, tick, slot);
             const deadline = core.monotonicMicros() + @as(i64, timeout_ms) * std.time.us_per_ms;
             while (done.load(.acquire) == 0) {
                 const left = deadline - core.monotonicMicros();
@@ -1240,15 +1372,23 @@ pub fn Jobs(comptime options: anytype) type {
         /// `K.run` with its arguments found: the value, the Scope, the tick
         /// where a `job.Tick` is asked for, and every pointer looked up in
         /// `deps` by type.
-        fn call(self: *Self, comptime K: type, value: K, scope: anytype, tick: Tick) anyerror!void {
+        fn call(self: *Self, comptime K: type, value: K, scope: anytype, tick: Tick, slot: *SlotOf(K)) anyerror!void {
             const param_types = @typeInfo(@TypeOf(K.run)).@"fn".param_types;
             var args: std.meta.ArgsTuple(@TypeOf(K.run)) = undefined;
             args[0] = value;
             args[1] = runOf(scope);
+            // The transaction is begun here, once, whichever parameter asks
+            // for it, and a failure to begin is the run's failure.
+            if (comptime transactional(K)) {
+                slot.tx = try self.store.begin(scope);
+                slot.open = true;
+            }
             inline for (param_types[2..], 2..) |PT, i| {
                 const P = PT.?;
                 if (P == Tick) {
                     args[i] = tick;
+                } else if (comptime isTx(P)) {
+                    args[i] = &slot.tx;
                 } else {
                     args[i] = @field(self.deps, depField(shortName(K), Deps, P));
                 }
@@ -1414,7 +1554,7 @@ fn budget(comptime kinds: []const type) u32 {
 /// `run`'s signature are read by `checkLate` instead, once the queue type
 /// exists, because a `run` that names `*Jobs` cannot be read before it does
 /// ([ADR 160](../docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)).
-fn checkKinds(comptime kinds: []const type, comptime Deps: ?type) void {
+fn checkKinds(comptime kinds: []const type, comptime Deps: ?type, comptime Store: type) void {
     @setEvalBranchQuota(budget(kinds));
     if (kinds.len == 0) @compileError(
         "nilo: `job.Jobs`'s `.kinds` is empty, so this queue could run nothing.\n" ++
@@ -1494,7 +1634,7 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type) void {
             );
         }
 
-        if (Deps) |D| checkRun(K, name, D);
+        if (Deps) |D| checkRun(K, name, D, Store);
 
         if (scheduled(K)) {
             if (@TypeOf(K.schedule) != Schedule) @compileError(
@@ -1564,10 +1704,10 @@ fn checkPayload(comptime T: type, comptime job_name: []const u8, comptime path: 
 
 /// The half of `checkKinds` that waits for the queue type: the deps struct
 /// and every `run`'s signature.
-fn checkLate(comptime kinds: []const type, comptime Deps: type) void {
+fn checkLate(comptime kinds: []const type, comptime Deps: type, comptime Store: type) void {
     @setEvalBranchQuota(budget(kinds));
     checkDepsShape(Deps);
-    for (kinds) |K| checkRun(K, shortName(K), Deps);
+    for (kinds) |K| checkRun(K, shortName(K), Deps, Store);
 }
 
 fn checkDepsShape(comptime Deps: type) void {
@@ -1584,7 +1724,7 @@ fn checkDepsShape(comptime Deps: type) void {
     }
 }
 
-fn checkRun(comptime K: type, comptime name: []const u8, comptime Deps: type) void {
+fn checkRun(comptime K: type, comptime name: []const u8, comptime Deps: type, comptime Store: type) void {
     if (!@hasDecl(K, "run")) @compileError(
         "nilo: the job " ++ name ++ " has no `run`, so there is nothing for a worker to do with it.\n" ++
             "  `pub fn run(self: " ++ name ++ ", scope: *nilo.Run) !void`",
@@ -1618,6 +1758,13 @@ fn checkRun(comptime K: type, comptime name: []const u8, comptime Deps: type) vo
         // and it is asked for by value for the reason request data is in
         // a handler: a pointer is a service, a value is the tick (ADR 160).
         if (P == Tick) continue;
+        // A transaction is the other thing after the Run that is not a
+        // `.deps` entry: the worker begins it, so it is asked for by the type
+        // the store's Db makes (ADR 160).
+        if (isTx(P)) {
+            checkTx(K, name, i, P, params, Store);
+            continue;
+        }
         if (P == *Tick or P == *const Tick) @compileError(
             "nilo: the job " ++ name ++ "'s `run` takes a `*job.Tick` at position " ++
                 std.fmt.comptimePrint("{d}", .{i}) ++ ", and a tick is asked for by value.\n" ++
@@ -1635,6 +1782,59 @@ fn checkRun(comptime K: type, comptime name: []const u8, comptime Deps: type) vo
     if (payload != void) @compileError(
         "nilo: the job " ++ name ++ "'s `run` returns " ++ @typeName(R) ++ ", and nobody is there to receive it.\n" ++
             "  `!void` — a job answers nobody. Write what it made into the database, or into a `status` Space.",
+    );
+}
+
+/// Whether `P` is a pointer to a transaction: a struct that commits and rolls
+/// back. Found by shape, not by the store's type, so that a `run` asking for
+/// one over a queue whose store has none is refused in nilo's words and not
+/// told that `.deps` lacks a type nobody could have put there.
+fn isTx(comptime P: type) bool {
+    const info = @typeInfo(P);
+    if (info != .pointer or info.pointer.size != .one) return false;
+    const C = info.pointer.child;
+    if (@typeInfo(C) != .@"struct") return false;
+    return @hasDecl(C, "commit") and @hasDecl(C, "rollback") and @hasDecl(C, "deinit");
+}
+
+/// Whether a kind's `run` asks for a transaction, which is what makes the
+/// worker begin one, write `done` in it and commit
+/// ([ADR 160](../docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)).
+fn transactional(comptime K: type) bool {
+    inline for (@typeInfo(@TypeOf(K.run)).@"fn".param_types[2..]) |PT| {
+        if (isTx(PT.?)) return true;
+    }
+    return false;
+}
+
+/// The three ways a transactional `run` is refused while compiling.
+fn checkTx(comptime K: type, comptime name: []const u8, comptime at: usize, comptime P: type, comptime params: anytype, comptime Store: type) void {
+    const store = shortName(Store);
+    const position = std.fmt.comptimePrint("{d}", .{at});
+    if (!(@hasDecl(Store, "Tx") and @hasDecl(Store, "begin") and @hasDecl(Store, "doneIn"))) @compileError(
+        "nilo: the job " ++ name ++ "'s `run` takes a " ++ @typeName(P) ++ " at position " ++ position ++ ", and this queue's store " ++ store ++ " cannot give one.\n" ++
+            "  A transaction needs a store in a database (`begin` and `doneIn`), and a row in memory has nothing to commit with. " ++
+            "Test such a kind on SQLite: `job.Table(sql.Sqlite(.{ … }))` with `:memory:` is a database in this process.",
+    );
+    if (P != *Store.Tx) @compileError(
+        "nilo: the job " ++ name ++ "'s `run` takes a " ++ @typeName(P) ++ " at position " ++ position ++ ", and it is not a transaction of this queue's Db.\n" ++
+            "  The row's `done` is written in that transaction, so it has to be on the database the queue lives in: " ++ @typeName(*Store.Tx) ++ ".",
+    );
+    if (@hasDecl(Store, "Database")) {
+        for (params[2..]) |QT| {
+            if (QT.? == *Store.Database) @compileError(
+                "nilo: the job " ++ name ++ "'s `run` takes both a " ++ @typeName(P) ++ " and a " ++ @typeName(*Store.Database) ++ ".\n" ++
+                    "  The worker holds one connection for the transaction, and a statement on the pool waits for another: " ++
+                    "with every worker in that position the pool is empty and nobody finishes. " ++
+                    "Do the run's writes through the transaction, and chain the next job with `jobs.pushIn(tx, …)`.",
+            );
+        }
+    }
+    if (@hasDecl(Store, "single_writer") and Store.single_writer and !@hasDecl(K, "timeout_ms")) @compileError(
+        "nilo: the job " ++ name ++ "'s `run` takes a " ++ @typeName(P) ++ " on SQLite, and says nothing about `timeout_ms`.\n" ++
+            "  SQLite has one writer, so this transaction holds every write in the program, claims and requests included, " ++
+            "for as long as the run takes. How long that may be is a number the kind's author writes: " ++
+            "`pub const timeout_ms: u32 = 5_000;`, and not the queue's default.",
     );
 }
 

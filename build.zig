@@ -1774,6 +1774,23 @@ const job_refusals = [_]Refusal{
         .name = "job_push_in_on_memory",
         .says = "`jobs.pushIn` was called on a queue over Memory, which cannot join a transaction.",
     },
+    // Transactional completion (ADR 160).
+    .{
+        .name = "job_transaction_on_memory",
+        .says = "the job Charge's `run` takes a *job_transaction_on_memory.Tx at position 2, and this queue's store Memory cannot give one.",
+    },
+    .{
+        .name = "job_transaction_and_pool",
+        .says = "the job Charge's `run` takes both a *job_transaction_and_pool.FakeStore(false).Tx and a *job_transaction_and_pool.FakeStore(false).Database.",
+    },
+    .{
+        .name = "job_transaction_on_sqlite_without_a_timeout",
+        .says = "the job Charge's `run` takes a *job_transaction_on_sqlite_without_a_timeout.FakeStore(true).Tx on SQLite, and says nothing about `timeout_ms`.",
+    },
+    .{
+        .name = "job_transaction_of_another_db",
+        .says = "the job Charge's `run` takes a *job_transaction_of_another_db.FakeStore(true).Tx at position 2, and it is not a transaction of this queue's Db.",
+    },
     .{
         .name = "job_scheduled_field_without_default",
         .says = "the scheduled job Nightly has a field `day` with no default, and nobody pushes a scheduled job.",

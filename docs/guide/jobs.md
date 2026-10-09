@@ -267,7 +267,94 @@ RETURNING …
 
 A `running` row whose lease has passed is a row whose worker died (the process was killed, or the machine went away), and whoever asks next takes it again. So `run` is called *at least* once. A `run` that finds its work already done the second time is expected, not a bug to work around: for example an email keyed by `user_id` that the provider deduplicates, an `insertOrIgnore` instead of an `insert`, or an `UPDATE … WHERE state = 'pending'`. `nilo.Idempotent` takes the same position for incoming requests ([Answering once](./idempotency.md)).
 
-The queue never promises exactly once because it cannot: that would be a promise about your mail provider.
+The queue never promises exactly once because it cannot: that would be a promise about your mail provider. For the one case where the work is a write to the queue's own database there is a narrower promise, [below](#a-run-that-writes-to-the-same-database).
+
+## A run that writes to the same database
+
+**A run that takes the Db's transaction commits its writes and its `done` together, or neither.** Plain at-least-once has one hole for a job whose work is a write to the same database: `run` returns, and `done` is a statement of its own, so a process that dies between the two does the write again when the lease runs out. Ask for the transaction by pointer and the worker closes the hole ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)):
+
+<!-- compiles -->
+```zig
+const Credit = struct {
+    pub const nilo_table = .{ .name = "credits", .key = .id };
+
+    id: i64,
+    user_id: i64,
+    cents: i64,
+};
+
+const Grant = struct {
+    pub const nilo_job = "grant-credit";
+    pub const retry: job.Retry = .{ .times = 3, .backoff = .{ .fixed_ms = 5_000 } };
+    // Declared because the queue's `timeout_ms` is not a number about this
+    // job. On SQLite it is also how long the transaction may hold the writer.
+    pub const timeout_ms: u32 = 5_000;
+
+    user_id: i64,
+    cents: i64,
+
+    pub fn run(self: Grant, scope: *nilo.Run, tx: *Db.Tx) !void {
+        _ = try tx.insert(Credit, scope, .{ .user_id = self.user_id, .cents = self.cents });
+    }
+};
+
+const GrantJobs = job.Jobs(.{ .kinds = .{Grant}, .store = job.Table(Db) });
+
+fn drainGrants(run: *nilo.Run, jobs: *GrantJobs) !void {
+    _ = try jobs.drain(run);
+}
+```
+
+The worker begins the transaction, calls `run` with it, and when `run` returns it writes the row's `done` **inside the same transaction** and commits. A crash before the commit leaves neither the credit nor the `done`, and the row is claimed again when the lease passes. The `done` is fenced on the claim like every other write about a row ([At-least-once delivery](#at-least-once-delivery)): if the lease lapsed mid-run and a second worker holds the row now, the `done` matches nothing, the transaction is **rolled back**, and the first worker's credit never exists. The worker that holds the row is the one whose writes count.
+
+**A failed run rolls everything back first.** Whatever `run` wrote is gone, and then the failure is recorded as for any kind: `retry` or `dead`, outside the transaction, never in it. A COMMIT that errors is a failed attempt like any other; if it had landed anyway, the row is `done` and the retry that follows matches nothing.
+
+**This is not exactly once.** What commits together is the run's writes to the queue's own database and its `done`. The run itself is still at least once: a call to a mail provider or a payment API made inside it can happen twice, because a crash after the call and before the commit repeats it. For an effect outside the database the answer is an idempotency key, and the row's id is a stable one: `Tick.id` is the same on every retry and every re-claim of the row. [`nilo_fetch`](./fetch.md#retrying) sends a key of yours as it is and retries under it:
+
+<!-- compiles -->
+```zig
+const Payment = struct {
+    pub const nilo_table = .{ .name = "payments", .key = .id };
+
+    id: i64,
+    user_id: i64,
+    cents: i64,
+};
+
+const Charge = struct {
+    pub const nilo_job = "charge";
+    pub const retry: job.Retry = .{ .times = 4, .backoff = .{ .fixed_ms = 30_000 } };
+    pub const timeout_ms: u32 = 20_000;
+
+    user_id: i64,
+    cents: i64,
+
+    pub fn run(self: Charge, scope: *nilo.Run, tick: job.Tick, tx: *Db.Tx, client: *fetch.Client) !void {
+        // The same on attempt one and attempt four, so the provider charges once.
+        var key: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&key, "charge-{d}", .{tick.id});
+        const res = try client.postJson(scope, "https://payments.example.com/v1/charges", .{ .cents = self.cents }, .{
+            .headers = &.{.{ .name = "Idempotency-Key", .value = name }},
+        });
+        if (!res.ok()) return error.Declined;
+        _ = try tx.insert(Payment, scope, .{ .user_id = self.user_id, .cents = self.cents });
+    }
+};
+
+const ChargeJobs = job.Jobs(.{ .kinds = .{Charge}, .store = job.Table(Db), .deps = struct { client: *fetch.Client } });
+
+fn drainCharges(run: *nilo.Run, jobs: *ChargeJobs) !void {
+    _ = try jobs.drain(run);
+}
+```
+
+A `mint_key` on the target would not do here: it mints a key for each call, so each attempt of the job would carry a new one. The key has to come from something the attempts share.
+
+**What it costs.** A connection is held for the whole `run`, and BEGIN and COMMIT are two more round trips, paid by a transactional run and nobody else. A kind that takes no transaction costs nothing more than before. Because each such run pins a connection and a claim needs one too, **a queue with a transactional kind refuses to start** (`error.PoolTooSmall` from `nilo_start` and `serveOn`) when `workers` is not smaller than the Db's `size`. On SQLite there is one writer, so the transaction holds every write in the program, claims and requests included, for as long as the run takes. That is why a transactional kind on SQLite has to declare its own `pub const timeout_ms`: how long the writer may be held is a number its author writes, and a plain `workers` above one buys no concurrency for it.
+
+**Three mistakes are compile errors.** A `run` that takes a transaction on `job.Memory`, which has nothing to commit with (test such a kind on SQLite, where `:memory:` is a database in the process); a transaction of a different Db than the queue's; and a `run` that takes both the transaction and the `*Db`, because the worker holds one connection and a statement on the pool waits for another, which with every worker in that position is a deadlock. A `*Jobs` beside the transaction is fine, and `jobs.pushIn(tx, scope, …)` is how a transactional run queues the next job so that it commits with the run's writes. A plain `jobs.push` from inside such a run takes a second connection and commits at once, whatever happens to the transaction after.
+
+**The worker ends the transaction, not `run`.** A `run` that calls `tx.commit()` itself has kept its writes before the `done` could join them, so the worker logs a warning and writes `done` on its own, which is plain at-least-once again. Return from `run` and let the worker commit; return an error and it rolls back.
 
 ## Scheduled jobs
 

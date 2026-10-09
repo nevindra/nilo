@@ -38,6 +38,17 @@
 //! can join a transaction, `ready()` for one that can be down, and
 //! `cancel(scope, id) !bool` for one that can take a queued row back
 //! ([ADR 160](../docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)).
+//!
+//! **Transactional completion is one more optional group**, for a store whose
+//! rows share a database with the caller's own: `Tx`, the transaction type a
+//! `run` asks for by pointer; `begin(scope) !Tx`; and `doneIn(tx, scope, id,
+//! attempts, now) !bool`, `done` written inside that transaction under the
+//! same fence, so the run's writes and the row's `done` commit together or
+//! not at all. A kind whose `run` takes a `*Tx` over a store without them is
+//! a compile error naming the store. A store may also say `poolSize() u32`,
+//! which a queue with such a kind compares to its workers at start, and
+//! `single_writer`, a `bool` that makes such a kind declare its own
+//! `timeout_ms`.
 
 /// The number a store gives a row. Whatever the store's own key is, it fits
 /// in here — a `bigint` does, and so does a counter.

@@ -6,7 +6,7 @@
 
 ## `nilo_job`
 
-Work that runs later, again, or on a schedule: a queue whose rows live in a table in the database the program already has, and a worker loop the server owns. Like `nilo_fetch`, it is a **Fitting**: it borrows the event loop and is handed its store ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)). Delivery is **at least once**, so write `run` to be safe to call twice.
+Work that runs later, again, or on a schedule: a queue whose rows live in a table in the database the program already has, and a worker loop the server owns. Like `nilo_fetch`, it is a **Fitting**: it borrows the event loop and is handed its store ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)). Delivery is **at least once**, so write `run` to be safe to call twice; the one exception to repeat work is a `run` that takes the Db's transaction, whose database writes commit with its `done`.
 
 ```zig
 const job = @import("nilo_job");
@@ -44,9 +44,11 @@ fn register(c: *nilo.Ctx, jobs: *Jobs, body: SignIn) !void {
 | `pub const retry: job.Retry` | required, no default: `.none`, or `.{ .times, .backoff }` with `.{ .fixed_ms }` or `.{ .exponential = .{ .from_ms, .to_ms, .jitter } }`, `.jitter` being `.none` (the default), `.full` or `.equal`. `job.Backoff` and `job.Jitter` are `nilo_core`'s ([ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)); `job.Retry.delayMs(failed)` is the un-jittered ceiling and `jitteredMs(failed, random)` what a worker schedules by |
 | `pub fn run(self, scope: *nilo.Run, …) !void` | the work: the job by value, the Run, then any service by pointer, looked up in `.deps` by type, and `tick: job.Tick` by value if it wants to know which tick it is ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)) |
 | `pub const final = error{ … }` | optional: the failures that are **final**. A `run` failing with one of these is dead on that attempt whatever `retry` says, and the row keeps the error's name; a timeout is never final. A Refusal on a kind whose `retry` is `.none` ([ADR 179](../adr/179-a-run-can-say-its-failure-is-final.md)) |
-| `pub const timeout_ms` | optional, overrides the queue's. Also the lease |
+| `pub const timeout_ms` | optional, overrides the queue's. Also the lease. **Required on SQLite for a kind whose `run` takes a transaction**, because there it is how long the one writer is held ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)) |
 | `pub const priority: job.Priority` | optional: `.high`, `.normal` (the default) or `.low`. A free worker takes the most urgent **due** row, and among equals the one that has been due longest ([ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)). A number here is a Refusal naming the three levels |
 | `pub const schedule`, `overlap`, `missed` | for a job that runs on the clock: see [Schedules](#schedules-jobcron-and-jobevery) |
+
+**A `run` that takes the Db's transaction, `tx: *Db.Tx`, commits its writes and the row's `done` together, or neither** (transactional completion, [ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)). `Db` is the type the queue's `job.Table(Db)` was built over; a `*Db.Tx` is not looked up in `.deps`. The worker begins the transaction, calls `run`, writes `done` inside it under the claim's fence, and commits; a `done` that matches nothing (the lease lapsed and another worker holds the row) rolls back, and a failed run rolls back before its failure is recorded outside the transaction as usual. The run itself is still at least once. A transaction pins a connection for the whole run. Refused while compiling: a transaction on `job.Memory`, a transaction of another Db, a `run` that takes both `*Db.Tx` and `*Db`, and on SQLite a kind with no `timeout_ms` of its own. A queue with such a kind refuses to start (`error.PoolTooSmall` from `nilo_start` and `serveOn`) when `workers` is not smaller than the Db's `size`. `jobs.pushIn(tx, scope, …)` from inside it queues a job that commits with the run.
 
 A field that is a `*T` is a Refusal naming the field. A `run` that asks for a `*Ctx`, a `*job.Tick`, or a pointer type nobody put in `.deps` is a Refusal naming the job.
 
@@ -134,6 +136,7 @@ The next tick is a row with the unique key `"schedule"`, so several instances se
 | `job.Table(Db)` | the queue as a `nilo_table` Row named `nilo_jobs`, over your `sql.Db` or `sql.Sqlite(…)`. `open(&db)`. Claims with `FOR UPDATE SKIP LOCKED` on Postgres, and without it on SQLite, where a claim is a write and `workers` is the number of writers. The claim asks only for the kinds this program runs (`kind IN (…)`), so a row another binary pushed under a kind you do not declare stays queued for the binary that does ([ADR 215](../adr/215-a-worker-claims-only-what-it-can-run.md)) |
 | `table.sweep(c, before)` | deletes `done` rows that finished before a moment. Nothing calls it for you |
 | `table.sweepDead(c, before)` | deletes dead rows that died before a moment, and returns how many went. Separate from `sweep` because a dead row is the record of a failure. `job.Memory` has the same method, which also frees the slots a long run of failures would otherwise fill |
+| `table.begin(c)`, `table.doneIn(tx, c, id, attempts, now)` | what transactional completion is made of: the Db's `begin`, and `done` written in that transaction under the same fence. A `Jobs` calls them; a store of your own that can join a transaction carries them with a `Tx` type |
 | `job.Memory` | the same contract, inside this process. `open(gpa, .{ .bytes, .max_payload = 4096 })`; when full, a push returns `error.QueueFull` and never writes over a row |
 
 ### Errors
@@ -144,4 +147,4 @@ The next tick is a row with the unique key `"schedule"`, so several instances se
 
 ### What it does not do
 
-**Not included:** a priority queue with numbers (a kind has one of three `priority` levels, and a push cannot override it: [ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)), a workflow engine, a rate limiter per kind (use `nilo.Gate` inside `run` for that), exactly-once delivery, or time zones.
+**Not included:** a priority queue with numbers (a kind has one of three `priority` levels, and a push cannot override it: [ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)), a workflow engine, a rate limiter per kind (use `nilo.Gate` inside `run` for that), exactly-once delivery (a transactional `run` commits its database writes with its `done`, and does nothing for an effect outside the database), or time zones.

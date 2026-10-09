@@ -691,3 +691,250 @@ test "on Postgres a run cut off by a shutdown in the middle of a statement goes 
     try testing.expectEqual(@as(i32, 0), row.attempts);
     try testing.expectEqual(@as(?[]const u8, null), row.last_error);
 }
+
+// -- transactional completion (ADR 160) --------------------------------------
+
+/// A job whose work is a write to the Db the queue lives in, asking for the
+/// transaction the worker begins and ends. `Db` is the Db type, so one kind
+/// serves both databases.
+fn TxNote(comptime Db: type) type {
+    return struct {
+        pub const nilo_job = "tx-note";
+        pub const retry: job.Retry = .{ .times = 1, .backoff = .{ .fixed_ms = 0 } };
+        /// Declared, because on SQLite a transaction holds the writer for as
+        /// long as the run takes and the kind's author says how long.
+        pub const timeout_ms: u32 = 5_000;
+
+        /// `commits` is the mistake of ending the transaction inside `run`.
+        pub const Fail = enum { never, first, always, commits };
+
+        text: core.Str,
+        fail: Fail = .never,
+
+        pub fn run(self: @This(), scope: *core.Run, tick: job.Tick, tx: *Db.Tx) !void {
+            _ = try tx.insert(Note, scope, .{ .text = self.text.view() });
+            switch (self.fail) {
+                .never => {},
+                .first => if (tick.attempts == 1) return error.AsAsked,
+                .always => return error.AsAsked,
+                .commits => try tx.commit(),
+            }
+        }
+    };
+}
+
+const SqliteTxNote = TxNote(SqliteDb);
+const SqliteTxJobs = job.Jobs(.{ .kinds = .{SqliteTxNote}, .store = SqliteTable });
+
+fn rowOf(comptime Table: type, db: anytype, run: *core.Run, id: job.Id) !Table.Row {
+    return (try db.select(Table.Row, run, .{ .where = .{ .id = @as(i64, @intCast(id)) } }))[0];
+}
+
+test "on SQLite a transactional run's write and its done commit together" {
+    const f = try Fixture.open();
+    defer f.close();
+    var table = SqliteTable.open(&f.db);
+    var jobs: SqliteTxJobs = .open(testing.allocator, &table, .{}, .{});
+
+    const id = try jobs.push(&f.run, SqliteTxNote{ .text = .static("kept") }, .{});
+    const at = core.nowMicros() + 1_000;
+    try testing.expectEqual(@as(usize, 1), try jobs.drainAt(&f.run, at));
+
+    const notes = try f.db.select(Note, &f.run, .{});
+    try testing.expectEqual(@as(usize, 1), notes.len);
+    try testing.expectEqualStrings("kept", notes[0].text);
+    const row = try rowOf(SqliteTable, &f.db, &f.run, id);
+    try testing.expectEqual(job.State.done, row.state);
+    try testing.expectEqual(@as(?i64, at), row.finished_at);
+}
+
+test "on SQLite a failed transactional run leaves none of its writes, and the retry writes once" {
+    const f = try Fixture.open();
+    defer f.close();
+    var table = SqliteTable.open(&f.db);
+    var jobs: SqliteTxJobs = .open(testing.allocator, &table, .{}, .{});
+
+    // Writes, then fails on the first attempt: that write is rolled back, so
+    // the one note there is at the end is the second attempt's.
+    const id = try jobs.push(&f.run, SqliteTxNote{ .text = .static("again"), .fail = .first }, .{});
+    try testing.expectEqual(@as(usize, 2), try jobs.drainAt(&f.run, core.nowMicros() + 1_000));
+    try testing.expectEqual(@as(usize, 1), try f.db.count(Note, &f.run, .{}));
+    const row = try rowOf(SqliteTable, &f.db, &f.run, id);
+    try testing.expectEqual(job.State.done, row.state);
+    try testing.expectEqual(@as(i32, 2), row.attempts);
+    // The failure was written outside the transaction, as for any kind.
+    try testing.expectEqualStrings("AsAsked", row.last_error.?);
+
+    // Fails every time: dead, and nothing it wrote anywhere.
+    const doomed = try jobs.push(&f.run, SqliteTxNote{ .text = .static("never"), .fail = .always }, .{});
+    try testing.expectEqual(@as(usize, 2), try jobs.drainAt(&f.run, core.nowMicros() + 2_000));
+    try testing.expectEqual(@as(usize, 1), try f.db.count(Note, &f.run, .{}));
+    try testing.expectEqual(job.State.dead, (try rowOf(SqliteTable, &f.db, &f.run, doomed)).state);
+}
+
+test "a run that commits its own transaction is done once, and not run again" {
+    const f = try Fixture.open();
+    defer f.close();
+    var table = SqliteTable.open(&f.db);
+    var jobs: SqliteTxJobs = .open(testing.allocator, &table, .{}, .{});
+
+    // Its write is already kept when `run` returns, so the worker writes
+    // `done` on its own rather than fail `doneIn` and retry into a second note.
+    const id = try jobs.push(&f.run, SqliteTxNote{ .text = .static("early"), .fail = .commits }, .{});
+    try testing.expectEqual(@as(usize, 1), try jobs.drainAt(&f.run, core.nowMicros() + 1_000));
+    try testing.expectEqual(@as(usize, 1), try f.db.count(Note, &f.run, .{}));
+    const row = try rowOf(SqliteTable, &f.db, &f.run, id);
+    try testing.expectEqual(job.State.done, row.state);
+    try testing.expectEqual(@as(i32, 1), row.attempts);
+}
+
+test "on SQLite a done that matches nothing rolls the transaction back, and a matching one commits it" {
+    const f = try Fixture.open();
+    defer f.close();
+    var table = SqliteTable.open(&f.db);
+
+    const id = (try table.push(&f.run, "tx-note", "{}", .{ .run_at = 0 })).?;
+    const claimed = (try table.claim(&f.run, &.{"tx-note"}, 1, 100)).?;
+
+    // The fence is the claim's number: a late worker's is not the row's.
+    {
+        var tx = try table.begin(&f.run);
+        defer tx.deinit();
+        _ = try tx.insert(Note, &f.run, .{ .text = "late" });
+        try testing.expect(!(try table.doneIn(&tx, &f.run, id, claimed.attempts + 1, 5)));
+        tx.rollback();
+    }
+    try testing.expectEqual(@as(usize, 0), try f.db.count(Note, &f.run, .{}));
+    try testing.expectEqual(job.State.running, (try rowOf(SqliteTable, &f.db, &f.run, id)).state);
+
+    {
+        var tx = try table.begin(&f.run);
+        defer tx.deinit();
+        _ = try tx.insert(Note, &f.run, .{ .text = "held" });
+        try testing.expect(try table.doneIn(&tx, &f.run, id, claimed.attempts, 5));
+        try tx.commit();
+    }
+    try testing.expectEqual(@as(usize, 1), try f.db.count(Note, &f.run, .{}));
+    try testing.expectEqual(job.State.done, (try rowOf(SqliteTable, &f.db, &f.run, id)).state);
+}
+
+test "a queue with a transactional kind refuses to start with as many workers as connections" {
+    const f = try Fixture.open();
+    defer f.close();
+    var table = SqliteTable.open(&f.db);
+    const io = f.threaded.io();
+
+    // The fixture's pool is two connections.
+    var crowded: SqliteTxJobs = .open(testing.allocator, &table, .{}, .{ .workers = 2 });
+    try testing.expectError(error.PoolTooSmall, crowded.nilo_start(io, .off));
+    try testing.expectError(error.PoolTooSmall, crowded.serveOn(io));
+
+    var roomy: SqliteTxJobs = .open(testing.allocator, &table, .{}, .{ .workers = 1 });
+    try roomy.nilo_start(io, .off);
+}
+
+/// Takes the lease away from itself part way through: while it runs, a
+/// second worker claims the row at a time past the lease, which is exactly
+/// what a run that outlives its lease looks like from the table.
+const Lapses = struct {
+    pub const nilo_job = "tx-lapse";
+    pub const retry: job.Retry = .none;
+
+    pub fn run(_: Lapses, scope: *core.Run, tx: *sql.Db.Tx, thief: *Thief) !void {
+        _ = try tx.insert(Note, scope, .{ .text = "from the first worker" });
+        thief.stolen = try thief.table.claim(thief.run, &.{"tx-lapse"}, std.math.maxInt(i64) / 2, std.math.maxInt(i64) / 2 + 1_000);
+    }
+};
+
+const Thief = struct {
+    table: *PgTable,
+    run: *core.Run,
+    stolen: ?job.Claimed = null,
+};
+
+const PgLapseJobs = job.Jobs(.{ .kinds = .{Lapses}, .store = PgTable, .deps = struct { thief: *Thief } });
+
+test "on Postgres a lease that lapses mid-run makes the first worker's transaction commit nothing" {
+    const p = (try Pg.open()) orelse return error.SkipZigTest;
+    defer p.close();
+    try sql.migrate.createMissing(&p.db, &p.run, .{ .tables = &.{Note} });
+    defer _ = p.db.exec(&p.run, "DROP TABLE IF EXISTS \"notes\"", .{}) catch {};
+    var table = PgTable.open(&p.db);
+    var other: core.Run = .init(testing.allocator);
+    defer other.deinit();
+    var thief: Thief = .{ .table = &table, .run = &other };
+    var jobs: PgLapseJobs = .open(testing.allocator, &table, .{ .thief = &thief }, .{});
+
+    const id = try jobs.push(&p.run, Lapses{}, .{});
+    try testing.expectEqual(@as(usize, 1), try jobs.drain(&p.run));
+
+    // The second worker took the row while the first was inside its run.
+    const second = thief.stolen.?;
+    try testing.expectEqual(id, second.id);
+    try testing.expectEqual(@as(u32, 2), second.attempts);
+    // The first worker's `done` matched nothing, so its insert never was.
+    try testing.expectEqual(@as(usize, 0), try p.db.count(Note, &p.run, .{}));
+    const row = try rowOf(PgTable, &p.db, &p.run, id);
+    try testing.expectEqual(job.State.running, row.state);
+    try testing.expectEqual(@as(i32, 2), row.attempts);
+    // And the row is the second claim's to finish.
+    try testing.expect(try table.done(&p.run, id, second.attempts, 0));
+}
+
+const PgTxNote = TxNote(sql.Db);
+const PgTxJobs = job.Jobs(.{ .kinds = .{PgTxNote}, .store = PgTable });
+
+test "on Postgres a transactional run's write and its done commit together, and a failed run leaves nothing" {
+    const p = (try Pg.open()) orelse return error.SkipZigTest;
+    defer p.close();
+    try sql.migrate.createMissing(&p.db, &p.run, .{ .tables = &.{Note} });
+    defer _ = p.db.exec(&p.run, "DROP TABLE IF EXISTS \"notes\"", .{}) catch {};
+    var table = PgTable.open(&p.db);
+    var jobs: PgTxJobs = .open(testing.allocator, &table, .{}, .{ .workers = 2 });
+
+    const ok = try jobs.push(&p.run, PgTxNote{ .text = .static("kept") }, .{});
+    try testing.expectEqual(@as(usize, 1), try jobs.drain(&p.run));
+    try testing.expectEqual(@as(usize, 1), try p.db.count(Note, &p.run, .{}));
+    try testing.expectEqual(job.State.done, (try rowOf(PgTable, &p.db, &p.run, ok)).state);
+
+    const again = try jobs.push(&p.run, PgTxNote{ .text = .static("again"), .fail = .first }, .{});
+    try testing.expectEqual(@as(usize, 2), try jobs.drain(&p.run));
+    try testing.expectEqual(@as(usize, 2), try p.db.count(Note, &p.run, .{}));
+    try testing.expectEqual(job.State.done, (try rowOf(PgTable, &p.db, &p.run, again)).state);
+
+    const doomed = try jobs.push(&p.run, PgTxNote{ .text = .static("never"), .fail = .always }, .{});
+    try testing.expectEqual(@as(usize, 2), try jobs.drain(&p.run));
+    try testing.expectEqual(@as(usize, 2), try p.db.count(Note, &p.run, .{}));
+    try testing.expectEqual(job.State.dead, (try rowOf(PgTable, &p.db, &p.run, doomed)).state);
+}
+
+/// Swallows a failed statement and returns success: on Postgres the
+/// transaction is aborted by then, so the `done` that follows cannot be
+/// written and the commit never happens.
+const Swallows = struct {
+    pub const nilo_job = "tx-swallow";
+    pub const retry: job.Retry = .none;
+
+    pub fn run(_: Swallows, scope: *core.Run, tx: *sql.Db.Tx) !void {
+        _ = try tx.insert(Note, scope, .{ .text = "before the failure" });
+        _ = tx.exec(scope, "SELECT 1 / 0", .{}) catch {};
+    }
+};
+
+const PgSwallowJobs = job.Jobs(.{ .kinds = .{Swallows}, .store = PgTable });
+
+test "on Postgres a run that swallows a statement error is a failed attempt, and commits nothing" {
+    const p = (try Pg.open()) orelse return error.SkipZigTest;
+    defer p.close();
+    try sql.migrate.createMissing(&p.db, &p.run, .{ .tables = &.{Note} });
+    defer _ = p.db.exec(&p.run, "DROP TABLE IF EXISTS \"notes\"", .{}) catch {};
+    var table = PgTable.open(&p.db);
+    var jobs: PgSwallowJobs = .open(testing.allocator, &table, .{}, .{});
+
+    const id = try jobs.push(&p.run, Swallows{}, .{});
+    try testing.expectEqual(@as(usize, 1), try jobs.drain(&p.run));
+    try testing.expectEqual(@as(usize, 0), try p.db.count(Note, &p.run, .{}));
+    // A `done` that failed in the aborted transaction is a failed attempt,
+    // and with `retry = .none` that is the last one.
+    try testing.expectEqual(job.State.dead, (try rowOf(PgTable, &p.db, &p.run, id)).state);
+}

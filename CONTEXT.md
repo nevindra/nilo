@@ -457,6 +457,10 @@ _Avoid_: dequeue, pop, poll (which is the wait, not the take), fetch, reserve
 How long a claimed row stays somebody's before anybody else may take it. A worker that dies mid-run leaves a row whose lease runs out, which is the whole of why a job is at least once and never exactly once.
 _Avoid_: lock, visibility timeout, ack deadline, heartbeat
 
+**Transactional completion**:
+A `run` that takes the Db's `*Db.Tx` has its database writes and the row's `done` committed together, or neither. The worker begins the transaction, writes `done` in it under the claim's fence, and commits; a `done` that matches nothing (the lease lapsed and another worker holds the row) rolls it back. It narrows what a lease allows and does not remove it: the run is still at least once, and an effect outside the database wants an idempotency key. Never "exactly once".
+_Avoid_: exactly once, exactly-once, atomic job
+
 **Dead**:
 A row that failed for the last time — every retry spent, or a payload this binary cannot read. Kept, with the error's name, until somebody retries or sweeps it. Not deleted, not hidden, and counted.
 _Avoid_: dead letter queue, DLQ, failed, poison, discarded

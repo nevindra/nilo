@@ -225,11 +225,57 @@ pub fn Table(comptime Db: type) type {
         /// second worker holds. `false` is that: no row was changed
         /// (ADR 160, `contract.zig`).
         pub fn done(self: *Self, scope: anytype, id: contract.Id, attempts: u32, now: i64) !bool {
-            const n = try self.db.update(Row, scope, .{
+            return doneOn(self.db, scope, id, attempts, now);
+        }
+
+        fn doneOn(on: anytype, scope: anytype, id: contract.Id, attempts: u32, now: i64) !bool {
+            const n = try on.update(Row, scope, .{
                 .set = .{ .state = contract.State.done, .lease_until = @as(i64, 0), .unique_key = null, .finished_at = now },
                 .where = fence(id, attempts),
             });
             return n == 1;
+        }
+
+        // -- transactional completion (ADR 160) ---------------------------------
+
+        /// The Db this table sits on, for a `Jobs` that has to tell a `run`'s
+        /// `*Db` from its `*Db.Tx` without naming `nilo_sql`.
+        pub const Database = Db;
+
+        /// The transaction type a `run` asks for by pointer to be given one.
+        pub const Tx = Db.Tx;
+
+        /// Whether every write in the program goes through one connection,
+        /// which is SQLite: a transaction that writes then holds all of them
+        /// for as long as it is open, so a `Jobs` asks the kind to say how
+        /// long that may be.
+        pub const single_writer = !on_postgres;
+
+        /// How many connections the Db holds, for the check that a queue
+        /// does not start with as many workers as connections. SQLite's pool
+        /// is at least two (one writer and a reader, `sql/sqlite.zig`), so
+        /// the number is what the pool will really hold and not the
+        /// option as written.
+        pub fn poolSize(self: *Self) u32 {
+            return if (on_postgres) self.db.opts.size else @max(self.db.opts.size, 2);
+        }
+
+        /// Begin the transaction a transactional run works in. The Db's own
+        /// `begin` with its defaults: read committed on Postgres, and
+        /// `BEGIN IMMEDIATE` on SQLite, which takes the writer at once and so
+        /// never fails later on an upgrade from reader to writer.
+        pub fn begin(self: *Self, scope: anytype) !Db.Tx {
+            return self.db.begin(scope, .{});
+        }
+
+        /// `done`, inside the transaction the run wrote in, so the run's
+        /// writes and the row's `done` commit together or not at all. The
+        /// fence is the same one: `false` means the lease lapsed and a second
+        /// worker holds the row now, and the caller rolls back rather than
+        /// commit a copy of work another claim is doing.
+        pub fn doneIn(self: *Self, tx: *Db.Tx, scope: anytype, id: contract.Id, attempts: u32, now: i64) !bool {
+            _ = self;
+            return doneOn(tx, scope, id, attempts, now);
         }
 
         pub fn retry(self: *Self, scope: anytype, id: contract.Id, attempts: u32, run_at: i64, err: []const u8) !bool {

@@ -89,7 +89,6 @@ Independent of the order: each touches files no stage of the direction above doe
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A schedule is UTC.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A job whose work is a write to the same database cannot commit the write and its `done` together, so a crash between the two does the work again.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.
 - [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_job` · A row another process pushed waits up to `poll_ms` for a worker, a second by default, because nothing tells the workers it arrived.
 
