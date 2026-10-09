@@ -34,7 +34,7 @@ const Carts = cache.Space("cart", Cart, .{ .ttl_s = 300 });
 
 | | |
 |---|---|
-| `cache.open(gpa, .{ .bytes = n })` | `!Store`: all the memory, taken here |
+| `cache.open(gpa, .{ .bytes = n })` | `!Store`: all the memory, taken here. `error.TooSmall`, `error.ShardTooLarge`, `error.SeedUnavailable` (no `seed` and no operating-system entropy) or `error.OutOfMemory` |
 | `cache.Space(name, V, .{ .ttl_s = s })` | a keyspace, as a type |
 | `Space.open(&store)` | the value a handler holds. Panics, naming the type, the limit and the Store's size, for a flat `V` whose entry (12-byte header, key and value) exceeds a quarter of one shard's ring, which every `put` would have refused |
 | `space.put(key, value)` | stored for the Space's `ttl_s` |

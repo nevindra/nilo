@@ -624,7 +624,7 @@ It ignores `snapshot.zon` entirely, diffs your Rows against an empty database, a
 
 **A snapshot written by an older nilo is read, not rejected.** If you upgrade nilo and the file is in a format this version no longer writes, `generate` prints one line about it, diffs against it anyway, and writes the current format. You do not have to delete anything. That matters, because deleting the snapshot at version 7 would make the next `generate` write a version 8 that creates every table you already have ([ADR 181](../../adr/181-the-marker-has-two-kinds-of-word.md)).
 
-It refuses, rather than doing something you cannot undo, in three cases: when the directory holds a version it is not regenerating (version 2 is a diff against what version 1 produced), when `--name` differs from the existing version 1, and when the file it would rewrite has no generated block. Each message names the files. [ADR 123](../../adr/123-a-migration-is-a-diff-against-a-snapshot.md) explains why the file has this layout.
+It refuses, rather than doing something you cannot undo, in four cases: when the directory holds a version it is not regenerating (version 2 is a diff against what version 1 produced), when `--name` differs from the existing version 1, when the file it would rewrite has no generated block, and when `snapshot.zon` records a version newer than the newest file, because one was deleted or lost in a merge (`migrations.Error.SnapshotAhead`: put the file back or restore the snapshot). Each message names the files. [ADR 123](../../adr/123-a-migration-is-a-diff-against-a-snapshot.md) explains why the file has this layout.
 
 ### Starting a migrations directory
 

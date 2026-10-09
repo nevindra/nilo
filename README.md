@@ -14,7 +14,7 @@
   <a href="./CHANGELOG.md"><img alt="version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference/"><img alt="12 modules" src="https://img.shields.io/badge/modules-12-8957e5?style=flat-square"></a>
   <a href="./refusals/README.md"><img alt="597 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-597-e05d44?style=flat-square"></a>
-  <a href="./docs/adr/"><img alt="252 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-252-6b7280?style=flat-square"></a>
+  <a href="./docs/adr/"><img alt="272 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-272-6b7280?style=flat-square"></a>
   <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=flat-square"></a>
 </p>
 
@@ -53,6 +53,7 @@ Those three lines are a complete route. From them you get:
 - 💾 **4,669 bytes** per idle connection.
 - 🧯 **597 mistakes caught while compiling**, each with a sentence that tells you the fix.
 - 🔌 **Zero glue.** Routing, errors, OpenAPI and SQL all read the same struct.
+- 🔀 **HTTP/1.1, HTTP/2 and gRPC on one port**, every route on each, when you build with `.http2 = true`.
 
 ## ⚡ Quickstart
 
@@ -63,7 +64,7 @@ $ zig init                                                          # only if yo
 $ zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
 ```
 
-A `build.zig` is two lines with `nilo.app`, and [`template/`](./template/) is a working project to start from: [Getting started](./docs/guide/getting-started.md#start-a-project) has the four commands.
+[`template/`](./template/) is a working project to start from: [Getting started](./docs/guide/getting-started.md#start-a-project) has the four commands.
 
 **Keep the `#commit` part.** The tag is annotated, and `zig fetch` doesn't peel it (still true on 0.17), so `?ref=v0.7.0` on its own gives you whatever `main` is that day.
 
@@ -97,29 +98,18 @@ pub fn main() !void {
 }
 ```
 
-Then add it to `build.zig`:
+Then `build.zig` is one call:
 
 ```zig
-const nilo = b.dependency("nilo", .{
-    .target = target,
-    .optimize = optimize,
-    // Only if you import nilo_sql. This is what fetches the database drivers;
-    // leave it off and a project that serves HTTP downloads none of them.
-    .sql = true,
-});
+const std = @import("std");
+const nilo = @import("nilo");
 
-const exe = b.addExecutable(.{
-    .name = "my-app",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "nilo_http", .module = nilo.module("nilo_http") },
-        },
-    }),
-});
+pub fn build(b: *std.Build) void {
+    _ = nilo.app(b, .{ .name = "my-app", .root = b.path("src/main.zig") });
+}
 ```
+
+That builds and installs the executable with `nilo_http` imported, and adds the steps `run`, `dev` and `test`. Anything past plain HTTP is a field in the same struct ([below](#-behind-a-flag)): `.sql = true` imports `nilo_sql` and fetches its drivers, and a project that leaves it off downloads none of them. [Without the helper](./docs/guide/getting-started.md#without-the-helper) is the same build written by hand.
 
 Run `zig build run` and it's serving. [Getting started](./docs/guide/getting-started.md) walks through the same steps line by line.
 
@@ -233,6 +223,35 @@ if (!try c.verifyPassword(gpa, if (row) |r| r.password.view() else null, form.pa
 
 argon2id, stored in a format any other library can read, and hashed off the event loop. An email with no account takes as long as one with an account, so your login form doesn't reveal who has signed up.
 
+### Your struct is a gRPC service
+
+<!-- compiles -->
+```zig
+const HelloRequest = struct {
+    pub const wire = .{ .name = 1 };
+    name: []const u8 = "",
+};
+
+const HelloReply = struct {
+    pub const wire = .{ .message = 1 };
+    message: []const u8 = "",
+};
+
+const Greeter = struct {
+    pub const nilo_service = "helloworld.Greeter";
+
+    pub fn sayHello(arena: std.mem.Allocator, in: HelloRequest) !HelloReply {
+        return .{ .message = try std.fmt.allocPrint(arena, "hello, {s}", .{in.name}) };
+    }
+};
+
+fn mountGreeter(app: *nilo.App) !void {
+    try app.rpc(Greeter);
+}
+```
+
+The field numbers are the `.proto`, written on the struct. `sayHello` is now `POST /helloworld.Greeter/SayHello`, an ordinary route with your middleware in front of it, and it answers a gRPC client, a Connect client and a plain JSON one, each in its own format and its own error codes. Build with `.http2 = true` and the port your other routes are on serves it too; there is no second server and no generated code ([gRPC guide](./docs/guide/grpc.md)).
+
 ## 🙂 When you get it wrong
 
 Mistakes come back as sentences that say what you did and what to do about it, and most of them arrive before your program finishes compiling:
@@ -280,25 +299,36 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 
 | Module | What it does | Left out |
 |---|---|---|
-| **`nilo_http`** | Routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, rooms that broadcast to sockets and event streams and reach one user by key, OpenAPI, metrics, OpenTelemetry tracing ([guide](./docs/guide/tracing.md)), rate limiting, CSRF, security headers, gzip (libdeflate behind `.libdeflate = true`, [guide](./docs/guide/responses.md#compression)), optional TLS 1.3, and optional HTTP/2 beside HTTP/1.1 for every route ([guide](./docs/guide/deploying.md#http2-for-a-browser)) with unary gRPC on it ([guide](./docs/guide/grpc.md)) | Templates, HTTP/2 in the default build, WebSocket over HTTP/2, streaming gRPC |
-| **`nilo_sql`** | Postgres and SQLite: reads, writes, transactions, streaming, schema and migrations. Window functions, CTEs and any other join go through `db.raw`, which still fills your struct, counts its columns while compiling and checks their types the first time it runs ([guide](./docs/guide/sql/raw.md)) | Window functions and CTEs written in Zig rather than SQL, `down` migrations |
-| **`nilo_s3`** | S3, MinIO and R2: get, put, multipart upload, copy and compose inside the store, range, stream, list, presigned URLs | A `list` that follows its own cursor |
-| **`nilo_fetch`** | Calling another HTTP API from inside a request, tried again on a bad minute under a budget | Circuit breaker |
-| **`nilo_job`** | Background and scheduled work, queued in the database you already have, with three levels of urgency and cron schedules | Exactly-once, time zones |
+| **`nilo_http`** | Routing, typed handlers and typed middleware, cookies, sessions and bearer tokens, static files, streaming, WebSocket, rooms that broadcast to sockets and event streams and reach one user by key, OpenAPI, idempotency keys, metrics, logs as text or JSON, OpenTelemetry tracing ([guide](./docs/guide/tracing.md)), rate limiting, CSRF, security headers, gzip. Behind a flag: TLS 1.3, HTTP/2 for every route, and gRPC and Connect calls answered by a struct of plain functions ([guide](./docs/guide/grpc.md)) | Templates, WebSocket over HTTP/2, streaming gRPC |
+| **`nilo_sql`** | Postgres and SQLite: reads, writes, transactions, streaming, schema and migrations, an index built on a busy table without stopping its writes, and idempotency keys every instance shares ([guide](./docs/guide/idempotency.md#once-across-instances-sqlreplays)). Window functions, CTEs and any other join go through `db.raw`, which still fills your struct, counts its columns while compiling and checks their types the first time it runs ([guide](./docs/guide/sql/raw.md)) | Window functions and CTEs written in Zig rather than SQL, `down` migrations |
+| **`nilo_s3`** | S3, MinIO and R2: get, put, multipart upload, copy and compose inside the store, ranges read whole or streamed, list, presigned URLs, and retries when the store says slow down | A `list` that follows its own cursor |
+| **`nilo_fetch`** | Calling another HTTP API from inside a request: JSON and form bodies, a `Target` that retries under a budget ([guide](./docs/guide/fetch.md#retrying)), the route's deadline carried into the call, an egress proxy, a private certificate authority | Circuit breaker, HTTP/2 and gRPC calls, HTTPS through a proxy |
+| **`nilo_job`** | Background and scheduled work, queued in the database you already have, with three levels of urgency, cron schedules and retries spread out by jitter | Exactly-once, time zones |
 | **`nilo_cache`** | An expiring in-process cache on a fixed memory budget | Pointers in cached values |
 | **`nilo_jwt`** | Verifying tokens: RS256, ES256 and rotating JWKS | Signing tokens, HS256 |
-| **`nilo_proto`** | Protobuf as plain structs: decode, encode, OTLP-sized messages in a handful of allocations | A `.proto` compiler, proto2 |
+| **`nilo_proto`** | Protobuf as plain structs: decode, encode, OTLP-sized messages in a handful of allocations ([guide](./docs/guide/proto.md)) | A `.proto` compiler, proto2 |
 | **`nilo_config`** | Settings from the environment | Config files |
 | **`nilo_pw`** | Password hashing with argon2id | |
 | **`nilo_id`** | UUID v4 and v7 | |
 | **`nilo_core`** | The types the other modules share | |
 
+### 🎛️ Behind a flag
+
+A build that serves plain HTTP fetches one dependency, [zio](https://github.com/lalinsky/zio). Everything else is asked for by name in `nilo.app`, or in `b.dependency("nilo", …)` for a `build.zig` written by hand, and a build that doesn't ask contains none of it:
+
+| Flag | What it turns on |
+|---|---|
+| `.sql = true` | `nilo_sql`, with its Postgres and SQLite drivers |
+| `.tls = true` | TLS 1.3 on a listener, for a server with nothing in front of it ([guide](./docs/guide/deploying.md#tls-without-a-proxy)) |
+| `.http2 = true` | HTTP/2 beside HTTP/1.1 on every listener, every route on either, and gRPC on top. With `.tls` too, a browser is offered it by ALPN ([guide](./docs/guide/deploying.md#http2-for-a-browser)) |
+| `.libdeflate = true` | libdeflate's compressor in place of the standard library's, for gzip ([guide](./docs/guide/responses.md#compression)) |
+
 ## 🚫 What it won't do
 
 - **Templates.** If your app is mostly HTML, [jetzig](https://www.jetzig.dev/) is built for it.
-- **HTTP/2 in the default build.** It is behind `.http2 = true`, and a browser reaches it only over TLS, which is `.tls = true` or a proxy in front ([deploying guide](./docs/guide/deploying.md#tls-and-a-reverse-proxy)). With both flags a TLS listener offers `h2` and `http/1.1` and serves every route on either; gRPC rides it, unary calls only ([gRPC guide](./docs/guide/grpc.md)).
+- **HTTP/3 and QUIC.** The CDN or proxy already in front terminates them. Nothing nilo serves runs over QUIC alone.
 - **Revoking a session.** Sessions are sealed into the cookie, so there's no session table to delete from.
-- **State shared between instances.** The cache, rate limits, idempotency keys and WebSocket rooms live in the process. At two instances, which a rolling deploy always is for a while, each keeps its own: a limit of 100 admits 200, a retried request that reaches the other instance runs again, and a room message reaches only that instance's sockets ([ADR 110](./docs/adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)).
+- **State shared between instances, outside your database.** The cache, rate limits and WebSocket rooms live in the process. At two instances, which a rolling deploy always is for a while, each keeps its own: a limit of 100 admits 200, and a room message reaches only that instance's sockets ([ADR 110](./docs/adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). Idempotency keys can go in the database instead, with `sql.Replays`, so a retry that reaches the other instance is answered rather than run again ([guide](./docs/guide/idempotency.md#once-across-instances-sqlreplays)).
 
 Each of these was decided on purpose; [`docs/decided.md`](./docs/decided.md) says why.
 

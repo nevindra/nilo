@@ -480,6 +480,8 @@ fn retryAfterIsRead(io: std.Io, gpa: std.mem.Allocator) !void {
 
 `io` is a `std.Io.Threaded` the test owns: `var threaded: std.Io.Threaded = .init(std.testing.allocator, .{}); defer threaded.deinit();` and `threaded.io()`. Use `concurrent`, not `async`, because `async` may run the server on your own thread, where it sits in `accept` waiting for the connection that same thread was about to make; the module's tests found that as a hang at zero CPU ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)).
 
+**A Target's `.retry` is tested with `canned.serveScript(script, count)`.** It answers `count` requests from a list of replies, one connection each, so every try is a connection that can be counted: `canned.tried` says how many arrived and when, and `headOfTry(n)` gives the head of each. Start it with `io.concurrent`, and check `tried` after the call returns.
+
 ## See also
 
 - [The reference](../reference/fetch.md#nilo_fetch): the whole API as a list.
