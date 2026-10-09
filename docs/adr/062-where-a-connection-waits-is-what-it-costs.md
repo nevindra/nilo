@@ -41,7 +41,7 @@ The first attempt left the connection loop waiting exactly where it always had, 
 
 So the wait moves up instead:
 
-1. **The idle wait happens at the connection loop's own frame.** `waitForRequest` in `http/serve.zig` does the whole wait: peek for `idle_peek_ms`, release the read and write buffers and the stack if that comes back empty, then wait for the next request there, at the shallowest frame the connection ever has.
+1. **The idle wait happens at the connection loop's own frame.** `waitForRequest` in `http/serve.zig` does the whole wait: peek for `idle_peek_ms`, release the read and write buffers and the stack if that comes back empty, then wait for the next request there, at the shallowest frame the connection ever has. A wait that holds nothing is the rule after the release, not during the peek: a WebSocket's and an HTTP/2 connection's peek receive into the buffers they still hold, and the wait after the release asks only for readiness ([ADR 284](./284-a-connection-in-conversation-waits-by-receiving.md)).
 2. **The request's machinery is a frame of its own.** `App.serveRequest` is `noinline`; its `Ctx`, parsed head and route match are a callee's frame, below the sleeping one and dead by the time the connection parks.
 3. **The cold half of a request costs nothing until it runs.** A format string builds its argument tuple and `Io.Writer` state in the frame of whatever it is inlined into, so `sendFailure`, `endAbandonedStream`, `warnFailedAfterAnswering`, `warnSocketFailed`, `Socket.deliver`, `handleControl` and `ping` are `noinline` for that reason alone.
 4. **A WebSocket handler hands its loop back instead of keeping it**, which breaks [ADR 021](./021-a-websocket-is-a-handler-that-does-not-return.md)'s shape on purpose:

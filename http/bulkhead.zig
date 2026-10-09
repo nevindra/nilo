@@ -77,6 +77,11 @@
 //!   Engine that waits on sockets can already wait on two things — it has to,
 //!   to wait with a deadline at all — so this asks for nothing new of it
 //!   beyond a handle to say so with.
+//! - `Waker.waitFilling` — the same wait, for a connection still holding its
+//!   read buffer: what arrives is received into that buffer, so the read
+//!   after it is from memory (ADR 284). Optional: an Engine without it
+//!   leaves the field null and the wait is `Waker.wait`, at the cost of a
+//!   second trip through its loop a message.
 //! - a read that flushes first — the `in` handed to `handler` puts whatever
 //!   `out` still holds on the wire before it reads the socket. nilo skips
 //!   the flush on a response whose successor is already in the read buffer,
@@ -1036,6 +1041,17 @@ const engine_waker: Waker.VTable = .{
             wake.halfClose();
         }
     }.f,
+    .wait_filling = struct {
+        fn f(target: ?*anyopaque, limit_ms: u32) Woken {
+            const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
+            return switch (wake.waitFilling(limit_ms)) {
+                .readable => .readable,
+                .posted => .posted,
+                .timed_out => .timed_out,
+                .closed => .closed,
+            };
+        }
+    }.f,
     .poll = if (!looks_ahead) {} else struct {
         fn f(target: ?*anyopaque) Woken {
             const wake: *engine.Wake = @ptrCast(@alignCast(target.?));
@@ -1759,6 +1775,10 @@ pub const Waker = struct {
         /// Only a `-Dhttp2` build has the field: a default build's Waker is
         /// the bytes it was.
         poll: if (looks_ahead) *const fn (target: ?*anyopaque) Woken else void = if (looks_ahead) &nothingYet else {},
+        /// `wait`, receiving what arrives into the connection's read buffer
+        /// rather than only saying it has arrived. See `waitFilling`. Null
+        /// is `wait`, which is what a Waker with no socket under it means.
+        wait_filling: ?*const fn (target: ?*anyopaque, limit_ms: u32) Woken = null,
     };
 
     fn nothingYet(_: ?*anyopaque) Woken {
@@ -1803,6 +1823,24 @@ pub const Waker = struct {
     /// against `off`, which answers `.readable` to everything by design.
     pub fn wait(self: Waker, limit_ms: u32) Woken {
         return self.vtable.wait(self.target, limit_ms);
+    }
+
+    /// `wait`, with the bytes: on `.readable` what arrived is already in the
+    /// connection's read buffer, so the read that follows is from memory and
+    /// costs the loop nothing. The same contract otherwise, the caller's
+    /// read buffer drained and its writer flushed.
+    ///
+    /// For the short wait a connection in conversation makes between two
+    /// messages, its peek, while it holds its buffers anyway. Not for the
+    /// wait after it has given them back: what this waits in holds the
+    /// buffer for as long as it waits, and an idle connection must not
+    /// (ADR 062). A frame read from a socket a poll said was readable was
+    /// two trips through the loop and a timer of its own; this is one, and
+    /// on a WebSocket echoing frames it was what nilo spent beyond dusty
+    /// ([ADR 284](../docs/adr/284-a-connection-in-conversation-waits-by-receiving.md)).
+    pub fn waitFilling(self: Waker, limit_ms: u32) Woken {
+        const f = self.vtable.wait_filling orelse return self.vtable.wait(self.target, limit_ms);
+        return f(self.target, limit_ms);
     }
 
     /// Wake the connection. The one call another fiber makes, and the reason

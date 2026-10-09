@@ -946,7 +946,9 @@ const Conn = struct {
             // bounded by the read of the call that waits for it (ADR 260).
             const limit = c.inFlightLimitMs() orelse return .stop;
             if (c.events_open == c.streams.items.len) return c.waitQuiet(limit);
-            return switch (c.waker.wait(limit)) {
+            // The buffers are held while calls are in flight, so the frames
+            // that arrive meanwhile are received into them (ADR 284).
+            return switch (c.waker.waitFilling(limit)) {
                 .readable => .readable,
                 .posted => .posted,
                 .timed_out => c.overdue(),
@@ -957,7 +959,9 @@ const Conn = struct {
             };
         }
         if (!c.released) {
-            switch (c.waker.wait(idle_peek_ms)) {
+            // The peek holds the buffers, so it receives into them, and the
+            // frame that ends it is read from memory (ADR 284).
+            switch (c.waker.waitFilling(idle_peek_ms)) {
                 .readable => return .readable,
                 .posted => return .posted,
                 .closed => {
@@ -1000,7 +1004,7 @@ const Conn = struct {
     fn waitQuiet(c: *Conn, limit: u32) Waited {
         if (!c.released) {
             const peek = if (limit == 0) idle_peek_ms else @min(limit, idle_peek_ms);
-            switch (c.waker.wait(peek)) {
+            switch (c.waker.waitFilling(peek)) {
                 .readable => return .readable,
                 .posted => {
                     // The pages come back after the next quiet stretch.

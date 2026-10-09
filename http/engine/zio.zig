@@ -718,6 +718,17 @@ pub const Wake = struct {
     /// read in the meantime. Looked at once, by `believe`.
     skipped: bool = false,
 
+    /// The reader nearest the socket, whose buffer `waitFilling` receives
+    /// into: the cleartext one on a plain connection and the ciphertext one
+    /// under TLS, `Link`'s either way. Null where there is no such reader
+    /// (a listener's own `Wake`), and `waitFilling` is then `wait`.
+    fill: ?*std.Io.Reader = null,
+    /// `waitFilling`'s receive. Never still in the loop's hands when a wait
+    /// returns: every way out takes it back first, so `deinit` has nothing of
+    /// it to drain and a later `wait` finds the buffer the caller's alone.
+    recv: zio.ev.NetRecv = undefined,
+    recv_iov: [1]zio.os.iovec = undefined,
+
     /// What sits between a TLS connection's socket and the buffers the
     /// handler reads: the records arrive in `in` and leave from `out`, and
     /// `leftover` is cleartext the last record decrypted that nobody has
@@ -785,11 +796,12 @@ pub const Wake = struct {
         return ready != 0;
     }
 
-    pub fn init(handle: zio.ev.Backend.NetHandle) Wake {
+    pub fn init(handle: zio.ev.Backend.NetHandle, fill: ?*std.Io.Reader) Wake {
         return .{
             .cq = zio.CompletionQueue.init(),
             .wake = zio.ev.Async.init(),
             .handle = handle,
+            .fill = fill,
             // `NetPoll` rather than `NetRecv`, which is the exception zio's
             // author named when he said to prefer the latter: the connection's
             // buffered `std.Io.Reader` does its own reading, so what is wanted
@@ -931,6 +943,94 @@ pub const Wake = struct {
             // so this cannot happen; going round again is the harmless
             // reading of a thing that cannot happen.
         }
+    }
+
+    /// `wait`, for a connection that still holds its read buffer: the bytes
+    /// are received into that buffer rather than announced, so `.readable`
+    /// arrives with them already there.
+    ///
+    /// **What `wait` costs a connection in conversation.** Its poll says the
+    /// socket is readable, and then the caller's read asks the kernel again
+    /// for the bytes: two operations through the loop per message, and the
+    /// read under a timer of its own, armed and cancelled around a receive
+    /// that was never going to wait. On a WebSocket echoing frames that was
+    /// three timers and two round trips through the loop a frame, against
+    /// one receive for dusty on the same zio, and 17% more CPU a frame on
+    /// HttpArena's `echo-ws` (`bench/result/http.md`). Received here, the
+    /// header is parsed from the buffer and the read is never made.
+    ///
+    /// Only for the peek, while the buffers are the connection's anyway:
+    /// the wait after one has given its pages back is `wait`, because a
+    /// receive pins the buffer it was given until it completes, and a
+    /// connection idle for an hour would hold it for the hour (ADR 062).
+    /// The caller flushes first, as for `wait` (ADR 201): this is a read the
+    /// writer's `Link` never sees.
+    ///
+    /// The receive never outlives the call. A post or the limit cancels it
+    /// and waits for the loop to let go (`CompletionQueue.cancel`), and
+    /// whatever it got before that is kept, so a post that crosses a frame
+    /// arriving loses neither: the caller hears `.posted`, and finds the
+    /// frame in its buffer on the next round.
+    pub fn waitFilling(self: *Wake, limit_ms: u32) Woken {
+        const r = self.fill orelse return self.wait(limit_ms);
+        // A poll left in the loop's hands by a `lookNow` or a `.posted`
+        // answers for this wait too. A receive beside it would race it for
+        // the same bytes and leave it to fire for bytes already taken.
+        if (self.poll_armed) return self.wait(limit_ms);
+        if (!self.armed) {
+            self.cq.submit(&self.wake.c) catch unreachable;
+            self.armed = true;
+        }
+        if (self.held()) {
+            self.skipped = true;
+            return .readable;
+        }
+        // Room after what is buffered, which on a plain connection is nothing
+        // (the caller drained it) and under TLS may be part of a record. A
+        // buffer with no room and nothing to move is one `wait` serves.
+        if (r.seek == r.end) {
+            r.seek = 0;
+            r.end = 0;
+        } else if (r.end == r.buffer.len) {
+            if (r.seek == 0) return self.wait(limit_ms);
+            const kept = r.end - r.seek;
+            std.mem.copyForwards(u8, r.buffer[0..kept], r.buffer[r.seek..r.end]);
+            r.seek = 0;
+            r.end = kept;
+        }
+        self.recv = zio.ev.NetRecv.init(self.handle, zio.ev.ReadBuf.fromSlice(r.buffer[r.end..], &self.recv_iov), .{});
+        self.cq.submit(&self.recv.c) catch unreachable;
+
+        const done = self.cq.waitTimeout(if (limit_ms == 0)
+            .none
+        else
+            .{ .duration = .fromMilliseconds(limit_ms) }) catch |err| {
+            // The limit or a cancel, with the receive still out. Bytes that
+            // landed before it was called back are the answer instead.
+            self.cq.cancel(&self.recv.c);
+            if (self.received(r)) return .readable;
+            return if (err == error.Timeout) .timed_out else .closed;
+        };
+        if (done == &self.wake.c) {
+            self.cq.submit(&self.wake.c) catch unreachable;
+            self.cq.cancel(&self.recv.c);
+            _ = self.received(r);
+            return .posted;
+        }
+        // The receive: the only other completion in the queue, since the
+        // poll is not armed. An end of stream or an error is `.readable` as
+        // well, and the caller's own read meets it, which is where a closed
+        // or reset connection is told apart today (`fillHeader`).
+        _ = self.received(r);
+        return .readable;
+    }
+
+    /// Count what a finished receive put in `r`'s buffer as buffered.
+    /// Whether it was anything: a cancelled receive and an error are not.
+    fn received(self: *Wake, r: *std.Io.Reader) bool {
+        const n = self.recv.getResult() catch return false;
+        r.end += n;
+        return n != 0;
     }
 
     /// Give the loop back every completion this queue still holds, and do
@@ -2062,7 +2162,7 @@ pub fn serve(
                     // mapped rather than an allocation of its own — see `Wake`. An
                     // ordinary request never touches it; it is armed on the first
                     // `wait`, which only a WebSocket reaches.
-                    var wake = Wake.init(stream.socket.handle);
+                    var wake = Wake.init(stream.socket.handle, &link.reader.interface);
                     // Registered after the two buffers and after `stream.close`, so
                     // it unwinds before all three: the loop has to be done with the
                     // completions before the frame holding them goes, and the poll
@@ -2156,7 +2256,7 @@ pub fn serve(
                     var link: Link = undefined;
                     link.init(stream, raw_in, raw_out);
                     var clocks = Clocks{ .reader = &link.reader, .writer = &link.writer };
-                    var wake = Wake.init(stream.socket.handle);
+                    var wake = Wake.init(stream.socket.handle, &link.reader.interface);
                     defer wake.deinit();
                     var peer: Peer = .{
                         .port = portOf(stream.socket.address),
@@ -3399,7 +3499,7 @@ test "a Wake that parked hands its completions back before its frame goes" {
     const listener = try addr.listen(.{});
     defer listener.close();
 
-    var wake = Wake.init(listener.socket.handle);
+    var wake = Wake.init(listener.socket.handle, null);
     try testing.expect(wake.cq.isEmpty());
 
     // Nobody connects, so the socket never becomes readable: this parks and

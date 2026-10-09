@@ -1661,3 +1661,184 @@ fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
     };
     return &built;
 }
+
+// ---- A WebSocket's wait receives the frame it waits for (ADR 284) ----
+
+/// The room the WebSocket tests below seat their socket in, set by each.
+var ws_room: *nilo.Room = undefined;
+
+fn echoFrames(socket: *nilo.Socket, room: *nilo.Room) !void {
+    try room.join(socket);
+    defer room.leave(socket);
+    while (try socket.receive()) |message| try socket.send(message.kind, message.data);
+}
+
+fn wsEcho(c: *nilo.Ctx) anyerror!void {
+    return c.upgrade(echoFrames, ws_room);
+}
+
+/// A WebSocket client over std's own socket, so what it hears is the server's
+/// frames and not two halves of one library agreeing. Every read is bounded by
+/// a receive limit on the socket: a server that never answers fails the test.
+const WsClient = struct {
+    stream: std.Io.net.Stream,
+    reader: std.Io.net.Stream.Reader,
+    writer: std.Io.net.Stream.Writer,
+    in_buf: [4096]u8 = undefined,
+    out_buf: [512]u8 = undefined,
+
+    fn open(self: *WsClient, io: std.Io, port: u16) !void {
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+        self.stream = try address.connect(io, .{ .mode = .stream });
+        errdefer self.stream.close(io);
+        const limit: std.posix.timeval = .{ .sec = 5, .usec = 0 };
+        try std.posix.setsockopt(self.stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&limit));
+        self.reader = self.stream.reader(io, &self.in_buf);
+        self.writer = self.stream.writer(io, &self.out_buf);
+        try self.raw("GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+            "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+        const head = self.reader.interface.takeDelimiterInclusive('\n') catch return error.AnswerNeverCame;
+        if (!std.mem.startsWith(u8, head, "HTTP/1.1 101")) return error.NotUpgraded;
+        while (true) {
+            const line = self.reader.interface.takeDelimiterInclusive('\n') catch return error.AnswerNeverCame;
+            if (std.mem.eql(u8, line, "\r\n")) break;
+        }
+    }
+
+    fn close(self: *WsClient, io: std.Io) void {
+        self.stream.close(io);
+    }
+
+    fn raw(self: *WsClient, bytes: []const u8) !void {
+        try self.writer.interface.writeAll(bytes);
+        try self.writer.interface.flush();
+    }
+
+    /// A masked text frame, written into `out`. A zero mask key is a mask
+    /// all the same, and keeps the payload readable in a capture.
+    fn frame(out: *std.Io.Writer, text: []const u8) !void {
+        std.debug.assert(text.len < 126);
+        try out.writeAll(&.{ 0x81, 0x80 | @as(u8, @intCast(text.len)), 0, 0, 0, 0 });
+        try out.writeAll(text);
+    }
+
+    fn send(self: *WsClient, text: []const u8) !void {
+        try frame(&self.writer.interface, text);
+        try self.writer.interface.flush();
+    }
+
+    /// The next frame's payload, a server's frame being unmasked.
+    fn next(self: *WsClient) ![]const u8 {
+        const head = self.reader.interface.takeArray(2) catch return error.AnswerNeverCame;
+        if (head[1] >= 126) return error.UnexpectedFrame;
+        return self.reader.interface.take(head[1]) catch return error.AnswerNeverCame;
+    }
+};
+
+test "a WebSocket answers every frame, in its peek, after its pages went back, split, and two at once" {
+    hush();
+    const gpa = testing.allocator;
+    var room = try nilo.Room.initWith(gpa, .{ .seats = 4 });
+    defer room.deinit();
+    ws_room = &room;
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+    const live = try nilo.testing.Live.start(gpa, &app, .{ .threads = 1 });
+    defer live.stop() catch {};
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client: WsClient = .{ .stream = undefined, .reader = undefined, .writer = undefined };
+    try client.open(io, live.port);
+    defer client.close(io);
+
+    // Inside the peek, which receives into the read buffer.
+    try client.send("one");
+    try testing.expectEqualStrings("one", try client.next());
+
+    // Past it: the buffers went back and the wait only listens.
+    try std.Io.sleep(io, .fromMilliseconds(350), .awake);
+    try client.send("two");
+    try testing.expectEqualStrings("two", try client.next());
+
+    // A frame in two writes: the header received alone, the rest read after.
+    var whole: [16]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&whole);
+    try WsClient.frame(&w, "three");
+    try client.raw(w.buffered()[0..3]);
+    try std.Io.sleep(io, .fromMilliseconds(30), .awake);
+    try client.raw(w.buffered()[3..]);
+    try testing.expectEqualStrings("three", try client.next());
+
+    // Two frames in one write: one receive holds both, and both are answered.
+    var two: [32]u8 = undefined;
+    var t: std.Io.Writer = .fixed(&two);
+    try WsClient.frame(&t, "four");
+    try WsClient.frame(&t, "five");
+    try client.raw(t.buffered());
+    try testing.expectEqualStrings("four", try client.next());
+    try testing.expectEqualStrings("five", try client.next());
+}
+
+/// Posts `count` numbered messages into `ws_room`, a little apart, so they
+/// land among the client's frames.
+fn postAmong(io: std.Io, count: u32, done: *std.atomic.Value(bool)) void {
+    for (0..count) |i| {
+        ws_room.print("p{d}", .{i}) catch {};
+        std.Io.sleep(io, .fromMicroseconds(150), .awake) catch {};
+    }
+    done.store(true, .release);
+}
+
+test "a post that crosses a frame arriving loses neither, however often they cross" {
+    hush();
+    const gpa = testing.allocator;
+    var room = try nilo.Room.initWith(gpa, .{ .seats = 4 });
+    defer room.deinit();
+    ws_room = &room;
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/ws", wsEcho);
+    const live = try nilo.testing.Live.start(gpa, &app, .{ .threads = 1 });
+    defer live.stop() catch {};
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var client: WsClient = .{ .stream = undefined, .reader = undefined, .writer = undefined };
+    try client.open(io, live.port);
+    defer client.close(io);
+    // Seated: the first echo comes back only once the loop has joined.
+    try client.send("seated");
+    try testing.expectEqualStrings("seated", try client.next());
+
+    const posts: u32 = 400;
+    const frames: u32 = 400;
+    var done: std.atomic.Value(bool) = .init(false);
+    const poster = try std.Thread.spawn(.{}, postAmong, .{ io, posts, &done });
+    defer poster.join();
+
+    // Every frame is sent before its echo is waited for, so the server is
+    // as often inside a wait with a receive out as it is writing a post.
+    var echoed: u32 = 0;
+    var heard: std.StaticBitSet(posts) = .empty;
+    var sent: u32 = 0;
+    var name: [8]u8 = undefined;
+    while (echoed < frames or heard.count() < posts) {
+        if (sent < frames) {
+            try client.send(try std.fmt.bufPrint(&name, "f{d}", .{sent}));
+            sent += 1;
+        }
+        const got = try client.next();
+        if (got.len > 1 and got[0] == 'f') {
+            try testing.expectEqual(echoed, try std.fmt.parseInt(u32, got[1..], 10));
+            echoed += 1;
+        } else if (got.len > 1 and got[0] == 'p') {
+            heard.set(try std.fmt.parseInt(u32, got[1..], 10));
+        } else return error.UnexpectedFrame;
+    }
+}

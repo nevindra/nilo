@@ -242,6 +242,10 @@ this.
   suite runnable against in-memory buffers with no server.
 - **`receive` parks differently.** It only waits when its read buffer is empty:
   a reader holding a buffered frame is readable whatever the socket thinks.
+  While it still holds its buffers, its 200 ms peek, the wait receives into
+  them rather than polling, so the frame that ends it is already buffered;
+  the wait after the buffers have gone back is the poll and the bell
+  ([ADR 284](./284-a-connection-in-conversation-waits-by-receiving.md)).
 - **ADR 019's refusal is amended**, ADR 021's "the thing this does not do" no
   longer describes nilo, and ADR 028's "blocked on one upstream line" is
   resolved. All three carry a note pointing here.

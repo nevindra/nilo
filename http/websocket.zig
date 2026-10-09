@@ -968,10 +968,13 @@ pub const Socket = struct {
         // A ping limit shorter than the peek is left alone rather than
         // reordered: the peek is supposed to be a prefix of the wait, not
         // longer than it.
+        // Both peeks receive into the read buffer, which they hold anyway, so
+        // a frame that arrives is parsed from memory with no read after it
+        // (ADR 284); the wait after the buffers have gone back only listens.
         if (self._idle_ms != 0 and self._idle_ms <= idle_peek_ms) {
-            return self._waker.wait(self._idle_ms);
+            return self._waker.waitFilling(self._idle_ms);
         }
-        switch (self._waker.wait(idle_peek_ms)) {
+        switch (self._waker.waitFilling(idle_peek_ms)) {
             .timed_out => {},
             else => |woken| return woken,
         }
