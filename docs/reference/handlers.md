@@ -584,6 +584,29 @@ The sentence is the same either way; only the status moves. It applies wherever 
 
 Five things are compile errors: `.misfit = 400` (it is the default), any other status, a value that is not a number, and the entry on an enum or on a union with no `.tag`, which `std.json` reads by itself.
 
+#### Leaving a field out of an answer
+
+**An answer writes every field, a `?T` that is empty as `null` and a list as `[]`. A struct can leave some out** ([ADR 282](../adr/282-an-answer-can-leave-a-field-out.md)):
+
+```zig
+const Page = struct {
+    pub const nilo_json = .{ .omit_null = true, .omit_empty = &.{"root_attributes"} };
+
+    id: u32,
+    title: ?[]const u8,
+    root_attributes: []const u32,
+};
+```
+
+| entry | leaves out |
+|---|---|
+| `.omit_null = true` | every optional field of the struct that is null |
+| `.omit_empty = &.{"name", …}` | each named slice field (a list, or text) that holds nothing |
+
+It is the generated writer's, so the type stays on the fast path and no comma is misplaced (`{"id":1}` with every other field gone, `{}` with all of them). The API document takes such a field off `required` in the answer. **It says nothing about reading**: a body read into the same type keeps the rule it had, where a `?T` or a field with a default may be absent. A type with an omission that would be written by `std.json` (a tuple, an array of bytes, an untagged union, a type with its own `jsonStringify`, past eight levels) is a compile error, as `rename_all` is.
+
+Compile errors: `.omit_null` that is not `true`, on a non-struct, or on a struct with no optional field written; `.omit_empty` that is not a list of names, names a field the struct does not have, a field that is not a slice, a field twice, or a field `.skip` leaves out.
+
 #### The marker is not inherited
 
 **The marker is per type.** A struct renames its own fields; a union renames its *variants* and leaves a payload struct's fields to that struct's own marker; a nested struct without a marker keeps its own spelling.

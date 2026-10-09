@@ -127,6 +127,13 @@ pub const Mark = struct {
     /// type answers. Read off the type the body is read into, and only that
     /// one ([ADR 251](../docs/adr/251-json-that-does-not-fit-can-be-a-422.md)).
     misfit: ?u16 = null,
+    /// Whether every optional field of a struct is left out of the answer when
+    /// it is null (`.omit_null = true`, ADR 282). Writing only: a request that
+    /// leaves the key out already reads, by the rule every optional follows.
+    omit_null: bool = false,
+    /// The slice fields of a struct left out of the answer when empty
+    /// (`.omit_empty = &.{"root_attributes"}`, ADR 282). Writing only.
+    omit_empty: []const []const u8 = &.{},
 
     /// Whether the marker changes how any field is spelled.
     pub fn renamesFields(self: Mark) bool {
@@ -138,6 +145,12 @@ pub const Mark = struct {
     /// `std.json` itself) cannot honour.
     pub fn spellsFields(self: Mark) bool {
         return self.renamesFields() or self.skips.len > 0;
+    }
+
+    /// Whether the marker leaves any field out of an answer when it is empty,
+    /// which only the generated writer does (ADR 282).
+    pub fn omitsFields(self: Mark) bool {
+        return self.omit_null or self.omit_empty.len > 0;
     }
 };
 
@@ -230,15 +243,20 @@ pub fn of(comptime T: type) ?Mark {
                 mark.ignores_unknown = unknownFieldsOf(T, said.unknown_fields);
             } else if (std.mem.eql(u8, f_name, "misfit")) {
                 mark.misfit = misfitOf(T, said.misfit);
+            } else if (std.mem.eql(u8, f_name, "omit_null")) {
+                mark.omit_null = omitNullOf(T, said.omit_null);
+            } else if (std.mem.eql(u8, f_name, "omit_empty")) {
+                mark.omit_empty = omitEmptyOf(T, said.omit_empty);
             } else @compileError(
                 "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` has a field `" ++ f_name ++
                     "`, which is not something it can say.\n" ++
-                    "  A marker says six things: `tag`, the key the variant's name goes under; " ++
+                    "  A marker says eight things: `tag`, the key the variant's name goes under; " ++
                     "`rename_all`, how every name is spelled on the wire; `rename`, the ones " ++
                     "spelled on their own; `skip`, the fields left out of the wire; " ++
                     "`unknown_fields`, whether a body key the struct " ++
                     "has no field for is skipped; and `misfit`, the status of a body that is " ++
-                    "JSON and not this type's shape.\n" ++
+                    "JSON and not this type's shape; `omit_null`, whether an optional that is null is left " ++
+                    "out of an answer; and `omit_empty`, the lists left out when empty.\n" ++
                     "    pub const " ++ marker ++ " = .{ .tag = \"signal\", .rename_all = .camelCase, " ++
                     ".rename = .{ .amount_minor = \"amountMinor\" } };",
             );
@@ -247,8 +265,11 @@ pub fn of(comptime T: type) ?Mark {
         // Asked once every field is read, because whether a union names its
         // tag can come after the `misfit` that needs it.
         if (mark.misfit != null) misfitBelongs(T, mark);
+        // Whether a name is a skipped one can come before the `skip` that
+        // says so, so the omissions are checked once every field is read.
+        if (mark.omitsFields()) checkOmits(T, mark);
 
-        if (mark.tag == null and !mark.spellsFields() and !mark.ignores_unknown and mark.misfit == null) @compileError(
+        if (mark.tag == null and !mark.spellsFields() and !mark.ignores_unknown and mark.misfit == null and !mark.omitsFields()) @compileError(
             "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` is empty, so it says nothing " ++
                 "about this type's JSON and nothing changes.\n" ++
                 "  Either say what it is for, or take the declaration off:\n" ++
@@ -256,7 +277,8 @@ pub fn of(comptime T: type) ?Mark {
                 "    pub const " ++ marker ++ " = .{ .rename_all = .camelCase }; // a cased enum\n" ++
                 "    pub const " ++ marker ++ " = .{ .skip = &.{\"password_hash\"} }; // a struct that leaves a field out\n" ++
                 "    pub const " ++ marker ++ " = .{ .unknown_fields = .ignore }; // a body struct that skips unknown keys\n" ++
-                "    pub const " ++ marker ++ " = .{ .misfit = 422 };              // a body struct whose wrong shape is a 422",
+                "    pub const " ++ marker ++ " = .{ .misfit = 422 };              // a body struct whose wrong shape is a 422\n" ++
+                "    pub const " ++ marker ++ " = .{ .omit_null = true };          // an answer that leaves out a null",
         );
 
         if (mark.tag) |key| checkTag(T, key);
@@ -567,6 +589,142 @@ fn skipsOf(comptime T: type, comptime said: anytype) []const []const u8 {
     }
 }
 
+/// `said.omit_null`, which is `true` or it is refused: leaving a null out is
+/// not what an answer does by default, and the default has no spelling to
+/// write out ([ADR 282](../docs/adr/282-an-answer-can-leave-a-field-out.md)).
+fn omitNullOf(comptime T: type, comptime said: anytype) bool {
+    comptime {
+        if (@TypeOf(said) != bool) @compileError(
+            "nilo: `" ++ naming.of(T) ++ "`'s `omit_null` is a " ++ naming.of(@TypeOf(said)) ++
+                ", and it says whether an optional that is null is left out of an answer, " ++
+                "which is written as `true`.\n" ++
+                "    pub const " ++ marker ++ " = .{ .omit_null = true };",
+        );
+        if (!said) @compileError(
+            "nilo: `" ++ naming.of(T) ++ "` says `.omit_null = false`, which is what every type " ++
+                "already does with a null, so it would change nothing.\n" ++
+                "  Take the entry off, or say `true` to leave a null out.",
+        );
+        if (@typeInfo(T) != .@"struct") @compileError(
+            "nilo: `" ++ naming.of(T) ++ "` says `.omit_null`, and it is a " ++ @tagName(@typeInfo(T)) ++
+                ", which has no optional fields to leave out.\n" ++
+                "  `omit_null` belongs on the struct whose fields are written.",
+        );
+        return true;
+    }
+}
+
+/// `said.omit_empty`: the slice fields a struct leaves out of an answer when
+/// they hold nothing, as a list of their names. Each has to be a field, named
+/// once, and a slice: a list or text, not an optional (a null is `omit_null`'s)
+/// and not a number or a struct, which have no empty
+/// ([ADR 282](../docs/adr/282-an-answer-can-leave-a-field-out.md)).
+fn omitEmptyOf(comptime T: type, comptime said: anytype) []const []const u8 {
+    comptime {
+        if (@typeInfo(T) != .@"struct") @compileError(
+            "nilo: `" ++ naming.of(T) ++ "` says `.omit_empty`, and it is a " ++ @tagName(@typeInfo(T)) ++
+                ", which has no fields to leave out.\n" ++
+                "  `omit_empty` names the list fields of a struct that are not written when empty.",
+        );
+        const list = switch (@typeInfo(@TypeOf(said))) {
+            .pointer => said.*,
+            else => said,
+        };
+        const List = @TypeOf(list);
+        const listed = @typeInfo(List) == .array or
+            (@typeInfo(List) == .@"struct" and @typeInfo(List).@"struct".is_tuple);
+        if (!listed) @compileError(
+            "nilo: `" ++ naming.of(T) ++ "`'s `.omit_empty` is a " ++ naming.of(@TypeOf(said)) ++ ", and it " ++
+                "names the lists left out when empty, so it is written as a list of them.\n" ++
+                "    pub const " ++ marker ++ " = .{ .omit_empty = &.{\"root_attributes\"} };",
+        );
+        var out: []const []const u8 = &.{};
+        for (0..list.len) |i| {
+            const name = list[i];
+            if (!isText(@TypeOf(name))) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "`'s `.omit_empty` has a " ++ naming.of(@TypeOf(name)) ++
+                    " in it, and a field is named by text.\n" ++
+                    "    .omit_empty = &.{\"root_attributes\"}",
+            );
+            const field: []const u8 = name;
+            if (!@hasField(T, field)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` leaves out a field `" ++ field ++ "` when empty and does not have it.\n" ++
+                    "  `.omit_empty` names this type's own fields, spelled as they are written: " ++
+                    "`.omit_empty = &.{\"root_attributes\"}`.",
+            );
+            const F = @FieldType(T, field);
+            if (!(@typeInfo(F) == .pointer and @typeInfo(F).pointer.size == .slice)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` leaves out `" ++ field ++ "` when empty, and it is a " ++
+                    naming.of(F) ++ ", which is not a slice and so is never empty.\n" ++
+                    "  `.omit_empty` names a list or text field. An optional that is null is " ++
+                    "left out by `.omit_null = true`.",
+            );
+            for (out) |already| if (std.mem.eql(u8, already, field)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` leaves out `" ++ field ++ "` when empty twice.",
+            );
+            out = out ++ [_][]const u8{field};
+        }
+        return out;
+    }
+}
+
+/// What can only be asked once the whole marker is read: that `.omit_null`
+/// has an optional to leave out, and that a field is not both skipped and
+/// omitted.
+fn checkOmits(comptime T: type, comptime m: Mark) void {
+    comptime {
+        if (m.omit_null) {
+            var any = false;
+            for (@typeInfo(T).@"struct".field_types, @typeInfo(T).@"struct".field_names) |F, f_name| {
+                if (@typeInfo(F) == .optional and !skipped(m, f_name)) any = true;
+            }
+            if (!any) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` says `.omit_null = true` and has no optional field " ++
+                    "that is written, so it would change nothing.\n" ++
+                    "  Take the entry off, or make the field that may be missing a `?T`.",
+            );
+        }
+        for (m.omit_empty) |name| {
+            if (skipped(m, name)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` both skips `" ++ name ++ "` and leaves it out when empty.\n" ++
+                    "  A skipped field is never written, so the second entry says nothing; take one off.",
+            );
+        }
+    }
+}
+
+/// Whether the writer leaves field `name`, of type `F`, out when it is empty:
+/// null under `.omit_null`, or a slice named in `.omit_empty`. Settled while
+/// compiling, so a field that never omits is written exactly as before.
+pub fn omittable(comptime m: ?Mark, comptime name: []const u8, comptime F: type) bool {
+    comptime {
+        const said = m orelse return false;
+        if (said.omit_null and @typeInfo(F) == .optional) return true;
+        for (said.omit_empty) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
+}
+
+/// Whether `value`, of a field that is `omittable`, is the empty one.
+pub inline fn isEmpty(value: anytype) bool {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .optional => value == null,
+        else => value.len == 0,
+    };
+}
+
+/// Whether `T` is a struct with a field it leaves out when empty.
+pub fn omitsAny(comptime T: type, comptime m: ?Mark) bool {
+    comptime {
+        if (@typeInfo(T) != .@"struct") return false;
+        for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |f_name, F| {
+            if (skipped(m, f_name)) continue;
+            if (omittable(m, f_name, F)) return true;
+        }
+        return false;
+    }
+}
+
 /// Whether `m` leaves the field `name` out of the wire.
 pub fn skipped(comptime m: ?Mark, comptime name: []const u8) bool {
     comptime {
@@ -836,39 +994,46 @@ pub fn wireNames(comptime T: type) []const []const u8 {
 /// same reason — a type holding a list of its own type has no bottom.
 pub fn renamedFieldsWithin(comptime T: type) ?type {
     comptime {
-        // This walk and `unreadableWithin` run inside the body slot's own
-        // evaluation, and `of` reading `.rename` on every struct they pass
-        // took a plain body over the default 1,000. Raised here because this
-        // is where the work is asked for (ADR 126): eight deep over every
-        // field is bounded by the type, and 20,000 is `typed.wrap`'s figure.
         @setEvalBranchQuota(20_000);
-        return renamedWithin(T, 0);
+        return renamedWithin(T, 0, false);
     }
 }
 
-fn renamedWithin(comptime T: type, comptime depth: usize) ?type {
+/// `renamedFieldsWithin`, for a value that is **written**: the first struct at
+/// or inside `T` that also leaves a field out when empty, which `std.json`
+/// does not do either ([ADR 282](../docs/adr/282-an-answer-can-leave-a-field-out.md)).
+/// A form or a query string is not refused for it, because omitting is only
+/// ever what an answer does.
+pub fn unwritableWithin(comptime T: type) ?type {
+    comptime {
+        @setEvalBranchQuota(20_000);
+        return renamedWithin(T, 0, true);
+    }
+}
+
+fn renamedWithin(comptime T: type, comptime depth: usize, comptime writing: bool) ?type {
     comptime {
         if (depth >= 8) return null;
         switch (@typeInfo(T)) {
             .@"struct" => |s| {
                 if (of(T)) |m| {
-                    if (m.spellsFields()) return T;
+                    if (m.spellsFields() or (writing and m.omitsFields())) return T;
                 }
                 for (s.field_types) |f_type| {
-                    if (renamedWithin(f_type, depth + 1)) |found| return found;
+                    if (renamedWithin(f_type, depth + 1, writing)) |found| return found;
                 }
                 return null;
             },
             .@"union" => |u| {
                 for (u.field_types) |f_type| {
-                    if (renamedWithin(f_type, depth + 1)) |found| return found;
+                    if (renamedWithin(f_type, depth + 1, writing)) |found| return found;
                 }
                 return null;
             },
-            .optional => |o| return renamedWithin(o.child, depth + 1),
-            .array => |a| return renamedWithin(a.child, depth + 1),
+            .optional => |o| return renamedWithin(o.child, depth + 1, writing),
+            .array => |a| return renamedWithin(a.child, depth + 1, writing),
             .pointer => |p| return switch (p.size) {
-                .slice, .one => renamedWithin(p.child, depth + 1),
+                .slice, .one => renamedWithin(p.child, depth + 1, writing),
                 else => null,
             },
             else => return null,

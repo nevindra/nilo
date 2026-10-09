@@ -2560,7 +2560,23 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "json_rename_all_on_a_shape_that_falls_back",
-        .says = "`json_rename_all_on_a_shape_that_falls_back.Contact` renames or skips its fields, and this value goes to `std.json`, which does not read the marker (ADR 148).",
+        .says = "`json_rename_all_on_a_shape_that_falls_back.Contact` renames, skips or omits its fields, and this value goes to `std.json`, which does not read the marker (ADR 148).",
+    },
+    .{
+        .name = "json_omit_empty_of_a_field_it_does_not_have",
+        .says = "`json_omit_empty_of_a_field_it_does_not_have.Page` leaves out a field `root_attributes` when empty and does not have it.",
+    },
+    .{
+        .name = "json_omit_empty_of_a_field_that_is_not_a_list",
+        .says = "`json_omit_empty_of_a_field_that_is_not_a_list.Page` leaves out `count` when empty, and it is a u32, which is not a slice and so is never empty.",
+    },
+    .{
+        .name = "json_omit_null_with_no_optional",
+        .says = "`json_omit_null_with_no_optional.Page` says `.omit_null = true` and has no optional field that is written, so it would change nothing.",
+    },
+    .{
+        .name = "json_omit_on_a_shape_that_falls_back",
+        .says = "`json_omit_on_a_shape_that_falls_back.Contact` renames, skips or omits its fields, and this value goes to `std.json`, which does not read the marker (ADR 148).",
     },
     .{
         .name = "json_rename_all_is_already_zig",

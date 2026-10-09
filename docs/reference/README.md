@@ -113,6 +113,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
     - [Leaf types](./handlers.md#leaf-types)
     - [Skipping the keys a body struct does not know](./handlers.md#skipping-the-keys-a-body-struct-does-not-know)
     - [Answering JSON of the wrong shape with a 422](./handlers.md#answering-json-of-the-wrong-shape-with-a-422)
+    - [Leaving a field out of an answer](./handlers.md#leaving-a-field-out-of-an-answer)
     - [The marker is not inherited](./handlers.md#the-marker-is-not-inherited)
   - [`nilo.jsonParseFor`](./handlers.md#nilojsonparsefor)
   - [Unions](./handlers.md#unions)

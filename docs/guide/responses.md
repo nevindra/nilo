@@ -306,7 +306,23 @@ const Summary = struct {
 
 **A field can stay off the wire.** `.skip = &.{"password_hash"}` names fields that are never written in a response and never read from a body. A client sending the key gets the answer any unknown key gets, and the field is left out of the API description. Because nothing fills a skipped field when a body is read, it needs a default value (or a `?T`) if the struct is ever read; a struct that is only returned needs nothing.
 
-A renamed struct that nilo's own writer cannot handle is also refused. The writer is deliberately narrow: one shape it does not recognise (a tuple, an array of bytes, an untagged union, a type that writes its own JSON without describing it, anything more than eight levels deep) sends the whole value to `std.json`, which ignores the marker.
+**A key can be left out when it has no value.** Go's `omitempty` is two entries here ([ADR 282](../adr/282-an-answer-can-leave-a-field-out.md)): `.omit_null = true` leaves out every optional field that is null, and `.omit_empty = &.{"root_attributes"}` leaves out the named lists that are empty. A list you do not name is still written as `[]`, because an empty list is often the answer.
+
+<!-- compiles -->
+```zig
+const Page = struct {
+    pub const nilo_json = .{ .omit_null = true, .omit_empty = &.{"root_attributes"} };
+
+    id: u32,
+    title: ?[]const u8,                  // no "title" key when null
+    root_attributes: []const []const u8, // no key when empty
+    tags: []const []const u8,            // "tags":[] when empty
+};
+```
+
+The generated writer does it, so the type is still written at full speed and still takes `rename_all`. The API description stops listing those fields as `required`. It means nothing when a body is read: a `?T` or a field with a default is already optional there. As with `rename_all`, a type that nilo's own writer cannot handle (see below) is a compile error rather than a quiet `null`.
+
+A renamed or omitting struct that nilo's own writer cannot handle is also refused. The writer is deliberately narrow: one shape it does not recognise (a tuple, an array of bytes, an untagged union, a type that writes its own JSON without describing it, anything more than eight levels deep) sends the whole value to `std.json`, which ignores the marker.
 
 **A type that writes its own JSON and describes it is not one of those.** `sql.Uuid`, `sql.Timestamp`, `sql.AsText` and `id.Uuid` all carry a `nilo_openapi` next to their `jsonStringify`, and a marker may only name a scalar. So nilo knows the value is one string or one number and keeps writing the object around it ([ADR 148](../adr/148-a-field-name-is-a-spelling-too.md)). A Row holding uuids can rename its fields, which is the ordinary case and the whole reason this was reopened.
 

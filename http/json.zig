@@ -622,16 +622,16 @@ pub fn readsItself(comptime T: type) bool {
 /// fields.
 fn refuseRenameOnTheFallback(comptime T: type) void {
     comptime {
-        const Renamed = mark.renamedFieldsWithin(T) orelse return;
+        const Renamed = mark.unwritableWithin(T) orelse return;
         @compileError(
-            "nilo: `" ++ @import("names.zig").of(Renamed) ++ "` renames or skips its fields, and this " ++
+            "nilo: `" ++ @import("names.zig").of(Renamed) ++ "` renames, skips or omits its fields, and this " ++
                 "value goes to `std.json`, which does not read the marker (ADR 148).\n" ++
                 "  `covers` sends the whole value to `std.json` when one shape in it is not " ++
                 "nilo's to write: a tuple, an array of bytes, an untagged union, a type with " ++
                 "its own `jsonStringify`, or anything nested more than eight deep.\n" ++
                 "  The keys would go out spelled as they are written, and a skipped field would go " ++
                 "out at all, while the API description promised otherwise. Take `rename_all` " ++
-                "and `skip` off, or take out the shape that cannot be written here.",
+                "`skip` and the omissions off, or take out the shape that cannot be written here.",
         );
     }
 }
@@ -720,7 +720,7 @@ fn coversWithin(comptime T: type, comptime depth: usize) bool {
     // applied one level down.
     if (comptime mark.documentOf(T)) |Inner| {
         if (coversWithin(Inner, depth + 1)) return true;
-        return mark.renamedFieldsWithin(Inner) == null;
+        return mark.unwritableWithin(Inner) == null;
     }
     // Reading the marker is what checks it, and this is the line that makes the
     // check happen at all: a `.tag` on a struct describes nothing and would
@@ -872,8 +872,13 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
                         const payload_info = @typeInfo(Payload).@"struct";
                         inline for (payload_info.field_names, payload_info.field_types) |f_name, f_type| {
                             if (comptime mark.skipped(inner, f_name)) continue;
-                            try w.writeAll(comptime ",\"" ++ mark.wire(f_name, inner) ++ "\":");
-                            try writeValue(f_type, w, @field(payload, f_name));
+                            // The tag is already out, so a comma always
+                            // comes first and an omission cannot misplace one.
+                            const may_go = comptime mark.omittable(inner, f_name, f_type);
+                            if (!may_go or !mark.isEmpty(@field(payload, f_name))) {
+                                try w.writeAll(comptime ",\"" ++ mark.wire(f_name, inner) ++ "\":");
+                                try writeValue(f_type, w, @field(payload, f_name));
+                            }
                         }
                         return w.writeByte('}');
                     }
@@ -898,6 +903,28 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
             const m = comptime mark.of(T);
             // A skipped field is not written, and which field opens the
             // object is settled while compiling like the rest (ADR 148).
+            //
+            // A struct that leaves a field out when it is empty (ADR 282)
+            // cannot settle the comma while compiling, because whether a field
+            // opens the object depends on the value: it takes the branch
+            // below, with one flag at run time. A struct that does not is the
+            // loop after it, unchanged.
+            if (comptime mark.omitsAny(T, m)) {
+                var first = true;
+                inline for (s.field_names, s.field_types) |f_name, f_type| {
+                    if (comptime mark.skipped(m, f_name)) continue;
+                    const may_go = comptime mark.omittable(m, f_name, f_type);
+                    if (!may_go or !mark.isEmpty(@field(value, f_name))) {
+                        if (first) {
+                            try writeValueAfter(comptime "{\"" ++ mark.wire(f_name, m) ++ "\":", f_type, w, @field(value, f_name));
+                            first = false;
+                        } else {
+                            try writeValueAfter(comptime ",\"" ++ mark.wire(f_name, m) ++ "\":", f_type, w, @field(value, f_name));
+                        }
+                    }
+                }
+                return if (first) literal(w, "{}") else literal(w, "}");
+            }
             comptime var opened = false;
             inline for (s.field_names, s.field_types) |f_name, f_type| {
                 if (comptime mark.skipped(m, f_name)) continue;
@@ -1945,6 +1972,88 @@ test "every case a struct can ask for, on one field" {
     try expectJson("{\"NotFound\":1}", Pascal{ .not_found = 1 });
     try expectJson("{\"NOT_FOUND\":1}", Screaming{ .not_found = 1 });
     try expectJson("{\"not-found\":1}", Kebab{ .not_found = 1 });
+}
+
+test "a null optional is left out under omit_null, and a comma never lands beside a brace" {
+    const Row = struct {
+        pub const nilo_json = .{ .omit_null = true };
+        a: ?u32,
+        b: u8,
+        c: ?[]const u8,
+        d: ?bool,
+    };
+    comptime std.debug.assert(covers(Row));
+    // Everything present: the same bytes `std.json` writes.
+    try expectSame(Row{ .a = 1, .b = 2, .c = "x", .d = false });
+    // The first one left out, the last one left out, a middle one left out.
+    try expectJson("{\"b\":2,\"c\":\"x\",\"d\":true}", Row{ .a = null, .b = 2, .c = "x", .d = true });
+    try expectJson("{\"a\":1,\"b\":2,\"c\":\"x\"}", Row{ .a = 1, .b = 2, .c = "x", .d = null });
+    try expectJson("{\"a\":1,\"b\":2,\"d\":true}", Row{ .a = 1, .b = 2, .c = null, .d = true });
+    try expectJson("{\"b\":2}", Row{ .a = null, .b = 2, .c = null, .d = null });
+
+    // Every field omittable and every one empty is an empty object.
+    const Only = struct {
+        pub const nilo_json = .{ .omit_null = true };
+        a: ?u32 = null,
+        b: ?[]const u8 = null,
+    };
+    try expectJson("{}", Only{});
+    try expectJson("{\"b\":\"hi\"}", Only{ .b = "hi" });
+
+    // The writer may be too small to reserve in, and says the same.
+    inline for (.{ 0, 1, 5, 40 }) |size| {
+        var small = try std.Io.Writer.Allocating.initCapacity(testing.allocator, size);
+        defer small.deinit();
+        try write(&small.writer, Row{ .a = null, .b = 2, .c = null, .d = true });
+        try testing.expectEqualStrings("{\"b\":2,\"d\":true}", small.written());
+    }
+}
+
+test "a named list is left out when empty, and a list that is not named is written empty" {
+    const Page = struct {
+        pub const nilo_json = .{ .omit_empty = &.{ "root_attributes", "tags" }, .rename_all = .camelCase };
+        id: u32,
+        root_attributes: []const u32,
+        note: ?[]const u8,
+        tags: []const []const u8,
+        items: []const u32,
+    };
+    comptime std.debug.assert(covers(Page));
+    try expectJson(
+        \\{"id":1,"note":null,"items":[]}
+    , Page{ .id = 1, .root_attributes = &.{}, .note = null, .tags = &.{}, .items = &.{} });
+    try expectJson(
+        \\{"id":1,"rootAttributes":[7],"note":"n","tags":["a"],"items":[2]}
+    , Page{ .id = 1, .root_attributes = &.{7}, .note = "n", .tags = &.{"a"}, .items = &.{2} });
+
+    // The first field of the object is the one left out.
+    const Lead = struct {
+        pub const nilo_json = .{ .omit_empty = &.{"first"} };
+        first: []const u8,
+        second: u8,
+    };
+    try expectJson("{\"second\":3}", Lead{ .first = "", .second = 3 });
+    try expectJson("{\"first\":\"x\",\"second\":3}", Lead{ .first = "x", .second = 3 });
+}
+
+test "a struct that leaves fields out keeps its meaning inside a list, an optional and a tagged variant" {
+    const Leaf = struct {
+        pub const nilo_json = .{ .omit_null = true };
+        n: ?u8,
+        m: u8,
+    };
+    const Outer = struct { leaves: []const Leaf, one: ?Leaf };
+    try expectJson(
+        \\{"leaves":[{"m":1},{"n":2,"m":3}],"one":{"m":4}}
+    , Outer{ .leaves = &.{ .{ .n = null, .m = 1 }, .{ .n = 2, .m = 3 } }, .one = .{ .n = null, .m = 4 } });
+
+    const Event = union(enum) {
+        pub const nilo_json = .{ .tag = "kind" };
+        click: Leaf,
+        nothing,
+    };
+    try expectJson("{\"kind\":\"click\",\"m\":5}", Event{ .click = .{ .n = null, .m = 5 } });
+    try expectJson("{\"kind\":\"click\",\"n\":1,\"m\":5}", Event{ .click = .{ .n = 1, .m = 5 } });
 }
 
 test "the payload of a tagged variant is renamed by its own marker, not by the union's" {

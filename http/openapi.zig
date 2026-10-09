@@ -545,8 +545,11 @@ fn schemaWithin(comptime T: type, comptime depth: usize, comptime written: bool)
                         // required whatever its default is, and a client does
                         // not null-check what the server always sends. A
                         // `void` field is the one the writer skips.
+                        //
+                        // A field the type leaves out when it is empty is the
+                        // exception: the writer may not send it (ADR 282).
                         .required = if (written)
-                            f_type != void
+                            f_type != void and !mark.omittable(said, f_name, f_type)
                         else
                             !field_mod.FieldRule(f_type, f_attrs).may_be_absent,
                     }};
@@ -1930,6 +1933,23 @@ test "a response lists every field it always writes as required, and a request k
     // The same type read from a body is as it was: only `name` has to be sent.
     try expectSchema(Row,
         \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"plan":{"type":"integer","minimum":0,"maximum":255}},"required":["name"]}
+    );
+}
+
+test "a field the type leaves out when empty is not required in the answer, and a request keeps its rule" {
+    const Row = struct {
+        pub const nilo_json = .{ .omit_null = true, .omit_empty = &.{"tags"} };
+        name: Str,
+        nickname: ?Str,
+        tags: []const Str,
+        plan: u8 = 1,
+    };
+    const response = try responseJson(Row);
+    defer testing.allocator.free(response);
+    try testing.expect(std.mem.indexOf(u8, response, "\"required\":[\"name\",\"plan\"]") != null);
+    // Read from a body, the marker says nothing: the rule is the reader's.
+    try expectSchema(Row,
+        \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"tags":{"type":"array","items":{"type":"string"}},"plan":{"type":"integer","minimum":0,"maximum":255}},"required":["name","tags"]}
     );
 }
 
