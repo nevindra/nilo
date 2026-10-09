@@ -2144,6 +2144,10 @@ pub fn fiberSlot() ?*anyopaque {
 /// (ADR 013).
 pub const loopTurnNanos = engine.loopTurnNanos;
 
+/// Which executor thread the running fiber is on, dense from zero, or null
+/// off a fiber. What a per-thread structure indexes itself by (ADR 211).
+pub const executorIndex = engine.executorIndex;
+
 /// The slot of the request currently running, or null if there is none.
 pub fn slot() ?*anyopaque {
     return engine.slot() orelse fallback_slot;

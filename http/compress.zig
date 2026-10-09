@@ -64,6 +64,7 @@ const builtin = @import("builtin");
 const build_options = @import("nilo_build");
 const flate = std.compress.flate;
 const http1 = @import("http1.zig");
+const bulkhead = @import("bulkhead.zig");
 
 pub const Options = struct {
     /// Bodies shorter than this go out as they are. Compressing a hundred
@@ -144,11 +145,19 @@ pub fn PoolOf(comptime which: Backend) type {
     return struct {
         const Self = @This();
 
+        /// `std.atomic.cache_line` on a line of its own: the flag is written
+        /// by whoever borrows or gives back, and the next flag is somebody
+        /// else's.
+        const Flag = struct {
+            free: std.atomic.Value(bool) align(std.atomic.cache_line) = .init(true),
+        };
+
         slots: []Slot,
-        /// One bit per slot, set while it is free. Words rather than a lock: a
-        /// borrow is one `cmpxchg` on the word its slot is in, and nothing
-        /// waits.
-        free: []std.atomic.Value(u64),
+        /// Whether each slot is free, one flag a slot and each on a cache line
+        /// of its own. A word of bits would be one borrow and one give-back
+        /// from every executor on the same line, and `borrow` is a
+        /// `cmpxchg` on a flag, so nothing waits (ADR 211).
+        free: []Flag,
         options: Options,
         /// libdeflate's compressors, all in one mapping kept off huge
         /// pages; nothing for the standard library's, which live in `slots`.
@@ -174,9 +183,9 @@ pub fn PoolOf(comptime which: Backend) type {
         pub fn init(gpa: std.mem.Allocator, count: usize, options: Options) !Self {
             const slots = try gpa.alloc(Slot, count);
             errdefer gpa.free(slots);
-            const words = (count + 63) / 64;
-            const free = try gpa.alloc(std.atomic.Value(u64), words);
+            const free = try gpa.alloc(Flag, count);
             errdefer gpa.free(free);
+            for (free) |*flag| flag.* = .{};
 
             const mapping: Mapping = switch (which) {
                 .std => {
@@ -191,10 +200,6 @@ pub fn PoolOf(comptime which: Backend) type {
                 },
                 .libdeflate => try placeCompressors(slots, options.level.libdeflateLevel()),
             };
-            for (free, 0..) |*word, w| {
-                const in_this_word = @min(64, count - w * 64);
-                word.* = .init(if (in_this_word == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(in_this_word)) - 1);
-            }
             return .{
                 .slots = slots,
                 .free = free,
@@ -244,25 +249,33 @@ pub fn PoolOf(comptime which: Backend) type {
         }
 
         /// A free compressor, or null when every one is out. Never waits.
-        fn borrow(self: *const Self) ?*Slot {
-            for (self.free, 0..) |*word, w| {
-                var bits = word.load(.acquire);
-                while (bits != 0) {
-                    const bit: u6 = @intCast(@ctz(bits));
-                    const taken = bits & ~(@as(u64, 1) << bit);
-                    if (word.cmpxchgWeak(bits, taken, .acquire, .monotonic)) |now| {
-                        bits = now;
-                        continue;
-                    }
-                    return &self.slots[w * 64 + bit];
-                }
+        ///
+        /// **A caller that says who it is gets its own slot back.** `hint` is
+        /// the executor thread's index, and the scan starts at the slot with
+        /// that index and wraps, so on a server with a slot a thread the
+        /// thread that gzipped last time gzips on the same compressor, whose
+        /// 229 KB of tables are still in its core's caches. Starting every scan
+        /// at slot 0, as this did, handed slot 0 to whichever core got there
+        /// first, and the compressor's working set crossed between cores on
+        /// nearly every request (ADR 211). Without a hint (an App driven with
+        /// no server, a thread the engine did not start) the scan starts at 0.
+        fn borrow(self: *const Self, hint: ?usize) ?*Slot {
+            const n = self.slots.len;
+            if (n == 0) return null;
+            const start = if (hint) |h| h % n else 0;
+            for (0..n) |step| {
+                const i = if (start + step >= n) start + step - n else start + step;
+                const flag = &self.free[i].free;
+                // A read first: a taken flag is somebody else's line to write.
+                if (!flag.load(.monotonic)) continue;
+                if (flag.cmpxchgStrong(true, false, .acquire, .monotonic) == null) return &self.slots[i];
             }
             return null;
         }
 
         fn giveBack(self: *const Self, slot: *Slot) void {
             const i = (@intFromPtr(slot) - @intFromPtr(self.slots.ptr)) / @sizeOf(Slot);
-            _ = self.free[i / 64].fetchOr(@as(u64, 1) << @intCast(i % 64), .release);
+            self.free[i].free.store(true, .release);
         }
 
         /// Whether an answer of this shape is one the pool would compress at
@@ -289,7 +302,15 @@ pub fn PoolOf(comptime which: Backend) type {
         /// the arena resizes its last allocation in place. libdeflate starts
         /// from the same half (`libdeflate.gzip` says how it goes past it).
         pub fn gzip(self: *const Self, arena: std.mem.Allocator, body: []const u8) ?[]const u8 {
-            const slot = self.borrow() orelse return null;
+            return self.gzipAt(arena, body, bulkhead.executorIndex());
+        }
+
+        /// `gzip` for a caller that knows which executor thread it is on:
+        /// the thread's own compressor if it is free, another if not. `gzip`
+        /// asks the engine; this is the form a test or a benchmark that
+        /// starts its own threads uses.
+        pub fn gzipAt(self: *const Self, arena: std.mem.Allocator, body: []const u8, hint: ?usize) ?[]const u8 {
+            const slot = self.borrow(hint) orelse return null;
             defer self.giveBack(slot);
 
             if (which == .libdeflate) {
@@ -579,22 +600,115 @@ test "the pool hands out every slot once and takes each back" {
         var pool = try PoolOf(which).init(gpa, 3, .{});
         defer pool.deinit(gpa);
 
-        const a = pool.borrow().?;
-        const b = pool.borrow().?;
-        const c = pool.borrow().?;
+        const a = pool.borrow(null).?;
+        const b = pool.borrow(null).?;
+        const c = pool.borrow(null).?;
         try testing.expect(a != b and b != c and a != c);
-        try testing.expect(pool.borrow() == null);
+        try testing.expect(pool.borrow(null) == null);
 
         pool.giveBack(b);
-        try testing.expect(pool.borrow().? == b);
-        try testing.expect(pool.borrow() == null);
+        try testing.expect(pool.borrow(null).? == b);
+        try testing.expect(pool.borrow(null) == null);
 
         pool.giveBack(a);
         pool.giveBack(b);
         pool.giveBack(c);
         var taken: usize = 0;
-        while (pool.borrow()) |_| taken += 1;
+        while (pool.borrow(null)) |_| taken += 1;
         try testing.expectEqual(@as(usize, 3), taken);
+    }
+}
+
+test "a thread asking with its own index gets its own slot back, and the next one when it is taken" {
+    const gpa = testing.allocator;
+    inline for (backends) |which| {
+        var pool = try PoolOf(which).init(gpa, 4, .{});
+        defer pool.deinit(gpa);
+
+        // Its own, every time it asks and gives back.
+        for (0..3) |_| {
+            const mine = pool.borrow(2).?;
+            try testing.expect(mine == &pool.slots[2]);
+            pool.giveBack(mine);
+        }
+
+        // Taken: the scan goes on to the next index and wraps past the end.
+        const held = pool.borrow(3).?;
+        try testing.expect(held == &pool.slots[3]);
+        const wrapped = pool.borrow(3).?;
+        try testing.expect(wrapped == &pool.slots[0]);
+        const next = pool.borrow(3).?;
+        try testing.expect(next == &pool.slots[1]);
+
+        // An index past the end is a remainder, not a crash, and it still
+        // finds the one slot left before saying the pool is empty.
+        const last = pool.borrow(1_000_003).?;
+        try testing.expect(last == &pool.slots[2]);
+        try testing.expect(pool.borrow(0) == null);
+        try testing.expect(pool.borrow(null) == null);
+    }
+}
+
+test "no slot is ever handed to two borrowers at once under contention" {
+    const gpa = testing.allocator;
+    // Eight threads on a pool of five, so some always find it empty and the
+    // rest race for the same flags, half of them with a hint and half without.
+    var pool = try PoolOf(.std).init(gpa, 5, .{ .level = .fastest });
+    defer pool.deinit(gpa);
+
+    const Shared = struct {
+        pool: *PoolOf(.std),
+        holders: [5]std.atomic.Value(u32) = @splat(.init(0)),
+        violations: std.atomic.Value(u32) = .init(0),
+        borrowed: std.atomic.Value(u32) = .init(0),
+
+        fn run(self: *@This(), id: usize) void {
+            for (0..20_000) |i| {
+                const hint: ?usize = if (id % 2 == 0) id else null;
+                const slot = self.pool.borrow(hint) orelse continue;
+                const index = (@intFromPtr(slot) - @intFromPtr(self.pool.slots.ptr)) / @sizeOf(@TypeOf(slot.*));
+                if (self.holders[index].fetchAdd(1, .acq_rel) != 0) _ = self.violations.fetchAdd(1, .monotonic);
+                _ = self.borrowed.fetchAdd(1, .monotonic);
+                if (i % 64 == 0) std.atomic.spinLoopHint();
+                _ = self.holders[index].fetchSub(1, .acq_rel);
+                self.pool.giveBack(slot);
+            }
+        }
+    };
+    var shared: Shared = .{ .pool = &pool };
+    var threads: [8]std.Thread = undefined;
+    for (&threads, 0..) |*t, id| t.* = try std.Thread.spawn(.{}, Shared.run, .{ &shared, id });
+    for (threads) |t| t.join();
+
+    try testing.expectEqual(@as(u32, 0), shared.violations.load(.monotonic));
+    try testing.expect(shared.borrowed.load(.monotonic) > 0);
+    // And everything came back.
+    var taken: usize = 0;
+    while (pool.borrow(null)) |_| taken += 1;
+    try testing.expectEqual(@as(usize, 5), taken);
+}
+
+test "off an executor the pool still gzips, and a hint that does not fit still finds a slot" {
+    const gpa = testing.allocator;
+    inline for (backends) |which| {
+        var pool = try PoolOf(which).init(gpa, 2, .{});
+        defer pool.deinit(gpa);
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+
+        // No engine under this test, so `gzip` has no index and scans from 0.
+        try testing.expect(bulkhead.executorIndex() == null);
+        const plain = pool.gzip(arena.allocator(), long_json).?;
+        const hinted = pool.gzipAt(arena.allocator(), long_json, 99).?;
+        try testing.expectEqualSlices(u8, plain, hinted);
+        const back = try inflated(gpa, hinted);
+        defer gpa.free(back);
+        try testing.expectEqualStrings(long_json, back);
+
+        // Every slot back afterwards, whichever was used.
+        try testing.expect(pool.borrow(null) != null);
+        try testing.expect(pool.borrow(null) != null);
+        try testing.expect(pool.borrow(null) == null);
     }
 }
 
@@ -607,7 +721,7 @@ test "a pool with every compressor out sends the body as it is" {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
 
-        const held = pool.borrow().?;
+        const held = pool.borrow(null).?;
         try testing.expect(pool.gzip(arena.allocator(), long_json) == null);
         pool.giveBack(held);
         try testing.expect(pool.gzip(arena.allocator(), long_json) != null);

@@ -93,6 +93,8 @@ property of the shape rather than a size somebody picked. The fallback
 for an empty pool, which an App driven with no server under it can reach,
 is the uncompressed body, not an error.
 
+**A thread gets its own compressor back.** Slot `i` is the executor thread `i`'s: `Pool.gzip` asks the Engine which executor it is running on (`bulkhead.executorIndex`) and `borrow` starts its scan at that slot, wrapping, so on a server sized one to a thread it finds its own free every time and its compressor's `~229 KB` of tables stay in its own core's caches. Each slot's free flag is a `bool` on a cache line of its own, so a borrow and a give-back write a line nobody else is writing. A caller with no executor (an App driven with no server, a thread the Engine did not start) scans from slot 0 as before, and `Pool.gzipAt` takes the index as an argument for a test or a benchmark that starts its own threads. The borrow is still one `cmpxchg`, still never waits, and an empty pool is still the uncompressed body. This costs nothing on the hard axes: the flags are `64` bytes a slot, once, beside compressors of `~288 KB`, and no connection and no request holds anything more.
+
 **The compressor is reset in place rather than re-initialised.** `finish`
 puts the standard library's writer into its failing state, and its only
 way back is `init`, which builds the 96 KB token buffer as a temporary
@@ -233,7 +235,27 @@ knows how many.
 **Waiting for a free slot.** There is nothing to wait on: a slot held by
 a fiber on another thread comes back in tens of microseconds, and a lock
 in the `cache` module's position, with no `Io` to park on, would spin. The
-bitmask borrow is one `cmpxchg`, and empty means uncompressed.
+borrow is one `cmpxchg` on a flag, and empty means uncompressed.
+
+**One word of free bits, and a scan that always starts at the lowest.** What
+shipped first: every slot's bit in one `u64` and `@ctz` to pick. With the
+executors away from the pool most of the time (a request spends about half its
+time elsewhere), every borrower found slot 0 free and took it, so one
+compressor's working set crossed between cores on nearly every request, and
+every borrow and give-back from every thread wrote one cache line. Measured in
+process (`zig build bench-compress-scale`, libdeflate, 20 µs of other work
+between bodies, Ryzen 7 9700X, threads on distinct cpus): last-level misses a
+body went from under 1 to 130 to 235, and ns a body ran 2.7% over a compressor
+owned by its thread at 4 threads, and 5 to 6% at 8 and at 16 (two runs); the standard
+library's compressor, whose body is three times slower, ran 1% over. Through
+the arena entry on 8 logical cpus at 4,096 connections, µs of CPU a request
+went from 32.56 to 31.94 (4 interleaved pairs, -1.9%). That is a real effect
+and a small one, which is why it is a revision and not a reason on its own to
+change the pool: the cost of a body at 16 threads against 1 is 2 times
+either way, SMT and the clock, and the same for a pool of one compressor each.
+Recorded in `bench/result/http.md`; what it cannot say is how much more a part
+with many small caches (a Threadripper's sixteen core complexes) pays for a
+line that crosses one.
 
 **No upper size, which is what shipped first.** Every eligible body was
 gzipped, so a 20 MB JSON export held an executor thread for 130 ms with
@@ -261,5 +283,8 @@ only to ask whether it carried a body, and the headers only to ask about
   `Options.threads`, re-exported by the Bulkhead so the pool and the
   executors are sized from one number.
 - `bench/compress_bench.zig` and `zig build bench-compress`.
+- `http/compress.zig`: `borrow(hint)`, the flags a cache line each,
+  `Pool.gzipAt`; `bulkhead.executorIndex` (the Engine's `Executor.id`);
+  `bench/compress_scale.zig` and `zig build bench-compress-scale`.
 - The roadmap entry closes; what is left (a stream, an event stream,
   brotli) is one entry in the todo list.

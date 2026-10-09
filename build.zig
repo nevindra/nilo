@@ -5510,6 +5510,23 @@ pub fn build(b: *std.Build) void {
     b.step("bench-compress", "Time gzipping a JSON answer at each level, and weigh the result")
         .dependOn(&b.addRunArtifact(bench_compress).step);
 
+    // Whether gzipping a body slows down as more threads share the pool,
+    // against a compressor each thread owns (ADR 211). Pin nothing: the
+    // program pins its own threads.
+    const bench_compress_scale = b.addExecutable(.{
+        .name = "nilo-bench-compress-scale",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/compress_scale.zig"),
+            .target = target,
+            .optimize = .fast,
+            .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+        }),
+    });
+    const run_compress_scale = b.addRunArtifact(bench_compress_scale);
+    run_compress_scale.addPassthruArgs();
+    b.step("bench-compress-scale", "Gzip on 1 to 16 pinned threads, shared pool against a compressor each thread owns")
+        .dependOn(&run_compress_scale.step);
+
     // The pool as `listen()` builds it, for what its compressors keep
     // resident once every thread has gzipped (ADR 248). Installed rather
     // than run: `bench/compress_rss.py` starts it and reads its smaps.

@@ -3048,6 +3048,19 @@ pub noinline fn loopTurnNanos() ?u64 {
     return if (at == 0) null else at;
 }
 
+/// Which executor thread this fiber runs on, or null off a fiber (a pool
+/// thread, a test with no server). Dense from zero in the order zio started
+/// them, so a structure with one slot a thread can index it (ADR 211).
+///
+/// Reached through the type of `Runtime.executors` for the reason
+/// `loopTurnNanos` is, and `noinline` for the same one: a threadlocal read
+/// must not be cached across a context switch.
+pub noinline fn executorIndex() ?usize {
+    const Executor = @typeInfo(@typeInfo(@TypeOf(@as(zio.Runtime, undefined).executors.items)).pointer.child).pointer.child;
+    const exec = Executor.current_DO_NOT_ACCESS_DIRECTLY orelse return null;
+    return @intCast(exec.id);
+}
+
 const testing = std.testing;
 
 fn ip6Text(buf: *[Peer.max_text]u8, groups: [8]u16) []const u8 {

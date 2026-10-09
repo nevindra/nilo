@@ -46,6 +46,7 @@ zig build bench-cache          # what a cache operation costs, and what an entry
 zig build bench-cache-hitrate  # what fraction of lookups it answers, against the best it could
 zig build bench-compress       # what gzipping a JSON answer costs at each level, in µs and bytes; -Dlibdeflate for the other backend
 zig build bench-compress-stack # the stack one gzip writes below its caller, per backend, in the -Doptimize asked for
+zig build bench-compress-scale # gzip on 1 to 16 pinned threads, a shared pool against a compressor each thread owns: ns, instructions and cache misses a body; `-- <dataset.json> --gap-ns 20000`
 zig build bench-sql            # what a prepared statement is worth: SQLite always, Postgres if reachable
 zig build bench-job            # what a claim and a push cost on job.Memory, SQLite, and Postgres if reachable
 zig build bench-proto          # protobuf decode and encode, against a decoder written by hand; pin it with taskset
