@@ -107,6 +107,7 @@
 //! inside the try and costs the retry nothing.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("nilo_core");
 
 const Str = core.Str;
@@ -304,6 +305,20 @@ pub const Client = struct {
         /// Overrides `Settings.stall_ms` for this call.
         stall_ms: ?u32 = null,
         max_body: ?usize = null,
+        /// Send this call over the unix domain socket at this absolute path
+        /// instead of dialling the URL's host. **The URL is still the
+        /// request**: its host is the `Host` header, its path and query the
+        /// request line, so `http://docker/containers/json` over
+        /// `/var/run/docker.sock` is one socket and any number of paths. The
+        /// URL must be `http://`; an `https://` one is `error.TlsOverSocket`,
+        /// and a path that is not absolute, or is longer than a socket
+        /// address holds, is `error.InvalidSocket`, both before anything is
+        /// dialled. Connections are pooled by the path, so two sockets never
+        /// share one. **`Settings.proxy` does not apply**: the proxy is a
+        /// way out onto the network and a socket is a file on this host
+        /// ([ADR 272](../docs/adr/272-a-call-names-the-socket-it-goes-over.md)).
+        /// A `Target` takes the path once, in `Open.unix_socket`.
+        unix_socket: ?[]const u8 = null,
     };
 
     pub const Error = error{
@@ -346,10 +361,39 @@ pub const Client = struct {
         /// dialled. Name the host in `Proxy.bypass` to call it directly
         /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
         TlsThroughProxy,
+        /// An `https://` call with `Call.unix_socket`. std starts TLS only
+        /// on a TCP connection, and a socket is a path on this host, which
+        /// is what the transport's own permissions already protect
+        /// ([ADR 272](../docs/adr/272-a-call-names-the-socket-it-goes-over.md)).
+        TlsOverSocket,
+        /// `Call.unix_socket` is not an absolute path a socket address can
+        /// hold (at most 107 bytes, no NUL).
+        InvalidSocket,
+        /// A followed redirect led away from the origin of a call made over
+        /// a unix socket. The socket belongs to the origin it was named for,
+        /// and the other is not dialled over TCP on the strength of a
+        /// `Location` ([ADR 272](../docs/adr/272-a-call-names-the-socket-it-goes-over.md)).
+        RedirectLeavesSocket,
         OutOfMemory,
-    } || std.Uri.ParseError || std.http.Client.RequestError ||
+    } || std.Io.net.UnixAddress.ConnectError || std.Uri.ParseError || std.http.Client.RequestError ||
         std.http.Client.Request.ReceiveHeadError ||
         std.Io.Writer.Error || std.Io.Reader.Error || std.Io.Cancelable;
+
+    /// The ways a socket and a URL can disagree, named before anything is
+    /// dialled; `Target.open` returns the same three.
+    pub const SocketError = error{ InvalidSocket, TlsOverSocket, UnsupportedUriScheme };
+
+    /// What a socket call must satisfy before anything is dialled: an
+    /// absolute path a socket address can hold, and a URL that is `http`.
+    /// A path is the caller's configuration, so a bad one is named here
+    /// rather than left to the kernel's `ENOENT` (ADR 272).
+    pub fn checkSocket(path: []const u8, uri: std.Uri) SocketError!void {
+        if (path.len == 0 or path[0] != '/' or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidSocket;
+        // One byte under std's limit: the kernel's `sun_path` keeps a NUL.
+        if (path.len >= std.Io.net.UnixAddress.max_len) return error.InvalidSocket;
+        if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.TlsOverSocket;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedUriScheme;
+    }
 
     pub fn init(gpa: std.mem.Allocator, settings: Settings) Client {
         return .{
@@ -699,6 +743,7 @@ pub const Client = struct {
             .authorization = if (given.authorization) null else standing.authorization,
             .user_agent = if (given.user_agent) null else standing.user_agent,
             .timeout_ms = call.timeout_ms,
+            .unix_socket = call.unix_socket,
             .route_left_ms = core.timeLeftOf(c),
             .stall_ms = call.stall_ms,
             .redirects = .{ .follow = &redirect_buffer },
@@ -1032,6 +1077,8 @@ pub const Exchange = struct {
         /// call and costs nothing. It does not change how much one socket
         /// read brings in; `Settings.read_buffer_size` does (ADR 186).
         transfer_buffer: []u8 = &.{},
+        /// `Call.unix_socket`, for a caller that drives an `Exchange`.
+        unix_socket: ?[]const u8 = null,
     };
 
     /// What a 3xx with a `Location` means to a call. See `Begin.redirects`.
@@ -1156,6 +1203,7 @@ pub const Exchange = struct {
 
         const io = client.inner.io;
         const uri = try std.Uri.parse(opts.url);
+        if (opts.unix_socket) |path| try Client.checkSocket(path, uri);
 
         // A request whose deadline has passed is not dialled for (ADR 105).
         if (opts.route_left_ms) |left| if (left == 0) return error.TimedOut;
@@ -1395,6 +1443,7 @@ pub const Exchange = struct {
 
         const crossing = judge(here.*, next);
         if (crossing == .downgrade) return error.InsecureRedirect;
+        if (hop.unix_socket != null and crossing != .same_origin) return error.RedirectLeavesSocket;
 
         var next_hop = hop.*;
         const to_get = switch (head.status) {
@@ -1599,7 +1648,7 @@ pub const Exchange = struct {
         const std_client = if (opts.body == .stream) &client.fresh else &client.inner;
         self.reused = false;
         self.heard = false;
-        const picked = try pickConnection(client, std_client, uri);
+        const picked = try pickConnection(client, std_client, uri, opts.unix_socket);
         const pooled = picked.conn;
         self.req = std_client.request(opts.method, uri, .{
             .connection = pooled,
@@ -1704,7 +1753,18 @@ pub const Exchange = struct {
     /// because std would otherwise route every `http://` call of a client
     /// that has a proxy through it. And the pool is asked for the proxy's
     /// connection, which is the one a proxied call reuses.
-    fn pickConnection(client: *const Client, std_client: *std.http.Client, uri: std.Uri) !Pick {
+    fn pickConnection(client: *const Client, std_client: *std.http.Client, uri: std.Uri, socket: ?[]const u8) !Pick {
+        if (socket) |path| {
+            // Before the proxy, which a socket never meets, and keyed by the
+            // path as std's `connectUnix` would have keyed it (ADR 272).
+            const found = try std_client.connection_pool.findConnection(std_client.io, .{
+                .host = .{ .bytes = path },
+                .port = 0,
+                .protocol = .plain,
+            });
+            if (found) |conn| return .{ .conn = conn, .reused = true };
+            return .{ .conn = try dialUnix(std_client, path) };
+        }
         const protocol = std.http.Client.Protocol.fromUri(uri) orelse return .{};
         var name: [std.Io.net.HostName.max_len]u8 = undefined;
         const host = std.Io.net.HostName.fromUri(uri, &name) catch return .{};
@@ -1731,6 +1791,59 @@ pub const Exchange = struct {
         }
         const found = try pool.findConnection(std_client.io, .{ .host = host, .port = port, .protocol = protocol });
         return .{ .conn = found, .reused = found != null };
+    }
+
+    /// A connection to the unix socket at `path`, added to the pool as in
+    /// use and keyed by the path (`host`), port 0 and plain, which is the
+    /// key `std.http.Client.connectUnix` uses and no TCP connection can
+    /// have: a host name never begins with `/`.
+    ///
+    /// **std's own `connectUnix` does not compile at 0.17.0** (it names
+    /// `std.posix.SocketError`, which is gone), and the one thing that
+    /// builds a `Connection`, `Connection.Plain.create`, is private. So the
+    /// node is laid out here exactly as `Plain` is: the `Connection`, then
+    /// the host bytes, the read buffer and the write buffer in one
+    /// allocation, because `Connection.destroy` frees by `Plain`'s length.
+    /// That is a copy of a private layout, so it is pinned to the Zig it
+    /// was read against, and the test that dials, pools and closes one
+    /// under the testing allocator is what notices a drift (ADR 272).
+    fn dialUnix(std_client: *std.http.Client, path: []const u8) !*std.http.Client.Connection {
+        comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 17)
+            @compileError("nilo: fetch lays out a unix-socket Connection as std.http.Client.Connection.Plain does (std/http/Client.zig, Zig 0.17); " ++
+                "re-read Plain.create for this Zig, or use std's connectUnix if it compiles, then widen this check (ADR 272)");
+        const Connection = std.http.Client.Connection;
+        const io = std_client.io;
+        const gpa = std_client.allocator;
+        const address = std.Io.net.UnixAddress.init(path) catch return error.InvalidSocket;
+        var socket = try address.connect(io);
+        errdefer socket.close(io);
+
+        const read_len = std_client.read_buffer_size;
+        const write_len = std_client.write_buffer_size;
+        const base = try gpa.alignedAlloc(u8, .of(Connection), @sizeOf(Connection) + path.len + read_len + write_len);
+        const host_bytes = base[@sizeOf(Connection)..][0..path.len];
+        const read_buffer = host_bytes.ptr[host_bytes.len..][0..read_len];
+        const write_buffer = read_buffer.ptr[read_len..][0..write_len];
+        @memcpy(host_bytes, path);
+        const conn: *Connection = @ptrCast(base.ptr);
+        conn.* = .{
+            .client = std_client,
+            .stream_writer = socket.writer(io, write_buffer),
+            .stream_reader = socket.reader(io, read_buffer),
+            .pool_node = .{},
+            .port = 0,
+            .host_len = @intCast(path.len),
+            .proxied = false,
+            .closing = false,
+            .protocol = .plain,
+        };
+        // On failure the stream closes (errdefer above) and the node is
+        // freed here, as `Connection.destroy` would not have been called.
+        std_client.connection_pool.addUsed(io, conn) catch |err| {
+            gpa.free(base);
+            return err;
+        };
+        return conn;
     }
 
     /// The write fails with `WriteFailed` after a refusal that came back

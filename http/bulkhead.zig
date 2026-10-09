@@ -608,6 +608,26 @@ pub const Options = struct {
     /// the tab is open.
     max_connections: u32 = 10_000,
 
+    /// How many requests one connection is answered before the server ends
+    /// it, so that a client that keeps a connection for ever is moved off the
+    /// instance and the executor it was dealt to
+    /// ([ADR 275](../docs/adr/275-a-connection-is-ended-after-a-number-of-requests.md)).
+    /// The answer to the last request carries `Connection: close` on
+    /// HTTP/1.1, and an HTTP/2 connection is sent a GOAWAY naming the last
+    /// stream that will be answered. 0 turns it off.
+    ///
+    /// **The number each connection gets is up to a tenth below this one**, so
+    /// that a hundred connections opened together do not all end on the same
+    /// request and come back together. A WebSocket, or any handler that took
+    /// the socket over, is never ended by it: the cap is a question about
+    /// requests, and a socket that has been handed over is not asking any.
+    ///
+    /// nginx ends a connection at 1,000 (`keepalive_requests`, raised from 100
+    /// in 1.19.10), fasthttp has `MaxRequestsPerConn`, and net/http, hyper and
+    /// actix have nothing. A client reconnects once in a thousand requests,
+    /// which is under 0.1% of a loopback request's cost.
+    max_requests_per_connection: u32 = 1000,
+
     /// The most requests this process answers at once. 0, the default,
     /// means no limit.
     ///
@@ -2465,4 +2485,35 @@ test "a caller that asks again right after leave does not jump the line" {
         t.join();
     }
     try testing.expectEqual(@as(usize, 0), barged);
+}
+
+/// What a connection is allowed: `cap` requests, less up to a tenth of it,
+/// chosen per connection so that connections opened together end apart. 0 for
+/// no cap. The spread comes from a counter put through a mixer and the clock,
+/// not a random source, because the only thing it has to be is uneven between
+/// neighbours (ADR 275).
+pub fn connectionBudget(cap: u32) u32 {
+    if (cap < 10) return cap;
+    const n = dealt.fetchAdd(1, .monotonic);
+    var z = (n +% @as(u64, @truncate(monotonicNanos()))) *% 0x9E3779B97F4A7C15;
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+    z ^= z >> 27;
+    return cap - @as(u32, @intCast(z % (cap / 10 + 1)));
+}
+
+var dealt: std.atomic.Value(u64) = .init(0);
+
+test "a connection's budget is the cap less up to a tenth, differs between neighbours, and is exact below ten" {
+    try std.testing.expectEqual(@as(u32, 0), connectionBudget(0));
+    try std.testing.expectEqual(@as(u32, 3), connectionBudget(3));
+    var lowest: u32 = std.math.maxInt(u32);
+    var highest: u32 = 0;
+    for (0..2000) |_| {
+        const b = connectionBudget(1000);
+        try std.testing.expect(b >= 900 and b <= 1000);
+        lowest = @min(lowest, b);
+        highest = @max(highest, b);
+    }
+    // Spread over the whole tenth, not stuck on one number.
+    try std.testing.expect(lowest <= 905 and highest >= 995);
 }

@@ -76,6 +76,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
 - [Concurrency](./app.md#concurrency)
 - [Static options](./app.md#static-options)
   - [`nilo.app`](./app.md#niloapp)
+- [A TLS library of your own](./app.md#a-tls-library-of-your-own)
 - [OpenAPI options](./app.md#openapi-options)
   - [The document without a server](./app.md#the-document-without-a-server)
 
@@ -301,6 +302,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`fetch.Client` calls](./fetch.md#fetchclient-calls)
   - [`Client.Settings`](./fetch.md#clientsettings)
   - [`Client.Call`](./fetch.md#clientcall)
+  - [A call over a unix socket](./fetch.md#a-call-over-a-unix-socket)
   - [A call under a traced request](./fetch.md#a-call-under-a-traced-request)
   - [A proxy and a private authority](./fetch.md#a-proxy-and-a-private-authority)
   - [Redirects](./fetch.md#redirects)

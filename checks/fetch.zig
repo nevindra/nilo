@@ -28,6 +28,13 @@ pub const FetchCheck = struct {
     /// `zig_exe` is the compiler running this build and `cache_root` its local
     /// cache, both of which only the build knows and so arrive as arguments.
     pub fn run(r: *Report, zig_exe: []const u8, cache_root: []const u8) anyerror!void {
+        // The second is `.tls = true, .tls_own = true` and no tls.zig of its
+        // own: configuring it must still land zio and nothing else, which is
+        // what makes the option a way to keep nilo's pin out (ADR 274).
+        for ([_][]const u8{ "dependent", "dependent-tls-own" }) |name| try runOne(r, zig_exe, cache_root, name);
+    }
+
+    fn runOne(r: *Report, zig_exe: []const u8, cache_root: []const u8, name: []const u8) anyerror!void {
         const io = r.io;
 
         // **Both caches have to be cold, and finding that out is the whole
@@ -39,8 +46,8 @@ pub const FetchCheck = struct {
         // the manifest is unpacked whether or not the build asked for it, so
         // counting `zig-pkg/` says everything. The first two versions of this
         // step got one each.
-        const cache = try std.fs.path.join(r.gpa, &.{ cache_root, "fetch-check" });
-        r.root.deleteTree(io, "bench/dependent/zig-pkg") catch {};
+        const cache = try std.fs.path.join(r.gpa, &.{ cache_root, "fetch-check", name });
+        r.root.deleteTree(io, try std.fs.path.join(r.gpa, &.{ "bench", name, "zig-pkg" })) catch {};
         std.Io.Dir.cwd().deleteTree(io, cache) catch {};
         try std.Io.Dir.cwd().createDirPath(io, cache);
 
@@ -54,8 +61,8 @@ pub const FetchCheck = struct {
         // beside them at the same relative place, and `../..` resolves to
         // exactly what a fetch would have unpacked.
         const staged = try std.fs.path.join(r.gpa, &.{ cache, "staged" });
-        try stageShipped(r, staged);
-        const dependent = try std.fs.path.join(r.gpa, &.{ staged, "bench", "dependent" });
+        try stageShipped(r, staged, name);
+        const dependent = try std.fs.path.join(r.gpa, &.{ staged, "bench", name });
         // The global cache is the compiler's to choose, by this variable and
         // not by a flag: the child gets the environment this program has, with
         // the cold cache named in it and nothing left over that would name a
@@ -81,8 +88,8 @@ pub const FetchCheck = struct {
                 // program, the child's own account is all there is of why.
                 std.debug.print("{s}", .{result.stderr});
                 return r.fail(
-                    "nilo: the dependent in `bench/dependent/` did not build, so nothing was counted",
-                    .{},
+                    "nilo: the dependent in `bench/{s}/` did not build, so nothing was counted",
+                    .{name},
                 );
             },
             else => return r.fail("nilo: the dependent's build did not exit normally", .{}),
@@ -106,11 +113,11 @@ pub const FetchCheck = struct {
             if (std.mem.startsWith(u8, entry.name, allowed)) continue;
             unwanted += 1;
             try r.addError(
-                "nilo: a dependent that imports only `nilo_http` downloaded `{s}`.\n" ++
+                "nilo: the dependent in `bench/{s}/`, which imports only `nilo_http`, downloaded `{s}`.\n" ++
                     "  Something in build.zig asks for it unconditionally — `b.lazyDependency` is a\n" ++
                     "  request, not a conditional, so it has to sit behind the option that wants it\n" ++
                     "  (ADR 066).",
-                .{entry.name},
+                .{ name, entry.name },
             );
         }
         if (unwanted > 0) return error.CheckFailed;
@@ -119,9 +126,9 @@ pub const FetchCheck = struct {
 
 /// Copy what a fetch of this package would unpack — the entries of
 /// `.paths` in `build.zig.zon` — into `staged`, and the fetch-check
-/// dependent beside it at `bench/dependent/`. Anything not shipped is not
+/// dependent beside it at `bench/<dependent>/`. Anything not shipped is not
 /// there, which is the point.
-fn stageShipped(r: *Report, staged: []const u8) !void {
+fn stageShipped(r: *Report, staged: []const u8, dependent: []const u8) !void {
     const io = r.io;
     const Manifest = struct { paths: []const []const u8 };
     const source = try r.root.readFileAllocOptions(
@@ -149,9 +156,13 @@ fn stageShipped(r: *Report, staged: []const u8) !void {
     defer out.close(io);
 
     for (manifest.paths) |entry| try copyEntry(r, root, out, entry);
-    for ([_][]const u8{ "build.zig", "build.zig.zon", "main.zig" }) |name| {
-        const at = try std.fs.path.join(r.gpa, &.{ "bench", "dependent", name });
-        try root.copyFile(at, out, at, io, .{ .make_path = true });
+    for ([_][]const u8{ "build.zig", "build.zig.zon", "main.zig" }) |file| {
+        const at = try std.fs.path.join(r.gpa, &.{ "bench", dependent, file });
+        // `main.zig` is only in a dependent that compiles something.
+        root.copyFile(at, out, at, io, .{ .make_path = true }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
     }
 }
 

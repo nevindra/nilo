@@ -423,6 +423,20 @@ Nothing is open at this tier.
 
 **What would settle it:** a test with a client whose permits are all taken, under a route deadline shorter than the queue's wait.
 
+**`nilo_fetch` lays out a unix socket's `Connection` by hand, because `std.http.Client.connectUnix` does not compile at 0.17.0.** It names `std.posix.SocketError`, which is gone, and a pool API that has moved, and the `Plain.create` that a connection is built through is private; lazy analysis hides all of it until something calls it. So `Exchange.dialUnix` dials `std.Io.net.UnixAddress` and builds the `Connection` the way `Plain` does, behind a `@compileError` that fires on any Zig but 0.17 ([ADR 272](./adr/272-a-call-names-the-socket-it-goes-over.md)). A std that changes the layout without changing the version would free the wrong bytes; the tests free under the testing allocator, which is what would notice.
+
+**Needs:** `connectUnix` fixed upstream (its `ConnectUnixError` and its call into the pool), or a std release where it builds; then `dialUnix` and its version pin go. Last checked at 0.17.0.
+
+**`nilo_fetch` has no WebSocket client, so a service that consumes a feed (prices, a chat platform's gateway) brings a library of its own.** The frame code is in `http/websocket.zig`, which `nilo_fetch` may not import ([ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)); a second copy is the thing to avoid, and the framing moving to `nilo_core` as something two layers need is the shape that keeps one ([ADR 057](./adr/057-percent-is-needed-by-two-layers.md)). What the others settled: a limit on a message counted in **decoded** bytes (coder/websocket 32 KiB, tungstenite 64 MiB, undici 128 MiB; gorilla's counts frame bytes and has no default, which leaves a compressed message unbounded), a ping answered without the caller (tungstenite queues the pong, awc leaves it to the caller), and a close that waits a bounded time for the other side's (coder/websocket, 5 s).
+
+**Needs:** a caller with a feed to read, and the frame code's home decided before the client is written.
+
+**Direction:** [The toolkit grows by the jobs people have](./roadmap.md#the-toolkit-grows-by-the-jobs-people-have)
+
+**`nilo_fetch` cannot present a client certificate, so it cannot call a service that requires mutual TLS.** `std.crypto.tls.Client` at 0.17.0 has no answer to a `CertificateRequest`; tls.zig, which the listener already uses behind `-Dtls`, takes a key pair on its client. Moving the client to it is the same fork of `std.http.Client`'s connection that the egress-proxy entry weighs, so the two are one decision. reqwest shows the trap to keep out: which `Identity` constructors compile depends on the TLS backend a feature picked. Go's `GetClientCertificate` is the shape for a certificate that rotates.
+
+**Needs:** a caller behind a mesh that requires it, and the client's TLS library settled together with the egress-proxy entry.
+
 ### `nilo_job`
 
 **A bulk enqueue may slow every claim, because the claim sorts the whole due backlog.** `ORDER BY priority, run_at LIMIT 1` over `(state, run_at)` sorts every due row; probing each priority on an index of `(state, priority, run_at)` would not, and [ADR 214](./adr/214-a-job-says-how-urgent-it-is.md)'s finding that the wide index is slower was for that one ordering, not for one `ORDER BY run_at LIMIT 1` a priority. The `nilo_job` audit at `1738286` ran both once in a scratch container and wrote nothing down, and `SKIP LOCKED` is refused inside a `UNION ALL`, so the shape is up to three statements or a CTE a priority.
@@ -497,9 +511,9 @@ Nothing is open at this tier.
 
 **What would settle it:** a client seen sending trailers after an early answer. Neither h2spec over TLS (142 of 146, the four constant failures) nor Chromium loading a page of nineteen subresources tripped it.
 
-**Client certificates on a TLS listener.** The library has `client_auth` with a CA bundle and `.require`/`.request`; nothing in `Options.tls` names it, and nothing on `Ctx` would say who the client was. The second half is the design question: a verified subject is request data, so it wants to be a typed argument the way `Session(T)` is, not a header.
+**Client certificates on a TLS listener.** The library has `client_auth` with a CA bundle and `.require`/`.request`; nothing in `Options.tls` names it, and nothing on `Ctx` would say who the client was. The second half is the design question: a verified subject is request data, so it wants to be a typed argument the way `Session(T)` is, not a header. **The modes are where the others leave a trap**: Go has five (`RequestClientCert` and `RequireAnyClientCert` hand the handler a chain nobody verified, and only `r.TLS.VerifiedChains` is to be believed), rustls has two (`WebPkiClientVerifier`, with `allow_unauthenticated()` turning "require" into "request"), fiber has one (`CertClientFile` forces require-and-verify), and actix reaches the certificate through an `on_connect` downcast to one TLS crate's type at one version. The shape that fits here is the two modes rustls has, a subject that exists only once verified, and nothing that names the library.
 
-**Needs:** the service mesh that wants it, and the answer to what a handler is handed.
+**Needs:** the service mesh that wants it, and the answer to what a handler is handed. The client half is the `nilo_fetch` entry on presenting a certificate.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
@@ -509,11 +523,15 @@ Nothing is open at this tier.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
-**A stream is never compressed, and neither is an event stream; and gzip is the only coding.** `app.compress` gzips a whole body on a compressor borrowed for the CPU it takes and handed back before the socket is written, which is what keeps one compressor per thread enough ([ADR 211](./adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md)). A stream has no whole body and would hold its compressor across every write, so its shape is a second pool larger than the thread count and chunked framing; an event stream must never be buffered and stays out on principle. Brotli and zstd were measured and refused ([`decided.md`](./decided.md)); a faster `std.flate` is the entry waiting on zig.
+**A stream is never compressed, and neither is an event stream; and gzip is the only coding.** `app.compress` gzips a whole body on a compressor borrowed for the CPU it takes and handed back before the socket is written, which is what keeps one compressor per thread enough ([ADR 211](./adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md)). A stream has no whole body and would hold its compressor across every write, so its shape is a second pool larger than the thread count and chunked framing. **That an event stream must stay out because it must never be buffered is not what the others found**: actix (since actix-http 3.18.12), async-compression under tower-http, gzhttp, Caddy and nginx all compress a stream and flush the compressor with a sync flush whenever the producer stops writing (nginx's `Z_SYNC_FLUSH` on a buffer marked `flush`, actix's flush when the source is pending), which puts each event on the wire whole. What they disagree on is the default: tower-http skips `text/event-stream`, the other four compress it. Each also has a way for one response to opt out (an explicit `Content-Encoding: identity`, gzhttp's `No-Gzip-Compression` header), drops `Accept-Ranges` and `Content-Length`, and weakens or suffixes a strong `ETag`. Brotli and zstd were measured and refused ([`decided.md`](./decided.md)); a faster `std.flate` is the entry waiting on zig.
 
-**Needs:** a caller streaming something text and large enough that the bandwidth matters.
+**Needs:** a caller streaming something text and large enough that the bandwidth matters; then the per-stream compressor's bytes measured, since it is held for the stream's life, and a flush at every `Stream.flush` and every event.
 
 **Direction:** [A stream is one shape](./roadmap.md#a-stream-is-one-shape)
+
+**An answer larger than `arena_keep` costs a request about 54 KB of backing allocation and a quarter of its time, measured in-process only.** `sendJson` starts at `json_hint` and grows, and a 17 KB answer used 54 KB of arena at the default 16 KiB keep, so every request asked the backing allocator again ([`http.md`](../bench/result/http.md#a-json-answer-in-arena-segments-does-not-beat-allocating)). Writing into segments is not the fix: it measured equal to `Allocating` once the arena kept enough. A per-route size hint, the length of the route's last answer, or a larger keep would be.
+
+**What would settle it:** a 17 KB route in `bench/main.zig` through wrk at a keep of 16 KiB and 64 KiB, and with a last-length hint, allocations a request and p99.
 
 **A gRPC connection's message budget is not an option.** The budget is `max_body`, or the largest limit a route raised to with `nilo.maxBody` (at least 64 KiB), and a call is charged its compressed bytes, its inflated copy and the copy its route reads it into, so a Collector sending 4 MB batches gets about two running at a time per connection at `max_body` 16 MiB and the rest wait ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md#what-the-budget-does-to-an-opentelemetry-collector)). Waiting replaced the refusal and made a small budget slow rather than lossy; a budget sized from the caller's batches is what would let more run at once.
 

@@ -332,6 +332,18 @@ var api: fetch.Client = .init(gpa, .{
 
 **`roots` is a bundle, and it is yours.** It must outlive the client and not change while the client lives; the client never frees it. Give it an empty bundle and an `https://` call trusts nobody, which is how you hold a program to one authority.
 
+### Calling a service on a unix socket
+
+**A service on `unix:/run/orders.sock`, the Docker Engine, or a local agent is called by naming the socket beside the URL.** The URL is still the request (its host becomes the `Host` header, its path the request line), so a Target for Docker is one line and every path hangs off it:
+
+```zig
+const Docker = fetch.Target("docker", .{});
+var docker = try Docker.open(&client, .{ .base = "http://docker/v1.43", .unix_socket = "/var/run/docker.sock" });
+// docker.get(c, "/containers/{id}/json", .{ .id = id }, .{})
+```
+
+Without a Target, `client.get(c, "http://docker/containers/json", .{ .unix_socket = "/var/run/docker.sock" })`. The URL must be `http://` (`error.TlsOverSocket` otherwise), the path absolute (`error.InvalidSocket`), and a proxy in `Settings` is not used for it: a socket never leaves the host, so one client proxies Stripe and talks to Docker. A redirect to another origin is `error.RedirectLeavesSocket` and is not followed over TCP ([ADR 272](../adr/272-a-call-names-the-socket-it-goes-over.md)).
+
 ### Stall timeout (`stall_ms`)
 
 **`stall_ms` limits silence inside a call, not the length of the call.** A download may legitimately take an hour, so the only sensible `timeout_ms` for a call whose whole purpose is the transfer is `0`. That leaves a peer that went quiet with the socket open (a CDN edge that lost its origin, a NAT that dropped the mapping, a Wi-Fi handover) with nothing to end it. With `stall_ms`, nothing arriving for that long is `error.Stalled`, counted from the last byte received, not from the start. The two work together (`timeout_ms` on the whole call, `stall_ms` on the gaps), and a caller sets either or both ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)).
@@ -377,6 +389,7 @@ Under a server it uses the Engine's timer, reset on every chunk; on a client wit
 | `error.BodyTooShort` | the body ended before the length its own head announced |
 | `error.TlsThroughProxy` | an `https://` call that `Settings.proxy` would carry; name its host in `bypass` to reach it directly |
 | `error.InvalidProxy` | `Settings.proxy.url` is not an `http://` or `https://` URL with a host; raised by the start, before the program serves |
+| `error.TlsOverSocket` / `error.InvalidSocket` / `error.RedirectLeavesSocket` | a call over a unix socket that is `https://`, whose path is not an absolute socket path, or whose redirect left the origin ([above](#calling-a-service-on-a-unix-socket)) |
 | `error.NotStarted` | a call made before `listen()`: the client is finished at startup like any other service |
 | the rest | `std.Uri.ParseError`, `std.http.Client`'s connect and receive errors, and the reader and writer errors, unchanged |
 
@@ -479,6 +492,8 @@ fn retryAfterIsRead(io: std.Io, gpa: std.mem.Allocator) !void {
 ```
 
 `io` is a `std.Io.Threaded` the test owns: `var threaded: std.Io.Threaded = .init(std.testing.allocator, .{}); defer threaded.deinit();` and `threaded.io()`. Use `concurrent`, not `async`, because `async` may run the server on your own thread, where it sits in `accept` waiting for the connection that same thread was about to make; the module's tests found that as a hang at zero CPU ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)).
+
+**A call over a unix socket is tested with `Canned.openUnix(io, path)`.** It listens on a socket file at `path` where `open` would bind a loopback port, and the call names that path as its `unix_socket`. The URL the test sends is its own, since over a socket only the `Host` and the path reach the server, and the socket file is yours to remove ([the reference](../reference/fetch.md#fetchtesting)).
 
 **A Target's `.retry` is tested with `canned.serveScript(script, count)`.** It answers `count` requests from a list of replies, one connection each, so every try is a connection that can be counted: `canned.tried` says how many arrived and when, and `headOfTry(n)` gives the head of each. Start it with `io.concurrent`, and check `tried` after the call returns.
 

@@ -516,6 +516,20 @@ So the retry costs **+48 bytes to a program that declares nothing** (the split o
 
 **Decision this moves.** ADR 271 (a retry is the caller's numbers and nilo's mechanism), ADR 061's per-connection figure (+4,141 to +2,132 for `nilo_fetch`'s call), and ADR 017's running total. Reproducing the memory run: build `bench-fetch-server` before and after, then `taskset -c 4,5 ./nilo-bench-fetch-server &` and `taskset -c 6 python3 bench/mem.py --port 8791 --path /call --steps 5000,10000`, killing the server between runs.
 
+## A call over a unix socket: what it costs (ADR 272)
+
+Run at c4e2d08 plus the working tree of the change, on the development machine (x86-64 Linux, Zig 0.17.0), `-Dtarget=x86_64-linux-gnu`. Not a load run: three sizes, because the change adds a runtime branch and a dial and nothing to a call that sets no socket.
+
+| what | before | after | delta |
+|---|---|---|---|
+| `@sizeOf(Exchange)` | 992 | 992 | 0 |
+| `@sizeOf(Client)` | 688 | 688 | 0 |
+| `@sizeOf(Client.Call)` | 48 | 64 | +16, on the stack of a call |
+| `@sizeOf(Exchange.Begin)` | 208 | 224 | +16, on the stack of a call |
+| stripped `ReleaseFast` program that does one `client.get` over `http://` | 953,008 | 953,744 | **+736** |
+
+The program is one `get` with default settings, built with `zig build-exe -OReleaseFast -fstrip` against `fetch/` and `core/` from `git archive HEAD` and from the working tree. **Decision this moves:** none; ADR 272 quotes the figures. Allocations per request and the idle figures are not touched on a path that sets no socket, and the allocation budget test is unchanged. Not measured: throughput of a socket call, and `bench/mem.py` against a socket, which would say whether the dial frame changes the park.
+
 ## What is still missing
 
 - **A quiet machine.** The load average was between 6 and 18 across these runs

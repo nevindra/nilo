@@ -50,6 +50,7 @@ zig build bench-sql            # what a prepared statement is worth: SQLite alwa
 zig build bench-job            # what a claim and a push cost on job.Memory, SQLite, and Postgres if reachable
 zig build bench-proto          # protobuf decode and encode, against a decoder written by hand; pin it with taskset
 zig build bench-json-float     # writing a float as JSON, std.json against serde_json's spelling; pin it with taskset
+zig build bench-json-segments  # a JSON answer in arena segments against Allocating, instructions and allocations a request; pin it with taskset, `-- --keep N` sets the arena's keep
 ```
 
 ## Servers for a load generator
@@ -90,6 +91,7 @@ python3 bench/slowloris.py --port … --path …    # what a body that never fin
 python3 bench/compress_rss.py ./zig-out/bin/nilo-bench-compress-server  # what the compressor pool keeps resident (ADR 248)
 python3 bench/ws_idle.py both                   # memory per idle WebSocket, nilo and gws
 python3 bench/paced.py --pid … --port … --rate …  # µs of CPU a request at a fixed rate: a server that is not busy (ADR 199)
+python3 bench/keepalive.py --ports … --pids … --plan BIIIBIII…  # which executor each keep-alive connection lives on, and each executor's CPU, per window (ADR 275); the server is `zig build bench-keepalive-server`
 python3 bench/shutdown.py --cmd … --port …      # does SIGTERM come back? (ADR 077)
 python3 bench/fdlimit.py --cmd … --port …       # does a descriptor shortage take the server down? (ADR 194)
 python3 bench/burst.py --cmd … --port …         # does a burst of connections get through? (ADR 198)

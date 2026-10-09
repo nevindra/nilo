@@ -495,6 +495,9 @@ const ServingAt = struct {
     bound: std.atomic.Value(bool) = .init(true),
     /// `block_warning_ms` for the server; the default is the shipped one.
     warn_ms: u32 = 250,
+    /// `max_requests_per_connection` for the server; 0 is off, which these
+    /// tests want unless they say otherwise (ADR 275).
+    max_requests: u32 = 0,
 
     fn run(self: *ServingAt) void {
         self.app.tryListen(.{
@@ -502,6 +505,7 @@ const ServingAt = struct {
             .threads = 1,
             .stop_on_signal = false,
             .block_warning_ms = self.warn_ms,
+            .max_requests_per_connection = self.max_requests,
         }) catch {
             self.bound.store(false, .release);
         };
@@ -762,6 +766,112 @@ test "two requests sent together are answered together, and the second is not he
     try writer.interface.flush();
     try readUntilSeen(io, stream, &whole, "\r\n\r\npong", 3);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, whole.written(), "HTTP/1.1 200 "));
+}
+
+/// Whether the server has closed `stream`: a read that returns end of file
+/// inside the bound, which is what a client that was told `Connection: close`
+/// sees once the answer is read.
+fn serverHungUp(io: std.Io, stream: std.Io.net.Stream) !bool {
+    const limit: std.posix.timeval = .{ .sec = 5, .usec = 0 };
+    try std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&limit));
+    var in_buf: [64]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    var sink: [64]u8 = undefined;
+    var discard = std.Io.Writer.fixed(&sink);
+    _ = reader.interface.stream(&discard, .limited(sink.len)) catch |err| return err == error.EndOfStream;
+    return false;
+}
+
+test "a connection is closed by the server after the requests it is allowed, and not before" {
+    // ADR 275. The loop that counts is the Engine's connection fiber, which
+    // a fixed reader never runs, so this takes a real socket: the answers
+    // before the last keep the connection, the last says `Connection: close`,
+    // and the socket then reaches end of file inside a bound.
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/ping", pong);
+
+    // Under ten requests there is no spread, so the third is the last.
+    var serving: ServingAt = .{ .app = &app, .max_requests = 3 };
+    const thread = try std.Thread.spawn(.{}, ServingAt.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    const port = try waitForPort(gpa, &serving);
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    var stream: std.Io.net.Stream = for (0..300) |_| {
+        break address.connect(io, .{ .mode = .stream }) catch {
+            std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+            continue;
+        };
+    } else return error.ServerNeverCameUp;
+    defer stream.close(io);
+
+    var out_buf: [512]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    const one = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    var whole: std.Io.Writer.Allocating = .init(gpa);
+    defer whole.deinit();
+    for (1..4) |n| {
+        try writer.interface.writeAll(one);
+        try writer.interface.flush();
+        try readUntilSeen(io, stream, &whole, "\r\n\r\npong", n);
+        // Only the last answer says it.
+        try testing.expectEqual(@as(usize, if (n == 3) 1 else 0), std.mem.count(u8, whole.written(), "Connection: close"));
+    }
+    try testing.expect(try serverHungUp(io, stream));
+}
+
+test "requests sent behind the last one a connection is allowed are not answered, and the last answer arrives" {
+    // The reset a close with unread input would send can take the answer with
+    // it (ADR 195), so the server hangs up with a FIN and waits for the peer.
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/ping", pong);
+
+    var serving: ServingAt = .{ .app = &app, .max_requests = 2 };
+    const thread = try std.Thread.spawn(.{}, ServingAt.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    const port = try waitForPort(gpa, &serving);
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    var stream: std.Io.net.Stream = for (0..300) |_| {
+        break address.connect(io, .{ .mode = .stream }) catch {
+            std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+            continue;
+        };
+    } else return error.ServerNeverCameUp;
+    defer stream.close(io);
+
+    var out_buf: [512]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    const one = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    try writer.interface.writeAll(one ++ one ++ one ++ one);
+    try writer.interface.flush();
+
+    var whole: std.Io.Writer.Allocating = .init(gpa);
+    defer whole.deinit();
+    try readUntilSeen(io, stream, &whole, "\r\n\r\npong", 2);
+    try testing.expect(try serverHungUp(io, stream));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, whole.written(), "HTTP/1.1 200 "));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, whole.written(), "Connection: close"));
 }
 
 /// The server under test on a path rather than a port.

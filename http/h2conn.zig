@@ -118,6 +118,9 @@ pub const Host = struct {
     gpa: std.mem.Allocator,
     stop: *const bulkhead.Stop,
     max_body: usize,
+    /// `max_requests_per_connection` (ADR 275): the calls a connection is
+    /// answered before it is sent a GOAWAY, 0 for no cap.
+    max_requests: u32 = 0,
     /// The most a route may raise its own limit to, and `max_body` where none
     /// does: what one connection's messages are bounded by together
     /// (`Conn.budget`, ADR 220).
@@ -245,6 +248,7 @@ pub fn serveConnection(
         .shared = shared,
         .decoder = hpack.Decoder.init(app.gpa),
         .scratch = .init(app.gpa),
+        .calls_left = bulkhead.connectionBudget(app.max_requests),
     };
     defer conn.deinit();
     deadlines.armWrite();
@@ -646,6 +650,12 @@ const Conn = struct {
     /// another thread.
     trailer_block: std.ArrayList(u8) = .empty,
     last_stream: u31 = 0,
+    /// Calls this connection may still start before it is sent a GOAWAY, and
+    /// whether that has come: the HTTP/2 form of `Connection: close` on the
+    /// last answer (ADR 275). `calls_left` is 0 for a connection with no cap,
+    /// which `spent` tells from one that has used its allowance.
+    calls_left: u32 = 0,
+    spent: bool = false,
 
     /// What the client said, and where its windows stand.
     peer_window: i64 = h2.default_window,
@@ -812,7 +822,7 @@ const Conn = struct {
             if (c.goaway_sent or c.peer_goaway) {
                 if (c.streams.items.len == 0 and c.in.bufferedLen() == 0) break;
             }
-            if (!c.goaway_sent and c.app.stop.isRequested()) {
+            if (!c.goaway_sent and (c.spent or c.app.stop.isRequested())) {
                 c.goaway(.no_error) catch break;
                 continue;
             }
@@ -1365,6 +1375,10 @@ const Conn = struct {
         }
         if (head.stream <= c.last_stream) return error.Protocol;
         c.last_stream = head.stream;
+        if (c.calls_left != 0) {
+            c.calls_left -= 1;
+            c.spent = c.calls_left == 0;
+        }
 
         const s = c.newStream(head.stream) catch return error.Internal;
         s.self_dependent = self_dependent;
@@ -6689,6 +6703,39 @@ test "a server that is stopping ends the event streams of an HTTP/2 connection a
     try testing.expect(data.len >= 1 and data[data.len - 1].head.has(h2.Flags.end_stream));
     try testing.expectEqualStrings("stopping", try dataOn(&got, 3));
     try testing.expectEqual(@as(usize, 0), room.count());
+}
+
+test "a connection that has had its allowance of calls is sent a GOAWAY naming the last it will answer" {
+    var app = try testApp();
+    defer app.deinit();
+    // Under ten there is no spread, so the third call is the last.
+    app.max_requests_per_connection = 3;
+    var client = try TestClient.init();
+    defer client.deinit();
+    for ([_]u31{ 1, 3, 5, 7, 9 }) |id| try client.call(id, "/test.Echo/Say", "hello");
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.no_error, got.goaway().?);
+    var last: ?u32 = null;
+    for (got.frames.items) |f| if (f.head.type == .goaway) {
+        last = std.mem.readInt(u32, f.payload[0..4], .big);
+    };
+    try testing.expectEqual(@as(?u32, 5), last);
+    // The three it took are answered whole; the two behind are not run.
+    for ([_]u31{ 1, 3, 5 }) |id| try testing.expectEqualStrings("hello", try got.message(id));
+    for ([_]u31{ 7, 9 }) |id| try testing.expectEqual(@as(usize, 0), Answer.of(.data, &got, id).len);
+}
+
+test "a connection with no cap is never sent a GOAWAY for the calls it makes" {
+    var app = try testApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    for ([_]u31{ 1, 3, 5, 7, 9 }) |id| try client.call(id, "/test.Echo/Say", "hello");
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
 }
 
 test "event streams count against the cap of streams like any open stream, and the one past it is refused" {

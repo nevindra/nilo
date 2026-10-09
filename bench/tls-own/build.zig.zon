@@ -1,0 +1,20 @@
+.{
+    .name = .tls_own,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x5e9e4eff2548fd1b,
+    .dependencies = .{
+        // By path, so the check builds this working copy.
+        .nilo = .{ .path = "../.." },
+        // The dependent's own TLS library. It is the commit nilo pins, so the
+        // global package cache already holds it wherever the suite has run,
+        // and a check that reaches the internet is not what `test` is. Move
+        // it with the pin in the root `build.zig.zon`, or the check is no
+        // longer about a library other than nilo's.
+        .tls = .{
+            .url = "git+https://github.com/nevindra/tls.zig#1d1dda2eccec9ddb83d906b4628a3fa9c4c3112b",
+            .hash = "tls-0.1.0-ER2e0njeBgD84olLeuyJgyoY5eesJk9y1bD4UCzsEtSd",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

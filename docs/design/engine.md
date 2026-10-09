@@ -49,6 +49,7 @@ The contract is `http/bulkhead.zig`; the only file allowed to name zio is `http/
 15. **A `nilo.Gate` serves waiters in the order they arrived, and `enterWithin(ms)` limits how long one waits.** A returned turn goes directly to the oldest waiter, never back into a count that a newcomer could grab first. A wait that times out holds nothing and leaves the line. [ADR 222](../adr/222-a-gate-serves-its-waiters-in-the-order-they-came.md)
 16. **A container's CPU quota sets the thread count: the quota rounded up, plus one.** The CPU affinity mask cannot see a quota, so `threads = 0` used to read every core of the host and the quota then throttled them. At startup nilo reads the tightest limit from the process's cgroup and its parents, and logs the count and the reason when it is lower than the number of cores. The count is capped at 64. [ADR 230](../adr/230-a-cpu-quota-sets-the-thread-count.md)
 17. **A request knows which listener it came in on, and a route can be bound to some.** `c.listener()` is the position in the list `listen()` was given, one byte on the connection's `Peer`; `app.onListener(&.{1})` makes a route a 404 on the others, before any middleware of it runs. [ADR 252](../adr/252-a-request-knows-which-listener-it-came-in-on.md)
+18. **A connection is ended after about 1,000 requests.** The last answer says `Connection: close` (HTTP/2: a GOAWAY), with up to a tenth taken off per connection so a pool does not end together, and a WebSocket is never ended by it. Without it a connection stays on the executor and the instance it was dealt to for as long as its client keeps it, which was measured as one executor at 4.0 times the mean and an added instance at 0% CPU. [ADR 275](../adr/275-a-connection-is-ended-after-a-number-of-requests.md)
 
 ## Decisions
 
@@ -67,6 +68,7 @@ The contract is `http/bulkhead.zig`; the only file allowed to name zio is `http/
 | [195](../adr/195-a-refused-request-is-hung-up-on-with-a-fin.md) | A rejected request's connection is half-closed before it is closed |
 | [198](../adr/198-a-backlog-is-sized-for-the-burst-not-the-load.md) | The listen backlog defaults to 4,096 |
 | [199](../adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md) | No task migration; a connection stays on the executor it was handed to |
+| [275](../adr/275-a-connection-is-ended-after-a-number-of-requests.md) | `max_requests_per_connection`: `Connection: close` or a GOAWAY on a connection's last request, so a connection is dealt again |
 | [200](../adr/200-every-executor-accepts.md) | One acceptor fiber per executor, not one accept loop for the server |
 | [213](../adr/213-a-server-answers-on-more-than-one-address.md) | `Options.also`: several listeners sharing one server |
 | [252](../adr/252-a-request-knows-which-listener-it-came-in-on.md) | `c.listener()` and `onListener`: a request's listener, and a route bound to some |

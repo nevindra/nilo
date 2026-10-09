@@ -403,31 +403,56 @@ pub fn forbidsTransform(cache_control: []const u8) bool {
 /// exact opposite: it is how a client that cannot decompress says so, and
 /// answering it with a gzipped body is a broken page rather than a slow one.
 /// `*` is honoured too, with an explicit `gzip` entry outranking it either
-/// way, which is what RFC 9110 §12.5.3 says to do.
+/// way, which is what RFC 9110 section 12.5.3 says to do.
 pub fn acceptsGzip(header: ?[]const u8) bool {
-    const value = header orelse return false;
+    return quality(header orelse return false, "gzip") > 0;
+}
 
-    var star: ?bool = null;
+/// A content coding a held or precompressed file can be answered in
+/// (ADR 273). Identity is the file as it was read.
+pub const Coding = enum { identity, gzip, br };
+
+/// Which of the codings a file has the client prefers, by `q`.
+///
+/// Higher `q` wins, `br` wins a tie (a browser sending `gzip, deflate, br`
+/// gave both the same weight and brotli is the smaller), and a coding at
+/// `q=0`, or one the client did not name and no `*` covers, is never chosen:
+/// `br;q=0` is how a client that cannot decode it says so. A client that sent
+/// no header, or named neither coding the file has, gets the identity form
+/// (RFC 9110 section 12.5.3). Pure and allocation-free, so the static path
+/// calls it per request at no cost on the allocation budget.
+pub fn negotiate(header: ?[]const u8, have_br: bool, have_gzip: bool) Coding {
+    const value = header orelse return .identity;
+    const q_br: u16 = if (have_br) quality(value, "br") else 0;
+    const q_gzip: u16 = if (have_gzip) quality(value, "gzip") else 0;
+    if (q_br == 0 and q_gzip == 0) return .identity;
+    return if (q_br >= q_gzip) .br else .gzip;
+}
+
+/// The weight an `Accept-Encoding` value gives the coding `name`, in
+/// thousandths: 0 for refused or not mentioned, 1000 for `q=1` or no `q`.
+/// A named entry outranks `*` whichever comes first.
+fn quality(value: []const u8, name: []const u8) u16 {
+    var star: u16 = 0;
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |raw| {
         const entry = std.mem.trim(u8, raw, " \t");
         if (entry.len == 0) continue;
 
         const semi = std.mem.indexOfScalar(u8, entry, ';');
-        const name = std.mem.trimEnd(u8, entry[0 .. semi orelse entry.len], " \t");
-        const wanted = if (semi) |i| !isQualityZero(entry[i + 1 ..]) else true;
+        const coding = std.mem.trimEnd(u8, entry[0 .. semi orelse entry.len], " \t");
+        const weight: u16 = if (semi) |i| qualityOf(entry[i + 1 ..]) else 1000;
 
-        if (std.ascii.eqlIgnoreCase(name, "gzip")) return wanted;
-        if (std.mem.eql(u8, name, "*")) star = wanted;
+        if (std.ascii.eqlIgnoreCase(coding, name)) return weight;
+        if (std.mem.eql(u8, coding, "*")) star = weight;
     }
-    return star orelse false;
+    return star;
 }
 
-/// Whether the parameters after a `;` say `q=0`: `q=0`, `q=0.0`, `q=0.000`.
-/// Anything else, including a malformed one, is read as "wanted": the cost
-/// of being wrong that way is a header the client asked for by listing the
-/// encoding at all.
-fn isQualityZero(params: []const u8) bool {
+/// The `q` in the parameters after a `;`, in thousandths. A missing or
+/// malformed one is read as 1000, "wanted": the cost of being wrong that way
+/// is a coding the client asked for by listing it at all.
+fn qualityOf(params: []const u8) u16 {
     var it = std.mem.splitScalar(u8, params, ';');
     while (it.next()) |raw| {
         const param = std.mem.trim(u8, raw, " \t");
@@ -436,20 +461,28 @@ fn isQualityZero(params: []const u8) bool {
         const eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
         if (std.mem.trim(u8, param[1..eq], " \t").len != 0) continue;
 
-        return isZero(std.mem.trim(u8, param[eq + 1 ..], " \t"));
+        return thousandths(std.mem.trim(u8, param[eq + 1 ..], " \t"));
     }
-    return false;
+    return 1000;
 }
 
-/// A `qvalue` that is zero: `0`, or `0.` followed by nothing but zeros
-/// (RFC 9110 §12.4.2). Read by hand rather than through `parseFloat`,
-/// which is 7 KB of machine code to answer a yes-or-no about three digits.
-fn isZero(q: []const u8) bool {
-    if (q.len == 0 or q[0] != '0') return false;
-    if (q.len == 1) return true;
-    if (q[1] != '.') return false;
-    for (q[2..]) |digit| if (digit != '0') return false;
-    return true;
+/// A `qvalue` (RFC 9110 section 12.4.2) in thousandths: `0`, `0.` and
+/// `0.xxx`, or `1` and `1.000`. Read by hand rather than through
+/// `parseFloat`, which is 7 KB of machine code to compare three digits.
+/// Anything else, a fourth digit or `1.5` or `zero`, is 1000.
+fn thousandths(q: []const u8) u16 {
+    if (q.len == 0 or (q[0] != '0' and q[0] != '1')) return 1000;
+    const whole: u16 = q[0] - '0';
+    if (q.len == 1) return whole * 1000;
+    if (q[1] != '.' or q.len > 5) return 1000;
+    var frac: u16 = 0;
+    var scale: u16 = 100;
+    for (q[2..]) |digit| {
+        if (digit < '0' or digit > '9') return 1000;
+        frac += (digit - '0') * scale;
+        scale /= 10;
+    }
+    return if (whole == 1) 1000 else frac;
 }
 
 /// Whether a body of this type is worth gzipping.
@@ -917,6 +950,31 @@ test "Accept-Encoding is read, not searched for the word gzip" {
     // Names that contain it without being it.
     try testing.expect(!acceptsGzip("gzip-x"));
     try testing.expect(!acceptsGzip("x-gzip"));
+}
+
+test "negotiating a coding takes the client's highest q, brotli on a tie, and never a refused one" {
+    const both = struct {
+        fn pick(h: ?[]const u8) Coding {
+            return negotiate(h, true, true);
+        }
+    }.pick;
+    try testing.expectEqual(Coding.br, both("gzip, deflate, br"));
+    try testing.expectEqual(Coding.br, both("br, gzip"));
+    try testing.expectEqual(Coding.gzip, both("gzip, deflate"));
+    try testing.expectEqual(Coding.gzip, both("br;q=0.5, gzip;q=0.9"));
+    try testing.expectEqual(Coding.br, both("br;q=0.9, gzip;q=0.5"));
+    try testing.expectEqual(Coding.gzip, both("br;q=0, gzip"));
+    try testing.expectEqual(Coding.gzip, both("gzip, br;q=0.000"));
+    try testing.expectEqual(Coding.identity, both("br;q=0, gzip;q=0"));
+    try testing.expectEqual(Coding.identity, both("identity"));
+    try testing.expectEqual(Coding.identity, both(null));
+    try testing.expectEqual(Coding.br, both("*"));
+    try testing.expectEqual(Coding.gzip, both("*, br;q=0"));
+    try testing.expectEqual(Coding.identity, both("*;q=0"));
+    // Only what the file has can be chosen.
+    try testing.expectEqual(Coding.gzip, negotiate("br, gzip", false, true));
+    try testing.expectEqual(Coding.br, negotiate("br, gzip", true, false));
+    try testing.expectEqual(Coding.identity, negotiate("br", false, true));
 }
 
 test "the types worth gzipping are named, and the rest are not" {

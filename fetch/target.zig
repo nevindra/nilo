@@ -103,9 +103,16 @@ pub const Open = struct {
     /// version, a tenant — written verbatim ahead of the call's own, which
     /// shadow one of these by name.
     headers: []const std.http.Header = &.{},
+    /// An absolute path to the unix domain socket this service listens on,
+    /// or null for the network. `base` is then only the `Host` and the
+    /// prefix of every path (`http://docker`, or `http://orders.internal/v2`),
+    /// and must be `http://`. Held, not copied. A call's own
+    /// `Call.unix_socket` goes instead of this one
+    /// ([ADR 272](../docs/adr/272-a-call-names-the-socket-it-goes-over.md)).
+    unix_socket: ?[]const u8 = null,
 };
 
-pub const OpenError = error{
+pub const OpenError = Client.SocketError || error{
     /// `base` has no scheme or no host. A target hangs paths off an
     /// absolute URL, and a relative one has nothing to hang them off.
     BaseNotAbsolute,
@@ -134,6 +141,7 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
         authorization: ?[]const u8,
         user_agent: ?[]const u8,
         headers: []const std.http.Header,
+        unix_socket: ?[]const u8,
         /// This target's own gate, when `max_in_flight` asked for one.
         /// Taken before the client's, so a call queued here holds no
         /// permit the other services could use, and given back after it.
@@ -146,6 +154,7 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
             const uri = std.Uri.parse(o.base) catch return error.BaseNotAbsolute;
             if (uri.scheme.len == 0 or uri.host == null) return error.BaseNotAbsolute;
             if (uri.query != null or uri.fragment != null) return error.BaseHasQuery;
+            if (o.unix_socket) |path| try Client.checkSocket(path, uri);
             const base = if (o.base[o.base.len - 1] == '/') o.base[0 .. o.base.len - 1] else o.base;
             return .{
                 .client = client,
@@ -153,6 +162,7 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
                 .authorization = o.authorization,
                 .user_agent = o.user_agent,
                 .headers = o.headers,
+                .unix_socket = o.unix_socket,
                 .gate = .{ .permits = opts.max_in_flight },
                 .ledger = if (comptime opts.retry != null) .empty else {},
             };
@@ -307,6 +317,7 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
                 .timeout_ms = call.timeout_ms orelse opts.timeout_ms,
                 .stall_ms = call.stall_ms orelse opts.stall_ms,
                 .max_body = call.max_body orelse opts.max_body,
+                .unix_socket = call.unix_socket orelse self.unix_socket,
             }, .{
                 .authorization = self.authorization,
                 .user_agent = self.user_agent,

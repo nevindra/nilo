@@ -116,6 +116,7 @@ try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
 | `write_timeout_ms` | `30_000`: any one write to the client. Cut to a route's deadline when that is nearer ([ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)) |
 | `request_deadline_ms` | `0`: a deadline every request starts with, the same thing [`nilo.deadline(ms)`](./middleware.md#nilodeadline) gives one route. A route that takes over the connection drops it; a route's own deadline is kept. `0` means none ([ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)) |
 | `max_connections` | `10_000` held at once, 4,669 bytes each when idle. `0` means no limit. `listen()` warns when the process's file descriptor limit (`ulimit -n`) is below it, and the accept loop waits out a shortage instead of stopping ([ADR 194](../adr/194-an-accept-loop-that-is-out-of-descriptors-waits.md)) |
+| `max_requests_per_connection` | `1000`: requests one connection is answered before the server ends it, less up to a tenth, chosen per connection so connections opened together do not all end together. The last answer carries `Connection: close` (HTTP/1.1) or the connection is sent a GOAWAY naming the last call it will answer (HTTP/2, `-Dhttp2`). A WebSocket is never ended by it. `0` means never ([ADR 275](../adr/275-a-connection-is-ended-after-a-number-of-requests.md)) |
 | `max_in_flight` | `0`: the most requests answered at once. Past it, a request immediately gets a `503` with `Retry-After: 1` instead of waiting in a queue. `0` means no limit ([ADR 159](../adr/159-a-server-past-its-limit-says-so-at-once.md)) |
 | `max_body` | `1024 * 1024`: the most `c.body()` reads into the arena. One route can set its own with [`nilo.maxBody(bytes)`](./middleware.md#nilomaxbody), or read it from configuration with `nilo.maxBody(&limit)` |
 | `trusted_hops` | `0`: how many proxies are in front, for `c.clientIp()`, `c.host()` and `c.scheme()` |
@@ -220,8 +221,12 @@ A 206, a 416, a `Content-Range` and `Cache-Control: no-transform` are never comp
 | `max_total_bytes` | `64 * 1024 * 1024` |
 | `dotfiles` | `false` |
 | `reload` | `false`. When true, holds nothing and opens every file per request |
+| `compress` | `true`. Gzip every file worth it once at load |
+| `precompressed` | `true`. A `.br` or `.gz` beside a compressible file is served as its coding |
 
 **A name on disk is matched as a browser sends it, and a symlink is never served.** A request for `/caf%C3%A9.png` finds `café.png`, and a path that decodes to an escaped `/`, a NUL, a backslash or a `.` or `..` segment finds nothing. The directory walk skips symlinks and names them in one startup warning; a spilled file, and every file under `reload`, is opened with `O_NOFOLLOW` and answers 404 if it became a link. A `FileBody` an application returns still follows links ([ADR 009](../adr/009-static-files-are-held-in-memory-or-opened.md)).
+
+**`precompressed` serves what the build already compressed** ([ADR 273](../adr/273-a-file-a-build-compressed-is-served-as-the-coding-of-the-file-beside-it.md)). `app.js.br` and `app.js.gz` beside `app.js` (any type `compressible` accepts) answer a client whose `Accept-Encoding` prefers them: the highest `q`, `br` on a tie, never one at `q=0`. A `.gz` replaces the gzip copy nilo would make; a `.br` leaves it. Each form has its own ETag, a file with more than one form sends `Vary: Accept-Encoding` on every answer, `Content-Length` is the form's length, and a request with `Range` gets the plain bytes. **The siblings are not files**: `/app.js.br` is a 404, and a sibling not smaller than its file, older than it, or (for `.gz`) not a gzip of its bytes is ignored with one warning. A file over `max_file_bytes` takes its siblings from the disk. `.precompressed = false` lists them as ordinary files.
 
 **`spa_fallback_for` decides which requests the fallback answers.** `.navigations` means a `GET` or `HEAD` with `Sec-Fetch-Mode: navigate` or, when the header is absent, an `Accept` that lists `text/html`; `*/*` alone, no `Accept` and every `fetch` are not, and get a 404 naming the path. The path is never read. `static.navigational(.{ .accept, .fetch_mode })` is the test. See [Static files](../guide/static-files.md#the-spa-fallback).
 
@@ -231,7 +236,7 @@ Both the length and the ETag of a file served from disk come from one look at th
 
 **`cache_rules` is settled while the files load.** A rule matches a file's path in the tree (relative, forward slashes, no leading `/`) by `.prefix` and `.suffix`, both of which must hold and an empty one holds for every file; the first rule a file matches wins and an empty `.cache_control` leaves the header off. A request does no matching: the result is the header each file already carried ([Static files](../guide/static-files.md#one-tree-two-cache-policies)).
 
-`app.embeddedWith(prefix, files, …)` takes `index`, `cache_control`, `cache_rules`, `spa_fallback`, `spa_fallback_for`, `compress` and `compress_min_bytes`, with the defaults above, and none of the others: nothing in the binary is served from disk, there is no total to exceed, every name was written by the caller, and there is no disk to reload from.
+`app.embeddedWith(prefix, files, …)` takes `index`, `cache_control`, `cache_rules`, `spa_fallback`, `spa_fallback_for`, `compress`, `compress_min_bytes` and `precompressed`, with the defaults above, and none of the others: nothing in the binary is served from disk, there is no total to exceed, every name was written by the caller, and there is no disk to reload from.
 
 **`embedDir(b, nilo_http, dir)` is a function of nilo's `build.zig`**, imported by a dependent as `@import("nilo").embedDir`. It walks `dir` (relative to the build root, or absolute) when the build is configured and returns a module exporting `files`, an array of `static.Embedded`, to hand to `app.embedded("/", &frontend.files)`. Regular files only, a `.` segment and symlinks left out, an empty directory stops the build ([ADR 009](../adr/009-static-files-are-held-in-memory-or-opened.md), [Static files](../guide/static-files.md#a-vue-or-react-build-in-the-binary)). A path listed twice, and a fallback that names no entry, are refused at startup ([ADR 009](../adr/009-static-files-are-held-in-memory-or-opened.md)).
 
@@ -253,10 +258,36 @@ pub fn build(b: *std.Build) void {
 | `.target`, `.optimize` | read from `-Dtarget` and `-Doptimize` when null; the mode passes unchanged to the dependency, the executable and the test |
 | `.sql` | imports `nilo_sql` and fetches its drivers (`-Dsql`, [ADR 066](../adr/066-a-lazy-dependency-is-a-request.md)) |
 | `.tls`, `.http2`, `.libdeflate` | the dependency's flags of the same names, each off until set |
+| `.tls_module` | a `*std.Build.Module` of your own tls.zig, in place of nilo's pin; implies `.tls` ([below](#a-tls-library-of-your-own)) |
 
 It imports `nilo_http` into the root module, installs the executable, and adds the steps `run` (arguments after `--` reach the server), `dev` (the restart on every save of [ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md), where `-D` options and `--no-incremental` go after `--`) and `test` (the root module's tests). It returns `nilo.AppBuilt`: `.exe` and `.tests` (the compile steps), and `.dependency`, the `nilo` dependency it fetched, from which `module("nilo_id")` or any other module is taken without a second instance. Every field of `AppOptions` after `.root` has a default, so a field added later changes no project already written.
 
 **`reload = true` is the same as `max_file_bytes = 0`**: nothing is held, every file is opened per request, and edits show up without a restart. It is for development, since it gives up the in-memory and gzipped copies. A file that did not exist at startup still needs a restart, because the list of names comes from the directory walk at startup.
+
+## A TLS library of your own
+
+Pass `.tls = true, .tls_own = true` to `b.dependency("nilo", …)` (or `.tls_module = …` to `nilo.app`) and nilo's pin of tls.zig is neither fetched nor built; the `tls` import is yours to write, on the module nilo exports ([ADR 274](../adr/274-a-dependent-can-bring-its-own-tls-library.md)):
+
+```zig
+const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .tls = true, .tls_own = true });
+const tls = b.dependency("tls", .{ .target = target, .optimize = optimize });
+nilo.module("nilo_http").addImport("tls", tls.module("tls"));
+```
+
+Setting the option and leaving the line out stops the build with an error that names it. `.tls_own` without `.tls` is refused at configuration.
+
+**The surface nilo uses** is all `http/engine/zio.zig` asks of the module, and a module is compatible if it has it. A missing name fails to compile at its use in the Engine.
+
+| name | used for |
+|---|---|
+| `config.CertKeyPair` | `fromFilePath(gpa, io, dir, cert, key)`, `deinit(gpa)`, `.bundle.bytes` and `.key` (its `signature_scheme` and per-scheme public key) for the key check at `listen()` |
+| `config.Server` | `.auth`, `.now`, `.rng`, `.alpn_protocols`, `.offload` |
+| `config.Offload` | `.{ .run = fn }`, the signature on the blocking pool ([ADR 217](../adr/217-a-handshakes-signature-is-computed-off-the-executor.md)) |
+| `server(reader, writer, config.Server)` | the handshake, returning a connection |
+| `input_buffer_len`, `output_buffer_len` | the record buffers |
+| the connection | `reader(buf)`, `writer(buf)`, `cleartext_buf`, `alpn_protocol`, `close()` |
+
+The pin in `build.zig.zon` is the commit this is tested against, with the `offload` option and the RSA signing fix; an upstream release that has both is a drop-in.
 
 ## OpenAPI options
 

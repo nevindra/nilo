@@ -146,6 +146,20 @@ pub const Canned = struct {
         return .{ .server = server, .io = io, .port = server.socket.address.getPort() };
     }
 
+    /// The same server on a unix domain socket at `path` (absolute, at most
+    /// 107 bytes), for a test of `Call.unix_socket`. A socket left at `path`
+    /// by an earlier run is removed first, and the file this leaves is the
+    /// caller's to remove, because closing a listener never unlinks it.
+    /// `port` is 0 and `url` is not meaningful: the URL a test sends is its
+    /// own, since over a socket it names only the `Host` and the path
+    /// ([ADR 272](../docs/adr/272-a-call-names-the-socket-it-goes-over.md)).
+    pub fn openUnix(io: std.Io, path: []const u8) !Canned {
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+        const address = try std.Io.net.UnixAddress.init(path);
+        const server = try address.listen(io, .{});
+        return .{ .server = server, .io = io, .port = 0 };
+    }
+
     /// `http://127.0.0.1:<port>/`, written into `buf`.
     pub fn url(self: *Canned, buf: []u8) ![]const u8 {
         return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}/", .{self.port});

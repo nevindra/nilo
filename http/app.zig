@@ -240,6 +240,11 @@ pub const App = struct {
     /// `limits` because it is the connection loop's, not a request's, and
     /// `Limits` is Core's and is shared with modules that have no arena.
     arena_keep: usize = default_arena_keep,
+    /// From `listen(.{ .max_requests_per_connection = … })`: how many requests a
+    /// connection is answered before it is ended, 0 for never. Zero here so
+    /// that an App a test drives directly keeps connections as it always
+    /// did; a test that wants the cap sets the field (ADR 275).
+    max_requests_per_connection: u32 = 0,
     /// The key session cookies are sealed with, from
     /// `listen(.{ .session_secret = … })` and checked there. Null for an App
     /// with no sessions, and for one a test drives directly — a test that
@@ -1420,6 +1425,7 @@ pub const App = struct {
         // Read once per request by the connection loop rather than by a
         // request, which is why it is a field of its own (ADR 075).
         self.arena_keep = options_.arena_keep;
+        self.max_requests_per_connection = options_.max_requests_per_connection;
         // Not on the App, because there is one memory controller per process
         // rather than one per App: two Apps hashing eight each would be
         // sixteen, which is the number the measurement in ADR 044 says not
@@ -1842,6 +1848,7 @@ pub const App = struct {
             .gpa = self.gpa,
             .stop = &self.stop,
             .max_body = self.limits.max_body,
+            .max_requests = self.max_requests_per_connection,
             .ceiling = self.grpcBodyCeiling(),
             .body_limit = Adapter.bodyLimit,
             .routes = Adapter.routes,

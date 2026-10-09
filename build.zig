@@ -3707,6 +3707,8 @@ fn s3For(
 /// `-Dtls`, and whether this is the repository building itself. Read by
 /// `wireOptions` below, which every instance of the http module goes through.
 var want_tls: bool = false;
+/// `-Dtls_own` (ADR 274): the dependent writes the `tls` import itself.
+var want_tls_own: bool = false;
 var in_repo: bool = false;
 /// `-Dhttp2` (ADR 259, ADR 220). No dependency behind it, unlike `-Dtls`: what
 /// it keeps out of a build that did not ask is the code, the binary size ADR
@@ -3730,6 +3732,9 @@ var want_libdeflate: bool = false;
 /// compile error rather than a link, and the comptime `if` in the Engine is
 /// what keeps it from being reached.
 ///
+/// `-Dtls_own` swaps the library for a stub that names the line a dependent
+/// writes to supply their own (ADR 274).
+///
 /// libdeflate is the same shape with one difference: `link_libdeflate` can
 /// be true while `want_libdeflate` is not. That is this repository's own
 /// http test root, which links the library whatever the flag says so that
@@ -3745,7 +3750,18 @@ fn wireOptions(b: *std.Build, module: *std.Build.Module, target: std.Build.Resol
     opts.addOption(bool, "libdeflate", want_libdeflate);
     opts.addOption(bool, "libdeflate_linked", linked);
     module.addImport("nilo_build", opts.createModule());
-    if (on) {
+    if (on and want_tls_own) {
+        // The dependent brings the library (ADR 274). The pin is not asked
+        // for, so it is not fetched; what stands in its place is a module
+        // that fails to compile with the line to write, and the dependent's
+        // `addImport("tls", …)` replaces it by name, which `addImport` does
+        // when the name is taken.
+        module.addImport("tls", b.createModule(.{
+            .root_source_file = b.path("http/engine/tls_unset.zig"),
+            .target = target,
+            .optimize = mode,
+        }));
+    } else if (on) {
         if (b.lazyDependency("tls", .{ .target = target, .optimize = mode })) |dep| {
             module.addImport("tls", dep.module("tls"));
         }
@@ -4144,6 +4160,11 @@ pub const AppOptions = struct {
     tls: bool = false,
     http2: bool = false,
     libdeflate: bool = false,
+    /// A TLS library of the project's own, in place of nilo's pin (ADR 274):
+    /// a module from `b.dependency("tls", …)` whose API is the one
+    /// `docs/reference/app.md` lists. Implies `tls`, and nilo's pin is not
+    /// fetched.
+    tls_module: ?*std.Build.Module = null,
 };
 
 /// What `app` made, for a project that wants to add to it.
@@ -4180,10 +4201,12 @@ pub fn app(b: *std.Build, options: AppOptions) AppBuilt {
         .target = target,
         .optimize = optimize,
         .sql = options.sql,
-        .tls = options.tls,
+        .tls = options.tls or options.tls_module != null,
+        .tls_own = options.tls_module != null,
         .http2 = options.http2,
         .libdeflate = options.libdeflate,
     });
+    if (options.tls_module) |own| dependency.module("nilo_http").addImport("tls", own);
 
     const root = b.createModule(.{
         .root_source_file = options.root,
@@ -4265,6 +4288,15 @@ pub fn build(b: *std.Build) void {
         "tls",
         "Build the TLS listener into nilo_http and fetch the library it needs (ADR 212). Off until a dependent passes `.tls = true`",
     ) orelse false;
+    want_tls_own = b.option(
+        bool,
+        "tls_own",
+        "Leave the `tls` import to the dependent, who writes `nilo.module(\"nilo_http\").addImport(\"tls\", their_module)`, and fetch nothing for it (ADR 274). Needs `.tls = true`",
+    ) orelse false;
+    if (want_tls_own and !want_tls) std.process.fatal(
+        "nilo: `.tls_own = true` is a way of supplying the TLS library, so it needs `.tls = true` as well (ADR 274).",
+        .{},
+    );
     in_repo = b.pkg_hash.len == 0;
     want_http2 = b.option(
         bool,
@@ -5103,6 +5135,33 @@ pub fn build(b: *std.Build) void {
     two_modes_step.dependOn(&two_modes.step);
     test_step.dependOn(two_modes_step);
 
+    // A dependent that supplies its own TLS library, and one that says it
+    // will and does not (ADR 274). The first compiles with a real tls.zig
+    // the dependent fetched itself; the second must stop at the stub's
+    // message. Both compile (an object, never linked), so the second holds
+    // the message the way a Refusal does: a different one, or none, fails.
+    const tls_triple = b.fmt("{s}-{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag), @tagName(target.result.abi) });
+    const tls_own_step = b.step("tls-own", "A dependent supplies its own tls.zig and one forgets to");
+    for ([_]struct { dir: []const u8, fails: bool }{
+        .{ .dir = "tls-own", .fails = false },
+        .{ .dir = "tls-own-missing", .fails = true },
+    }) |case| {
+        const run = b.addRunFile(.zig_exe);
+        run.addArgs(&.{ "build", "--build-file" });
+        run.addFileArg(b.path(b.fmt("bench/{s}/build.zig", .{case.dir})));
+        run.addArg(b.fmt("-Dtarget={s}", .{tls_triple}));
+        if (case.fails) {
+            run.expectExitCode(1);
+            run.expectStdErrMatch("error: nilo: `.tls_own = true` leaves the `tls` import to you");
+        } else {
+            run.expectExitCode(0);
+        }
+        // Its inputs are nilo's own sources, which the Run step does not hash.
+        run.has_side_effects = true;
+        tls_own_step.dependOn(&run.step);
+    }
+    test_step.dependOn(tls_own_step);
+
     // The checks that read the repository rather than build it. Only here: a
     // dependent has none of `checks/` (it is not in `.paths`), and no step of
     // nilo's to run them from.
@@ -5313,6 +5372,33 @@ pub fn build(b: *std.Build) void {
     {
         const run = b.addRunArtifact(bench_json_float);
         b.step("bench-json-float", "Time writing a float as JSON, std.json's spelling against serde_json's")
+            .dependOn(&run.step);
+    }
+
+    // Whether a JSON answer in arena segments beats `Allocating` (a
+    // measurement; `bench/json_segments.zig` says what). The real writer
+    // is the module, so what is timed is `json.write` into each.
+    const bench_json_segments = b.addExecutable(.{
+        .name = "nilo-bench-json-segments",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/json_segments.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{
+                .name = "json",
+                .module = b.createModule(.{
+                    .root_source_file = b.path("http/json.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "nilo_core", .module = nilo_core }},
+                }),
+            }},
+        }),
+    });
+    {
+        const run = b.addRunArtifact(bench_json_segments);
+        run.addPassthruArgs();
+        b.step("bench-json-segments", "Time a JSON answer in arena segments against Allocating, instructions and allocations a request")
             .dependOn(&run.step);
     }
 
@@ -5655,6 +5741,22 @@ pub fn build(b: *std.Build) void {
     });
     b.step("bench-body-server", "A server reading request bodies, for what one holds while it arrives")
         .dependOn(&b.addInstallArtifact(bench_body_server, .{}).step);
+
+    // Which executor a keep-alive connection lives on, and for how long:
+    // `bench/keepalive.py` is the client (ADR 199).
+    const bench_keepalive_server_module = b.createModule(.{
+        .root_source_file = b.path("bench/keepalive_server.zig"),
+        .target = target,
+        .optimize = .fast,
+        .strip = stripMeasured(strip, .fast),
+        .imports = &.{.{ .name = "nilo_http", .module = bench_http }},
+    });
+    const bench_keepalive_server = b.addExecutable(.{
+        .name = "nilo-bench-keepalive-server",
+        .root_module = bench_keepalive_server_module,
+    });
+    b.step("bench-keepalive-server", "A server naming the thread that answered, for which executor a connection lives on")
+        .dependOn(&b.addInstallArtifact(bench_keepalive_server, .{}).step);
 
     // Whether a plain idle connection holds one page of fiber stack, or two,
     // which is the line between 4,669 bytes and 8,765 on every connection a

@@ -37,6 +37,7 @@ client ──TLS 1.3 handshake──► nilo's listener
 11. **A `-Dtls` build costs a plain listener nothing per idle connection (4,692 bytes against 4,678), and a TLS connection one extra page (8,843)**: its handshake leaves the connection parked at 3,994 bytes of stack, two pages. The plain listener paid that page too until a change after the run that recorded ADR 212's tables gave it back. The 33 KB of record buffers a live TLS connection needs are returned to the kernel when idle, just like the plain buffers. [ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md)
 12. **A handshake costs about 300 µs of CPU with an ECDSA P-256 certificate and 2.6 ms with an RSA-2048 one**; a request on an already established connection costs about half a microsecond more either way. [ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md), [ADR 217](../adr/217-a-handshakes-signature-is-computed-off-the-executor.md)
 13. **`Ctx.clientIp()` is the client's real address on a TLS listener**, since there is no proxy in front to hide it. For every other deployment, the address-hiding consequence of ADR 027 still applies. [ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md)
+14. **A dependent can supply the TLS library itself with `.tls_own = true`**, writing `nilo.module("nilo_http").addImport("tls", their_module)`; the pin is then not fetched, and forgetting the line fails with a message naming it. [ADR 274](../adr/274-a-dependent-can-bring-its-own-tls-library.md)
 
 ## Decisions
 
@@ -44,6 +45,7 @@ client ──TLS 1.3 handshake──► nilo's listener
 |---|---|
 | [027](../adr/027-tls-is-terminated-in-front.md) | nilo does not act as a TLS server on the internet; a proxy in front is the answer |
 | [212](../adr/212-tls-is-an-option-a-build-asks-for.md) | TLS 1.3 as a listener option behind `-Dtls`, the key and certificate check, and what it costs builds with and without it |
+| [274](../adr/274-a-dependent-can-bring-its-own-tls-library.md) | `.tls_own = true` leaves the `tls` import to the dependent, who writes one `addImport`; nilo's pin is not fetched, and forgetting the line is a compile error that names it |
 | [217](../adr/217-a-handshakes-signature-is-computed-off-the-executor.md) | The handshake's signature runs on the blocking pool, off the executor, so it does not stall every other connection on the same thread |
 
 Related topics: [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md) (topic grpc, no page of its own) is where gRPC runs over h2c or over TLS with ALPN `h2`, behind `-Dhttp2`; [ADR 259](../adr/259-http2-is-a-framing-of-every-request.md) (topic framing) is where a TLS listener came to offer `h2` and `http/1.1` together. The Engine, and the rule that only it may name a dependency, are in [`engine.md`](./engine.md) (ADR 001). The four trade-off axes every cost above is measured against are [ADR 017](../adr/017-the-trade-budget-has-four-axes.md) (topic principles, no page). The per-idle-connection minimum that a `-Dtls` build's extra page is added to is in [`memory.md`](./memory.md) (ADR 062).

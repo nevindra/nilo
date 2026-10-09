@@ -55,6 +55,10 @@ pub fn handleConnection(
     // below, before each request, rather than left as it was (ADR 105).
     deadlines.armWrite();
 
+    // Requests this connection may still be answered, 0 once it is not capped
+    // (ADR 275). A `u32` in this frame, which is where the connection waits.
+    var requests_left: u32 = bulkhead.connectionBudget(self.max_requests_per_connection);
+
     // What this fiber is serving is bound to it once, then reused by
     // every request on the same connection (ADR 006).
     var in_flight = fail.InFlight{};
@@ -95,6 +99,10 @@ pub fn handleConnection(
         // Back to `listen()`'s limit for this request, undoing whatever the
         // last one's deadline did to it. A field store and no allocation.
         deadlines.armWrite();
+        if (requests_left != 0) {
+            requests_left -= 1;
+            in_flight.closing = requests_left == 0;
+        }
         var served = serveRequest(self, arena.allocator(), &lifetime, &in_flight, in, .wire, .{ .wire = out }, deadlines, waker, peer);
         // A handler that upgraded runs its loop here rather than inside
         // `serveRequest`, so that the request's 1,608 bytes are unwound
@@ -115,6 +123,11 @@ pub fn handleConnection(
         // pages are handed back and faulted in again next time (ADR 075).
         lifetime.end();
         _ = arena.reset(.{ .retain_with_limit = self.arena_keep });
+        // A request pipelined behind the last one is already in the buffer and
+        // goes unanswered. Closing with it unread would make the kernel send a
+        // reset that can take the last answer with it, so this hangs up the
+        // way a refused request does (ADR 195).
+        if (in_flight.closing and in.bufferedLen() != 0) served.linger = true;
         if (!served.keep_alive) {
             // The last answer on this connection may still be buffered: a
             // response is flushed when the connection next reads, and this
@@ -517,6 +530,9 @@ pub noinline fn serveRequest(
         // keep-alive connection without a word is how a deploy turns
         // into a handful of failed requests nobody can reproduce.
         ._stopping = &self.stop.requested,
+        // The connection's last request under `max_requests_per_connection`
+        // is answered as if the client had said `Connection: close` (ADR 275).
+        ._force_close = in_flight.closing,
         // Where a handler that upgrades leaves the socket. The slot is
         // this frame's, and what is in it is copied out on the way back —
         // the caller runs the loop from *its* frame (ADR 062).
@@ -1114,7 +1130,26 @@ fn serveSpilledFile(
     // regular files, so a name that is a link now was put there after
     // startup, and serving it would send whatever it points at out of the
     // tree (ADR 009).
-    const open = on_disk.dir.openFileNoFollow(on_disk.path) catch |err| switch (err) {
+    //
+    // Which file that is depends on the client: a build's `.br` or `.gz`
+    // beside it is opened instead when the client prefers it, and a `Range`
+    // is an offset into the plain bytes, as it is for a held file (ADR 273).
+    var coding: compress_mod.Coding = if (c.header("Range") != null)
+        .identity
+    else
+        compress_mod.negotiate(headerValue(c, "Accept-Encoding"), on_disk.br != null, on_disk.gzip != null);
+    var chosen: ?bulkhead.File = null;
+    if (coding != .identity) {
+        const sibling = if (coding == .br) on_disk.br.? else on_disk.gzip.?;
+        chosen = on_disk.dir.openFileNoFollow(sibling.path) catch |err| switch (err) {
+            // Gone since the walk: the plain file answers, as it would have
+            // had the sibling never been there.
+            error.FileNotFound, error.SymLinkLoop => null,
+            else => return err,
+        };
+        if (chosen == null) coding = .identity;
+    }
+    const open = chosen orelse (on_disk.dir.openFileNoFollow(on_disk.path) catch |err| switch (err) {
         // The list said the file was there and the disk disagrees, which
         // from the client's side is indistinguishable from asking for
         // something that never existed. Every other way of failing to open
@@ -1122,7 +1157,7 @@ fn serveSpilledFile(
         // disk disagreeing too.
         error.FileNotFound, error.SymLinkLoop => return fail.notFound("there is no {s}", .{c._path}),
         else => return err,
-    };
+    });
 
     // One look, after the open, at the descriptor whose bytes are going out.
     // Both numbers in the head come from it, so the length and the tag cannot
@@ -1138,12 +1173,28 @@ fn serveSpilledFile(
     // after the head is on the wire — the request arena is not touched, and
     // the budget of one allocation per request is unchanged (ADR 017).
     var etag_buf: [static_mod.max_spilled_etag]u8 = undefined;
-    const etag = static_mod.spilledEtag(&etag_buf, @as(i96, now.mtime_ns), now.size);
+    const etag = static_mod.spilledEtagCoded(&etag_buf, @as(i96, now.mtime_ns), now.size, coding);
 
-    // No `Vary`, because there is nothing to vary on: a spilled file has one
-    // representation and no gzipped copy to negotiate against (ADR 017 —
-    // nothing compresses per request). No `defer open.close()` either: the
-    // file belongs to `sendFile` from here, on every path out of it.
+    // `Vary` when the file has a second representation, whichever this
+    // request got, and none when it has one: nilo makes no copy of a file it
+    // does not hold (ADR 017, nothing compresses per request). No
+    // `defer open.close()` either: the file belongs to `sendFile` from here,
+    // on every path out of it.
+    if (on_disk.varies()) c.setStaticHeader("Vary", "Accept-Encoding") catch |err| {
+        open.close();
+        return err;
+    };
+    switch (coding) {
+        .identity => {},
+        .gzip => c.setStaticHeader("Content-Encoding", "gzip") catch |err| {
+            open.close();
+            return err;
+        },
+        .br => c.setStaticHeader("Content-Encoding", "br") catch |err| {
+            open.close();
+            return err;
+        },
+    }
     return c.sendFile(.{
         .file = open,
         .size = now.size,
@@ -1189,10 +1240,13 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
     // out which one a client meant, a request that asks for part of a file
     // gets the plain one — which is the representation `Accept-Ranges:
     // bytes` has been promising all along.
+    const held = file.contents.held;
     const wants_part = c.header("Range") != null;
-    const wants_gzip = !wants_part and
-        compress_mod.acceptsGzip(headerValue(c, "Accept-Encoding"));
-    const sending = file.representation(wants_gzip);
+    const coding: compress_mod.Coding = if (wants_part)
+        .identity
+    else
+        compress_mod.negotiate(headerValue(c, "Accept-Encoding"), held.br != null, held.gzip != null);
+    const sending = file.representation(coding);
 
     // Everything here belongs to the loaded file, which outlives every
     // request, so there is nothing to copy.
@@ -1205,8 +1259,15 @@ fn serveHeldFile(c: *Ctx, file: *const static_mod.File) anyerror!void {
     // when the gzipped one is the one going out. A shared cache that stored
     // the plain answer without this would go on handing it to clients that
     // could have had the small one, and, worse, the other way round.
-    if (file.contents.held.gzip != null) try c.setStaticHeader("Vary", "Accept-Encoding");
-    if (sending.gzipped) try c.setStaticHeader("Content-Encoding", "gzip");
+    //
+    // A file built with a `.br` but no gzip copy varies too, and so does every
+    // answer for it: the 304 and the 416 (ADR 273).
+    if (held.varies()) try c.setStaticHeader("Vary", "Accept-Encoding");
+    switch (sending.coding) {
+        .identity => {},
+        .gzip => try c.setStaticHeader("Content-Encoding", "gzip"),
+        .br => try c.setStaticHeader("Content-Encoding", "br"),
+    }
 
     // The ETag was computed when the file was read, so a repeat visitor
     // costs a comparison and a head — no body, no work. Compared against
@@ -1764,4 +1825,61 @@ test "a connection that sends nothing, or stops inside the preface, is gone" {
 
     var half = Drip.init(h2.preface[0..14], 1, &buffer);
     try testing.expectEqual(Framing.gone, half.sniff());
+}
+
+fn cappedPing(c: *Ctx) anyerror!void {
+    try c.sendText(200, "pong");
+}
+
+fn cappedSocket(c: *Ctx) anyerror!void {
+    return c.upgrade(cappedLoop, {});
+}
+
+fn cappedLoop(socket: *websocket.Socket) anyerror!void {
+    while (try socket.receive()) |_| {}
+}
+
+/// One request through `serveRequest` as the connection loop's last one under
+/// `max_requests_per_connection`: what it left behind, and what it wrote.
+fn answerAsLast(app: *App, request: []const u8, written: *std.Io.Writer.Allocating) Served {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var lifetime = str_mod.Lifetime.init();
+    defer lifetime.deinit();
+    var in_flight = fail.InFlight{ .closing = true };
+    var underlying = std.Io.Reader.fixed(request);
+    var read_buf: [4096]u8 = undefined;
+    var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, &read_buf);
+    var served = serveRequest(app, arena.allocator(), &lifetime, &in_flight, &limited.interface, .wire, .{ .wire = &written.writer }, .off, .off, .{});
+    runHandover(&served);
+    lifetime.end();
+    return served;
+}
+
+test "the last request a connection is allowed is answered with Connection: close and the connection is given up" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ping", cappedPing);
+    try app.resolveChains();
+
+    var written: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer written.deinit();
+    const served = answerAsLast(&app, "GET /ping HTTP/1.1\r\nHost: t\r\n\r\n", &written);
+    try testing.expect(!served.keep_alive);
+    try testing.expect(std.mem.startsWith(u8, written.written(), "HTTP/1.1 200"));
+    try testing.expect(std.mem.indexOf(u8, written.written(), "Connection: close\r\n") != null);
+}
+
+test "a request that opens a WebSocket as the last of a connection is upgraded, not told to close" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/ws", cappedSocket);
+    try app.resolveChains();
+
+    var written: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer written.deinit();
+    _ = answerAsLast(&app, "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" ++
+        "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", &written);
+    try testing.expect(std.mem.startsWith(u8, written.written(), "HTTP/1.1 101"));
+    try testing.expect(std.mem.indexOf(u8, written.written(), "Connection: close") == null);
 }

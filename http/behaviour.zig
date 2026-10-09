@@ -9568,18 +9568,52 @@ fn dupeHeader(buf: []u8, response: []const u8, name: []const u8) ![]const u8 {
 // `inline_headers` was raised past — so this is what says the extra two did
 // not quietly become an allocation on the path every asset goes down.
 test "serving a gzipped static file allocates nothing, middleware included" {
-    // Middleware in front of it, deliberately — this test used to leave it
-    // out and say so, because a path that matched no route built its chain
-    // out of the request arena and that one allocation would have hidden
-    // what the test was measuring. Leaving it out meant the shape nearly
-    // every app deploys — assets behind a logger — was the one shape the
-    // allocation budget never checked. The chains are resolved at
-    // `listen()` now, per file, so this is the case that proves it.
     var app = try cssApp(testing.allocator);
     defer app.deinit();
+    try expectStaticAllocatesNothing(
+        &app,
+        "GET /app.css HTTP/1.1\r\nHost: example.dev\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n",
+    );
+}
 
-    // One global and one scoped somewhere else, so the chain is a genuine
-    // filter of the registrations rather than all of them.
+fn brotliApp(gpa: std.mem.Allocator) !App {
+    var app = App.init(gpa);
+    errdefer app.deinit();
+    try app.static_sets.append(gpa, try static_mod.embed(gpa, "/", &.{
+        .{ .path = "app.css", .bytes = test_css },
+        .{ .path = "app.css.br", .bytes = "BR-BYTES-BR-BYTES" },
+    }, .{}));
+    try app.resolveChains();
+    return app;
+}
+
+test "serving a file the build compressed allocates nothing, whichever form goes out" {
+    // The brotli form beside the file (ADR 273), chosen by q-value from the
+    // header: the negotiation is a scan of a borrowed string, and the bytes
+    // are the Set's own. Then the plain answer of a file that has a form,
+    // where `Vary` is a constant.
+    var chosen = try brotliApp(testing.allocator);
+    defer chosen.deinit();
+    try expectStaticAllocatesNothing(
+        &chosen,
+        "GET /app.css HTTP/1.1\r\nHost: example.dev\r\nAccept-Encoding: gzip;q=0.5, br\r\nConnection: keep-alive\r\n\r\n",
+    );
+    var plain = try brotliApp(testing.allocator);
+    defer plain.deinit();
+    try expectStaticAllocatesNothing(
+        &plain,
+        "GET /app.css HTTP/1.1\r\nHost: example.dev\r\nConnection: keep-alive\r\n\r\n",
+    );
+}
+
+/// Serve `request` through an App with a global and a scoped middleware and
+/// check that the fourth identical request allocated nothing: the bytes were
+/// prepared when the App was built and the body going out is a slice of them.
+fn expectStaticAllocatesNothing(app: *App, request: []const u8) !void {
+    // Middleware in front of it, deliberately: a test that leaves it out
+    // misses the shape nearly every app deploys, assets behind a logger. The
+    // chains are resolved at `listen()` per file, so this is the case that
+    // proves it.
     try app.use(passThrough);
     try app.useOn("/api", passThrough);
     try app.resolveChains();
@@ -9591,12 +9625,9 @@ test "serving a gzipped static file allocates nothing, middleware included" {
     var in_flight = fail.InFlight{};
     var buf: [8192]u8 = undefined;
 
-    const request = "GET /app.css HTTP/1.1\r\nHost: example.dev\r\n" ++
-        "Accept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
-
     const send = struct {
-        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
-            var in = std.Io.Reader.fixed(request);
+        fn once(a: *App, req: []const u8, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(req);
             var out = std.Io.Writer.fixed(b);
             _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
             l.end();
@@ -9604,21 +9635,19 @@ test "serving a gzipped static file allocates nothing, middleware included" {
     }.once;
 
     for (0..3) |_| {
-        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        send(app, request, counting.allocator(), &lifetime, &in_flight, &buf);
         _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
     }
 
     counting.reset();
     pass_through_runs = 0;
-    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+    send(app, request, counting.allocator(), &lifetime, &in_flight, &buf);
 
     // The global one, and not the one scoped to `/api`.
     try testing.expectEqual(@as(usize, 1), pass_through_runs);
 
-    // Zero, not one: the bytes were compressed when the App was built and
-    // the body going out is a slice of them. Nothing is serialised, nothing
-    // is copied, the five headers fit in the Ctx, and the chain the
-    // middleware runs in was worked out before the socket opened.
+    // Zero, not one: nothing is serialised, nothing is copied, the headers
+    // fit in the Ctx, and the chain was worked out before the socket opened.
     try testing.expectEqual(@as(usize, 0), counting.allocs);
 }
 

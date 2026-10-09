@@ -66,7 +66,22 @@ Given to `init`:
 
 ### `Client.Call`
 
-Given per call: `headers`, and `timeout_ms` / `stall_ms` / `max_body` to override the settings above for one call. **A header std has its own slot for** (`host`, `authorization`, `user-agent`, `content-type`, `connection`, `accept-encoding`) **is sent once**: your copy replaces std's instead of being sent beside it ([ADR 182](../adr/182-a-header-std-owns-goes-out-once.md)).
+Given per call: `headers`, `timeout_ms` / `stall_ms` / `max_body` to override the settings above for one call, and `unix_socket` to send the call over a unix domain socket ([below](#a-call-over-a-unix-socket)). **A header std has its own slot for** (`host`, `authorization`, `user-agent`, `content-type`, `connection`, `accept-encoding`) **is sent once**: your copy replaces std's instead of being sent beside it ([ADR 182](../adr/182-a-header-std-owns-goes-out-once.md)).
+
+### A call over a unix socket
+
+**`Call.unix_socket = "/var/run/docker.sock"` sends the call over that socket instead of dialling the URL's host.** The URL is still the request: its host is the `Host` header and its path and query the request line, so one socket serves any number of paths ([ADR 272](../adr/272-a-call-names-the-socket-it-goes-over.md)).
+
+```zig
+const res = try client.get(c, "http://docker/containers/json?all=1", .{ .unix_socket = "/var/run/docker.sock" });
+```
+
+- **The path is absolute, at most 107 bytes, with no NUL**, else `error.InvalidSocket`; the URL is `http://`, an `https://` one is `error.TlsOverSocket`, any other scheme `error.UnsupportedUriScheme`. All three come before anything is dialled. A socket nobody listens on is the dial's own error (`error.FileNotFound`, `error.ConnectionRefused`).
+- **Connections are pooled by the path**, so two sockets never share one. Deadlines, `stall_ms`, the stale-connection replay and a `Target`'s retry apply as for any call.
+- **`Settings.proxy` does not apply**: a socket never leaves the host, so the call goes straight to it in origin form. One `Client` can proxy Stripe and talk to Docker.
+- **A followed redirect inside the origin stays on the socket; one that leaves it is `error.RedirectLeavesSocket`**, not dialled over TCP on a `Location`'s word.
+- **`Exchange.begin` takes the same field**, `Begin.unix_socket`.
+- A `Target` holds the path once: `Docker.open(&client, .{ .base = "http://docker/v1.43", .unix_socket = "/var/run/docker.sock" })`. `open` returns the same three errors, and a call's own `unix_socket` goes instead of the target's.
 
 ### A call under a traced request
 
@@ -104,7 +119,7 @@ var api: fetch.Client = .init(gpa, .{
 
 ### Errors
 
-**Each error means one thing.** `error.TimedOut` is this call's own deadline. `error.Stalled` is `stall_ms` passing with nothing arriving while the other side keeps the socket open. `error.Canceled` is the server shutting down underneath the call. The three are kept distinct instead of guessed at. `error.RedirectRefused` is a 3xx with a `Location` under an `Exchange` that did not choose a redirect policy (`Client.get` and the other calls above do follow redirects). `error.InsecureRedirect` is a followed redirect that led from `https` to `http`: it is not followed. `error.NotStarted` is a call made before `listen()`; the client is finished at startup like any other service. `error.TlsThroughProxy` is an `https://` call that `Settings.proxy` would carry, and `error.InvalidProxy` is a proxy URL the start refused.
+**Each error means one thing.** `error.TimedOut` is this call's own deadline. `error.Stalled` is `stall_ms` passing with nothing arriving while the other side keeps the socket open. `error.Canceled` is the server shutting down underneath the call. The three are kept distinct instead of guessed at. `error.RedirectRefused` is a 3xx with a `Location` under an `Exchange` that did not choose a redirect policy (`Client.get` and the other calls above do follow redirects). `error.InsecureRedirect` is a followed redirect that led from `https` to `http`: it is not followed. `error.NotStarted` is a call made before `listen()`; the client is finished at startup like any other service. `error.TlsThroughProxy` is an `https://` call that `Settings.proxy` would carry, and `error.InvalidProxy` is a proxy URL the start refused. `error.TlsOverSocket`, `error.InvalidSocket` and `error.RedirectLeavesSocket` are the three refusals of a call over a unix socket ([above](#a-call-over-a-unix-socket)).
 
 **A 4xx or 5xx is a `Response`, not an error.** The call worked and the service said no; only the caller knows which of those matters.
 
@@ -138,7 +153,7 @@ fn charge(stripe: *Stripe, c: *nilo.Ctx, charge_id: nilo.Str) !fetch.Response {
 | | |
 |---|---|
 | `fetch.Target(name, .{…})` | a type. `name` tells two targets with the same options apart, and is what the health route calls it; an empty name is a Refusal |
-| `Stripe.open(&client, .{ .base, .authorization, .user_agent, .headers })` | `error.BaseNotAbsolute` for a base with no scheme or host, `error.BaseHasQuery` for one with a `?` or `#`; a trailing `/` is dropped. Every value is held, not copied |
+| `Stripe.open(&client, .{ .base, .authorization, .user_agent, .headers, .unix_socket })` | `error.BaseNotAbsolute` for a base with no scheme or host, `error.BaseHasQuery` for one with a `?` or `#`, `error.TlsOverSocket` / `error.InvalidSocket` for a bad `unix_socket` ([ADR 272](../adr/272-a-call-names-the-socket-it-goes-over.md)); a trailing `/` is dropped. Every value is held, not copied |
 | `app.provide(&stripe)` | starts the client under it at `listen()`; the client itself is provided only if a handler asks for it by that type |
 | `stripe.get(c, path, args, .{})` | `Response`. Also `post(c, path, args, body, .{})`, `put`, `delete`, `patch(c, path, args, body_or_null, .{})`, `send(c, method, path, args, body_or_null, .{})`, `postJson(c, path, args, value, .{})`, `putJson`, `patchJson`, `sendJson`, `postForm(c, path, args, fields, .{})`, `putForm`, `sendForm`: every call the client has, with a path instead of the URL and the same `Call` last |
 | `stripe.url(c, path, args)` | `[]const u8`: the URL alone, in the Scope, one allocation of exactly the right size, for an `Exchange` begun on the client |
@@ -234,6 +249,7 @@ fn oneExchange(io: std.Io, gpa: std.mem.Allocator) !void {
 | | |
 |---|---|
 | `Canned.open(io)` | bound to port 0 on loopback, with the port the kernel chose read back, so there is no port range to keep separate from anybody else's |
+| `Canned.openUnix(io, path)` | the same server on a unix socket at `path` (absolute, at most 107 bytes), for a test of `Call.unix_socket`. `port` is 0 and `url` means nothing: send your own URL, whose host is only the `Host` header. The socket file is yours to remove ([ADR 272](../adr/272-a-call-names-the-socket-it-goes-over.md)) |
 | `canned.reply(status, headers, body)` | what `serveOne` answers: the status line after `HTTP/1.1 `, headers each ending in `\r\n` (`Content-Length` is written for you), and the body as given |
 | `canned.url(&buf)` | `http://127.0.0.1:<port>/` |
 | `canned.serveOne()` | accepts one connection, reads the whole request, answers, and closes. **Start it with `io.concurrent`**, never `io.async`, which may run it on your own thread and wait there for the connection you were about to make |

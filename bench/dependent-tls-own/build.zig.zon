@@ -1,0 +1,12 @@
+.{
+    .name = .dependent_tls_own,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x576f871774b7251a,
+    .dependencies = .{
+        // By path, so the check measures this working copy rather than
+        // whatever is published.
+        .nilo = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon" },
+}

@@ -2413,15 +2413,19 @@ test "forty rows that failed together are not due together when the backoff has 
     for (0..40) |_| _ = try jobs.push(&run, Spread{}, .{ .at = t });
 
     // All forty fail at `t`, each scheduling its retry by a wait drawn from
-    // zero to the second the backoff names.
-    try testing.expectEqual(@as(usize, 40), try jobs.drainAt(&run, t));
-    // Some are due within half of it and some are not: not one instant.
+    // zero to the second the backoff names. A wait of 0 ms (one draw in
+    // 1,001) is due at `t` itself and runs again inside the same drain,
+    // where it may still meet one of the forty failures and go dead: so the
+    // counts below are bounds, not sums.
+    try testing.expect(try jobs.drainAt(&run, t) >= 40);
+    // Some are due within half of it and some after: not one instant.
     const early = try jobs.drainAt(&run, t + 500 * ms);
+    const late = try jobs.drainAt(&run, t + 1_001 * ms);
     try testing.expect(early > 0);
-    try testing.expect(early < 40);
+    try testing.expect(late > 0);
+    try testing.expect(early + late <= 40);
     // And none waits past the second, which is the ceiling.
-    try testing.expectEqual(@as(usize, 40 - early), try jobs.drainAt(&run, t + 1_001 * ms));
-    try testing.expectEqual(@as(usize, 40), ledger.lines.items.len);
+    try testing.expectEqual(@as(usize, 0), try jobs.drainAt(&run, t + 60_000 * ms));
 }
 
 test "a cron schedule fires when the clock is moved to three in the morning" {

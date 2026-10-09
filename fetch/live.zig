@@ -13,6 +13,7 @@
 //! wrong layer rather than the test being wrong.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("nilo_core");
 const fetch = @import("fetch.zig");
 
@@ -2624,6 +2625,270 @@ test "a bundle the caller loaded is the one both clients trust, and the client n
             // under the caller's own `deinit` above, if it did not.
             client.deinit();
             try testing.expectEqual(@as(u32, 1), roots.map.count());
+        }
+    }.run);
+}
+
+// ---- a call over a unix domain socket (ADR 272) ----
+
+/// A path for a test's socket under `/tmp`, short enough for a socket
+/// address and different for every test and every run.
+fn socketPath(buf: []u8, tag: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "/tmp/nilo-fetch-{d}-{s}.sock", .{ core.monotonicMicros(), tag });
+}
+
+fn removeSocket(io: std.Io, path: []const u8) void {
+    std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+test "a call over a socket sends the URL as the request and reaches the socket, proxy or none" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var path_buf: [96]u8 = undefined;
+            const path = try socketPath(&path_buf, "basic");
+            var canned = try Canned.openUnix(io, path);
+            defer removeSocket(io, path);
+            defer canned.close();
+            canned.reply("200 OK", "", "containers");
+
+            // A proxy nothing listens on: the call must not go near it.
+            var client = try started(io, .{ .proxy = .{ .url = "http://ann:pw@127.0.0.1:1" } });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+            const res = try client.get(&scope, "http://docker/containers/json?all=1", .{ .unix_socket = path });
+            served.await(io) catch {};
+            try testing.expectEqualStrings("containers", res.body.view());
+
+            const seen = canned.request();
+            // Origin form, never the proxy's full URL, and the URL's host is
+            // the Host header.
+            try testing.expect(std.mem.startsWith(u8, seen, "GET /containers/json?all=1 HTTP/1.1"));
+            try testing.expect(std.mem.indexOf(u8, seen, "host: docker") != null);
+            try testing.expect(!carries(seen, "proxy-authorization"));
+        }
+    }.run);
+}
+
+test "a socket connection is pooled by its path, and two sockets never share one" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var a_buf: [96]u8 = undefined;
+            var b_buf: [96]u8 = undefined;
+            const a_path = try socketPath(&a_buf, "pool-a");
+            const b_path = try socketPath(&b_buf, "pool-b");
+            var a = try Canned.openUnix(io, a_path);
+            defer removeSocket(io, a_path);
+            defer a.close();
+            var b = try Canned.openUnix(io, b_path);
+            defer removeSocket(io, b_path);
+            defer b.close();
+            a.reply("200 OK", "", "from a");
+            b.reply("200 OK", "", "from b");
+
+            var client = try started(io, .{ .timeout_ms = 5_000 });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // `a` accepts once and answers twice: the second call can only
+            // succeed on the connection the first one pooled, because a
+            // second dial would wait on an accept that never comes.
+            a.body_len = 6;
+            var served_a = try io.concurrent(Canned.serveKeepAlive, .{ &a, 2 });
+            defer served_a.cancel(io) catch {};
+            var served_b = try io.concurrent(Canned.serveOne, .{&b});
+            defer served_b.cancel(io) catch {};
+
+            _ = try client.get(&scope, "http://svc/one", .{ .unix_socket = a_path });
+            // Same URL, other socket: it must be `b` that answers.
+            const from_b = try client.get(&scope, "http://svc/one", .{ .unix_socket = b_path });
+            try testing.expectEqualStrings("from b", from_b.body.view());
+            _ = try client.get(&scope, "http://svc/two", .{ .unix_socket = a_path });
+            served_a.await(io) catch {};
+            served_b.await(io) catch {};
+        }
+    }.run);
+}
+
+test "a socket call with https, or a path that is not absolute, is refused before a dial" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var client = try started(io, .{});
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var too_long: [121]u8 = @splat('a');
+            too_long[0] = '/';
+            // None of these paths exists: a refusal is the proof that nothing
+            // was dialled, since a dial would be `FileNotFound`.
+            try testing.expectError(error.TlsOverSocket, client.get(&scope, "https://docker/x", .{ .unix_socket = "/run/nothing.sock" }));
+            try testing.expectError(error.InvalidSocket, client.get(&scope, "http://docker/x", .{ .unix_socket = "run/nothing.sock" }));
+            try testing.expectError(error.InvalidSocket, client.get(&scope, "http://docker/x", .{ .unix_socket = "" }));
+            try testing.expectError(error.InvalidSocket, client.get(&scope, "http://docker/x", .{ .unix_socket = &too_long }));
+            try testing.expectError(error.UnsupportedUriScheme, client.get(&scope, "ftp://docker/x", .{ .unix_socket = "/run/nothing.sock" }));
+        }
+    }.run);
+}
+
+test "a socket nobody listens on is an error the caller can read, not a panic" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var client = try started(io, .{ .timeout_ms = 2_000 });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            try testing.expectError(error.FileNotFound, client.get(&scope, "http://docker/x", .{ .unix_socket = "/tmp/nilo-fetch-no-such-socket.sock" }));
+        }
+    }.run);
+}
+
+test "a deadline fires on a socket call that is never answered" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var path_buf: [96]u8 = undefined;
+            const path = try socketPath(&path_buf, "silence");
+            var canned = try Canned.openUnix(io, path);
+            defer removeSocket(io, path);
+            defer canned.close();
+
+            var client = try started(io, .{});
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var served = try io.concurrent(Canned.serveSilence, .{&canned});
+            defer served.cancel(io) catch {};
+            const began = core.monotonicMicros();
+            try testing.expectError(error.TimedOut, client.get(&scope, "http://docker/slow", .{ .unix_socket = path, .timeout_ms = 200 }));
+            try testing.expect(@divTrunc(core.monotonicMicros() - began, std.time.us_per_ms) < deadline_slack_ms);
+        }
+    }.run);
+}
+
+test "a redirect inside the origin stays on the socket and one that leaves it is refused" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var path_buf: [96]u8 = undefined;
+            const path = try socketPath(&path_buf, "redirect");
+            var canned = try Canned.openUnix(io, path);
+            defer removeSocket(io, path);
+            defer canned.close();
+
+            var client = try started(io, .{ .timeout_ms = 5_000 });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // Same origin: the second hop is a second connection to the same
+            // socket (every answer says `close`), and the socket is kept.
+            {
+                var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]fetch.testing.Reply{
+                    .{ .status = "302 Found", .headers = "Location: /moved\r\n" },
+                    .{ .body = "landed" },
+                }, 2 });
+                defer served.cancel(io) catch {};
+                const res = try client.get(&scope, "http://docker/start", .{ .unix_socket = path });
+                served.await(io) catch {};
+                try testing.expectEqualStrings("landed", res.body.view());
+                try testing.expect(std.mem.startsWith(u8, canned.headOfTry(1), "GET /moved HTTP/1.1"));
+            }
+
+            // Another origin: not dialled over TCP on a `Location`'s word.
+            {
+                canned.reply("302 Found", "Location: http://elsewhere.test/x\r\n", "");
+                var served = try io.concurrent(Canned.serveOne, .{&canned});
+                defer served.cancel(io) catch {};
+                try testing.expectError(error.RedirectLeavesSocket, client.get(&scope, "http://docker/start", .{ .unix_socket = path }));
+            }
+        }
+    }.run);
+}
+
+test "a target opened on a socket sends every call over it, and a call's own socket goes instead" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var a_buf: [96]u8 = undefined;
+            var b_buf: [96]u8 = undefined;
+            const a_path = try socketPath(&a_buf, "target-a");
+            const b_path = try socketPath(&b_buf, "target-b");
+            var a = try Canned.openUnix(io, a_path);
+            defer removeSocket(io, a_path);
+            defer a.close();
+            var b = try Canned.openUnix(io, b_path);
+            defer removeSocket(io, b_path);
+            defer b.close();
+            a.reply("200 OK", "", "a");
+            b.reply("200 OK", "", "b");
+
+            var client = try started(io, .{ .timeout_ms = 5_000 });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const Docker = fetch.Target("docker", .{});
+            var docker = try Docker.open(&client, .{ .base = "http://docker/v1.43", .unix_socket = a_path });
+
+            var served_a = try io.concurrent(Canned.serveOne, .{&a});
+            defer served_a.cancel(io) catch {};
+            const res = try docker.get(&scope, "/containers/{id}/json", .{ .id = "abc" }, .{});
+            served_a.await(io) catch {};
+            try testing.expectEqualStrings("a", res.body.view());
+            try testing.expect(std.mem.startsWith(u8, a.request(), "GET /v1.43/containers/abc/json HTTP/1.1"));
+            try testing.expect(std.mem.indexOf(u8, a.request(), "host: docker") != null);
+
+            var served_b = try io.concurrent(Canned.serveOne, .{&b});
+            defer served_b.cancel(io) catch {};
+            const other = try docker.get(&scope, "/_ping", .{}, .{ .unix_socket = b_path });
+            served_b.await(io) catch {};
+            try testing.expectEqualStrings("b", other.body.view());
+
+            // A target is refused at `open` for the same two reasons a call is.
+            try testing.expectError(error.TlsOverSocket, Docker.open(&client, .{ .base = "https://docker", .unix_socket = a_path }));
+            try testing.expectError(error.InvalidSocket, Docker.open(&client, .{ .base = "http://docker", .unix_socket = "relative.sock" }));
+        }
+    }.run);
+}
+
+test "a socket call whose body is a reader gets a connection of its own and the socket is closed after" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var path_buf: [96]u8 = undefined;
+            const path = try socketPath(&path_buf, "stream");
+            var canned = try Canned.openUnix(io, path);
+            defer removeSocket(io, path);
+            defer canned.close();
+            canned.reply("200 OK", "", "ok");
+
+            var client = try started(io, .{ .timeout_ms = 5_000 });
+            defer client.deinit();
+
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+            var ex: fetch.Exchange = .idle;
+            defer ex.end();
+            var source: std.Io.Reader = .fixed("hello");
+            const head = try ex.begin(&client, .{
+                .method = .POST,
+                .url = "http://docker/build",
+                .body = .{ .stream = .{ .reader = &source, .len = 5 } },
+                .unix_socket = path,
+            });
+            try testing.expect(head.ok());
+            served.await(io) catch {};
+            try testing.expectEqualStrings("hello", canned.requestBody());
         }
     }.run);
 }

@@ -34,6 +34,7 @@ The path is relative to the working directory the server runs in. A directory th
 | `max_total_bytes` | the most one tree may hold in memory, gzipped copies included. Default 64 MB |
 | `dotfiles` | whether to load names starting with `.`. Off by default |
 | `compress` | gzip every file worth gzipping, once, at load. On by default |
+| `precompressed` | serve a `.br` or `.gz` the build wrote beside a file. On by default |
 | `compress_min_bytes` | files smaller than this are served as they are. Default 1 KB |
 
 Dotfiles are off because finding out on the first request that a `.env` or a `.git` ended up in the published directory is a bad way to learn it was there.
@@ -112,6 +113,26 @@ Three details that are easy to get wrong, and that nilo gets right:
 - **The two versions have different ETags.** An ETag names a representation, not a file. If both had the same one, a cache could answer a client that can't read gzip with the gzipped copy, because the tag matched.
 - **`gzip;q=0` means no.** It contains the word `gzip` and means the opposite: it is how a client that can't decompress says so.
 
+## Files your build already compressed
+
+**If your build writes `app.js.br` and `app.js.gz` beside `app.js`, nilo serves them**, and a brotli-capable browser gets the smallest one. There is nothing to turn on:
+
+```
+dist/app.js       803,121 bytes
+dist/app.js.br    169,659
+dist/app.js.gz    205,519
+```
+
+A client that sends `Accept-Encoding: gzip, deflate, br` gets the `.br`, one that sends `br;q=0.5, gzip;q=0.9` the `.gz` (the highest `q` wins, brotli on a tie), and `br;q=0` is never given brotli. Nilo has no brotli encoder, so only a file somebody else compressed is served this way. A `.gz` replaces the gzip copy nilo would have made at startup, so the startup work is saved too; with only a `.br`, nilo still makes its own gzip copy, for the browsers that take gzip and not brotli (Chrome sends no `br` over plain HTTP).
+
+What to know:
+
+- **The siblings are not files.** `/app.js.br` is a 404: its bytes are held once, as a form of `app.js`. A tree that publishes `notes.txt.gz` to be downloaded beside `notes.txt` passes `.precompressed = false`. A `.gz` beside a PNG is a file, because a PNG is not worth compressing.
+- **A stale sibling is not served.** A `.gz` is checked against the file it sits beside (its trailer carries the CRC-32 of what it compressed); a `.br` has no such check and is held to the modification time, so one older than its file is ignored. Either way the startup log names it: `holds 1 precompressed file(s) that are not served: "app.js.br" (older than the file beside it)`.
+- **Each form has its own ETag and every answer for the file says `Vary: Accept-Encoding`**, the plain one and the 304 too. A request for a `Range` gets the plain bytes.
+- **It costs the bytes it holds.** On a six-file, 1.4 MB front end the siblings were 273,497 bytes more than nilo's own gzip copy ([the run](../../bench/result/http.md#a-file-a-build-compressed-is-held-beside-the-file)); brotli was 17.7% smaller on the wire than nilo's gzip. The startup line counts them: `(2034416 bytes held, 333516 of them gzipped copies, 279412 of them precompressed files)`.
+- **A file over `max_file_bytes` takes its siblings from the disk**, the way it is served from the disk itself.
+
 ## Range requests
 
 **A request for a byte range gets that range**, which is what a video being scrubbed and a download being resumed both ask for:
@@ -142,7 +163,7 @@ A request for several ranges at once is legal, but needs a `multipart/byteranges
 
 Below the limit nothing changes: the file is read at load, hashed, gzipped if worth it, and answered from memory. Above it, three things change:
 
-- **There is no gzipped copy.** Compression happens once, while the App is being built, and a file that is never read then cannot be compressed then. A file that size is usually a video, an archive or an installer, and all three are compressed already.
+- **There is no gzipped copy of nilo's making** (a `.br` or `.gz` your build wrote beside it is served from the disk). Compression happens once, while the App is being built, and a file that is never read then cannot be compressed then. A file that size is usually a video, an archive or an installer, and all three are compressed already.
 - **The ETag is the modification time and the size**, `"<mtime>-<size>"` in hex, instead of a hash of the contents. It is strong, and it is what nginx has sent by default for twenty years. Hashing would mean reading the whole file at startup, and a weak tag would make `If-Range` unusable for exactly the large downloads that get resumed. Both numbers come from one look at the file descriptor whose bytes are about to be sent, so a file that changed on disk cannot go out with a length and a tag from different versions of it ([ADR 098](../adr/098-a-file-is-described-by-the-descriptor-being-sent.md)).
 - **One file descriptor is held while the response is sent**: one per request in flight, which `max_connections` already bounds.
 

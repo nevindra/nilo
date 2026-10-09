@@ -1,0 +1,11 @@
+.{
+    .name = .tls_own_missing,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x16d894ffc4c0e286,
+    .dependencies = .{
+        // By path, so the check builds this working copy.
+        .nilo = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

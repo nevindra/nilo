@@ -119,6 +119,14 @@ pub const InFlight = struct {
     request: ?*anyopaque = null,
     read_request: ?*const fn (*anyopaque, Part) []const u8 = null,
 
+    /// Set by the connection loop on the request that is the connection's
+    /// last under `max_requests_per_connection` (ADR 275): the answer then
+    /// carries `Connection: close` as if the client had asked for it. Here
+    /// because this struct is what the loop already hands every request, so
+    /// it costs `serveRequest` no parameter; one byte in a frame whose
+    /// padding it fits in.
+    closing: bool = false,
+
     pub const Part = enum { id, method, path };
 
     pub fn startRequest(self: *InFlight) void {

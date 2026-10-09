@@ -26,6 +26,10 @@
 //! And every file gets an ETag computed once at load, so a repeat visitor
 //! gets a 304 with no body and no work.
 //!
+//! A `.br` or `.gz` the build wrote beside a file is held (or, over the
+//! line, left on the disk) as that file's other form and served to a client
+//! that prefers it, under a tag of its own (ADR 273).
+//!
 //! Range requests come along nearly free once the bytes are in memory — a
 //! range is a slice and two headers (ADR 020).
 //!
@@ -154,6 +158,32 @@ pub const Options = struct {
     /// adding one still needs a restart.
     reload: bool = false,
 
+    /// Serve a file a build already compressed: `app.js.br` or `app.js.gz`
+    /// beside `app.js` answers a client that accepts that coding, in place of
+    /// anything nilo would make (ADR 273).
+    ///
+    /// **On by default, and guarded where the others are not.** Caddy, nginx
+    /// and tower-http trust a sibling blindly, and a `.br` left behind by the
+    /// build before last is then served to every browser for a script that
+    /// has changed. Here a `.gz` is checked against the plain file it sits
+    /// beside (its trailer carries the CRC-32 and the length of what it
+    /// compressed), a sibling older than the file, or not smaller than it, is
+    /// ignored, and each one ignored is said in one line at load. Brotli has
+    /// no such trailer, so a `.br` is held to the modification time alone.
+    ///
+    /// What it takes from the tree: a `X.br` or `X.gz` whose `X` is in the
+    /// tree and is a type worth compressing (`compressible`) is a sibling,
+    /// not a file, and **its own URL is a 404**. Its bytes are held once, as
+    /// the coding of `X`; listing it as well would hold them twice. A tree
+    /// that publishes `notes.txt.gz` for download beside `notes.txt` sets
+    /// this to false.
+    ///
+    /// A sibling takes the place of the gzipped copy `compress` would have
+    /// made, so the gzip is not made twice. A `.br` alone leaves that copy in
+    /// place for a client that takes gzip and not brotli (every browser over
+    /// plain HTTP). `compress = false` turns off the copy and not this.
+    precompressed: bool = true,
+
     /// Files smaller than this are served as they are.
     ///
     /// A gzip stream carries about 20 bytes of framing, so below a few
@@ -269,6 +299,32 @@ pub const File = struct {
         /// with the gzipped copy, on the grounds that the tag matched.
         /// Empty when `gzip` is null.
         gzip_etag: []const u8 = &.{},
+        /// The same file as the build brotli-compressed it (`app.js.br`),
+        /// read at load. Nilo has no encoder for it (decided.md), so this is
+        /// only ever a file somebody else wrote. Null when there is none.
+        br: ?[]const u8 = null,
+        /// The ETag of `br`: its own, for the reason `gzip_etag` is.
+        br_etag: []const u8 = &.{},
+        /// `gzip` is a `.gz` out of an embedded tree, borrowed from the
+        /// binary like `bytes` and not the Set's to free (ADR 273). Always
+        /// false for one nilo compressed itself.
+        gzip_borrowed: bool = false,
+
+        /// Whether there is more than one representation to choose between,
+        /// which is when `Vary: Accept-Encoding` is owed on every answer,
+        /// the plain one and the 304 included.
+        pub fn varies(self: Held) bool {
+            return self.gzip != null or self.br != null;
+        }
+    };
+
+    /// A precompressed file left on the disk beside a spilled one, the way
+    /// the plain file is (ADR 273). Opened per request by the same rule.
+    pub const Sibling = struct {
+        /// Relative to the Set's directory, written by the walk.
+        path: []const u8,
+        size: u64,
+        mtime_ns: i96,
     };
 
     /// Left on the disk and opened per request (ADR 009).
@@ -277,6 +333,8 @@ pub const File = struct {
     /// happens once, while the App is being built (ADR 017), and a file
     /// that is not being held cannot be compressed once. Compressing it per
     /// request is the trade that was already refused for handler responses.
+    /// A form the build wrote (`app.js.br` beside `app.js`) is not nilo's
+    /// copy and is served from the disk (ADR 273).
     pub const Spilled = struct {
         /// The directory `path` is opened against, which is the Set's.
         ///
@@ -310,6 +368,16 @@ pub const File = struct {
         /// comparing files later compares two integers instead of parsing a
         /// string back.
         mtime_ns: i96,
+        /// `app.js.br` and `app.js.gz` beside a spilled `app.js`, found at
+        /// load and opened per request when the client prefers them. A
+        /// request describes them from their own descriptor like the file
+        /// itself (ADR 098).
+        br: ?Sibling = null,
+        gzip: ?Sibling = null,
+
+        pub fn varies(self: Spilled) bool {
+            return self.br != null or self.gzip != null;
+        }
     };
 
     /// Which bytes and which ETag to answer with. Kept together so the two
@@ -319,7 +387,7 @@ pub const File = struct {
     pub const Representation = struct {
         bytes: []const u8,
         etag: []const u8,
-        gzipped: bool,
+        coding: compress_mod.Coding,
     };
 
     /// The bytes and the ETag of a held file.
@@ -329,16 +397,19 @@ pub const File = struct {
     /// by `sendfile.send`. Callers branch on `contents` first — `App`'s
     /// `serveStaticFile` does it once, at the top.
     pub fn identity(self: *const File) Representation {
-        return .{ .bytes = self.contents.held.bytes, .etag = self.etag, .gzipped = false };
+        return .{ .bytes = self.contents.held.bytes, .etag = self.etag, .coding = .identity };
     }
 
-    /// The gzipped form if there is one and the client said it can read
-    /// one, and the plain form otherwise.
-    pub fn representation(self: *const File, wants_gzip: bool) Representation {
-        if (!wants_gzip) return self.identity();
+    /// The form in `coding` if the file has one, and the plain form
+    /// otherwise.
+    pub fn representation(self: *const File, coding: compress_mod.Coding) Representation {
         const held = self.contents.held;
-        const packed_bytes = held.gzip orelse return self.identity();
-        return .{ .bytes = packed_bytes, .etag = held.gzip_etag, .gzipped = true };
+        switch (coding) {
+            .identity => {},
+            .gzip => if (held.gzip) |g| return .{ .bytes = g, .etag = held.gzip_etag, .coding = .gzip },
+            .br => if (held.br) |b| return .{ .bytes = b, .etag = held.br_etag, .coding = .br },
+        }
+        return self.identity();
     }
 };
 
@@ -356,12 +427,20 @@ fn freeFile(gpa: std.mem.Allocator, f: File, owns_bytes: bool) void {
     switch (f.contents) {
         .held => |held| {
             if (owns_bytes) gpa.free(held.bytes);
-            if (held.gzip) |p| gpa.free(p);
+            if (held.gzip) |p| if (!held.gzip_borrowed) gpa.free(p);
             if (held.gzip_etag.len > 0) gpa.free(held.gzip_etag);
+            // Only a directory has a `.br` it read itself: an embedded one is
+            // the binary's, borrowed exactly as `bytes` is.
+            if (held.br) |p| if (owns_bytes) gpa.free(p);
+            if (held.br_etag.len > 0) gpa.free(held.br_etag);
         },
         // The descriptor belongs to the Set, not to the file that borrowed
-        // it, so there is nothing here but the name.
-        .spilled => |on_disk| gpa.free(on_disk.path),
+        // it, so there is nothing here but the names.
+        .spilled => |on_disk| {
+            gpa.free(on_disk.path);
+            if (on_disk.br) |b| gpa.free(b.path);
+            if (on_disk.gzip) |g| gpa.free(g.path);
+        },
     }
 }
 
@@ -736,6 +815,7 @@ pub fn load(
 
     var held_total: usize = 0;
     var packed_total: usize = 0;
+    var sibling_total: usize = 0;
     var spilled_files: usize = 0;
     var skipped_dotfiles: usize = 0;
     // Links the walk passed over, named once at the end: the first few and a
@@ -758,6 +838,16 @@ pub fn load(
                 "For development; take it out to serve from memory again.",
             .{dir_path},
         );
+    }
+
+    // Two passes, because what a file is depends on its neighbours: `app.js.br`
+    // is a file of its own or the brotli form of `app.js`, and whether
+    // `app.js` is then held or spilled decides how its form is kept (ADR 273).
+    // The first only names and stats, which is all a spilled file ever gets.
+    var found: std.ArrayList(Found) = .empty;
+    defer {
+        for (found.items) |f| gpa.free(f.path);
+        found.deinit(gpa);
     }
 
     var walker = try dir.walk(gpa);
@@ -784,15 +874,6 @@ pub fn load(
             continue;
         }
 
-        var url_buf: [max_url]u8 = undefined;
-        const url = join(&url_buf, url_prefix, entry.path) orelse {
-            std.log.err("nilo: static file \"{s}\" has a path longer than {d} bytes", .{ entry.path, max_url });
-            return error.StaticUrlTooLong;
-        };
-        toForwardSlashes(url);
-
-        const content_type = contentTypeFor(url);
-
         // Asked before anything is read, which is the whole point: a file
         // over the line must not be read even once, or startup on a
         // directory of videos costs a pass over every one of them.
@@ -800,24 +881,50 @@ pub fn load(
             std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
             return error.StaticReadFailed;
         };
+        const relative = try gpa.dupe(u8, entry.path);
+        errdefer gpa.free(relative);
+        toForwardSlashes(relative);
+        try found.append(gpa, .{ .path = relative, .size = stat.size, .mtime_ns = stat.mtime.nanoseconds });
+    }
 
-        if (stat.size > spill_over) {
+    var ignored: Ignored = .{};
+    defer ignored.names.deinit(gpa);
+    if (options.precompressed) try pairSiblings(gpa, found.items, &ignored);
+
+    for (found.items) |f| {
+        if (f.role != .plain) continue;
+
+        var url_buf: [max_url]u8 = undefined;
+        const url = join(&url_buf, url_prefix, f.path) orelse {
+            std.log.err("nilo: static file \"{s}\" has a path longer than {d} bytes", .{ f.path, max_url });
+            return error.StaticUrlTooLong;
+        };
+
+        const content_type = contentTypeFor(url);
+
+        if (f.size > spill_over) {
             // Over the line, so what goes in the list is where to find it
             // rather than what is in it (ADR 009). Nothing is added to
             // `held_total`: this file holds no memory to be counted.
-            const relative = try gpa.dupe(u8, entry.path);
+            const relative = try gpa.dupe(u8, f.path);
             errdefer gpa.free(relative);
+            const br = try spilledSibling(gpa, found.items, f.br);
+            errdefer if (br) |b| gpa.free(b.path);
+            const gzip_sibling = try spilledSibling(gpa, found.items, f.gzip);
+            errdefer if (gzip_sibling) |g| gpa.free(g.path);
 
             try files.append(gpa, .{
                 .url = try gpa.dupe(u8, url),
                 .content_type = content_type,
-                .etag = try etagForSpilled(gpa, stat.mtime.nanoseconds, stat.size),
-                .cache_control = cacheControlFor(options.cache_rules, options.cache_control, entry.path),
+                .etag = try etagForSpilled(gpa, f.mtime_ns, f.size),
+                .cache_control = cacheControlFor(options.cache_rules, options.cache_control, f.path),
                 .contents = .{ .spilled = .{
                     .dir = serving,
                     .path = relative,
-                    .size = stat.size,
-                    .mtime_ns = stat.mtime.nanoseconds,
+                    .size = f.size,
+                    .mtime_ns = f.mtime_ns,
+                    .br = br,
+                    .gzip = gzip_sibling,
                 } },
             });
             spilled_files += 1;
@@ -831,25 +938,41 @@ pub fn load(
         // it at all now means the file grew between the `stat` above and
         // this read, which is a read that failed rather than a size that was
         // refused.
-        const bytes = entry.dir.readFileAlloc(io, entry.basename, gpa, .limited64(spill_over +| 1)) catch |err| {
-            if (err == error.OutOfMemory) return error.OutOfMemory;
-            std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ entry.path, @errorName(err) });
-            return error.StaticReadFailed;
-        };
+        const bytes = try readHeld(gpa, io, dir, f.path, spill_over +| 1);
         errdefer gpa.free(bytes);
 
         held_total += bytes.len;
-        if (held_total > options.max_total_bytes) {
-            std.log.err(
-                "nilo: static directory \"{s}\" is over the {d} byte total limit",
-                .{ dir_path, options.max_total_bytes },
-            );
-            return error.StaticSetTooLarge;
+        try checkTotal(held_total, options.max_total_bytes, dir_path);
+
+        // What the build compressed, read the same way. A sibling is smaller
+        // than its file, which `pairSiblings` held it to, so it is under the
+        // line whenever the file is.
+        var br_bytes: ?[]const u8 = null;
+        errdefer if (br_bytes) |p| gpa.free(p);
+        if (f.br) |at| {
+            br_bytes = try readHeld(gpa, io, dir, found.items[at].path, found.items[at].size +| 1);
+            held_total += br_bytes.?.len;
+            sibling_total += br_bytes.?.len;
+            try checkTotal(held_total, options.max_total_bytes, dir_path);
         }
 
         var packed_bytes: ?[]const u8 = null;
         errdefer if (packed_bytes) |p| gpa.free(p);
-        if (options.compress and
+        if (f.gzip) |at| {
+            const sibling = try readHeld(gpa, io, dir, found.items[at].path, found.items[at].size +| 1);
+            if (gzipMatches(sibling, bytes)) {
+                packed_bytes = sibling;
+                held_total += sibling.len;
+                sibling_total += sibling.len;
+                try checkTotal(held_total, options.max_total_bytes, dir_path);
+            } else {
+                gpa.free(sibling);
+                try ignored.note(gpa, found.items[at].path, "its contents are not a gzip of the file beside it");
+            }
+        }
+        const sibling_gzip = packed_bytes != null;
+        if (!sibling_gzip and
+            options.compress and
             bytes.len >= options.compress_min_bytes and
             compressible(content_type))
         {
@@ -857,15 +980,7 @@ pub fn load(
             if (packed_bytes) |p| {
                 packed_total += p.len;
                 held_total += p.len;
-                if (held_total > options.max_total_bytes) {
-                    std.log.err(
-                        "nilo: static directory \"{s}\" is over the {d} byte total limit " ++
-                            "once the gzipped copies are counted — raise .max_total_bytes, " ++
-                            "or pass .compress = false",
-                        .{ dir_path, options.max_total_bytes },
-                    );
-                    return error.StaticSetTooLarge;
-                }
+                try checkTotal(held_total, options.max_total_bytes, dir_path);
             }
         }
 
@@ -873,14 +988,17 @@ pub fn load(
             .url = try gpa.dupe(u8, url),
             .content_type = content_type,
             .etag = try etagFor(gpa, bytes),
-            .cache_control = cacheControlFor(options.cache_rules, options.cache_control, entry.path),
+            .cache_control = cacheControlFor(options.cache_rules, options.cache_control, f.path),
             .contents = .{ .held = .{
                 .bytes = bytes,
                 .gzip = packed_bytes,
                 .gzip_etag = if (packed_bytes) |p| try etagFor(gpa, p) else &.{},
+                .br = br_bytes,
+                .br_etag = if (br_bytes) |p| try etagFor(gpa, p) else &.{},
             } },
         });
     }
+    ignored.say(dir_path);
 
     if (skipped_links > 0) std.log.warn(
         "nilo: static directory \"{s}\" holds {d} symlink(s) that are not served: {s}{s}. " ++
@@ -922,11 +1040,12 @@ pub fn load(
     // memory budget and the second one is not in that budget at all — it is
     // one descriptor each, and only while a response is being written.
     std.log.info(
-        "nilo: loaded {d} static file(s) ({d} bytes held{f}) from \"{s}\" onto \"{s}\"{f}{s}",
+        "nilo: loaded {d} static file(s) ({d} bytes held{f}{f}) from \"{s}\" onto \"{s}\"{f}{s}",
         .{
             set.files.len,
             held_total,
             GzipNote{ .bytes = packed_total },
+            SiblingNote{ .bytes = sibling_total },
             dir_path,
             url_prefix,
             SpillNote{ .files = spilled_files, .over = options.max_file_bytes },
@@ -934,6 +1053,146 @@ pub fn load(
         },
     );
     return set;
+}
+
+/// What the first pass of `load` knows about a file: where it is, how big,
+/// when it changed, and what the pairing made of it (ADR 273).
+const Found = struct {
+    /// Relative to the directory, forward slashes, owned.
+    path: []u8,
+    size: u64,
+    mtime_ns: i96,
+    /// A plain file is listed. A `.br` or `.gz` that is the form of a file
+    /// beside it is not, whether or not it turned out usable.
+    role: Role = .plain,
+    /// For a plain file: the index in the same list of its forms.
+    br: ?usize = null,
+    gzip: ?usize = null,
+
+    const Role = enum { plain, br, gzip };
+};
+
+fn lessByPath(_: void, a: Found, b: Found) bool {
+    return std.mem.order(u8, a.path, b.path) == .lt;
+}
+
+/// The coding a name says it is, and the name of the file it would be the
+/// form of: `("app.js.br")` is `(.br, "app.js")`.
+fn siblingOf(path: []const u8) ?struct { coding: compress_mod.Coding, base: []const u8 } {
+    if (std.mem.endsWith(u8, path, ".br")) return .{ .coding = .br, .base = path[0 .. path.len - 3] };
+    if (std.mem.endsWith(u8, path, ".gz")) return .{ .coding = .gzip, .base = path[0 .. path.len - 3] };
+    return null;
+}
+
+/// The siblings `load` found and did not use, named once (ADR 273). A sibling
+/// is consumed by the file it sits beside even when it cannot be served, so
+/// that the rule a reader has to know is one sentence; this is how they hear
+/// that one was passed over.
+const Ignored = struct {
+    count: usize = 0,
+    names: std.ArrayList(u8) = .empty,
+
+    fn note(self: *Ignored, gpa: std.mem.Allocator, path: []const u8, why: []const u8) !void {
+        self.count += 1;
+        if (self.count > max_named_links) return;
+        if (self.names.items.len > 0) try self.names.appendSlice(gpa, "; ");
+        try self.names.print(gpa, "\"{s}\" ({s})", .{ path, why });
+    }
+
+    fn say(self: *const Ignored, dir_path: []const u8) void {
+        if (self.count == 0) return;
+        std.log.warn(
+            "nilo: static directory \"{s}\" holds {d} precompressed file(s) that are not served: {s}{s}. " ++
+                "A .br or .gz beside its file is never served under its own name (ADR 273); " ++
+                "rebuild it, or pass .precompressed = false.",
+            .{ dir_path, self.count, self.names.items, if (self.count > max_named_links) " and more" else "" },
+        );
+    }
+};
+
+/// Match every `X.br` and `X.gz` in `found` (sorted here by path) with the
+/// `X` beside it, when `X` is a type worth compressing, and mark it a sibling
+/// of `X`. One that cannot be used, because it is not smaller than `X` or is
+/// older than it, is marked all the same and `ignored` says so; the
+/// contents of a `.gz` are checked once its bytes are read.
+fn pairSiblings(gpa: std.mem.Allocator, found: []Found, ignored: *Ignored) !void {
+    std.sort.pdq(Found, found, {}, lessByPath);
+    for (found, 0..) |*f, at| {
+        const named = siblingOf(f.path) orelse continue;
+        const base = baseIndex(found, named.base) orelse continue;
+        if (!compressible(contentTypeFor(named.base))) continue;
+        f.role = if (named.coding == .br) .br else .gzip;
+
+        const plain = &found[base];
+        if (f.size == 0 or f.size >= plain.size) {
+            try ignored.note(gpa, f.path, "not smaller than the file beside it");
+            continue;
+        }
+        // Make's rule. A build writes the file and then its forms, so a form
+        // older than the file was left by an earlier build.
+        if (f.mtime_ns < plain.mtime_ns) {
+            try ignored.note(gpa, f.path, "older than the file beside it");
+            continue;
+        }
+        switch (named.coding) {
+            .br => plain.br = at,
+            .gzip => plain.gzip = at,
+            .identity => unreachable,
+        }
+    }
+}
+
+fn baseIndex(sorted: []const Found, path: []const u8) ?usize {
+    var lo: usize = 0;
+    var hi: usize = sorted.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (std.mem.order(u8, sorted[mid].path, path)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return mid,
+        }
+    }
+    return null;
+}
+
+/// A precompressed file for a spilled one: where to open it, copied.
+fn spilledSibling(gpa: std.mem.Allocator, found: []const Found, at: ?usize) !?File.Sibling {
+    const index = at orelse return null;
+    return .{
+        .path = try gpa.dupe(u8, found[index].path),
+        .size = found[index].size,
+        .mtime_ns = found[index].mtime_ns,
+    };
+}
+
+fn readHeld(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path: []const u8, limit: u64) LoadError![]u8 {
+    return dir.readFileAlloc(io, path, gpa, .limited64(limit)) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        std.log.err("nilo: static file \"{s}\" could not be read ({s})", .{ path, @errorName(err) });
+        return error.StaticReadFailed;
+    };
+}
+
+fn checkTotal(held_total: usize, max_total_bytes: usize, dir_path: []const u8) LoadError!void {
+    if (held_total <= max_total_bytes) return;
+    std.log.err(
+        "nilo: static directory \"{s}\" is over the {d} byte total limit, " ++
+            "gzipped and precompressed copies counted — raise .max_total_bytes, " ++
+            "or pass .compress = false",
+        .{ dir_path, max_total_bytes },
+    );
+    return error.StaticSetTooLarge;
+}
+
+/// Whether `gz` is a gzip of exactly `plain`: the magic, and the CRC-32 and
+/// the length mod 2^32 its last eight bytes carry. This is what makes a stale
+/// `.gz` detectable, which brotli's format has no equivalent of (ADR 273).
+fn gzipMatches(gz: []const u8, plain: []const u8) bool {
+    if (gz.len < 18 or gz[0] != 0x1f or gz[1] != 0x8b) return false;
+    const crc = std.mem.readInt(u32, gz[gz.len - 8 ..][0..4], .little);
+    const size = std.mem.readInt(u32, gz[gz.len - 4 ..][0..4], .little);
+    return size == @as(u32, @truncate(plain.len)) and crc == std.hash.Crc32.hash(plain);
 }
 
 /// One file the binary carries, for `embed`.
@@ -977,6 +1236,7 @@ pub const EmbedOptions = struct {
     spa_fallback_for: Options.Fallback = (Options{}).spa_fallback_for,
     compress: bool = (Options{}).compress,
     compress_min_bytes: usize = (Options{}).compress_min_bytes,
+    precompressed: bool = (Options{}).precompressed,
 };
 
 /// A Set over bytes the binary carries, mapped to URLs under `url_prefix`
@@ -1013,7 +1273,37 @@ pub fn embed(
     errdefer set.deinit();
     set.prefix = try gpa.dupe(u8, url_prefix);
 
-    set.files = try gpa.alloc(File, files.len);
+    // Which entries are the forms of which, before anything is allocated for
+    // the files, so that the list is the size of what is served (ADR 273).
+    const forms = try gpa.alloc(EmbeddedForms, files.len);
+    defer gpa.free(forms);
+    @memset(forms, .{});
+    var consumed: usize = 0;
+    var ignored: Ignored = .{};
+    defer ignored.names.deinit(gpa);
+    if (options.precompressed) {
+        for (files, 0..) |entry, at| {
+            const named = siblingOf(entry.path) orelse continue;
+            if (!compressible(contentTypeFor(named.base))) continue;
+            const base = for (files, 0..) |other, j| {
+                if (std.mem.eql(u8, other.path, named.base)) break j;
+            } else continue;
+            forms[at].consumed = true;
+            consumed += 1;
+            if (entry.bytes.len == 0 or entry.bytes.len >= files[base].bytes.len) {
+                try ignored.note(gpa, entry.path, "not smaller than the file beside it");
+            } else if (named.coding == .gzip and !gzipMatches(entry.bytes, files[base].bytes)) {
+                try ignored.note(gpa, entry.path, "its contents are not a gzip of the file beside it");
+            } else switch (named.coding) {
+                .br => forms[base].br = at,
+                .gzip => forms[base].gzip = at,
+                .identity => unreachable,
+            }
+        }
+        ignored.say("the embedded tree");
+    }
+
+    set.files = try gpa.alloc(File, files.len - consumed);
     // Emptied before anything can fail, for the reason `fromMemory` does it:
     // `deinit` on the way out of a half-built Set frees what exists and steps
     // over what does not.
@@ -1027,8 +1317,13 @@ pub fn embed(
 
     var carried_total: usize = 0;
     var packed_total: usize = 0;
+    var next: usize = 0;
 
-    for (files, set.files) |entry, *file| {
+    for (files, forms) |entry, form| {
+        if (form.consumed) continue;
+        const file = &set.files[next];
+        next += 1;
+
         var url_buf: [max_url]u8 = undefined;
         const url = join(&url_buf, url_prefix, entry.path) orelse {
             std.log.err("nilo: embedded file \"{s}\" has a path longer than {d} bytes", .{ entry.path, max_url });
@@ -1044,7 +1339,17 @@ pub fn embed(
         const held = &file.contents.held;
         held.bytes = entry.bytes;
         carried_total += entry.bytes.len;
-        if (options.compress and
+        // The binary carries these already, so they are borrowed, and only
+        // their tags are the Set's (ADR 273).
+        if (form.br) |at| {
+            held.br = files[at].bytes;
+            held.br_etag = try etagFor(gpa, files[at].bytes);
+        }
+        if (form.gzip) |at| {
+            held.gzip = files[at].bytes;
+            held.gzip_borrowed = true;
+            held.gzip_etag = try etagFor(gpa, files[at].bytes);
+        } else if (options.compress and
             entry.bytes.len >= options.compress_min_bytes and
             compressible(file.content_type))
         {
@@ -1093,6 +1398,15 @@ pub fn embed(
     return set;
 }
 
+/// What `embed` worked out about one entry before building the list: whether
+/// it is the form of another entry, and for a plain one the entries that are
+/// its forms.
+const EmbeddedForms = struct {
+    consumed: bool = false,
+    br: ?usize = null,
+    gzip: ?usize = null,
+};
+
 /// The URL that appears twice in a list sorted by URL, or null when every
 /// one is its own. A directory cannot hold two files by one name and a
 /// list can, and the second entry would then be unreachable forever,
@@ -1127,6 +1441,18 @@ const GzipNote = struct {
     pub fn format(self: GzipNote, w: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.bytes == 0) return;
         try w.print(", {d} of them gzipped copies", .{self.bytes});
+    }
+};
+
+/// The precompressed half of the load line: bytes read from `.br` and `.gz`
+/// files the build wrote, which are held beside the plain file like the copy
+/// nilo makes (ADR 273). Absent when there were none.
+const SiblingNote = struct {
+    bytes: usize,
+
+    pub fn format(self: SiblingNote, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.bytes == 0) return;
+        try w.print(", {d} of them precompressed files", .{self.bytes});
     }
 };
 
@@ -1249,7 +1575,7 @@ fn etagForSpilled(gpa: std.mem.Allocator, mtime_ns: i96, size: u64) ![]const u8 
 
 /// The longest `spilledEtag` can write: two quotes, a dash, 24 hex digits of
 /// a u96 and 16 of a u64.
-pub const max_spilled_etag = 2 + 1 + 24 + 16;
+pub const max_spilled_etag = 2 + 1 + 24 + 16 + 3;
 
 /// The same tag, written into a caller's buffer instead of an allocation.
 ///
@@ -1267,6 +1593,28 @@ pub fn spilledEtag(buf: *[max_spilled_etag]u8, mtime_ns: i96, size: u64) []const
     // Cannot overflow: `max_spilled_etag` is what the widest pair of numbers
     // comes to, so the only way past it is a wider integer type.
     return std.fmt.bufPrint(buf, "\"{x}-{x}\"", .{ @as(u96, @bitCast(mtime_ns)), size }) catch unreachable;
+}
+
+/// The tag of a precompressed file left on the disk: its own modification
+/// time and size, and the coding after them (`"1a2b-ff-br"`).
+///
+/// The suffix is not decoration. A representation has its own tag (ADR 273),
+/// and two files sharing a nanosecond and a length is as unlikely for a build
+/// that wrote them side by side as for any pair, but "unlikely" is not the
+/// property a cache is owed: with the coding in the tag the plain file's and
+/// the sibling's cannot be equal.
+pub fn spilledEtagCoded(
+    buf: *[max_spilled_etag]u8,
+    mtime_ns: i96,
+    size: u64,
+    coding: compress_mod.Coding,
+) []const u8 {
+    const suffix = switch (coding) {
+        .identity => "",
+        .gzip => "-gz",
+        .br => "-br",
+    };
+    return std.fmt.bufPrint(buf, "\"{x}-{x}{s}\"", .{ @as(u96, @bitCast(mtime_ns)), size, suffix }) catch unreachable;
 }
 
 /// Whether an `If-None-Match` header matches `etag`. Handles the `*`
@@ -1612,13 +1960,13 @@ test "the two representations of one file never share an ETag" {
     // because the tag it was holding matched.
     try testing.expect(!std.mem.eql(u8, file.etag, held.gzip_etag));
 
-    const plain = file.representation(false);
-    try testing.expect(!plain.gzipped);
+    const plain = file.representation(.identity);
+    try testing.expect(plain.coding == .identity);
     try testing.expectEqualStrings(html, plain.bytes);
     try testing.expectEqualStrings(file.etag, plain.etag);
 
-    const squeezed = file.representation(true);
-    try testing.expect(squeezed.gzipped);
+    const squeezed = file.representation(.gzip);
+    try testing.expect(squeezed.coding == .gzip);
     try testing.expect(squeezed.bytes.len < html.len);
     try testing.expectEqualStrings(held.gzip_etag, squeezed.etag);
 }
@@ -1634,8 +1982,8 @@ test "a file with no compressed copy asks for the plain one whatever the client 
 
     const file = set.find("/tiny.txt").?;
     try testing.expect(file.contents.held.gzip == null);
-    try testing.expect(!file.representation(true).gzipped);
-    try testing.expectEqualStrings("no", file.representation(true).bytes);
+    try testing.expect(file.representation(.gzip).coding == .identity);
+    try testing.expectEqualStrings("no", file.representation(.gzip).bytes);
 }
 
 // ---- a file too big to hold (ADR 009) ----
@@ -2438,4 +2786,282 @@ fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
         break :blk final;
     };
     return &built;
+}
+
+// ---- a file the build already compressed (ADR 273) ----
+
+const bundle_js = repeat("function add(a, b) { return a + b; } // a bundle line\n", 60);
+/// Not brotli, and nothing here decodes it: a sibling's bytes are the build's,
+/// and what is under test is which bytes go out, under which headers.
+const bundle_br = repeat("BR-BYTES-", 20);
+
+/// A tree with `app.js`, a `.br` made of `bundle_br` and a real `.gz`,
+/// written in that order so the siblings are not older than the file.
+fn bundleTree(gpa: std.mem.Allocator, with_br: bool, with_gz: bool) !struct { tree: TmpTree, gz: []const u8 } {
+    const gz = (try gzipped(gpa, bundle_js)).?;
+    errdefer gpa.free(gz);
+    var tree = try TmpTree.init(gpa, &.{.{ "app.js", bundle_js }});
+    errdefer tree.deinit(gpa);
+    if (with_br) try tree.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.js.br", .data = bundle_br });
+    if (with_gz) try tree.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.js.gz", .data = gz });
+    return .{ .tree = tree, .gz = gz };
+}
+
+fn lengthOf(comptime n: usize) []const u8 {
+    return std.fmt.comptimePrint("{d}", .{n});
+}
+
+test "a build's brotli and gzip are served by the client's q, each under its own tag, and never under their own names" {
+    const gpa = testing.allocator;
+    var built = try bundleTree(gpa, true, true);
+    defer built.tree.deinit(gpa);
+    defer gpa.free(built.gz);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", built.tree.path, .{});
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+
+    const ask = struct {
+        fn get(cl: *nilo_testing.Client, a: *App, extra: []const u8) !nilo_testing.Answer {
+            var buf: [256]u8 = undefined;
+            return cl.send(a, try std.fmt.bufPrint(&buf, "GET /app.js HTTP/1.1\r\nHost: t\r\n{s}\r\n", .{extra}));
+        }
+    }.get;
+
+    // Copied out, because the next request writes over the buffer.
+    var plain_tag: [64]u8 = undefined;
+    var br_tag: [64]u8 = undefined;
+    var gz_tag: [64]u8 = undefined;
+
+    const plain = try ask(&client, &app, "");
+    try testing.expectEqual(@as(u16, 200), plain.status);
+    try testing.expectEqualStrings(bundle_js, plain.body);
+    try testing.expect(plain.header("Content-Encoding") == null);
+    // The plain answer says it varies too: a cache that stored it without
+    // would hand it to a browser that could have had the small one.
+    try testing.expectEqualStrings("Accept-Encoding", plain.header("Vary").?);
+    @memcpy(plain_tag[0..plain.header("ETag").?.len], plain.header("ETag").?);
+
+    const br = try ask(&client, &app, "Accept-Encoding: gzip, deflate, br\r\n");
+    try testing.expectEqualStrings(bundle_br, br.body);
+    try testing.expectEqualStrings("br", br.header("Content-Encoding").?);
+    try testing.expectEqualStrings("Accept-Encoding", br.header("Vary").?);
+    try testing.expectEqualStrings(lengthOf(bundle_br.len), br.header("Content-Length").?);
+    @memcpy(br_tag[0..br.header("ETag").?.len], br.header("ETag").?);
+
+    // The build's gzip, byte for byte: nilo made no copy of its own.
+    const gz = try ask(&client, &app, "Accept-Encoding: gzip, deflate\r\n");
+    try testing.expectEqualSlices(u8, built.gz, gz.body);
+    try testing.expectEqualStrings("gzip", gz.header("Content-Encoding").?);
+    @memcpy(gz_tag[0..gz.header("ETag").?.len], gz.header("ETag").?);
+
+    try testing.expect(!std.mem.eql(u8, plain_tag[0..plain.header("ETag").?.len], br_tag[0..br.header("ETag").?.len]));
+
+    // q-values: highest wins, brotli on a tie, and a refused one never.
+    try testing.expectEqualStrings("gzip", (try ask(&client, &app, "Accept-Encoding: br;q=0.4, gzip;q=0.8\r\n")).header("Content-Encoding").?);
+    try testing.expectEqualStrings("br", (try ask(&client, &app, "Accept-Encoding: br;q=0.9, gzip;q=0.8\r\n")).header("Content-Encoding").?);
+    try testing.expectEqualStrings("gzip", (try ask(&client, &app, "Accept-Encoding: br;q=0, gzip\r\n")).header("Content-Encoding").?);
+    const refused = try ask(&client, &app, "Accept-Encoding: br;q=0, gzip;q=0\r\n");
+    try testing.expect(refused.header("Content-Encoding") == null);
+    try testing.expectEqualStrings(bundle_js, refused.body);
+    try testing.expectEqualStrings("br", (try ask(&client, &app, "Accept-Encoding: *\r\n")).header("Content-Encoding").?);
+
+    // A repeat visitor, per encoding: its own tag is a 304, another's is not.
+    var request: [256]u8 = undefined;
+    const same = try client.send(&app, try std.fmt.bufPrint(
+        &request,
+        "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\nIf-None-Match: {s}\r\n\r\n",
+        .{br_tag[0..br.header("ETag").?.len]},
+    ));
+    try testing.expectEqual(@as(u16, 304), same.status);
+    try testing.expectEqualStrings("Accept-Encoding", same.header("Vary").?);
+    const other = try client.send(&app, try std.fmt.bufPrint(
+        &request,
+        "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\nIf-None-Match: {s}\r\n\r\n",
+        .{plain_tag[0..plain.header("ETag").?.len]},
+    ));
+    try testing.expectEqual(@as(u16, 200), other.status);
+    try testing.expectEqualStrings(bundle_br, other.body);
+
+    // A range is an offset into the plain bytes, as it is for nilo's own
+    // copy, so the compressed forms are not cut anywhere.
+    const part = try ask(&client, &app, "Accept-Encoding: br\r\nRange: bytes=0-9\r\n");
+    try testing.expectEqual(@as(u16, 206), part.status);
+    try testing.expectEqualStrings(bundle_js[0..10], part.body);
+    try testing.expect(part.header("Content-Encoding") == null);
+    try testing.expectEqualStrings("Accept-Encoding", part.header("Vary").?);
+
+    // A HEAD gets the head the GET would have, with the compressed length.
+    const head = try client.send(&app, "HEAD /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\n\r\n");
+    try testing.expectEqualStrings("br", head.header("Content-Encoding").?);
+    try testing.expectEqualStrings(lengthOf(bundle_br.len), head.header("Content-Length").?);
+    try testing.expectEqualStrings("", head.body);
+
+    // The siblings are the file's forms and not files.
+    try testing.expectEqual(@as(u16, 404), (try client.get(&app, "/app.js.br")).status);
+    try testing.expectEqual(@as(u16, 404), (try client.get(&app, "/app.js.gz")).status);
+}
+
+test "a gzip beside the file replaces the copy nilo would make, and a brotli alone leaves that copy" {
+    const gpa = testing.allocator;
+
+    var with_gz = try bundleTree(gpa, true, true);
+    defer with_gz.tree.deinit(gpa);
+    defer gpa.free(with_gz.gz);
+    var set = try load(gpa, "/", with_gz.tree.path, .{}, .reported);
+    defer set.deinit();
+    const both = set.find("/app.js").?.contents.held;
+    try testing.expectEqualSlices(u8, with_gz.gz, both.gzip.?);
+    try testing.expectEqualStrings(bundle_br, both.br.?);
+    try testing.expectEqual(@as(usize, 1), set.files.len);
+
+    var only_br = try bundleTree(gpa, true, false);
+    defer only_br.tree.deinit(gpa);
+    defer gpa.free(only_br.gz);
+    var made = try load(gpa, "/", only_br.tree.path, .{}, .reported);
+    defer made.deinit();
+    const held = made.find("/app.js").?.contents.held;
+    // Nilo's own, for the client that takes gzip and not brotli.
+    try testing.expect(held.gzip != null);
+    try testing.expect(held.br != null);
+    try testing.expect(!std.mem.eql(u8, held.gzip_etag, held.br_etag));
+}
+
+test "a sibling that is stale, not smaller or not a gzip of its file is passed over, and still not a file" {
+    const gpa = testing.allocator;
+
+    // A gzip of something else: what an old build left behind.
+    const other = (try gzipped(gpa, repeat("not the bundle at all, but compressible enough. ", 80))).?;
+    defer gpa.free(other);
+    var tree = try TmpTree.init(gpa, &.{
+        .{ "app.js", bundle_js },
+        .{ "app.js.gz", other },
+        .{ "big.js", "tiny();" },
+        .{ "big.js.br", "this is longer than the file it claims to compress" },
+        .{ "old.js", bundle_js },
+        .{ "old.js.br", bundle_br },
+    });
+    defer tree.deinit(gpa);
+
+    // Older than the file, by a build before this one.
+    var old_br = try tree.tmp.dir.openFile(std.testing.io, "old.js.br", .{ .mode = .read_write });
+    defer old_br.close(std.testing.io);
+    try old_br.setTimestamps(std.testing.io, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 1_000_000_000 } } });
+
+    var set = try load(gpa, "/", tree.path, .{}, .reported);
+    defer set.deinit();
+
+    try testing.expectEqual(@as(usize, 3), set.files.len);
+    const app_js = set.find("/app.js").?.contents.held;
+    try testing.expect(!std.mem.eql(u8, other, app_js.gzip.?));
+    try testing.expect(set.find("/big.js").?.contents.held.br == null);
+    try testing.expect(set.find("/old.js").?.contents.held.br == null);
+    try testing.expect(set.find("/app.js.gz") == null);
+    try testing.expect(set.find("/big.js.br") == null);
+    try testing.expect(set.find("/old.js.br") == null);
+}
+
+test "with precompressed off the siblings are ordinary files, and a type not worth compressing keeps its neighbour" {
+    const gpa = testing.allocator;
+    var built = try bundleTree(gpa, true, true);
+    defer built.tree.deinit(gpa);
+    defer gpa.free(built.gz);
+
+    var off = try load(gpa, "/", built.tree.path, .{ .precompressed = false }, .reported);
+    defer off.deinit();
+    try testing.expectEqual(@as(usize, 3), off.files.len);
+    try testing.expect(off.find("/app.js.br") != null);
+    try testing.expect(off.find("/app.js").?.contents.held.br == null);
+
+    // A picture is not compressible, so `photo.png.gz` is somebody's download.
+    var tree = try TmpTree.init(gpa, &.{
+        .{ "photo.png", repeat("not really a png ", 100) },
+        .{ "photo.png.gz", "x" },
+    });
+    defer tree.deinit(gpa);
+    var png = try load(gpa, "/", tree.path, .{}, .reported);
+    defer png.deinit();
+    try testing.expectEqual(@as(usize, 2), png.files.len);
+}
+
+test "a spilled file takes its sibling from the disk, under a tag of its own" {
+    const gpa = testing.allocator;
+    var built = try bundleTree(gpa, true, true);
+    defer built.tree.deinit(gpa);
+    defer gpa.free(built.gz);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.tryStaticWith("/", built.tree.path, .{ .max_file_bytes = 16 });
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+
+    var plain_tag: [64]u8 = undefined;
+    const plain = try client.get(&app, "/app.js");
+    try testing.expectEqualStrings(bundle_js, plain.body);
+    try testing.expectEqualStrings("Accept-Encoding", plain.header("Vary").?);
+    const plain_tag_len = plain.header("ETag").?.len;
+    @memcpy(plain_tag[0..plain_tag_len], plain.header("ETag").?);
+
+    const br = try client.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br, gzip\r\n\r\n");
+    try testing.expectEqualStrings(bundle_br, br.body);
+    try testing.expectEqualStrings("br", br.header("Content-Encoding").?);
+    try testing.expectEqualStrings("Accept-Encoding", br.header("Vary").?);
+    try testing.expectEqualStrings(lengthOf(bundle_br.len), br.header("Content-Length").?);
+    try testing.expect(!std.mem.eql(u8, plain_tag[0..plain_tag_len], br.header("ETag").?));
+    var br_tag: [64]u8 = undefined;
+    const br_tag_len = br.header("ETag").?.len;
+    @memcpy(br_tag[0..br_tag_len], br.header("ETag").?);
+
+    const gz = try client.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br;q=0, gzip\r\n\r\n");
+    try testing.expectEqualSlices(u8, built.gz, gz.body);
+    try testing.expectEqualStrings("gzip", gz.header("Content-Encoding").?);
+
+    var request: [256]u8 = undefined;
+    const again = try client.send(&app, try std.fmt.bufPrint(
+        &request,
+        "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\nIf-None-Match: {s}\r\n\r\n",
+        .{br_tag[0..br_tag_len]},
+    ));
+    try testing.expectEqual(@as(u16, 304), again.status);
+
+    const part = try client.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\nRange: bytes=0-9\r\n\r\n");
+    try testing.expectEqual(@as(u16, 206), part.status);
+    try testing.expectEqualStrings(bundle_js[0..10], part.body);
+    try testing.expect(part.header("Content-Encoding") == null);
+
+    // The sibling gone since the walk: the plain file answers.
+    try built.tree.tmp.dir.deleteFile(std.testing.io, "app.js.br");
+    const gone = try client.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\n\r\n");
+    try testing.expectEqual(@as(u16, 200), gone.status);
+    try testing.expectEqualStrings(bundle_js, gone.body);
+    try testing.expect(gone.header("Content-Encoding") == null);
+}
+
+test "an embedded tree serves the forms it carries and frees only what it made" {
+    const gpa = testing.allocator;
+    const gz = (try gzipped(gpa, bundle_js)).?;
+    defer gpa.free(gz);
+
+    var app = App.init(gpa);
+    defer app.deinit();
+    try app.embedded("/", &.{
+        .{ .path = "app.js.br", .bytes = bundle_br },
+        .{ .path = "app.js", .bytes = bundle_js },
+        .{ .path = "app.js.gz", .bytes = gz },
+    });
+
+    var client = try nilo_testing.Client.init(gpa, .{});
+    defer client.deinit();
+
+    const br = try client.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: br\r\n\r\n");
+    try testing.expectEqualStrings(bundle_br, br.body);
+    try testing.expectEqualStrings("Accept-Encoding", br.header("Vary").?);
+    const zipped = try client.send(&app, "GET /app.js HTTP/1.1\r\nHost: t\r\nAccept-Encoding: gzip\r\n\r\n");
+    try testing.expectEqualSlices(u8, gz, zipped.body);
+    try testing.expectEqual(@as(u16, 404), (try client.get(&app, "/app.js.br")).status);
 }

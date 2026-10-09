@@ -4412,3 +4412,114 @@ Marginal meets average to within 25 bytes for the plain rows and 75 for TLS, so 
 **So the record was stale, and `park-check` and `mem.py` agree.** Both read one page for a plain connection in every build. `park-check` never sees the TLS connection's second page because it speaks plain HTTP; its pin of two on `-Dtls` was left over from the plain listener's old page. Not known: which commit between `514e8c1` and `1e583bc` gave the page back (the connection loop and the Bridge were reorganised for the HTTP/2 stages in that range); no bisect was run.
 
 **The decision it moved:** `park-check` pins every build at one page, and CLAUDE.md, ADR 062, ADR 212, `docs/design/memory.md`, `docs/design/tls.md`, `docs/guide/deploying.md`, the roadmap and the todo entry now say a plain listener pays nothing and a TLS connection pays the page. **Can it be pushed further:** a TLS connection's second page is the handshake frames' high-water mark below the park (ADR 212); `park-check` does not cover it, so a TLS connection going from two pages to three is noticed only by `mem.py --tls`. Covering it needs a client that does a handshake, which the program does not carry. The default build's 288 bytes of headroom and `-Dhttp2`'s were not re-read here.
+
+## A file a build compressed is held beside the file
+
+Run on 2026-10-09 at `c4e2d08` plus the working tree of ADR 273, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0, one temporary test calling `static.load` on five directories and summing the held slices (the test was removed after the run). The compile was Debug with the standard library's gzip, so the load times below are Debug times and say only which side does the work, not what a ReleaseFast server pays.
+
+The fixture is six real front-end files from this machine's `/usr/share/doc` (jQuery 3.6.0 minified, Bootstrap's `bootstrap.min.css`, clang's `searchindex.js`, LibreOffice's `contents.js` and two ffmpeg HTML pages), 1,421,488 plain bytes. The siblings were written the way a bundler's plugin does: `brotli -q 11` and `gzip -9`, each after the file.
+
+| tree | gzip held | br held | total held | load (Debug) |
+|---|---|---|---|---|
+| plain only, `compress` on (today) | 339,431 (nilo's) | 0 | 1,760,919 | 186 ms |
+| plain only, `compress = false` | 0 | 0 | 1,421,488 | 2 ms |
+| `.br` and `.gz` beside every file | 333,516 (the build's) | 279,412 | 2,034,416 | 6 ms |
+| `.br` only, `compress` on | 339,431 (nilo's) | 279,412 | 2,040,331 | 186 ms |
+| `.br` only, `compress = false` | 0 | 279,412 | 1,700,900 | 2 ms |
+
+What goes over the wire for the whole tree: 279,412 bytes as brotli, 333,516 as the build's gzip -9 and 339,431 as nilo's own, so brotli is 16.2% under gzip -9 and 17.7% under nilo's copy, and nilo's default level is within 1.8% of `gzip -9` on this tree. The largest file, `searchindex.js`, is 803,121 plain, 205,519 gzip and 169,659 brotli.
+
+**What it moved.** The precompressed tree holds 273,497 bytes (15.5%) more than today's, all of it the brotli forms, and saves the startup gzip for every file with a `.gz`. A tree that gives up the gzip copy for brotli alone holds 60,019 bytes less than today's and serves nothing to a client without brotli but the plain file, which is the Chrome-over-HTTP case, so the default keeps nilo's copy when there is no `.gz`. The decision (ADR 273): serve the siblings, on by default, `br` before `gzip` by q, one more form per file held and charged against `max_total_bytes`.
+
+**Not measured, and why.** The "Needs" of the todo entry asked for a front end served by nilo whose build writes these files; these are real files compressed with the real tools but not the output of one bundler, so the byte counts are a tree's and not Vite's. No req/s: the request path takes a slice either way and `behaviour.zig` holds its allocations at zero. Can it be pushed further: the only lever on memory is the choice of which forms to keep, and it is the operator's through `compress`.
+
+## A JSON answer in arena segments does not beat `Allocating`
+
+Run on 2026-10-09 at `c4e2d08` plus `bench/json_segments.zig` (the program and its `bench-json-segments` step, nothing under `http/`), AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0, `-Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast`, `taskset -c 5`, SMT sibling idle but the rest of the machine not (other agents were building on other cores). The question was the todo entry "whether a body written into arena segments and sent with one vectored write would beat `std.Io.Writer.Allocating` for a JSON answer of a few kilobytes".
+
+What was compared, all through the real `json.write` into a `*std.Io.Writer`: **A** is `sendJson`'s writer (`Allocating.initCapacity(arena, 512)`, growing); **B** is a prototype `Segments` writer (a `std.Io.Writer` whose buffer is an arena segment, sealed when full, 512 bytes doubling to 4,096, the segments being the iovecs of one `writev`); **C** is the same with 4,096-byte segments throughout. The bytes of B and C are checked equal to A's before anything is timed. The arena is a `std.heap.ArenaAllocator` reset after every request with `retain_with_limit = 16 KiB` (`default_arena_keep`), over a counting allocator. Answers: 7, 31 and 126 items of about 135 bytes, 952, 4,212 and 17,116 bytes of JSON (the nearest whole items to 1, 4 and 16 KiB). Instructions are the user-space `INSTRUCTIONS` counter through `perf_event_open`, because cachegrind is not installed here. Three variants interleaved, order rotated each round, 21 rounds of 5,000 requests, the first round of each discarded as warm-up; times are the minimum round and the median round. Run twice at the default keep and once at `--keep 65536`.
+
+| answer | keep | variant | ns a request (min, median) | instructions a request | backing bytes a request |
+|---|---|---|---|---|---|
+| 952 B | 16 KiB | A | 582, 601 | 17,788 | 0 |
+| | | B | 600, 612 | 18,097 | 0 |
+| | | C | 591, 602 | 17,842 | 0 |
+| 4,212 B | 16 KiB | A | 2,705, 2,724 | 78,062 | 0 |
+| | | B | 2,712, 2,731 | 78,459 | 0 |
+| | | C | 2,685, 2,702 | 77,958 | 0 |
+| 17,116 B | 16 KiB | A | 14,223, 14,750 | 317,780 | 54,392 |
+| | | B | 10,744, 10,991 | 315,808 | 0 |
+| | | C | 10,554, 10,943 | 315,382 | 0 |
+| 17,116 B | 64 KiB | A | 10,556, 10,715 | 314,909 | 0 |
+| | | B | 10,520, 10,704 | 315,659 | 0 |
+| | | C | 10,535, 10,644 | 315,147 | 0 |
+
+Adding the one `writev` of head and body to `/dev/null` moves every row by the same 60 to 100 ns whichever variant, and the order of the three does not change (the full output is reproducible with the command in the program's header).
+
+**Segments do not win.** At 1 and 4 KiB the three are within 1 to 3% of each other on time (inside the spread of a round, 2 to 12%) and within 1% on instructions, where B and C are not below A but a few hundred above or below it. At 17 KiB with the default keep the segments are 24 to 26% faster, and **that is not the segments**: at `--keep 65536` the three are equal (10.52 to 10.56 us, 314,909 to 315,659 instructions). What the 24% is, is that A's growth leaves a 17 KB answer using 54 KB of arena (the buffer at each size it passed through), more than the 16 KiB the arena keeps, so each request gives the excess back and asks the backing allocator for it again (2 calls and 54,392 bytes a request); the segments are many small blocks that the reset keeps within the limit (0 backing bytes a request), so they ask for nothing. Why that holds for 17 KB of segments and not for A's buffer was not chased further. The copy the todo entry feared is not in the numbers: the instruction counts of A and B differ by under 1% at every size, which is where the memcpy of a grow would show (the likely reason is that `Allocating`'s buffer is the arena's last allocation and grows in place, which was inferred and not checked).
+
+**The decision it moved:** segments are not built. They would cost the contiguous body that everything after `sendJson` wants (`deliverWhole`'s compression, `holdWhole` for a middleware that holds the answer, HEAD, ETag, `kept`, and `sendOwned(…, out.written())` in `typed.zig`, `ownbody.zig` and `profile.zig`), for a saving the measurement does not find. What the run found instead is that **an answer larger than `arena_keep` costs a request 54 KB of backing allocation and about a quarter of its time**, and the cheaper levers for that are not segments: a size hint per route (the length of its last answer, so `initCapacity` is right the second time) or an `arena_keep` the answer fits in. Neither was measured here and neither is claimed.
+
+**Can it be pushed further:** B and C differ from A by less than the spread everywhere the arena is not over its limit, so a better segment writer cannot turn it around; the open question is the one above, and it wants a run through the server (`bench/main.zig` with a 17 KB route) rather than this in-process one, because the backing allocator here is `smp_allocator` and the server's is whatever the App was given.
+
+## A connection is never ended by the server: executor imbalance that lasts, and a cap on requests (ADR 275)
+
+**What was run.** `bench/keepalive_server.zig` (every answer names the OS thread; `/work/:us` spins for a given time) and `bench/keepalive.py` (opens connections in a stated order, keeps them, reads each executor thread's CPU from `/proc/<pid>/task/<tid>/stat` per window). Busy connections ask `/work/400` every 2 ms (about 15% of a core each); quiet ones ask `/tid` every 10 s. Windows are 15 s of a 45 s run.
+
+**Machine.** AMD Ryzen 7 9700X, 8 cores, 16 threads. Server pinned to cores 0 to 3 (four executors), client to cores 4 to 7, ReleaseFast, loopback. Commit c4e2d08 plus the diff for ADR 275.
+
+**Without a cap, the imbalance is dealt on day one and does not move.** Hottest executor over the mean, the same in all three windows of each run:
+
+| plan (B busy, I quiet, in opening order) | hottest / mean |
+|---|---|
+| `BBBBIIIIIIIIIIII` | 1.00 |
+| `BIIIBIIIBIIIBIII` (strided) | 4.00 (all four busy on one executor, the other three at 0.0%) |
+| six random orders of 4 B and 12 I | 1.99, 2.00, 2.00, 2.96, 2.99, 2.99 |
+| three random orders of 16 B and 48 I, 8 ms apart | 1.74, 1.50, 1.50 |
+
+The dealing is round-robin by arrival (`getNextExecutor`), so it is even in count; it is uneven in load whenever the busy ones are few.
+
+**With `max_requests_per_connection = 1000`** (a busy connection reconnects about every 2 s here): strided 4.00 becomes 1.58, 1.03, 1.01 across the three windows; seed 2 from 3.00 becomes 1.33, 1.01, 1.00; seed 4 from 3.00 becomes 1.32, 1.01, 1.01; the 16-in-64 runs from 1.74, 1.50, 1.50 become 1.41/1.02/1.01, 1.28/1.00/1.02 and 1.28/1.02/1.01. The first window carries the first 2 s before any connection has been dealt again.
+
+**Latency when the hot executor saturates** (400 us of work every 1 ms, three busy connections on one executor): uncapped p50 0.46, 0.82, 0.82 ms with 78,158 requests in 45 s and 70% of the server's four cores; capped p50 0.43 ms in all windows with 110,260 requests and 97 to 99%. p99 is noise between 0.5 and 3 ms in both and is not claimed: a capped run puts one busy connection on every executor, and each wakes from park.
+
+**Two instances, 2 executors each, the second added to the rotation at 15 s** (8 busy and 24 quiet connections): uncapped, the second instance took 0.0% CPU and no connection in all three windows, the first held both executors at 56 to 59% each. Capped: window 2 split 61% / 51% and window 3 55% / 56% (busy 2+2 and 2+2). The 24 quiet connections stayed on the first instance for the whole run, as they would: at one request in ten seconds a count of a thousand is hours away. They carry no load.
+
+**What it costs.** Server CPU per request on the cheapest route (32 busy connections back to back, 10 s, three runs each): cap 0 gives 2.50, 2.44, 2.43 us; cap 2 gives 5.74, 5.67, 5.56; cap 1 gives 8.60, 8.66, 8.72. A connection therefore costs about 6.3 us, so one per thousand requests is 0.26% of a request. A first attempt at cap 1000 against cap 0 for 15 s read between +10% and +60% and was noise from the Python client (the runs that disagreed with the cap 1 and cap 2 figures); the per-connection cost above is the figure to use. No wrk or oha is installed here, so this is CPU per request and never req/s, as ADR 242 prefers.
+
+**Memory and size.** `bench/mem.py` against `nilo-hello`, three interleaved pairs, before and after: 4,731 / 4,704 / 4,684 / 4,678 bytes per connection at 1,000 / 2,000 / 5,000 / 10,000, identical to the byte in all six runs. `park-check` reads one page for the default build, `-Dhttp2`, `-Dtls` and `-Dtls -Dhttp2`. Stripped `nilo-hello`: 918,552 before, 918,880 after (+328 bytes).
+
+**Decision.** Build it: a cap of 1,000 requests, jittered by a tenth, on by default. Age was not built: the quiet connections it would move carry no load. **Can the number be pushed further?** The 6.3 us a connection costs is accept, spawn, and the first request's cold pages; a smaller default than 1,000 would cost 2.6% at 100 and is not wanted. An age cap for quiet connections is open if a balancer that balances connection counts needs it.
+
+## The arena's HTTP/2 profiles: work stealing, the request cap, and where nilo stands against the framework league's leader
+
+Run on 2026-10-09, AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, Zig 0.17.0. The arena entry of [HttpArena PR 1539](https://github.com/MDA2AV/HttpArena/pull/1539) built as the board builds it (`zig build -Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3+aes+pclmul --release=fast`) in three variants: **steal**, the PR as submitted (`zio_options.scheduling = .work_stealing`, nilo `c4e2d08`); **pinned**, the same with that line removed; **main**, pinned against this working tree (`01ca862` plus the uncommitted changes of ADR 272 to 275) with `.max_requests_per_connection = 0`. The control is the board's swerver entry (first in the framework league's HTTP/2 composite), its own Dockerfile, `--network host`. Server on cpus 0-3,8-11 (four physical cores), the board's `h2load` image on 4-7,12-15, the board's own arguments per profile (`-m 100` for the baselines and gRPC, `-m 32` for static and JSON, `-t 8`), 5 s, the board's data and certificate mounted. CPU per request is the server's user and system time over the run divided by requests answered.
+
+**Work stealing is what put the board's HTTP/2 numbers at the bottom.** The board read baseline-h2c 235k to 315k at about 6,000% CPU and 2 to 7 GiB, and unary-grpc 247k to 335k, last of sixteen. Two interleaved rounds here:
+
+| profile | c | pinned req/s | steal req/s | pinned peak | steal peak |
+|---|---|---|---|---|---|
+| baseline-h2c | 256 | 1.44M | 0.66M | 65 MB | 370 MB |
+| baseline-h2c | 1,024 | 1.53M, 2.94M | 1.14M, 1.19M | 47 to 53 MB | 1.47 to 1.48 GB |
+| baseline-h2c | 4,096 | 2.86M, 2.87M | 0.86M, 0.99M | 216 to 227 MB | 5.88 to 5.92 GB |
+| unary-grpc | 256 | 1.41M, 1.42M | 1.08M, 1.15M | 416 to 429 MB | 427 to 438 MB |
+| unary-grpc | 1,024 | 1.29M, 1.29M | 1.05M, 1.07M | 842 to 848 MB | 1.75 to 1.81 GB |
+| json-h2c | 1,024 | 667k, 671k | 539k, 537k | 237 to 251 MB | 713 to 722 MB |
+
+Under `.work_stealing` zio refuses `spawnInto(.local)`, and the engine's fallback spawns a stream's call anywhere, so a connection's calls run on other executors and pile up there: the 5.9 GB at 4,096 connections is the board's 7.4 GiB. The `async-db` reason the override was put in for did not hold either (66k at 755% against 57k before, with dusty at 290k), so the override comes out of the entry.
+
+**The request cap of ADR 275 at its default takes `h2load` down.** main as built with the default 1,000 read 195k req/s at 1,024 connections with 92,729 of 1,065,799 requests errored: a GOAWAY after a thousand requests refuses the streams `h2load` already opened above the last one named, and `h2load` does not open a new connection in a timed run. With the cap at 0, main reads 2.99M against pinned's 2.96M, the same.
+
+**Against the control** (one round each, main with the cap at 0):
+
+| profile | c | swerver req/s | nilo req/s | swerver µs CPU a request | nilo µs CPU a request | swerver peak | nilo peak |
+|---|---|---|---|---|---|---|---|
+| baseline-h2c | 1,024 | 6.03M | 2.99M | 1.24 | 2.44 | 916 MB | 47 MB |
+| baseline-h2c | 4,096 | 5.61M | 2.90M | 1.30 | 2.55 | 2.6 GB | 215 MB |
+| baseline-h2 (TLS) | 1,024 | 2.08M | 2.36M | 3.09 | 3.05 | 972 MB | 169 MB |
+| static-h2 (TLS) | 256 | 703k | 106k | 9.26 | 44.29 | 516 MB | 182 MB |
+| json-h2c | 1,024 | 1.73M | 680k | 4.51 | 10.16 | 912 MB | 240 MB |
+
+Over TLS nilo is already ahead. Cleartext, it spends twice the CPU a request; JSON, 2.3 times; static, 4.8 times, because the entry serves `/data/static` with `.reload` (an open, a stat and a read per request, and no compressed form) since the board's rule is that a cache must follow the disk, and nilo's held files do not.
+
+**What it decided.** The override leaves the entry and the entry sets the cap to 0 until the cap's HTTP/2 behaviour is settled. Three pieces of work follow, each measured against this table: a held static file that follows the disk, a request on HTTP/2 that does not cost twice the leader's, and JSON. Projected onto the board by these ratios, nilo would sit about seventh in the framework league's HTTP/2 composite; third needs static near swerver's, baseline-h2c at about 75% of its, and json-h2c at about two thirds.

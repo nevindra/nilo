@@ -81,6 +81,7 @@ On the request path, a routed GET returning JSON with CORS installed makes **one
 | the process's descriptor limit (`ulimit -n`) | usually 1,024 | `accept` fails with `ProcessFdQuotaExceeded`. The loop waits (5 ms, doubling up to a second) and tries again, and the log says so once per shortage. Meanwhile connections wait in the kernel's backlog. `listen()` warned at startup if this was below `max_connections` ([ADR 194](../adr/194-an-accept-loop-that-is-out-of-descriptors-waits.md)) | A held connection ends |
 | `backlog` | 4,096 | The kernel drops the SYN (no reset, and no log line from nilo), and the client's TCP retries it one second later, so the connection succeeds late. `ListenOverflows` in `/proc/net/netstat` is the only trace; `bench/burst.py` reads it ([ADR 198](../adr/198-a-backlog-is-sized-for-the-burst-not-the-load.md)) | An acceptor takes the next handshake. There is one per thread, so the queue drains at the rate all of them accept ([ADR 200](../adr/200-every-executor-accepts.md)) |
 | `max_in_flight` | off | The head is read, then the answer is `503` with `Retry-After: 1` and `Connection: close`: one write of a constant, no queue. Counted under `<shed>` on the metrics page | A request inside its handler finishes |
+| `max_requests_per_connection` | 1,000 | Not a refusal: the answer to a connection's last request carries `Connection: close` (an HTTP/2 connection is sent a GOAWAY naming the last call it will answer), and the client opens another. Each connection gets up to a tenth less, so a pool opened together does not end together ([ADR 275](../adr/275-a-connection-is-ended-after-a-number-of-requests.md)) | Nothing to free: the client reconnects, to whichever instance the balancer picks |
 | `header_timeout_ms` | 10,000 | A client partway through a head gets a `408` and the connection is closed. One that sent nothing is closed without a status, because there is nothing to answer | Nothing to free: the connection is gone |
 | `read_buffer` | 16 KiB | A head that does not fit is a `431`, and the connection is closed, send side first, so the `431` reaches a client that would otherwise see a reset ([ADR 195](../adr/195-a-refused-request-is-hung-up-on-with-a-fin.md)) | Nothing to free |
 | `idle_timeout_ms` | 75,000 | A keep-alive connection that has asked for nothing is closed, with no status | Nothing to free |
@@ -381,7 +382,14 @@ One consequence is worth knowing before you need it: **a browser gets HTTP/2 fro
 const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .tls = true });
 ```
 
-The library is fetched and linked only with that flag, so a build without it is exactly the build the rest of this page describes. With it, the listener takes two PEM files:
+The library is fetched and linked only with that flag, so a build without it is exactly the build the rest of this page describes. To run a different commit, fork or checkout of tls.zig than the one nilo pins, add `.tls_own = true` and write the import yourself; nilo's pin is then not fetched, and forgetting the line is an error that names it ([ADR 274](../adr/274-a-dependent-can-bring-its-own-tls-library.md), [the surface it needs](../reference/app.md#a-tls-library-of-your-own)):
+
+```zig
+const nilo = b.dependency("nilo", .{ .target = target, .optimize = optimize, .tls = true, .tls_own = true });
+nilo.module("nilo_http").addImport("tls", b.dependency("tls", .{ .target = target, .optimize = optimize }).module("tls"));
+```
+
+The fix to a TLS bug then reaches you when you move your `tls` pin, not when nilo releases. With it, the listener takes two PEM files:
 
 <!-- compiles: body -->
 ```zig
