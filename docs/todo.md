@@ -63,12 +63,6 @@ Nothing is open at this tier.
 
 **Needs:** a way of being cheap in a test suite that is not also a way of being cheap in production.
 
-### `nilo_fetch`
-
-**An `https://` call cannot go through an egress proxy, because `std.http.Client` cannot start TLS inside its tunnel.** `Settings.proxy` carries `http://` calls and refuses an `https://` one with `error.TlsThroughProxy` ([ADR 267](./adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)), and a network whose only way out is a proxy is mostly a network of HTTPS. Reading `std.http.Client.connect` and `connectProxied` at 0.17.0: the tunnel is a `CONNECT` on a connection created with the proxy's protocol, not the target's, so the request that follows is sent as text to a server expecting a handshake, and `Connection.Tls.create`, the one piece that would wrap the tunnel, is private. This is a reading, not a run: the fetch tests have no TLS server.
-
-**Needs:** a `CONNECT` proxy and a TLS server in the test suite to run it against (the proxy half is a few lines of the canned server); then either the fix upstream in std (a report, with the two functions above named), or `nilo_fetch` building the tunnel and the TLS client itself with `std.crypto.tls.Client` and handing std a connection it can read, which is a fork of the client and is weighed against ADR 017's size axis before it is written.
-
 ### `nilo_job`
 
 **A schedule is UTC.** `0 3 * * *` is three in the morning in Greenwich, and a program in Jakarta writes `0 20 * * *` with a comment. A time zone is a table of rules that changes twice a year and a dependency to carry it. A zone with daylight saving also has an hour each year that never happens and one that happens twice, so `0 2 * * *` in `Europe/Berlin` needs an answer to both; Vixie cron runs a skipped tick right after the jump and a repeated one once. Go embeds the whole database with `time/tzdata` (about 450 KB), and Rust's `chrono-tz` compiles it in with a filter for the zones a program names.
@@ -433,9 +427,9 @@ Nothing is open at this tier.
 
 **Direction:** [The toolkit grows by the jobs people have](./roadmap.md#the-toolkit-grows-by-the-jobs-people-have)
 
-**`nilo_fetch` cannot present a client certificate, so it cannot call a service that requires mutual TLS.** `std.crypto.tls.Client` at 0.17.0 has no answer to a `CertificateRequest`; tls.zig, which the listener already uses behind `-Dtls`, takes a key pair on its client. Moving the client to it is the same fork of `std.http.Client`'s connection that the egress-proxy entry weighs, so the two are one decision. reqwest shows the trap to keep out: which `Identity` constructors compile depends on the TLS backend a feature picked. Go's `GetClientCertificate` is the shape for a certificate that rotates.
+**`nilo_fetch` cannot present a client certificate, so it cannot call a service that requires mutual TLS, and neither std nor a flag fixes it today.** `std.crypto.tls.Client` at 0.17.0 has no arm for `CertificateRequest` (its handshake loop ends `else => return error.TlsUnexpectedMessage`) and sends no `Certificate` or `CertificateVerify`; tls.zig, behind `-Dtls`, takes a key pair (`config.Client.auth`), but `std.http.Client.Connection` can only hold std's own TLS client (a `.tls` connection is read and written through `&tls.client.reader` and `.writer`, found by `@fieldParentPtr`, and freed by a length std computes from its own buffers), so a tls.zig connection cannot be handed to it ([ADR 276](./adr/276-an-https-call-goes-through-a-proxy-in-a-tunnel-nilo-opens.md), last section). The cheapest honest fix is client authentication in `std.crypto.tls.Client`, which would serve the default build with no flag; the alternative is an HTTP/1.1 client of nilo's own on tls.zig behind `-Dtls`, a module of its own. reqwest shows the trap to keep out: which `Identity` constructors compile depends on the TLS backend a feature picked. Go's `GetClientCertificate` is the shape for a certificate that rotates.
 
-**Needs:** a caller behind a mesh that requires it, and the client's TLS library settled together with the egress-proxy entry.
+**Needs:** an upstream issue or patch for client authentication in `std.crypto.tls.Client`, or a decision to own an HTTP/1.1 client; a caller with a mutual-TLS service.
 
 ### `nilo_job`
 

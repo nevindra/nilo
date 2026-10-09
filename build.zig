@@ -3875,6 +3875,21 @@ fn httpFor(
     mode: std.lang.Optimize,
     core_mod: *std.Build.Module,
 ) *std.Build.Module {
+    return httpWith(b, target, mode, core_mod, want_tls);
+}
+
+/// `httpFor`, with TLS decided by the caller: a test root that needs a TLS
+/// listener whatever the flag says, as this repository's own http suite
+/// does. Only ever asked with `tls` true where `in_repo`, because it is
+/// `wireOptions` that fetches the library and a dependent that did not
+/// pass `.tls` must not (ADR 066).
+fn httpWith(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.lang.Optimize,
+    core_mod: *std.Build.Module,
+    tls: bool,
+) *std.Build.Module {
     const engine = zioFor(b, target, mode);
     const module = b.createModule(.{
         .root_source_file = b.path("http/http.zig"),
@@ -3888,7 +3903,7 @@ fn httpFor(
             .{ .name = "nilo_pw", .module = pwFor(b, target, mode) },
         },
     });
-    wireOptions(b, module, target, mode, want_tls, want_http2, false);
+    wireOptions(b, module, target, mode, tls, want_http2, false);
     return module;
 }
 
@@ -4921,6 +4936,25 @@ pub fn build(b: *std.Build) void {
         });
         const tests = b.addTest(.{ .root_module = root, .use_llvm = testBackend(target, mode) });
         test_fetch_engine_step.dependOn(&b.addRunArtifact(tests).step);
+
+        // The other root of this step: an `https://` call through a
+        // `CONNECT` proxy, which needs a TLS server and so the listener
+        // (ADR 267). Its own root, for the reason `deadline.zig` is one.
+        // The listener has TLS in it whatever the flag says, so only here.
+        if (in_repo) {
+            const tunnel_root = b.createModule(.{
+                .root_source_file = b.path("fetch/tunnel.zig"),
+                .target = target,
+                .optimize = mode,
+                .imports = &.{
+                    .{ .name = "nilo_core", .module = mode_core },
+                    .{ .name = "nilo_http", .module = httpWith(b, target, mode, mode_core, true) },
+                    .{ .name = "nilo_fetch", .module = fetchFor(b, target, mode, mode_core) },
+                },
+            });
+            const tunnel_tests = b.addTest(.{ .root_module = tunnel_root, .use_llvm = testBackend(target, mode) });
+            test_fetch_engine_step.dependOn(&b.addRunArtifact(tunnel_tests).step);
+        }
     }
     test_step.dependOn(test_fetch_engine_step);
 

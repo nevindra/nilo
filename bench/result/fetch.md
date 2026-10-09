@@ -530,6 +530,25 @@ Run at c4e2d08 plus the working tree of the change, on the development machine (
 
 The program is one `get` with default settings, built with `zig build-exe -OReleaseFast -fstrip` against `fetch/` and `core/` from `git archive HEAD` and from the working tree. **Decision this moves:** none; ADR 272 quotes the figures. Allocations per request and the idle figures are not touched on a path that sets no socket, and the allocation budget test is unchanged. Not measured: throughput of a socket call, and `bench/mem.py` against a socket, which would say whether the dial frame changes the park.
 
+## An https call through a proxy: what std does, and what the tunnel costs (ADR 276)
+
+Run on 9 October 2026 at `0f6a939` plus the working tree of the change, on the development machine (x86-64 Linux, Zig 0.17.0), `-Dtarget=x86_64-linux-gnu`.
+
+**What std does (a run, where ADR 267 had a reading).** `fetch/tunnel.zig`, "std's own tunnel for an https target sends the request in the clear": nilo's TLS listener, a `CONNECT` proxy that records the first byte the client sends after its 200, and a bare `std.http.Client` with `https_proxy` set and `supports_connect = true`. The proxy saw `CONNECT localhost:PORT HTTP/1.1` and then `G` (0x47), the start of `GET`, in both Debug and ReleaseSafe; a handshake would be 0x16. The server hung up on the text and `receiveHead` failed. ADR 267's reading of `connect` and `connectProxied` was right.
+
+**What the tunnel costs a program that does not use it.** A program that dials out through `nilo_fetch` with default `Settings` (a `postJson` over `https://` and a `putForm` over `http://`), built twice with `zig build-exe -OReleaseFast -fstrip -target x86_64-linux-gnu`, once against `fetch/` and `core/` from `git archive 0f6a939` and once against the working tree:
+
+| module at | bytes | delta |
+|---|---|---|
+| `0f6a939` | 941,488 | |
+| working tree | 946,192 | **+4,704** |
+
+It is unconditional, because the branch is a runtime one; a program that does not import `nilo_fetch` is byte-identical.
+
+**The frame that is on the stack while a call waits.** The same program built unstripped and read with `objdump` for the first `sub $N, %rsp` of each function: `Exchange.attempt` is 0x718 bytes at `0f6a939` and 0x568 in the working tree, because `pickConnection` (with its 255-byte host name buffer) is no longer inlined into it and is a frame of 0x308 bytes that is gone when it returns; `dialTunnel` is 0x468, `pickTunnel` 0x48 and `openTunnel` 0x98, all gone before the call parks. Before the `noinline` on `pickTunnel` and `pickConnection` the same measurement was 0x758 for `attempt` (dial inlined) and 0x738 (dial out of line, `pickConnection` still inlined), so the saving is the second `noinline`, not luck. **Not measured:** `bench/mem.py` against an outbound server (a parked connection's RSS), and throughput; there is no `https://` proxy path in `bench/fetch_server.zig`.
+
+**Decision this moves.** ADR 276 quotes the size and the frame; ADR 267's refusal of `https://` through a proxy goes. Whether the frame saving shows up in a parked fiber's resident set is the run that would say, and it is the one to take before quoting a per-connection number for `nilo_fetch` again.
+
 ## What is still missing
 
 - **A quiet machine.** The load average was between 6 and 18 across these runs

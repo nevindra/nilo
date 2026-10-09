@@ -243,8 +243,8 @@ pub const Client = struct {
         /// own in `Call.headers` keeps it.
         forward_request_id: bool = true,
 
-        /// The egress proxy every `http://` call goes through, or null for
-        /// none. **Given here and never read from the environment**: a
+        /// The egress proxy every call goes through (`http://` as a forward
+        /// proxy, `https://` in a `CONNECT` tunnel), or null for none. **Given here and never read from the environment**: a
         /// process that finds `HTTP_PROXY` set by something it did not write
         /// and routes its calls through it has a surprise to explain, and
         /// the caller's own configuration (`nilo_config`) is where a
@@ -270,8 +270,10 @@ pub const Client = struct {
         roots: ?*const std.crypto.Certificate.Bundle = null,
     };
 
-    /// A forward proxy for `http://` calls
-    /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+    /// A forward proxy for `http://` calls and a `CONNECT` tunnel for
+    /// `https://` ones
+    /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md),
+    /// [ADR 276](../docs/adr/276-an-https-call-goes-through-a-proxy-in-a-tunnel-nilo-opens.md)).
     pub const Proxy = struct {
         /// `http://[user:password@]host[:port]`, or `https://` for a proxy
         /// that is itself reached over TLS. The user and password, when
@@ -355,12 +357,19 @@ pub const Client = struct {
         /// (ADR 174). The connection buffers a head of several kilobytes;
         /// this is a request carrying more headers than that.
         HeadTooLong,
-        /// An `https://` call that `Settings.proxy` would carry. std has no
-        /// way to start TLS inside a tunnel, and the one it offers sends the
-        /// request in the clear, so the call is refused before anything is
-        /// dialled. Name the host in `Proxy.bypass` to call it directly
+        /// An `https://` call that `Settings.proxy` would carry, through a
+        /// proxy that is itself an `https://` URL: a handshake inside a
+        /// handshake, which is not built, so the call is refused before
+        /// anything is dialled. Reach the proxy over `http://`, or name the
+        /// host in `Proxy.bypass` to call it directly
         /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
         TlsThroughProxy,
+        /// The proxy answered a `CONNECT` for an `https://` call with
+        /// anything but a 2xx (a 403 from a policy, a 407 for a missing or
+        /// wrong credential, a 502 from a host it could not reach), or with
+        /// a head that is not HTTP. Nothing of the call was sent
+        /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+        TunnelRefused,
         /// An `https://` call with `Call.unix_socket`. std starts TLS only
         /// on a TCP connection, and a socket is a path on this host, which
         /// is what the transport's own permissions already protect
@@ -466,9 +475,9 @@ pub const Client = struct {
     }
 
     /// `p` as the `std.http.Client.Proxy` both std clients carry as their
-    /// `http_proxy`. Only `http_proxy`: an `https://` call is never sent
-    /// through it (`Exchange.pickConnection`), and `https_proxy` stays null
-    /// so that std cannot route one by itself. `supports_connect` is false,
+    /// `http_proxy`. Only `http_proxy`: an `https://` call is tunnelled by
+    /// `Exchange.dialTunnel`, and `https_proxy` stays null so that std
+    /// cannot route one by itself, its tunnel being the one that sends text. `supports_connect` is false,
     /// so an `http://` call is sent to the proxy as std's forward-proxy form
     /// (the full URL on the request line, `Proxy-Authorization` after the
     /// headers) and never as a `CONNECT` to a port a proxy may refuse.
@@ -1745,15 +1754,21 @@ pub const Exchange = struct {
     /// leaves `request` to dial.
     ///
     /// With `Settings.proxy`, three more things are decided here and nowhere
-    /// else (ADR 267). A call the proxy carries is `http://` only: an
-    /// `https://` one is `error.TlsThroughProxy`, because the tunnel std
-    /// builds for it never starts TLS and sends the request in the clear, so
-    /// it is refused before anything is dialled. A call to a host on the
+    /// else (ADR 267). An `https://` call the proxy carries is tunnelled by
+    /// `dialTunnel`, because the tunnel std builds for it never starts TLS
+    /// and sends the request in the clear; one through a proxy that is
+    /// itself `https://` is `error.TlsThroughProxy`, before anything is
+    /// dialled. A call to a host on the
     /// bypass list is dialled directly, handed to `request` as a connection,
     /// because std would otherwise route every `http://` call of a client
     /// that has a proxy through it. And the pool is asked for the proxy's
     /// connection, which is the one a proxied call reuses.
-    fn pickConnection(client: *const Client, std_client: *std.http.Client, uri: std.Uri, socket: ?[]const u8) !Pick {
+    /// **Not inlined**: its frame (a 255-byte name buffer and the dial
+    /// paths) is gone when it returns, where inlined it was part of
+    /// `attempt`'s, which is on the stack for as long as a call waits
+    /// (ADR 062). `attempt`'s frame is 0x718 bytes before this change in a
+    /// stripped `ReleaseFast` program and 0x568 after.
+    noinline fn pickConnection(client: *const Client, std_client: *std.http.Client, uri: std.Uri, socket: ?[]const u8) !Pick {
         if (socket) |path| {
             // Before the proxy, which a socket never meets, and keyed by the
             // path as std's `connectUnix` would have keyed it (ADR 272).
@@ -1775,7 +1790,12 @@ pub const Exchange = struct {
         const pool = &std_client.connection_pool;
         if (std_client.http_proxy) |proxy| {
             if (!client.skipsProxy(host.bytes)) {
-                if (protocol == .tls) return error.TlsThroughProxy;
+                if (protocol == .tls) {
+                    // A proxy reached over TLS would mean a handshake inside
+                    // a handshake, which is not built (ADR 267).
+                    if (proxy.protocol == .tls) return error.TlsThroughProxy;
+                    return pickTunnel(std_client, proxy, host, port);
+                }
                 const found = try pool.findConnection(std_client.io, .{
                     .host = proxy.host,
                     .port = proxy.port,
@@ -1844,6 +1864,205 @@ pub const Exchange = struct {
             return err;
         };
         return conn;
+    }
+
+    /// The pooled tunnel to `host:port` or a new one. Keyed as a direct
+    /// connection to the target is, because once open it is one. Not
+    /// inlined, so that what a tunnel needs (a name buffer, the dial) is not
+    /// in the frame of `attempt`, which is on the stack while a call waits
+    /// (ADR 062).
+    noinline fn pickTunnel(
+        std_client: *std.http.Client,
+        proxy: *const std.http.Client.Proxy,
+        host: std.Io.net.HostName,
+        port: u16,
+    ) !Pick {
+        const found = try std_client.connection_pool.findConnection(std_client.io, .{ .host = host, .port = port, .protocol = .tls });
+        if (found) |conn| return .{ .conn = conn, .reused = true };
+        return .{ .conn = try dialTunnel(std_client, proxy, host, port) };
+    }
+
+    /// The node std's `Connection.Tls` is, field for field. std's own is
+    /// private, and `Connection.reader`, `writer`, `end`, `getReadError`
+    /// and `destroy` find the TLS client of a `.tls` connection with
+    /// `@fieldParentPtr("connection", c)` on it, so a connection built here
+    /// is read, written, pooled and freed by std as its own (ADR 267).
+    const TunnelTls = struct {
+        client: std.crypto.tls.Client,
+        connection: std.http.Client.Connection,
+
+        /// `Connection.Tls.allocLen`: the node, the host bytes, the TLS read
+        /// buffer (which holds the HTTP head as well), the TLS write buffer,
+        /// the socket write buffer and the socket read buffer. `destroy`
+        /// frees by this length, so a drift is a size the allocator reports.
+        fn allocLen(std_client: *const std.http.Client, host_len: usize) usize {
+            const tls_read_len = std_client.tls_buffer_size + std_client.read_buffer_size;
+            return @sizeOf(TunnelTls) + host_len + tls_read_len + std_client.tls_buffer_size +
+                std_client.write_buffer_size + std_client.tls_buffer_size;
+        }
+    };
+
+    /// A TLS connection to `host:port` inside a `CONNECT` tunnel the proxy
+    /// opened, added to the pool as in use and keyed as a direct connection
+    /// to the target is (host, port, `.tls`).
+    ///
+    /// **std cannot do this at 0.17.0.** Its `connectProxied` creates the
+    /// tunnel's connection with the proxy's protocol, not the target's, so
+    /// for an `https://` target the request is sent as text into a tunnel
+    /// whose far end expects a handshake, and `Connection.Tls.create`, the
+    /// one piece that would wrap it, is private (a test in
+    /// `fetch/tunnel.zig` runs std's own path and watches the clear text).
+    /// So the node is laid out here as `Tls.create` lays it out, the
+    /// `CONNECT` is sent and answered on the socket's own buffers, and
+    /// `std.crypto.tls.Client` then runs over the same two streams. **The
+    /// certificate is checked against the target's name** (`host`), never
+    /// the proxy's, because that is the name the caller asked for and the
+    /// one the tunnel leads to; the proxy sees the name in the `CONNECT`
+    /// line and nothing of what follows.
+    ///
+    /// The proxy's credential goes in the `CONNECT` and nowhere else: the
+    /// request inside the tunnel is origin-form, as on a direct connection.
+    /// A copy of a private layout is pinned like `dialUnix`'s: a
+    /// `@compileError` unless the Zig is 0.17, and a test that dials, pools
+    /// and closes one under the testing allocator (ADR 267).
+    noinline fn dialTunnel(
+        std_client: *std.http.Client,
+        proxy: *const std.http.Client.Proxy,
+        host: std.Io.net.HostName,
+        port: u16,
+    ) !*std.http.Client.Connection {
+        comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 17)
+            @compileError("nilo: fetch lays out a tunnelled TLS Connection as std.http.Client.Connection.Tls does (std/http/Client.zig, Zig 0.17); " ++
+                "re-read Tls.create for this Zig, then widen this check (ADR 267)");
+        if (std.http.Client.disable_tls) return error.TlsInitializationFailed;
+        const io = std_client.io;
+        const gpa = std_client.allocator;
+        try ensureRoots(std_client);
+
+        var socket = try proxy.host.connect(io, proxy.port, .{ .mode = .stream });
+        errdefer socket.close(io);
+
+        const alloc_len = TunnelTls.allocLen(std_client, host.bytes.len);
+        const base = try gpa.alignedAlloc(u8, .of(TunnelTls), alloc_len);
+        errdefer gpa.free(base);
+        const host_buffer = base[@sizeOf(TunnelTls)..][0..host.bytes.len];
+        const tls_read_buffer = host_buffer.ptr[host_buffer.len..][0 .. std_client.tls_buffer_size + std_client.read_buffer_size];
+        const tls_write_buffer = tls_read_buffer.ptr[tls_read_buffer.len..][0..std_client.tls_buffer_size];
+        const socket_write_buffer = tls_write_buffer.ptr[tls_write_buffer.len..][0..std_client.write_buffer_size];
+        const socket_read_buffer = socket_write_buffer.ptr[socket_write_buffer.len..][0..std_client.tls_buffer_size];
+        std.debug.assert(base.ptr + alloc_len == socket_read_buffer.ptr + socket_read_buffer.len);
+        @memcpy(host_buffer, host.bytes);
+        const node: *TunnelTls = @ptrCast(base.ptr);
+        node.connection = .{
+            .client = std_client,
+            .stream_writer = socket.writer(io, tls_write_buffer),
+            .stream_reader = socket.reader(io, socket_read_buffer),
+            .pool_node = .{},
+            .port = port,
+            .host_len = @intCast(host.bytes.len),
+            .proxied = false,
+            .closing = false,
+            .protocol = .tls,
+        };
+
+        try openTunnel(&node.connection.stream_reader.interface, &node.connection.stream_writer.interface, host.bytes, port, proxy.authorization);
+
+        var entropy: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+        io.random(&entropy);
+        node.client = std.crypto.tls.Client.init(
+            &node.connection.stream_reader.interface,
+            &node.connection.stream_writer.interface,
+            .{
+                .host = .{ .explicit = host.bytes },
+                .ca = .{ .bundle = .{
+                    .gpa = gpa,
+                    .io = io,
+                    .lock = &std_client.ca_bundle_lock,
+                    .bundle = &std_client.ca_bundle,
+                } },
+                .ssl_key_log = std_client.ssl_key_log,
+                .read_buffer = tls_read_buffer,
+                .write_buffer = socket_write_buffer,
+                .entropy = &entropy,
+                .realtime_now = std_client.now.?,
+                // HTTP says how long a body is, which is what detects a
+                // truncation; std makes the same choice for a direct call.
+                .allow_truncation_attacks = true,
+            },
+        ) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => return error.TlsInitializationFailed,
+        };
+        try std_client.connection_pool.addUsed(io, &node.connection);
+        return &node.connection;
+    }
+
+    /// The `CONNECT` and the proxy's answer to it, on the connection's own
+    /// buffers. Anything but a 2xx, a head that does not parse and a head
+    /// longer than the buffer are `error.TunnelRefused`; after a 2xx the
+    /// stream is the tunnel, and what the proxy sent beyond the head (a
+    /// well-behaved one sends nothing) stays buffered for the handshake.
+    noinline fn openTunnel(
+        r: *std.Io.Reader,
+        w: *std.Io.Writer,
+        host: []const u8,
+        port: u16,
+        authorization: ?[]const u8,
+    ) !void {
+        // An IPv6 literal is bracketed in an authority (RFC 9110 section 7.2).
+        const v6 = std.mem.indexOfScalar(u8, host, ':') != null;
+        try w.print("CONNECT {s}{s}{s}:{d} HTTP/1.1\r\nHost: {s}{s}{s}:{d}\r\n", .{
+            if (v6) "[" else "", host, if (v6) "]" else "", port,
+            if (v6) "[" else "", host, if (v6) "]" else "", port,
+        });
+        if (authorization) |value| try w.print("Proxy-Authorization: {s}\r\n", .{value});
+        try w.writeAll("\r\n");
+        try w.flush();
+
+        const status = r.takeDelimiterInclusive('\n') catch |err| return switch (err) {
+            error.StreamTooLong => error.TunnelRefused,
+            else => |e| e,
+        };
+        // `HTTP/1.x SSS `: a status line is at least that long.
+        if (status.len < 12 or !std.mem.startsWith(u8, status, "HTTP/1.")) return error.TunnelRefused;
+        const code = std.fmt.parseInt(u16, status[9..12], 10) catch return error.TunnelRefused;
+        if (code < 200 or code > 299) return error.TunnelRefused;
+        var seen: usize = 0;
+        while (true) {
+            const line = r.takeDelimiterInclusive('\n') catch |err| return switch (err) {
+                error.StreamTooLong => error.TunnelRefused,
+                else => |e| e,
+            };
+            if (line.len <= 2 and (line.len == 1 or line[0] == '\r')) return;
+            seen += line.len;
+            if (seen > 16 * 1024) return error.TunnelRefused;
+        }
+    }
+
+    /// What `std.http.Client.request` does before it picks a connection for
+    /// an `https://` call, which `dialTunnel` has to do itself because it
+    /// runs first: unless the caller gave roots (`Settings.roots` sets
+    /// `now` at start), scan the system's once and set `now`.
+    fn ensureRoots(std_client: *std.http.Client) !void {
+        const io = std_client.io;
+        {
+            try std_client.ca_bundle_lock.lockShared(io);
+            defer std_client.ca_bundle_lock.unlockShared(io);
+            if (std_client.now != null) return;
+        }
+        var bundle: std.crypto.Certificate.Bundle = .empty;
+        defer bundle.deinit(std_client.allocator);
+        const now = std.Io.Clock.real.now(io);
+        bundle.rescan(std_client.allocator, io, now) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => return error.CertificateBundleLoadFailure,
+        };
+        try std_client.ca_bundle_lock.lock(io);
+        defer std_client.ca_bundle_lock.unlock(io);
+        // Another call may have got here first, and its bundle stands.
+        if (std_client.now != null) return;
+        std_client.now = now;
+        std.mem.swap(std.crypto.Certificate.Bundle, &std_client.ca_bundle, &bundle);
     }
 
     /// The write fails with `WriteFailed` after a refusal that came back

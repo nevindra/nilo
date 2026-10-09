@@ -2549,11 +2549,11 @@ test "a redirect from the proxy to a bypassed host leaves the proxy's credential
     }.run);
 }
 
-test "an https call the proxy would carry is refused before anything is dialled" {
+test "an https call through a proxy that is itself https is refused before anything is dialled" {
     try withIo(struct {
         fn run(io: std.Io) !void {
             // Nothing listens on port 1, so a dial would be `ConnectionRefused`.
-            var client = try started(io, .{ .proxy = .{ .url = "http://127.0.0.1:1", .bypass = &.{"127.0.0.1"} } });
+            var client = try started(io, .{ .proxy = .{ .url = "https://127.0.0.1:1", .bypass = &.{"127.0.0.1"} } });
             defer client.deinit();
             var scope: core.Run = .init(testing.allocator);
             defer scope.deinit();
@@ -2562,6 +2562,22 @@ test "an https call the proxy would carry is refused before anything is dialled"
             // A bypassed name is not the proxy's, so it is dialled itself,
             // and refused by the port, which is the proof it was.
             if (client.get(&scope, "https://127.0.0.1:1/", .{})) |_| return error.TestUnexpectedResult else |err| {
+                try testing.expect(err != error.TlsThroughProxy);
+            }
+        }
+    }.run);
+}
+
+test "an https call through an http proxy dials the proxy, which `fetch/tunnel.zig` then speaks TLS through" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var client = try started(io, .{ .proxy = .{ .url = "http://127.0.0.1:1" } });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            // The proxy's port is closed: the call is refused by it and not
+            // by nilo before a dial.
+            if (client.get(&scope, "https://service.test/", .{})) |_| return error.TestUnexpectedResult else |err| {
                 try testing.expect(err != error.TlsThroughProxy);
             }
         }
