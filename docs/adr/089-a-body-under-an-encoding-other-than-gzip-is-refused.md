@@ -11,7 +11,9 @@ Refusing every encoding once meant refusing gzip too. Decoding it was set aside 
 
 ## Decision
 
-**A body under any `Content-Encoding` but `identity` or `gzip` is a 415 naming the header. A body under `gzip` is inflated once into the arena, in place of the bytes that arrived, and nothing after that line knows how it was sent.**
+**A body under any `Content-Encoding` but `identity` or `gzip` is a 415 naming the header, unless the route's chain says it reads that coding itself. A body under `gzip` is inflated once into the arena, in place of the bytes that arrived, and nothing after that line knows how it was sent.**
+
+**A route can read a coding itself** (`nilo.bodyEncodings(.{"snappy"})`, [ADR 283](./283-a-route-can-read-a-content-encoding-itself.md)): for an App that has one, the refusal below is held back until the route is matched, and a body under a coding the matched route names reaches `c.body()` and `c.bodyStream()` as it arrived. Every other route, and every App that has none, is refused as this ADR says.
 
 ### Why 415 and not 400
 
@@ -35,11 +37,13 @@ In `finish`, at the blank line, rather than in the header arm that reads the val
 
 ### What still does not decode
 
-`c.bodyStream()` refuses any coding with a 415 of its own. A stream hands bytes out as they arrive into the caller's buffer and holds nothing, so there is no buffer to be the history, and the caller's own buffer is handed a piece at a time; decoding on that path needs a window per stream (the pool question again) or a decoder over the caller's buffer with a minimum size, and it is not the path the Collector takes.
+`c.bodyStream()` refuses any coding with a 415 of its own, except on a route that reads the coding itself (ADR 283), where it hands the bytes over as they came. A stream hands bytes out as they arrive into the caller's buffer and holds nothing, so there is no buffer to be the history, and the caller's own buffer is handed a piece at a time; decoding on that path needs a window per stream (the pool question again) or a decoder over the caller's buffer with a minimum size, and it is not the path the Collector takes.
 
 **The head is not rewritten.** `header("Content-Encoding")` still says `gzip` and `header("Content-Length")` still gives the wire length after `body()` has inflated it, because the head is read where it lies ([ADR 085](./085-every-header-without-handing-out-the-head.md)) and there is nothing to remove a line from. A proxy handler forwarding `body()` with the request's own headers sends plain bytes labelled `gzip`; `Ctx.body`'s doc comment names the trap and says what to send instead.
 
 ## What was rejected
+
+**Refusing the coding on every route with no way round.** The position this ADR first held, and the one that shipped: the refusal is made while the head is read, before any route matches, so a receiver whose protocol is a coding nilo does not decode (Prometheus remote-write sends snappy and no client setting avoids it) could not be written at all, not even over `bodyStream()`. ADR 283 holds the refusal back for an App that has a route which reads a coding, and leaves it where it was for every other.
 
 **Decoding `deflate` too.** HTTP's `deflate` is a zlib stream some clients send raw, and telling the two apart is a heuristic; nothing that pushes telemetry sends it, and the 415 names gzip specifically rather than guess.
 

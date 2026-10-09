@@ -804,6 +804,18 @@ pub const deadline = @import("deadline.zig").with;
 /// ([ADR 156](../docs/adr/156-a-route-can-say-how-much-body-it-takes.md)).
 pub const maxBody = @import("maxbody.zig").with;
 
+/// A route that reads a `Content-Encoding` itself:
+/// `app.with(nilo.bodyEncodings(.{"snappy"})).post("/api/v1/write", …)`.
+///
+/// nilo decodes `gzip` and answers 415 to any other coding. A route named
+/// here gets a body under the codings it lists as they arrived, through
+/// `c.body()` or `c.bodyStream()`, with the coding in
+/// `c.header("content-encoding")`, still held to `max_body` or `maxBody` on
+/// the bytes that arrived. It decodes, and bounds what it decodes. Every
+/// other route is refused as before
+/// ([ADR 283](../docs/adr/283-a-route-can-read-a-content-encoding-itself.md)).
+pub const bodyEncodings = @import("bodyencodings.zig").with;
+
 /// A value stated in the program or filled before `listen()`: what
 /// `allowance`, `secure` and `maxBody` take where a deployment fact is
 /// wanted, as `.per_window = 100` or `.per_window = &config.rate`
@@ -1124,6 +1136,7 @@ test {
     _ = @import("allowance.zig");
     _ = @import("deadline.zig");
     _ = @import("maxbody.zig");
+    _ = @import("bodyencodings.zig");
     _ = @import("ownbody.zig");
     _ = @import("headers.zig");
     _ = @import("app.zig");

@@ -5525,6 +5525,40 @@ test "a path parameter and a body reach the route as they do on HTTP/1.1" {
     try testing.expectEqualStrings("40000", sized.body);
 }
 
+fn codedRoute(c: *Ctx) anyerror!void {
+    const coding = if (c.header("content-encoding")) |v| v.view() else "-";
+    const bytes = (try c.body()).view();
+    try c.sendText(200, try std.fmt.allocPrint(c._arena, "{s}:{s}", .{ coding, bytes }));
+}
+
+test "a route that names a Content-Encoding reads it on HTTP/2 as on HTTP/1.1, and every other route refuses it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.with(@import("bodyencodings.zig").with(.{"snappy"})).post("/write", codedRoute);
+    try app.post("/size", sizeRoute);
+    try app.resolveChains();
+
+    var read = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/write", .body = "\x04\x0cabcd", .fields = &.{
+        .{ .name = "content-encoding", .value = "snappy" },
+    } });
+    defer read.deinit();
+    try testing.expectEqual(@as(u16, 200), read.status);
+    try testing.expectEqualStrings("snappy:\x04\x0cabcd", read.body);
+
+    var unlisted = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/write", .body = "abc", .fields = &.{
+        .{ .name = "content-encoding", .value = "br" },
+    } });
+    defer unlisted.deinit();
+    try testing.expectEqual(@as(u16, 415), unlisted.status);
+    try testing.expectEqualStrings("identity, gzip, snappy", unlisted.header("accept-encoding").?);
+
+    var elsewhere = try h2test.roundTrip(&app, .{ .method = "POST", .path = "/size", .body = "abc", .fields = &.{
+        .{ .name = "content-encoding", .value = "snappy" },
+    } });
+    defer elsewhere.deinit();
+    try testing.expectEqual(@as(u16, 415), elsewhere.status);
+}
+
 test "cookies a client split across fields are one field when the route reads them, joined with a semicolon" {
     var app = try httpApp();
     defer app.deinit();

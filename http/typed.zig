@@ -2570,7 +2570,7 @@ fn readBody(comptime P: type, c: *Ctx, spelling: anytype) !P {
             .unread => unreachable,
             .json => {},
             .proto, .grpc => {
-                const value = try message.decodeProto(P, c._arena, (try c.body()).view());
+                const value = try message.decodeProto(P, c._arena, (try c.dataBody()).view());
                 // A message that checks itself is checked as a JSON body is
                 // (ADR 193): the rule is the type's, not the spelling's.
                 try @import("bound.zig").enforce(.body, P, value);

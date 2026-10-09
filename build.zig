@@ -172,6 +172,7 @@ const http_above_core = [_][]const u8{
     "logger",    "cors",        "csrf",      "secure", "allowance", "deadline",
     "maxbody",   "http",        "behaviour", "live",   "profile",   "fuzz",
     "fuzz_main", "fuzz_llhttp", "test_root", "wide",   "h2test",
+    "bodyencodings",
 };
 
 const Layer = struct {
@@ -2197,6 +2198,18 @@ const refusals = [_]Refusal{
     .{
         .name = "maxbody_read_from_a_u32",
         .says = "maxBody takes a number of bytes or the address of a usize that holds one, and was handed *u32.",
+    },
+    .{
+        .name = "bodyencodings_of_identity",
+        .says = "bodyEncodings was handed \"identity\", which every route already reads.",
+    },
+    .{
+        .name = "bodyencodings_of_nothing",
+        .says = "bodyEncodings was handed no Content-Encoding, so the route would read none.",
+    },
+    .{
+        .name = "bodyencodings_of_an_empty_name",
+        .says = "bodyEncodings was handed an empty Content-Encoding.",
     },
     // The five ways of writing the pair a type that writes its own answer
     // carries (ADR 157).

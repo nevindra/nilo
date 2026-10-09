@@ -274,6 +274,11 @@ pub const Ctx = struct {
     /// over, a gzip stream that did not inflate: a second `body()` is refused
     /// rather than answered from `_body`, which is empty then.
     _body_refused: bool = false,
+    /// Set by `nilo.bodyEncodings` when the body arrived under a coding the
+    /// route reads itself: `body()` and `bodyStream()` then hand over the
+    /// bytes as they came, and the readers that parse (`json`, `form`, a
+    /// typed body) refuse them (ADR 283).
+    _body_as_sent: bool = false,
     /// Written by `Next.run`: how many layers of the onion were left below
     /// the deepest one reached, 0 once the handler ran, and the maximum
     /// while nothing has run. A chain that ends unanswered above 0 was
@@ -1313,6 +1318,37 @@ pub const Ctx = struct {
         try self._framing.interimContinue();
     }
 
+    /// Hand `body()` and `bodyStream()` the bytes as they arrived, whatever
+    /// `Content-Encoding` they are under. What `nilo.bodyEncodings` calls for
+    /// a coding its route named; has to be called before the body is read
+    /// (ADR 283).
+    pub fn readBodyAsSent(self: *Ctx) void {
+        self._body_as_sent = true;
+    }
+
+    /// Whether the request announced a body, which a `Content-Encoding` on
+    /// a request without one says nothing about (ADR 089).
+    pub fn announcesBody(self: *const Ctx) bool {
+        const r = self._request;
+        return r.chunked or r.content_length > 0 or (framing_mod.http2_built and r.ends_with_stream and
+            !(r.has_content_length and r.content_length == 0));
+    }
+
+    /// `body()` for the readers that parse it as data: a body that arrived
+    /// compressed under a coding a route read itself is not data yet, and is
+    /// refused with a 415 saying so rather than parsed as though it were
+    /// (ADR 283).
+    pub fn dataBody(self: *Ctx) !Str {
+        const b = try self.body();
+        if (self._body_as_sent) return fail.status(
+            415,
+            "this route reads its body as data, and it arrived under a Content-Encoding the route reads itself: " ++
+                "decode it first, or send it as identity",
+            .{},
+        );
+        return b;
+    }
+
     /// The whole request body, read once into the request arena. Chunked
     /// and Content-Length look the same from here — the handler asks for
     /// the body, not for the way it arrived.
@@ -1396,7 +1432,21 @@ pub const Ctx = struct {
             // **Held only once it has inflated.** The compressed bytes used
             // to be assigned first and replaced on success, so a second
             // `body()` after a failure was handed them as the body (ADR 089).
-            if (self._request.content_encoding == .gzip) {
+            if (self._request.content_encoding == .other and !self._body_as_sent and received.len > 0) {
+                // A coding the parser held back for a route that was to read
+                // it (ADR 283) and one on a request the parser had no length
+                // to refuse (an HTTP/2 body with no `content-length`): neither
+                // is data, and neither reaches a reader that parses.
+                self._body = &.{};
+                self._body_refused = true;
+                return fail.status(
+                    415,
+                    "this server decodes Content-Encoding: gzip and nothing else, and this route does not read the one it was sent; " ++
+                        "send the body as identity or gzip",
+                    .{},
+                );
+            }
+            if (self._request.content_encoding == .gzip and !self._body_as_sent) {
                 received = encoded.inflate(self._arena, received, self._limits.max_body) catch |err| {
                     // Nothing is held as the body, and the wire has been
                     // read to its end, which is what a non-null `_body`
@@ -1490,7 +1540,7 @@ pub const Ctx = struct {
         // here, and it is handed back a piece at a time (ADR 089). Refused
         // with the status the parser gives every other coding, and the
         // sentence says which side to change.
-        if (self._request.content_encoding != .identity) return fail.status(
+        if (self._request.content_encoding != .identity and !self._body_as_sent) return fail.status(
             415,
             "this route reads its body as a stream, which is not decoded — send it as identity",
             .{},
@@ -1533,7 +1583,7 @@ pub const Ctx = struct {
     /// after the request has finished trips the debug trap just like any
     /// other Str (ADR 003).
     pub fn json(self: *Ctx, comptime T: type) !T {
-        const b = (try self.body()).view();
+        const b = (try self.dataBody()).view();
         try refuseTooDeep(T, b);
         // A repeated key already said which on the Failure (`json.parseLeaky`),
         // and the dynamic re-read below cannot hold a repeated key at all.
@@ -1562,7 +1612,7 @@ pub const Ctx = struct {
         // head: `body()` may read from the connection, and on a request with
         // a body the head has been copied for exactly that reason.
         const content_type = if (self.header("Content-Type")) |h| h.view() else null;
-        const b = (try self.body()).view();
+        const b = (try self.dataBody()).view();
         const value = try @import("form.zig").readInto(T, self._arena, self._lifetime, content_type, b);
         // The same check a JSON body gets, in the form's own words (ADR 193).
         try @import("bound.zig").enforce(.form, T, value);
@@ -1582,7 +1632,7 @@ pub const Ctx = struct {
         outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
     ) !T {
         const content_type = if (self.header("Content-Type")) |h| h.view() else null;
-        const b = (try self.body()).view();
+        const b = (try self.dataBody()).view();
         return @import("form.zig").readIntoCollecting(
             T,
             self._arena,
@@ -1604,7 +1654,7 @@ pub const Ctx = struct {
         comptime T: type,
         outcomes: *[@typeInfo(T).@"struct".field_names.len]convert.Outcome,
     ) !T {
-        const b = (try self.body()).view();
+        const b = (try self.dataBody()).view();
         try refuseTooDeep(T, b);
         if (json_mod.parseLeaky(T, self._arena, b, .{})) |parsed| {
             var value = parsed;

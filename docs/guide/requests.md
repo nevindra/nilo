@@ -221,6 +221,25 @@ The limits: the compressed bytes are bounded by `max_body`, and so is what they 
 
 `c.bodyStream()` is the exception: a stream hands bytes out as they arrive and holds nothing, so there is nowhere to decompress into, and a gzipped body on a streaming route is a 415 that says so.
 
+**A route can say it reads a `Content-Encoding` itself.** Prometheus remote-write sends a protobuf body compressed with snappy under `Content-Encoding: snappy`, an OTLP exporter may send zstd, and a gateway forwarding a body wants it untouched. nilo decodes none of those, and the 415 is still right for every route that was not written to expect one. Name the codings a route reads and it gets the bytes as they arrived, plus the coding in the head ([ADR 283](../adr/283-a-route-can-read-a-content-encoding-itself.md)):
+
+<!-- compiles -->
+```zig
+fn remoteWrite(c: *nilo.Ctx) !void {
+    const sent = (try c.body()).view(); // still snappy-framed
+    const coding = c.header("content-encoding"); // "snappy", or null when it was not compressed
+    _ = sent;
+    _ = coding;
+    // decode it, and cap what it decodes to
+}
+
+fn routes(app: *nilo.App) !void {
+    try app.with(nilo.bodyEncodings(.{"snappy"})).post("/api/v1/write", remoteWrite);
+}
+```
+
+`max_body`, or the route's `nilo.maxBody`, is applied to the bytes that arrived, so a 413 is on the compressed length. What they decode to is yours to bound, because you know the format and nilo does not: a decoder that trusts a length the sender wrote is the decompression bomb. A coding the route did not name is a 415 whose `Accept-Encoding` lists the ones it reads, and every other route keeps answering exactly what it did. Naming `"gzip"` passes gzip through undecoded on that route; without it gzip is inflated as everywhere else. `c.bodyStream()` hands the bytes over too. `c.json`, a `Form(T)` and a typed body argument refuse such a body with a 415 rather than parse compressed bytes; a type that decodes its own body (`nilo_decode`) is handed them, which is what it is for. It means the same on HTTP/2.
+
 ## Checking what arrived
 
 **The type of a field is its rule.** A number inside a range, text of a given length or shape, a list of a given size: each is a type, and each is read the same way in a JSON body, a form, a query string or a path param (a list is the exception, below). It is the job go-playground's `validate:"min=1,email"` tag does and zod's `z.string().email().min(1)` does, with the rule in the type rather than a string or a call chain, so the compiler sees it, a bad default is a compile error, and the API description is written from the same declaration the server enforces.

@@ -91,6 +91,11 @@ pub const Limited = struct {
 
     run: Middleware,
     limit: Limit,
+    /// The `Content-Encoding` values a route with this middleware reads
+    /// itself, undecoded (`nilo.bodyEncodings`, ADR 283). Empty for every
+    /// other middleware, and `limit` is then zero, which `read` and every
+    /// reader of it already treat as "nothing said".
+    encodings: []const []const u8 = &.{},
 
     /// Where the number is: in the program, or in a `usize` it fills before
     /// `listen()` (`nilo.Late`).

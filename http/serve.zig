@@ -29,6 +29,7 @@ const handover_mod = @import("handover.zig");
 const metrics_mod = @import("metrics.zig");
 const failurebody = @import("failurebody.zig");
 const framing_mod = @import("framing.zig");
+const bodyencodings = @import("bodyencodings.zig");
 const h2 = @import("h2.zig");
 const json = @import("json.zig");
 const trace_mod = @import("trace.zig");
@@ -427,7 +428,22 @@ pub noinline fn serveRequest(
     defer _ = self.stop.in_flight.fetchSub(1, .acq_rel);
 
     var r = http1.Request{};
-    parseArrived(arrival, raw_head, &r) catch |err| {
+    // Set only by the first refusal below, for an App with a route that reads
+    // a `Content-Encoding` itself, and read once the route is known (ADR 283).
+    var coding_held_back = false;
+    parseArrived(arrival, raw_head, &r) catch |err| held: {
+        // A body under a coding nilo cannot decode is a 415 unless a route
+        // might read it, which is not known until the route is matched. For
+        // an App with such a route the head is parsed again with the refusal
+        // held back, and the answer is given below, after the match. The
+        // request that parsed the first time never gets here (ADR 283).
+        if (err == error.UnsupportedContentEncoding and self.reads_codings) {
+            r = .{ .encoding_deferred = true };
+            if (parseArrived(arrival, raw_head, &r)) {
+                coding_held_back = true;
+                break :held;
+            } else |_| {}
+        }
         // One of these is not a malformed request: a body under a
         // `Content-Encoding` nilo cannot decode is a request everybody
         // understands and this server cannot read (ADR 089). gzip is not
@@ -662,6 +678,26 @@ pub noinline fn serveRequest(
             metrics_mod.unmatched);
     }
 
+    // A body under a coding nilo cannot decode, held back by the parse above
+    // until the route was known: refused now, with the bytes every other
+    // route is refused with, unless a middleware in this request's own chain
+    // named the coding (`nilo.bodyEncodings`, ADR 283). That middleware
+    // settles the rest, and the 415 for a coding it did not name is its own.
+    if (coding_held_back and c.announcesBody()) {
+        const coding = if (c.header("content-encoding")) |s| s.view() else "";
+        if (!bodyencodings.chainReads(chain, self.body_limits.items, coding)) {
+            // A chain with no `bodyEncodings` at all is refused by the bytes
+            // every route is refused with. One with some is refused by a
+            // 415 that says which codings it reads (ADR 283).
+            if (!bodyencodings.chainHasAny(chain, self.body_limits.items)) {
+                c.markAnswered(415);
+                sendFinal(sink, RESPONSE_415, 415);
+                return .{ .keep_alive = false, .linger = true };
+            }
+            return refuseCoding(self, &c, chain, in, &r, failure, handover);
+        }
+    }
+
     // The one mistake the compiler cannot catch and everybody else pays
     // for: a handler that waits on the operating system directly holds
     // the thread every other request on it is being served by
@@ -732,6 +768,29 @@ pub noinline fn serveRequest(
     return .{ .keep_alive = reusable, .handover = handover, .linger = linger };
 }
 
+/// The 415 for a body under a coding the matched route's chain reads some of
+/// and not this one, with the `Accept-Encoding` that says which (ADR 283). A
+/// failure like any other, so the connection is kept when the body can be
+/// discarded.
+noinline fn refuseCoding(
+    self: *App,
+    c: *Ctx,
+    chain: []const mw.Middleware,
+    in: *std.Io.Reader,
+    r: *const http1.Request,
+    failure: *fail.Failure,
+    handover: handover_mod.Handover,
+) Served {
+    if (bodyencodings.accepted(c._arena, chain, self.body_limits.items)) |list|
+        c.setStaticHeader("Accept-Encoding", list) catch {}
+    else |_| {}
+    fail.status(415, "this route does not read the Content-Encoding it was sent, and Accept-Encoding lists the ones it does", .{}) catch {};
+    const reusable = drain(c, in, r);
+    const linger = !reusable and http1.readsMore(r);
+    sendFailure(c, failure, error.Failed, self) catch return .{ .keep_alive = false, .handover = handover, .linger = linger };
+    return .{ .keep_alive = reusable, .handover = handover, .linger = linger };
+}
+
 /// The head that arrived, parsed. An HTTP/1.1 one by `parseHead`; an HTTP/2
 /// call's target by `applyTarget` and its fields by `parseFields`, which is
 /// `parseHead`'s own loop, so a call is refused for exactly what a request
@@ -751,7 +810,15 @@ inline fn parseArrived(arrival: framing_mod.Arrival, head: []const u8, r: *http1
             // the length of what it is.
             if (r.chunked) return error.BadHeader;
             if (call.inbox != null) {
-                if (comptime framing_mod.http2_built) r.ends_with_stream = true;
+                if (comptime framing_mod.http2_built) {
+                    r.ends_with_stream = true;
+                    // `finish` refuses a coding when a length says there is a
+                    // body, and a body framed by its stream says none. This
+                    // is the same refusal for the same request (ADR 089).
+                    if (r.content_encoding == .other and !r.encoding_deferred and
+                        !(r.has_content_length and r.content_length == 0))
+                        return error.UnsupportedContentEncoding;
+                }
             } else if (r.content_length != call.body.len) return error.BadHeader;
         },
     }

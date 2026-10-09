@@ -105,6 +105,13 @@ pub const Request = struct {
     /// memory for the reason `has_content_length` is: it lands in padding
     /// the struct already had.
     content_encoding: Encoding = .identity,
+    /// Set by `serve` before it parses a head a second time, only for an
+    /// App with a route that reads some `Content-Encoding` itself, and only
+    /// after the first parse refused one: `finish` then leaves a body under
+    /// `.other` alone, and `serve` refuses it after the route is matched
+    /// unless the route's chain says it reads that coding (ADR 283). Never
+    /// set on the path of a request that parses first time.
+    encoding_deferred: bool = false,
     /// Whether a `Host` was sent, which RFC 9112 §3.2 requires exactly one of
     /// on an HTTP/1.1 request: none is a 400 and so is a second line, even one
     /// that agrees with the first — stricter than `Content-Length`, where an
@@ -1066,7 +1073,8 @@ fn finish(r: *Request) ParseError!void {
     // bytes were what they claim to be — the same failure `Transfer-Encoding`
     // used to have, one header over (ADR 089). A `Content-Encoding` on a
     // request with no body says nothing about anything and is left alone.
-    if (r.content_encoding == .other and (r.chunked or r.content_length > 0)) return error.UnsupportedContentEncoding;
+    if (r.content_encoding == .other and !r.encoding_deferred and (r.chunked or r.content_length > 0))
+        return error.UnsupportedContentEncoding;
 }
 
 pub fn parseRequestLine(line: []const u8, r: *Request) ParseError!void {

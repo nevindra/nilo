@@ -49,6 +49,7 @@ This page covers reading a request, answering it, its cookies, session and uploa
 | `c.overdue()` | whether the deadline `nilo.deadline(ms)` gave this route has passed. Always false without one |
 | `c.timeLeftMs()` | `?u32`: milliseconds left, rounded up so any time left reads at least 1, `null` without a deadline, `0` once it has gone |
 | `c.giveDeadline(ms)` | set one by hand. `nilo.deadline(ms)` is what normally calls this |
+| `c.readBodyAsSent()` | hand `body()` and `bodyStream()` the bytes as they arrived, whatever `Content-Encoding` they are under. What `nilo.bodyEncodings` calls; before the body is read |
 | `c.giveBodyLimit(bytes)` | how much body this request may read into the arena, over `listen()`'s `max_body`. `nilo.maxBody(bytes)` is what normally calls this; a body already read keeps the limit it was read under |
 | `c.service(*Db)` | `?*Db`. A middleware that needs a service takes it as an argument instead, which `listen()` checks ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
 | `c.resolve(V)` | `!V`: a resolved value, worked out once per request |
@@ -116,7 +117,7 @@ Setting the same header twice replaces it, except for `Set-Cookie` and `Vary`, w
 
 ### Compressed request bodies
 
-**A body sent with `Content-Encoding: gzip` is decompressed into the arena before anything reads it**: `body`, `json`, a struct argument, a form. `max_body` limits both the compressed and the decompressed size, and a body that does not decode is a 400 naming the encoding ([ADR 089](../adr/089-a-body-under-an-encoding-other-than-gzip-is-refused.md)). `bodyStream` does not decode, and answers a gzipped body with a 415. **Any other encoding is a 415** naming the header, before any handler runs ([ADR 089](../adr/089-a-body-under-an-encoding-other-than-gzip-is-refused.md)). The header is ignored on a request with no body.
+**A body sent with `Content-Encoding: gzip` is decompressed into the arena before anything reads it**: `body`, `json`, a struct argument, a form. `max_body` limits both the compressed and the decompressed size, and a body that does not decode is a 400 naming the encoding ([ADR 089](../adr/089-a-body-under-an-encoding-other-than-gzip-is-refused.md)). `bodyStream` does not decode, and answers a gzipped body with a 415. **Any other encoding is a 415** naming the header, before any handler runs ([ADR 089](../adr/089-a-body-under-an-encoding-other-than-gzip-is-refused.md)), unless the route's chain has [`nilo.bodyEncodings`](./middleware.md#nilobodyencodings) naming it: `body` and `bodyStream` then hand over the bytes as they arrived, and `json`, `form` and a typed body refuse them ([ADR 283](../adr/283-a-route-can-read-a-content-encoding-itself.md)). The header is ignored on a request with no body.
 
 ### A stream with a `.length`
 

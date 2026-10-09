@@ -185,6 +185,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`nilo.allowance`](./middleware.md#niloallowance)
     - [`allowance.keyed`](./middleware.md#allowancekeyed)
   - [`nilo.deadline`](./middleware.md#nilodeadline)
+  - [`nilo.bodyEncodings`](./middleware.md#nilobodyencodings)
   - [`nilo.maxBody`](./middleware.md#nilomaxbody)
 - [Typed middleware](./middleware.md#typed-middleware)
 - [Holding the answer with `next.hold`](./middleware.md#holding-the-answer-with-nexthold)

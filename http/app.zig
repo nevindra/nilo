@@ -138,6 +138,11 @@ pub const App = struct {
     /// limit it is collected under is found here, by the functions in the
     /// route's chain (ADR 156, ADR 220). Empty unless `maxBody` is used.
     body_limits: std.ArrayList(mw.Limited) = .empty,
+    /// Whether any route reads a `Content-Encoding` itself
+    /// (`nilo.bodyEncodings`, ADR 283). False for every App that does not,
+    /// and the only thing `serve` asks before it treats a body under a coding
+    /// nilo cannot decode as anything but the 415 it always was.
+    reads_codings: bool = false,
     /// The middleware `guard` said reads the session cookie, if one did
     /// (ADR 153). Read by `writeOpenApi` and by nothing on the request path.
     declared_guard: ?mw.Guard = null,
@@ -410,6 +415,7 @@ pub const App = struct {
     /// find (ADR 220). A function is one limit, so one entry is enough.
     fn noteLimit(self: *App, middleware: anytype) !void {
         if (@TypeOf(middleware) != mw.Limited) return;
+        if (middleware.encodings.len > 0) self.reads_codings = true;
         for (self.body_limits.items) |l| if (l.run == middleware.run) return;
         try self.body_limits.append(self.gpa, middleware);
     }

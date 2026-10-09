@@ -41,6 +41,7 @@ nilo.allowance.keyed(account, .{ .per_window = 1000,        // …counted agains
 nilo.deadline(2000)                                         // how long a route gets
 nilo.maxBody(50 << 20)                                      // how much body it takes
 nilo.maxBody(&limit)                                        // …read from a usize at run time
+nilo.bodyEncodings(.{"snappy"})                             // reads a Content-Encoding itself
 ```
 
 **How the logger writes is not an option of the logger.** Text or JSON, and the lowest level written, are [`listen(.{ .log = .{ .format = .json, .level = .warn } })`](./app.md#listen-options), read at run time, and they apply to every line the process writes through [`nilo.logFn`](./README.md#declarations-in-the-root-file). In JSON the access line is one flat object: `time` and `level` beside `method`, `path`, `status`, `us`, and `request_id` and `error` when there are any. `skip` compares the request's path exactly and costs nothing when empty; a skipped request is still answered and still gets its `X-Request-Id` ([ADR 262](../adr/262-a-log-line-has-one-sink.md)).
@@ -217,6 +218,27 @@ while (try rows.next()) |row| {
 **The write is clamped too, in one case**: a deadline with less left than `write_timeout_ms` bounds the answer's writes, so a two-second route does not wait thirty seconds on a client that reads nothing. A deadline further off leaves each write on `write_timeout_ms`, which stops a client that has stopped reading but not one that takes a little every few seconds.
 
 A handler that fails while overdue, with nothing sent yet, gets a 503 naming the budget. One that finishes late still answers, because the work is done and correct, and the lateness is logged ([ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)). `deadline(0)` is a compile error.
+
+### `nilo.bodyEncodings`
+
+**A route that reads a `Content-Encoding` itself, as a middleware:**
+
+```zig
+try app.with(nilo.bodyEncodings(.{"snappy"})).post("/api/v1/write", remoteWrite);
+try app.with(nilo.bodyEncodings(.{ "snappy", "zstd" })).with(nilo.maxBody(8 << 20)).post("/ingest", ingest);
+```
+
+nilo decodes `gzip` and answers any other `Content-Encoding` on a request with a body with a 415, before any route matches ([ADR 089](../adr/089-a-body-under-an-encoding-other-than-gzip-is-refused.md)). A route under this middleware gets a body under one of the codings it names as they arrived, through `c.body()` or `c.bodyStream()`, with the value in `c.header("content-encoding")`. Names are compared whole and ignoring case, so `"gzip, snappy"` names a stacked body and is not `"snappy"`. Several `bodyEncodings` in one route's chain read the union of what they name.
+
+**`max_body`, or the route's `maxBody`, applies to the bytes that arrived.** What they decode to is the handler's to bound.
+
+**A coding the chain does not name is a 415 carrying `Accept-Encoding`** (`identity, gzip`, then the names), as RFC 9110 §15.5.16 asks. A route outside any such chain is refused by the same bytes as ever. A coding on a request with no body is ignored, as everywhere.
+
+**`"gzip"` in the list passes gzip through undecoded** for a route that stores or forwards it. Left out, gzip is inflated as on every route. `"identity"` and an empty name are compile errors, as is an empty list.
+
+**`c.json`, `c.form` and a typed `body: T` answer a 415 for a body that arrived under a coding the route reads itself**, because they parse and compressed bytes are not what they parse; a type that carries `nilo_decode` is handed the bytes. The check is at run time and not while compiling because a chain is settled at `listen()`, where a global `use` can add it to a route whose signature was written without it ([ADR 283](../adr/283-a-route-can-read-a-content-encoding-itself.md)).
+
+**It means the same on HTTP/2**, where the route is matched by the call's `:path` and the field is read as the header is. gRPC's own `grpc-encoding` is a different header, read by the gRPC side and untouched here. **`nilo.bodyEncodings` returns an `mw.Limited`** with no limit (zero), so `use`, `useOn` and `with` keep what it names for the App. Nothing is added to the OpenAPI document: the encoding is not part of the schema of what the body means.
 
 ### `nilo.maxBody`
 
