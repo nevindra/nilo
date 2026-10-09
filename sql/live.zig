@@ -629,6 +629,39 @@ test "an unchecked Db on the defaults has a connection to lend the moment it sta
     try testing.expectEqual(@as(?i64, 1), try db.rawOne(i64, &run, "SELECT 1::bigint", .{}));
 }
 
+test "a pool says how many connections it has open, idle and lent out, and counts the statements" {
+    const gpa = testing.allocator;
+    const url = live_config.database_url orelse return error.SkipZigTest;
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+
+    // Before `nilo_start` there is no pool to read.
+    var db = db_mod.Db.init(gpa, url, .{ .size = 2, .connect_on_init = 2, .unchecked = true });
+    defer db.deinit();
+    try testing.expectEqual(@as(?wire_mod.PoolStats, null), db.poolStats());
+
+    try db.nilo_start(threaded.io(), .off);
+    defer db.nilo_stop();
+
+    // Two dialled at boot (the constraint `Live.open` states), none lent out.
+    const idle = db.poolStats().?;
+    try testing.expectEqual(@as(usize, 2), idle.size);
+    try testing.expectEqual(@as(usize, 2), idle.available);
+    try testing.expectEqual(@as(usize, 0), idle.missing);
+    try testing.expectEqual(@as(usize, 0), idle.in_use);
+
+    // One statement is one more in `statements`, and leaves the pool as full
+    // as it found it.
+    var run: core.Run = .init(gpa);
+    defer run.deinit();
+    try testing.expectEqual(@as(?i64, 1), try db.rawOne(i64, &run, "SELECT 1::bigint", .{}));
+    const after = db.poolStats().?;
+    try testing.expect(after.statements > idle.statements);
+    try testing.expectEqual(@as(usize, 2), after.available);
+    try testing.expectEqual(@as(usize, 0), after.in_use);
+}
+
 /// A `Limits` that counts what the wire reports through it, for the test below.
 var waits_reported: usize = 0;
 var waits_closed: usize = 0;

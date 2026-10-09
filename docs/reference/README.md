@@ -210,6 +210,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`Db`](./sql.md#db)
     - [`db.expecting`](./sql.md#dbexpecting)
     - [`db.watching` and `sql.Sent`](./sql.md#dbwatching-and-sqlsent)
+    - [`db.poolStats`](./sql.md#dbpoolstats)
     - [`db.explain`](./sql.md#dbexplain)
     - [Starting, checking and stopping: `nilo_start`, `nilo_check`, `nilo_stop`, `nilo_ready`](./sql.md#starting-checking-and-stopping-nilo_start-nilo_check-nilo_stop-nilo_ready)
     - [The connection URL](./sql.md#the-connection-url)

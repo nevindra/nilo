@@ -64,6 +64,26 @@ pub const Wire = struct {
     /// as parked rather than as a handler holding its thread (ADR 210).
     limits: core.Limits = .off,
 
+    pub const PoolStats = wire.PoolStats;
+
+    /// The pool's counters, read on demand. One short hold of the pool's lock,
+    /// and pg.zig's three process-wide counters read out of its metrics text,
+    /// the only way it hands them over: nothing runs unless a program asks.
+    pub fn poolStats(self: *Wire) PoolStats {
+        const s = self.pool.stats();
+        var buf: [metrics_text]u8 = undefined;
+        const text = metricsText(&buf) catch "";
+        return .{
+            .size = s.size,
+            .available = s.available,
+            .missing = s.missing,
+            .in_use = s.in_use,
+            .waited = metricIn(text, "pg_pool_empty") catch 0,
+            .dropped = metricIn(text, "pg_pool_dirty") catch 0,
+            .statements = metricIn(text, "pg_query") catch 0,
+        };
+    }
+
     /// One result set, and the connection it is being read from. Both go
     /// back in `close`.
     pub const Rows = struct {
@@ -2102,22 +2122,38 @@ fn keepText(arena: std.mem.Allocator, text: []const u8) []const u8 {
 /// the number over; it is a process-wide counter, so a test compares two
 /// readings rather than trusting one.
 pub fn dirtyConnections() !usize {
-    var buf: [1024]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try pg.writeMetrics(&w);
+    return metric("pg_pool_dirty");
+}
 
-    const key = "pg_pool_dirty";
-    const at = std.mem.indexOf(u8, w.buffered(), key) orelse return error.NoSuchMetric;
-    // Prometheus text: `pg_pool_dirty <number>` on its own line, and the
-    // `# TYPE` line above it also contains the name — so the count is read
-    // off the line that has a number after the key rather than the first hit.
-    var lines = std.mem.splitScalar(u8, w.buffered()[at..], '\n');
+/// Room for pg.zig's metrics text: six counters of a line or two each, about
+/// 500 bytes.
+const metrics_text = 1024;
+
+fn metricsText(buf: *[metrics_text]u8) ![]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    try pg.writeMetrics(&w);
+    return w.buffered();
+}
+
+/// One of pg.zig's process-wide counters by name, out of text `metricsText`
+/// wrote.
+///
+/// Prometheus text: `<key> <number>` on its own line, and the `# TYPE` line
+/// above it also contains the name, so the count is read off the line that
+/// has a number after the key rather than the first hit.
+fn metricIn(text: []const u8, comptime key: []const u8) !usize {
+    var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, key ++ " ")) continue;
-        const text = std.mem.trim(u8, line[key.len..], " \r");
-        return std.fmt.parseInt(usize, text, 10) catch continue;
+        const number = std.mem.trim(u8, line[key.len..], " \r");
+        return std.fmt.parseInt(usize, number, 10) catch continue;
     }
     return error.NoSuchMetric;
+}
+
+fn metric(comptime key: []const u8) !usize {
+    var buf: [metrics_text]u8 = undefined;
+    return metricIn(try metricsText(&buf), key);
 }
 
 // -- tests ---------------------------------------------------------------
@@ -2475,4 +2511,14 @@ test "a URL nobody can read is refused rather than half understood" {
             Wire.dialOpts(try std.Uri.parse(url), aa),
         );
     }
+}
+
+test "a pg.zig counter is read by its name and a name it does not keep is an error" {
+    // The three counters `poolStats` hands over. Whatever their values (the
+    // process may have run statements already), reading one must not fail,
+    // and a name pg.zig keeps nowhere must say so rather than read as zero.
+    _ = try metric("pg_query");
+    _ = try metric("pg_pool_empty");
+    try testing.expectEqual(try dirtyConnections(), try metric("pg_pool_dirty"));
+    try testing.expectError(error.NoSuchMetric, metric("pg_nothing_of_the_kind"));
 }

@@ -1573,6 +1573,102 @@ A caller sees the same thing from each of the first four: the feed answers the s
 
 **Can it be pushed further:** the fresh claim and the put are two commits around a handler. Writing the marker with `synchronous_commit = off` for that one statement (`SET LOCAL` inside a transaction of its own) would cost a round trip to save a flush, and loses the one guarantee the marker has, that a crash after the claim leaves a marker. It is not built. What would settle it is the same measurement on a deployment's own disk.
 
+## 28. The arena's `async-db` gap, taken apart on 16 threads
+
+**Run:** `c4e2d08`, 2026-10-09, AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5. Postgres 18.6 (`postgres:18`, `--network host`, tmpfs data, the arena's `pgdb-seed.sql`, `-c max_connections=256`) on cpus 0-2,8-10 (three physical cores); the server on cpus 3-5,11-13 (three cores); gcannon (`MDA2AV/gcannon` main, the board's tool) on 6,7,14,15, `-c 1024 -t 4 -r 25 --raw` the arena's five `async-db-N.raw` files, 6 s runs; pool 256. Three entries, each built as the board builds it (`zig build -Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3+aes+pclmul --release=fast`): **dusty** as submitted (`lalinsky/dusty`, zio 0.19.1, pg.zig `v26.10.0`, Zig 0.16); **nilo-board**, the arena's `frameworks/nilo` as submitted, pinning nilo `224a507`, zio 0.18.0 and pg.zig `91d0705` (Zig 0.16); **nilo-main**, the same `main.zig` built against this tree at `c4e2d08` (Zig 0.17; stealing off, pg.zig with `2c7c6ca`). The numbers on the board are 57,285 req/s at 830% CPU, p99 77.6 ms for nilo and 290,326 req/s at 4,606%, p99 12.7 ms for dusty, on 64 threads.
+
+**What this box cannot do: reproduce the 5 times.** Three cores of Postgres saturate at about 100k a query-and-reply second whatever answers them (`pg_cpu` 540 to 580% of 600% in every row below), so every entry here is Postgres-bound and the gap that is left is the part the server adds on top. The board's 290k needs sixteen cores of Postgres; the board's nilo at 830% of 6,400% was not waiting for Postgres to be busy.
+
+| entry | run 1 req/s | run 2 req/s | p50 ms | p99 ms | server CPU | switches/req |
+|---|---:|---:|---:|---:|---:|---:|
+| dusty | 93,859–102,554 | 91,716–94,433 | 9.1–10.9 | 25.6–26.2 | 183–199% | 2.0 |
+| nilo-board | 91,146–94,099 | 83,215–86,114 | 9.8–11.3 | 48.0–49.9 | 244–262% | 2.3–2.7 |
+| nilo-main | 91,156–97,152 | 86,831–90,942 | 10.0–11.4 | 33.8–35.1 | 232–257% | 1.3–1.5 |
+
+Three interleaved rounds, a fresh server per row, two runs each on that server. Run 2 sits under run 1 for every entry, dusty's included, which is Postgres on a warm tmpfs and not the server.
+
+**A single connection shows the cost the board build pays.** `-c 1`, one request at a time, pool 64 (rps, then mean latency; two interleaved rounds, which agree to 1%):
+
+| entry | req/s | mean µs | switches/req |
+|---|---:|---:|---:|
+| dusty | 27,979–28,063 | 35 | 2.07 |
+| nilo-board | 15,377–15,436 | **64** | **4.14** |
+| nilo-main | 24,862–24,914 | 39 | 2.06 |
+
+nilo-board pays a second round trip on every cached statement (the `Sync` that `2c7c6ca` removed, §16): twice the context switches and 25 µs more a query. At 16 connections the same ordering holds (128k, 112k, 130k req/s for dusty, nilo-board, nilo-main).
+
+**Where the time goes in nilo-main**, from a scratch build that timestamps `Wire.take`, `queryOpts` and `giveBack` (reverted, not in the tree), 1,024 connections, pool 256: a query waits **7.3 to 8.3 ms for a pool connection, holds it 2.4 to 2.8 ms (the whole of `queryOpts`, which is Postgres's answer) and spends 8 µs decoding and releasing**. That is Little's law on a saturated database, not a slow pool: 1,024 requests in flight over 256 connections is four requests a connection, and the hold is Postgres answering 256 backends on three cores. It does not name anything nilo adds.
+
+**The pool mutex is not the limit, measured through nilo's own pool.** A scratch route that does `pool.acquire()` and `pool.release()` and nothing else, 1,024 connections, pool 256:
+
+| | req/s |
+|---|---:|
+| `/baseline11` (no pool, the floor) | 1,353,647 (6 threads), 1,234,392 (64 threads) |
+| acquire + release | 1,345,161–1,346,536 (6), 1,231,044–1,237,556 (64) |
+| acquire, `nilo.sleep(1)`, release (ceiling 256,000) | 252,219–254,321 (6), 253,604–253,680 (64) |
+
+The acquire and release cost nothing visible, the 1 ms hold reaches its ceiling, and 64 executors on six cpus change none of it. This repeats §12's scratch program through the real pool and the real route. It does not exclude a convoy that needs sixty-four cpus.
+
+**What else was ruled out.** *Pool fill:* the pool is dialled by pg.zig's single reconnector, one connection at a time, and reaches 135 of 253 backends by 0.4 s and all of them by about 1 s under load; dusty's `initUri` drops `connect_on_init_count` (ADR 115) and so dials all 256 before listening. It changed no run-1 number here, and a best of three would hide it on the board. *Executor count:* `threads = 64` against 6 on six cpus moved nilo-main from 96,464 to 86,621 and dusty from 91,618 to 85,751, together. *Balance:* with 6 executors every nilo thread sat at 41 to 43% CPU; dusty's work-stealing runtime left them at 15 to 44%. With 64 executors nilo spread 5% over each of 64 threads where dusty used 34 threads, 5 of them above 10%. *Statement:* `log_statement = all` shows the same query from both, `WHERE "price" >= $1 AND "price" <= $2 LIMIT $3` against `BETWEEN`. *Pool size:* 8, 16, 32, 64, 128, 256 for each entry, 1,024 connections: the throughput peaks at 16 to 64 (about 125k for dusty and nilo-main, 112k for nilo-board) and falls 17 to 20% at 256 for all three, because more backends on three cores is more queueing in Postgres.
+
+**What it decided.** Nothing in nilo's tree changes: within 5% of dusty on throughput, with 25 to 35% more server CPU a request and a p99 of 34 ms against 26 on this box, nilo-main has no defect that these controls reach. The part that is nilo's is **the arena entry's pin**: `224a507` carries pg.zig without `2c7c6ca`, and re-pinning it recovers 2 to 10% of throughput depending on the row (2 to 3% at the medians of the table above, 8 to 10% at 64 connections and across the pool sweep), 14 ms of p99 and, at one connection, 25 µs of the 64 a query. §16 measured 3 µs for the round trip on a unix socket; over loopback TCP to a Postgres backend that has to be woken it is 25. **That does not close the board's 5 times, and this section does not know what does.** What the board has that this box has not is sixty-four executors on sixty-four real cpus, and the one difference seen between the two runtimes that grows with that is how work is spread: nilo's pinned executors give every thread 1/64th of the connections and so 1/64th of the work, each wake of a thread that had gone idle; dusty's stealing runtime concentrates it on the threads that stay awake. It would also explain a board nilo that uses 830% of the CPU and waits. It is a reading of the per-thread table above, not a measurement of wake latency on that machine.
+
+**Whether the number can be pushed further:** the missing measurement is the board's own. The scratch timestamps above (pool wait, `queryOpts`, decode) on a host with at least 32 threads, with Postgres on its own cores, would say in one run whether the 4.5 ms a pool connection is held is Postgres answering or a fiber being resumed late; and the same run with `-Dscheduling=work_stealing` on zio, which ADR 199 turned off, is the control for the reading above. For the arena entry itself: re-pin to a current nilo, and test `DATABASE_MAX_CONN` smaller than 256 where the contract allows, since 16 to 64 peaked here and PG's `max_connections = 256` leaves 253 usable to a pool of 256, so three of its connections can never be dialled.
+
+**To repeat it:** `docker run -d --rm --name pg --network host --cpuset-cpus=0-2,8-10 --tmpfs /var/lib/postgresql:rw,size=2g -e POSTGRES_USER=bench -e POSTGRES_PASSWORD=bench -e POSTGRES_DB=benchmark -v pgdb-seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro postgres:18 -c max_connections=256`, the server under `taskset -c 3-5,11-13` with `DATABASE_URL` and `DATABASE_MAX_CONN=256`, and `taskset -c 6,7,14,15 gcannon http://127.0.0.1:8080/async-db -c 1024 -t 4 -r 25 -d 6s --json --raw async-db-5.raw,async-db-10.raw,async-db-20.raw,async-db-35.raw,async-db-50.raw`. `-r 25` matters: the board's `reconnects` column (22,509 for nilo in 5 s) is a connection closed every 25 requests, which a gcannon without `-r` never does. `bench/sql_server.zig` is the same handler without the arena's TLS and dataset, and dials its whole pool at start (`connect_on_init = size`).
+
+## 29. The arena's `async-db` gap again, with Postgres given the box: not reproduced, and what the next board run will say
+
+**Run:** `01ca862` plus the main tree's uncommitted work plus this change (`db.poolStats`, ADR 279), 2026-10-09, AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, `kernel.io_uring_disabled = 0`, transparent hugepages `always`. Postgres 18.6 (`postgres:18`, tmpfs data, the arena's `pgdb-seed.sql`, `max_connections=256`, user `bench`) on cpus 0-3,8-11 (**eight logical cpus, so that it is not the first thing to saturate as in section 28 where it had six**), the server on cpus 4-7 with **64 executors as on the board** (nilo `threads = 64`, dusty `executors` forced to 64), gcannon (`-c 1024 -t 4 -r 25 --raw` the five `async-db-N.raw` files, 5 to 6 s) on cpus 12-15, pool 256. Entries as the board builds them (`-Dtarget=x86_64-linux-musl -Dcpu=x86_64_v3+aes+pclmul --release=fast`): **dusty** as submitted (zio 0.19.1, pg.zig `v26.10.0`, Zig 0.16); **nilo** the arena entry (`ab/base`, zio 0.19.0, nilo at this tree, Zig 0.17) with `threads` read from the environment. **The box was not quiet**: three other agents compiled and benchmarked on it, the load average read 7 to 117, so every comparison below is interleaved, one run each, inside the shared lock, and a figure is a range over the pairs.
+
+**What was asked is not reproduced.** The board's nilo reads 66k at 755% CPU against dusty's 290k at 4,606%; here the two read the same within the spread.
+
+| async-db, 1,024 connections, pool 256, five interleaved pairs | nilo | dusty |
+|---|---:|---:|
+| requests a second | 98,383 to 132,219 (median 124,718) | 96,306 to 107,781 (median 105,455) |
+| server CPU a request | 24.2 to 31.9 µs (median 25.8) | 22.3 to 25.6 µs (median 24.1) |
+| Postgres CPU | 603 to 671% of 800 | 668 to 694% |
+| p50, p99 | 1.2 to 8.8 ms, 46 to 66 ms | 8.9 to 9.6 ms, 24 to 31 ms |
+| sleeps a request (voluntary context switches) | 0.47 to 2.34 | 1.58 to 1.68 |
+| page faults a request | 1.36 to 1.37 | 0.04 |
+
+Postgres is at 75 to 87% of its eight cpus in every row, so this is still a Postgres-bound regime, closer to the board's than section 28's and not the board's. The same pairs with the server on two cpus (nilo 93k and 108k at 172% of 200%, dusty 104k and 117k at 157 to 167%), with Postgres on the same cpus as the server and the generator (nilo 122k and 127k, dusty 126k and 119k), and at 64, 256 and 1,024 connections show the same: **nilo within 10% of dusty on throughput, 5 to 25% more server CPU a request, and a p99 two to three times dusty's.**
+
+**With Postgres taken out of the way the gap is 15%, and most of it is the executors sleeping.** `SELECT $1::bigint` through `db.raw` against `pool.queryOpts` with the same text and `cache_name`, 1,024 connections, Postgres at 200 to 250% of 800, four to five interleaved rounds:
+
+| | requests a second | server CPU a request | sleeps a request |
+|---|---:|---:|---:|
+| dusty, work stealing | 541,634 to 568,000 | 4.9 to 5.3 µs | 0.10 to 0.14 |
+| nilo, pinned (the arena entry) | 460,749 to 477,051 | 6.2 to 6.6 µs | 0.35 to 0.58 |
+| nilo, `.work_stealing` | 514,282 to 521,869 | 5.5 to 5.6 µs | 0.02 |
+
+Pinned costs the lightest statement 10% of its throughput and four times dusty's sleeps; stealing takes nilo to 5 to 7% under dusty, which is what `nilo_sql` and nilo's HTTP layer add to a statement here (0.4 to 0.6 µs). It is not the board's 4.4 times, and PR 1539 measured stealing on the board and read 66k against 57k, so it is a cost of the pin and not the board's cause.
+
+**What was ruled out, each with the number that moved or did not.**
+
+- *The pool's fill.* With nothing else running a lazily filled pool reaches 253 to 256 connections in under half a second. Under load on eight Postgres cpus it is at 64 at 0.1 s and 245 at 2.4 s (85 dials a second). Under a machine saturated by other agents' builds (load 56) it dialled about 15 a second, 155 to 212 connections over four seconds, and the run read 51k against 109k for the runs around it. Dialling the whole pool before listening (`connect_on_init = size`, which is what dusty's `initUri` does) changed nothing when the cpus were contended on purpose by one busy loop each (67,933 and 69,590, 50,289 and 47,023, 53,708 and 52,904 against dusty's 75,406, 66,806 and 70,281), so the fill is a start-up cost of the first run and not the gap.
+- *The three connections above 253.* `bench` is a superuser (the image makes `POSTGRES_USER` one), and a superuser may use Postgres's reserved slots: the pool reached `open=256` and `missing=0`, no `too many clients` line, no retry loop. The reconnector's 2 s retry after a failed dial is never reached.
+- *The pool's lock and the pool's barging.* `waited` over statements is 0.97 and p50 is bimodal (600 µs to 1.2 ms in some runs, 9 ms in others, the same binary), which fits `acquire` handing a released connection to whichever fiber looks first, a new arrival, rather than to the oldest waiter (the woken waiter finds it taken and waits again, which is what `waited` over statements counts). It moves p99 (nilo 46 to 66 ms against dusty's 24 to 31) and not throughput.
+- *Where the pool connections do their I/O.* zio's `.linux` backend is io_uring here (`iou-wrk` threads), and each operation runs on the executor of the fiber that issued it, so there is no owner. On the epoll fallback a socket's readiness belongs to the loop that first parked on it, which for every pool connection is the reconnector's executor, and that executor reads each reply for the others. Forced with `backend = .epoll`: one nilo thread runs at 16 to 23% where the median is 5 (flat at 5 on io_uring), throughput on `/ping` is 358k to 360k for nilo against 375k to 383k for dusty on epoll (both 25 to 30% under io_uring), and the hot thread is nowhere near saturated, so the single owner is a skew the board's host would have to inflate thirty-fold to turn into the gap.
+- *What `nilo_sql` adds a statement.* About 0.4 to 0.6 µs of CPU over `queryOpts` once the sleeps are removed (above), and the instrumented entry is within 1% of the plain one on `/ping`. Not the gap.
+
+**One real difference was found and is nilo's: the `tags` column costs 1.4 page faults a request.** `sql.Json([]const []const u8)` is parsed per row with `std.json.parseFromSliceLeaky`. A request that reads it takes **1.36 to 1.37 minor faults a request on every pair above and dusty takes 0.04**; the same route without the `jsonb` column (`/plain`, the `Item` less `tags`) takes 0.01 to 0.03, `/baseline11`, `/ping` and `/json/50` take 0.00 to 0.01, and the entry's resident set grows from 50 MB to 65 to 67 MB at 1,024 connections (15 KB a connection). Faults are spread evenly over the 64 executors, are not RSS growth, and no `mmap`, `munmap`, `madvise`, `mremap` or `mprotect` was seen by `gdb` over 7,000 and over 346,000 requests, so they are pages already mapped being touched again. At about a microsecond each it is 1 to 2 µs of the 25. It is not the board's gap and it is not explained: the address ranges that churn are 256 KiB to 1 MiB anonymous regions, which fits the fiber stacks of the connections gcannon opens every 25 requests (34 faults a connection is 1.37 a request), and `std.json`'s frames on a fiber stack are the candidate.
+
+**The instrumentation the next board run will print**, because the rest of this section cannot say what a machine with sixty-four free cpus does. `ab/asyncdb/src/main.zig` (and `.claude/asyncdb-main.zig` in the worktree) is the arena entry with one thread that writes two lines a second to the log, which the board publishes:
+
+```
+asyncdb: answered=130480/s inflight=603 (max 777) pool size=256 open=256 in_use=255.0 idle=1.0 missing=0 waited=121437 dropped=0 | statement mean=5008us p99=61440us | request mean=5009us p99=61440us | hold~1954us
+asyncdb: threads=67 cpu=320% hot(>=50%)=0 warm(>=10%)=0 top=[6,6,6,6,6,6]% sleeps=63552/s preempted=14511/s faults=181032/s io_uring_workers=2
+```
+
+`open` and `missing` say whether the pool was filled; `in_use` against `size` whether it was the limit; `hold` (Little's law over the pool) against `statement mean` how much of a statement was the wait for a connection and how much the database; `hot` and `top` whether the CPU is one thread or all of them (an owner, an acceptor, the reconnector's executor); `sleeps` and `preempted` whether the executors are being woken; `dropped` whether connections are cycling; `io_uring_workers` and the `kernel.io_uring_disabled` line at start whether the board ran the ring or the epoll fallback. What each reading would mean: **`missing` high after the first second** is the fill, and the entry's `connect_on_init = size` is the fix; **`in_use` at `size` with Postgres idle and `hold` near 4 ms** is fibers resumed late, and `sleeps` and `top` say where; **`hot` at 1 with `top` near 100** is a thread everything waits for.
+
+**What it costs.** `db.poolStats()` costs nothing until it is called: the arena entry's stripped binary is 2,574,704 bytes with and without the change (byte for byte identical), nothing is added to a statement's path, and the allocation and idle-memory axes are untouched. The entry's thread (a statement watcher with two clock reads, a handful of relaxed adds and two log-linear histograms on the request path, and a read of `/proc/self/task` once a second) costs 2 to 3% of requests a second and 2 to 6% of CPU a request on async-db (three pairs on a quiet box: 123,061 and 120,465, 113,648 and 110,057, 113,476 and 110,741; 25.8 and 26.4, 27.8 and 29.4, 28.0 and 28.8 µs), and is inside 1% on `/ping` (four pairs, 466,711 and 462,336, 473,092 and 474,822, 466,820 and 462,069, 473,705 and 470,671). The binary is 114,048 bytes larger.
+
+**What it decided.** Nothing in `nilo_http` or `nilo_sql` changes except the addition of `db.poolStats()`, which is the measurement the board run needs. The gap is not reproduced on sixteen threads with Postgres given eight of them, the pool's fill, the reserved slots, the pool's lock, the epoll owner and what `nilo_sql` adds are each measured and are not it, and the pin costs the lightest statement 10% and is not the board's 4.4 times either. **Whether the number can be pushed further:** a host of 32 threads or more with Postgres on its own cores, or the board itself with the instrumented entry and `connect_on_init = size`.
+
+**To repeat it:** Postgres as in section 28 with `-p 5441` and `--cpuset-cpus=0-3,8-11`, `bench` a superuser; the server under `taskset -c 4-7` with `DATABASE_URL`, `DATABASE_MAX_CONN=256` and `THREADS=64`; `taskset -c 12-15 gcannon http://127.0.0.1:8080/async-db -c 1024 -t 4 -r 25 -d 6s --json --raw async-db-5.raw,…`, for `/ping` no `--raw`. The entries: `ab/base` built as `ab/README.md` says with `.threads = THREADS` added to `listen`, and `.claude/asyncdb-main.zig` for the instrumented one.
+
 ## What is still missing
 
 - **A second box.** Everything here shares eight physical cores between nilo,

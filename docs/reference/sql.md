@@ -125,6 +125,17 @@ A statement that failed also carries `sent.problem`: the database's own `message
 
 **`sql.problem(c)` returns the same struct to the call that failed**, instead of to a watcher of every call. See [Errors](#errors).
 
+#### `db.poolStats`
+
+**`db.poolStats()` says how full the pool is, and costs nothing until it is called** ([ADR 279](../adr/279-a-pool-says-how-full-it-is.md)). It returns a `?sql.PoolStats`:
+
+- `size`, `available`, `missing` and `in_use`: the connections the pool was sized for, idle, not dialled yet (or lost and waiting for the reconnector), and lent to a statement. `size - missing` is how many are open, and the four are read under the pool's lock, so they agree with each other at that moment and not an instant later;
+- `waited`, `dropped` and `statements`: since the process started, how many times a statement looked for a connection and found none (a waiter woken to find its connection taken looks again and counts again), how many connections were thrown away because a statement left them mid-conversation, and how many statements were sent. These are pg.zig's own counters, kept for the process and not for the pool, so two Postgres `Db`s in one program add up.
+
+It is null before `listen()` has opened the pool and on SQLite, which has no pool of connections. A program that never calls it pays no byte and nothing on a statement's way; a call is one short hold of the pool's lock and one render of pg.zig's counters into 1,024 bytes of stack.
+
+`in_use` over statements a second is how long a statement holds a connection (Little's law on the pool), which with `db.watching`'s time for the whole call says how much of it was waiting. A pool whose `missing` stays high after the first second is still being dialled one connection at a time (set `connect_on_init`, [ADR 115](../adr/115-a-boot-dials-the-connection-its-work-needs.md)); one whose `in_use` stays at `size` while the database is idle wants a larger `size`, or a handler that holds its connection for less.
+
 #### `db.explain`
 
 **`db.explain(Row, c, options)` takes what `db.select` takes and returns the plan of that statement with its values bound**, one line of the plan per line of text: `EXPLAIN (ANALYZE, BUFFERS)` on Postgres, which runs the read, and `EXPLAIN QUERY PLAN` on SQLite. It is for tests and developers. A children statement is not included ([ADR 232](../adr/232-a-read-can-show-its-plan.md)).

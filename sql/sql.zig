@@ -298,6 +298,11 @@ pub const Error = wire.Error;
 /// one past the request copies it.
 pub const Problem = wire.Problem;
 
+/// What `db.poolStats()` answers with: how many connections the pool has
+/// open, idle and lent out, and how often a statement found none
+/// ([ADR 279](../docs/adr/279-a-pool-says-how-full-it-is.md)).
+pub const PoolStats = wire.PoolStats;
+
 /// What the database said about the last statement **this fiber** ran, or
 /// null when it worked
 /// ([ADR 117](../docs/adr/117-a-statement-that-failed-says-what-the-database-said.md)).

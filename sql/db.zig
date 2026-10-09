@@ -1533,6 +1533,22 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             self.wire = null;
         }
 
+        /// How full the pool is: connections open, idle and lent out, and how
+        /// often a statement had to wait for one
+        /// ([ADR 279](../docs/adr/279-a-pool-says-how-full-it-is.md)).
+        ///
+        /// Null on a `Db` whose Wire has no pool of connections (SQLite is
+        /// one file) and before `listen()` opened it. It costs nothing until
+        /// it is called: one short hold of the pool's lock and three counters
+        /// read, so a program that never asks pays no byte and no instruction
+        /// on a statement's way. A program that asks once a second pays what
+        /// that lock costs once a second.
+        pub fn poolStats(self: *Self) ?wire_mod.PoolStats {
+            if (comptime !@hasDecl(W, "poolStats")) return null;
+            const w = if (self.wire) |*w| w else return null;
+            return w.poolStats();
+        }
+
         /// What the health route asks
         /// ([ADR 154](../docs/adr/154-a-health-route-asks-the-services.md)).
         /// A pool that is up is a pool that can answer `SELECT 1`, and

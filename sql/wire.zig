@@ -309,6 +309,36 @@ pub const Problem = struct {
     constraint: []const u8 = "",
 };
 
+/// How full a pool of connections is, as `Db.poolStats` answers it
+/// ([ADR 279](../docs/adr/279-a-pool-says-how-full-it-is.md)).
+///
+/// **A reading, not a promise**: the four counts are taken under the pool's
+/// lock and are exact at that moment, and a busy pool has moved on by the time
+/// they are read. The three after them are pg.zig's own process-wide counters,
+/// which no pool owns, so with two Postgres `Db`s in one process they add up.
+pub const PoolStats = struct {
+    /// Connections the pool was sized for.
+    size: usize,
+    /// Dialled and idle.
+    available: usize,
+    /// Not dialled yet, or lost and waiting for the reconnector. `size` less
+    /// this is how many connections the pool has open.
+    missing: usize,
+    /// Dialled and lent to a statement.
+    in_use: usize,
+    /// How many times a statement looked for a connection and found none,
+    /// since the process started. One per look: a waiter woken to find the
+    /// connection already taken looks again and counts again, so this can
+    /// exceed the number of statements that waited.
+    waited: usize,
+    /// Connections thrown away rather than taken back, since the process
+    /// started: one a statement left mid-conversation, which the pool
+    /// replaced by dialling on the spot.
+    dropped: usize,
+    /// Statements sent through any pg.zig pool, since the process started.
+    statements: usize,
+};
+
 /// What a transaction sees of everything else running beside it. The
 /// spelling is Postgres's and the meanings are the SQL standard's.
 ///
