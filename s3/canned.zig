@@ -97,6 +97,11 @@ const Answer = struct {
     error_body: []const u8 = "",
     /// A body that arrives a byte at a time instead of at once.
     slow: ?Slow = null,
+    /// Sent as `Content-Range` when it is not empty: what a 206 carries.
+    content_range: []const u8 = "",
+    /// Leave `Content-Length` out and end the body by closing, which is
+    /// what a response of unknown length is.
+    omit_length: bool = false,
 };
 
 /// `pieces` bytes, `gap_ms` apart. With `hold` the length claimed is one
@@ -303,6 +308,14 @@ const Canned = struct {
             if (slow.hold) _ = r.takeByte() catch {};
             return;
         }
+        if (self.answer.content_range.len != 0)
+            try w.print("Content-Range: {s}\r\n", .{self.answer.content_range});
+        if (self.answer.omit_length) {
+            try w.writeAll("Connection: close\r\n\r\n");
+            if (!is_head) try w.writeAll(body);
+            try w.flush();
+            return;
+        }
         try w.print("Content-Length: {d}\r\n\r\n", .{self.answer.claim_len orelse body.len});
         // A HEAD carries no body however long it says it is, which is the
         // whole of what makes `head` a cheap call.
@@ -317,6 +330,8 @@ const Canned = struct {
         const method = parts.next() orelse return error.BadRequest;
         const target = parts.next() orelse return error.BadRequest;
 
+        if (method.len > self.seen.method.len) return error.RequestTooLong;
+        if (target.len > self.seen.target.len) return error.RequestTooLong;
         @memcpy(self.seen.method[0..method.len], method);
         self.seen.method_len = method.len;
         @memcpy(self.seen.target[0..target.len], target);
@@ -333,6 +348,11 @@ const Canned = struct {
             const value = std.mem.trim(u8, trimmed[colon + 1 ..], " \t");
 
             const i = self.seen.count;
+            // A request this harness has no room for is an error that names
+            // it, not a write past a buffer: what S3 itself does is refuse.
+            if (i == self.seen.names.len) return error.RequestTooLong;
+            if (name.len > self.seen.names[0].len) return error.RequestTooLong;
+            if (value.len > self.seen.values[0].len) return error.RequestTooLong;
             @memcpy(self.seen.names[i][0..name.len], name);
             self.seen.name_lens[i] = name.len;
             @memcpy(self.seen.values[i][0..value.len], value);
@@ -374,6 +394,19 @@ const Canned = struct {
         const region = scope_parts.next() orelse return false;
         if (date.len != 8) return false;
         const credential_scope = credential[key_id.len + 1 ..];
+
+        // S3 refuses an `x-amz-*` header that is on the wire and not in
+        // `SignedHeaders`, so a client that forgets to sign one passes
+        // nowhere real and must not pass here.
+        for (0..self.seen.count) |i| {
+            const sent = self.seen.names[i][0..self.seen.name_lens[i]];
+            if (!startsWithIgnoreCase(sent, "x-amz-")) continue;
+            var listed = std.mem.splitScalar(u8, signed_headers, ';');
+            const found = while (listed.next()) |n| {
+                if (std.ascii.eqlIgnoreCase(n, sent)) break true;
+            } else false;
+            if (!found) return false;
+        }
 
         var hashing: sign.Hashing = .init();
         const w = &hashing.interface;
@@ -429,6 +462,10 @@ const Canned = struct {
         return std.mem.eql(u8, &self.expected, claimed);
     }
 };
+
+fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {
+    return text.len >= prefix.len and std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix);
+}
 
 /// The value of `name=` in an `Authorization` header, up to the next comma.
 fn fieldOf(auth: []const u8, name: []const u8) ?[]const u8 {
@@ -721,7 +758,11 @@ test "a range is signed as a header, and asks for the slice it was given" {
         fn run(io: std.Io) !void {
             var canned = try Canned.open(io);
             defer canned.close();
-            canned.answer = .{ .status = "206 Partial Content", .body = "0123456789" };
+            canned.answer = .{
+                .status = "206 Partial Content",
+                .body = "0123456789",
+                .content_range = "bytes 0-9/5000000000",
+            };
 
             var served = try io.concurrent(Canned.serveOne, .{&canned});
             defer served.cancel(io) catch {};
@@ -742,6 +783,9 @@ test "a range is signed as a header, and asks for the slice it was given" {
             try expectVerified(&canned);
 
             try testing.expectEqualStrings("0123456789", part.bytes.view());
+            try testing.expectEqual(@as(u64, 10), part.len);
+            // The object's own size, past what the slice or the bucket holds.
+            try testing.expectEqual(@as(u64, 5_000_000_000), part.total);
             try testing.expectEqualStrings("bytes=0-9", canned.seen.header("range").?);
             // In the signature as well as on the wire, which is the half a
             // client gets wrong.
@@ -2105,7 +2149,7 @@ test "a bounded get stays inside its allocation budget" {
             try testing.expectEqualStrings("the bytes of a very small png", object.bytes.view());
 
             // One, and it is the body, the content type and the ETag together
-            // in a single block — see `finishGet`. Raising this number needs a
+            // in a single block — see `bounded`. Raising this number needs a
             // reason written down beside it.
             try testing.expectEqual(@as(usize, 1), scope._counting.allocs);
         }
@@ -2950,6 +2994,261 @@ test "a name the bucket's style cannot carry is BadBucketName, and opening it al
             var ok = try Files.openAs(&store, &@as([63]u8, @splat('a')));
             defer ok.deinit();
             try testing.expectEqual(before + 1, counting.allocs);
+        }
+    }.run);
+}
+
+/// The bytes of a request the way a socket delivers them, rebuilt from what
+/// `seen` kept, with `extra` lines before the blank one.
+fn replayed(buf: []u8, seen: *const Seen, extra: []const u8) ![]const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    try w.print("{s} {s} HTTP/1.1\r\n", .{ seen.methodText(), seen.targetText() });
+    for (0..seen.count) |i| {
+        try w.print("{s}: {s}\r\n", .{ seen.names[i][0..seen.name_lens[i]], seen.values[i][0..seen.value_lens[i]] });
+    }
+    try w.writeAll(extra);
+    try w.writeAll("\r\n");
+    return w.buffered();
+}
+
+test "a request with an x-amz header that was not signed is refused, as S3 refuses it" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.answer = .{ .body = "x" };
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            _ = try files.get(&scope, "photos/wati.png");
+            served.await(io) catch {};
+            try expectVerified(&canned);
+
+            var raw: [8192]u8 = undefined;
+            // The same request, byte for byte, passes.
+            var same: Canned = canned;
+            same.seen = .{};
+            var r: std.Io.Reader = .fixed(try replayed(&raw, &canned.seen, ""));
+            try same.readRequest(&r);
+            try testing.expect(same.check());
+
+            // And with one more `x-amz-*` line the signature covers nothing of.
+            var other: Canned = canned;
+            other.seen = .{};
+            var r2: std.Io.Reader = .fixed(try replayed(&raw, &canned.seen, "x-amz-meta-sneaked: in\r\n"));
+            try other.readRequest(&r2);
+            try testing.expect(!other.check());
+        }
+    }.run);
+}
+
+test "a request this harness has no room for is an error rather than an overflow" {
+    var canned: Canned = undefined;
+    var raw: [16 << 10]u8 = undefined;
+
+    const long_name: [65]u8 = @splat('x');
+    canned.seen = .{};
+    var w1: std.Io.Writer = .fixed(&raw);
+    try w1.print("GET / HTTP/1.1\r\n{s}: v\r\n\r\n", .{&long_name});
+    var r1: std.Io.Reader = .fixed(w1.buffered());
+    try testing.expectError(error.RequestTooLong, canned.readRequest(&r1));
+
+    const long_value: [3073]u8 = @splat('v');
+    canned.seen = .{};
+    var w2: std.Io.Writer = .fixed(&raw);
+    try w2.print("GET / HTTP/1.1\r\nname: {s}\r\n\r\n", .{&long_value});
+    var r2: std.Io.Reader = .fixed(w2.buffered());
+    try testing.expectError(error.RequestTooLong, canned.readRequest(&r2));
+
+    canned.seen = .{};
+    var w3: std.Io.Writer = .fixed(&raw);
+    try w3.writeAll("GET / HTTP/1.1\r\n");
+    for (0..33) |_| try w3.writeAll("h: v\r\n");
+    try w3.writeAll("\r\n");
+    var r3: std.Io.Reader = .fixed(w3.buffered());
+    try testing.expectError(error.RequestTooLong, canned.readRequest(&r3));
+
+    const long_target: [4097]u8 = @splat('a');
+    canned.seen = .{};
+    var w4: std.Io.Writer = .fixed(&raw);
+    try w4.print("GET /{s} HTTP/1.1\r\n\r\n", .{&long_target});
+    var r4: std.Io.Reader = .fixed(w4.buffered());
+    try testing.expectError(error.RequestTooLong, canned.readRequest(&r4));
+}
+
+/// One request through a Store pointed at a canned answer, for the tests below
+/// that are about what a client makes of that answer.
+fn againstAnswer(answer: Answer, comptime body: fn (*Files, *core.Run, *Canned) anyerror!void) !void {
+    const Run = struct {
+        var chosen: Answer = .{};
+        fn run(io: std.Io) !void {
+            testing.log_level = .err;
+            var canned = try Canned.open(io);
+            defer canned.close();
+            canned.answer = chosen;
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            try body(&files, &scope, &canned);
+            served.await(io) catch {};
+        }
+    };
+    Run.chosen = answer;
+    try withIo(Run.run);
+}
+
+test "a range that ends before it starts is refused rather than answered with the whole object" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            testing.log_level = .err;
+            var canned = try Canned.open(io);
+            defer canned.close();
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            // No server is serving: the refusal comes before a socket.
+            try testing.expectError(error.Rejected, files.getRange(&scope, "a.bin", .{ .from = 9, .to = 0 }));
+            var reading: Files.Reading = .{ .range = .{ .from = 9, .to = 0 } };
+            defer reading.close();
+            try testing.expectError(error.Rejected, files.stream(&scope, "a.bin", &reading));
+        }
+    }.run);
+}
+
+test "a ranged get answered with a 200 is not the slice that was asked for" {
+    try againstAnswer(.{ .body = "the whole object, not a slice" }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            try testing.expectError(error.Failed, files.getRange(scope, "a.bin", .{ .from = 0, .to = 3 }));
+        }
+    }.run);
+}
+
+test "a 206 with no content-range is refused, for there is no total to report" {
+    try againstAnswer(.{ .status = "206 Partial Content", .body = "0123" }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            try testing.expectError(error.Failed, files.getRange(scope, "a.bin", .{ .from = 0, .to = 3 }));
+        }
+    }.run);
+}
+
+test "a get without a content-length is Failed rather than an empty object" {
+    try againstAnswer(.{ .body = "abc", .omit_length = true }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            try testing.expectError(error.Failed, files.get(scope, "a.bin"));
+        }
+    }.run);
+}
+
+test "a stream without a content-length is Failed rather than a length of zero" {
+    try againstAnswer(.{ .body = "abc", .omit_length = true }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            var reading: Files.Reading = .idle;
+            defer reading.close();
+            try testing.expectError(error.Failed, files.stream(scope, "a.bin", &reading));
+        }
+    }.run);
+}
+
+test "a head without a content-length is Failed rather than a length of zero" {
+    try againstAnswer(.{ .omit_length = true }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            try testing.expectError(error.Failed, files.head(scope, "a.bin"));
+        }
+    }.run);
+}
+
+test "a streamed range asks for the slice, signs it, and reports the object's total" {
+    try againstAnswer(.{
+        .status = "206 Partial Content",
+        .body = "456789",
+        .content_range = "bytes 4-9/16",
+    }, struct {
+        fn run(files: *Files, scope: *core.Run, canned: *Canned) !void {
+            var reading: Files.Reading = .{ .range = .{ .from = 4, .to = 9 } };
+            defer reading.close();
+            try files.stream(scope, "a.bin", &reading);
+            try testing.expectEqual(@as(u64, 6), reading.len);
+            try testing.expectEqual(@as(u64, 16), reading.total);
+
+            var out: [16]u8 = undefined;
+            var w = std.Io.Writer.fixed(&out);
+            _ = try reading.pipe(&w);
+            try testing.expectEqualStrings("456789", w.buffered());
+            try testing.expectEqualStrings("bytes=4-9", canned.seen.header("range").?);
+        }
+    }.run);
+}
+
+test "a streamed range answered with a 200 is Failed" {
+    try againstAnswer(.{ .body = "0123456789" }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            var reading: Files.Reading = .{ .range = .{ .from = 4, .to = 9 } };
+            defer reading.close();
+            try testing.expectError(error.Failed, files.stream(scope, "a.bin", &reading));
+        }
+    }.run);
+}
+
+test "a whole stream's total is its length" {
+    try againstAnswer(.{ .body = "0123456789" }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            var reading: Files.Reading = .idle;
+            defer reading.close();
+            try files.stream(scope, "a.bin", &reading);
+            try testing.expectEqual(@as(u64, 10), reading.total);
+        }
+    }.run);
+}
+
+test "a missing bucket is Rejected, which a missing key is not" {
+    try againstAnswer(.{
+        .status = "404 Not Found",
+        .error_body = "<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>",
+    }, struct {
+        fn run(files: *Files, scope: *core.Run, _: *Canned) !void {
+            try testing.expectError(error.Rejected, files.get(scope, "a.bin"));
+        }
+    }.run);
+}
+
+test "a presigned URL asked to live for no time is refused" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            testing.log_level = .err;
+            var canned = try Canned.open(io);
+            defer canned.close();
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.Rejected, files.presign(&scope, "a.bin", 0));
+            try testing.expectError(error.Rejected, files.presignPut(&scope, "a.bin", 0));
+            try testing.expectError(error.Rejected, files.presignPost(&scope, "a.bin", .{ .seconds = 0, .max_bytes = 10 }));
+            // And one second is still a life.
+            _ = try files.presign(&scope, "a.bin", 1);
         }
     }.run);
 }

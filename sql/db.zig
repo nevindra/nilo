@@ -1117,6 +1117,42 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             });
         }
 
+        /// What a statement that holds a result set has to say, kept until
+        /// the result set is given back.
+        ///
+        /// **A statement is told after its `drain`, never before**, because a
+        /// drain can suspend (Postgres reads up to a megabyte off the socket
+        /// and the pool may dial) and the fiber that runs meanwhile finishes a
+        /// statement of its own, overwriting the thread's `recent`. Told
+        /// first, `sql.violated` answered false for a unique that was hit
+        /// (ADR 117). So the paths out set this and a `defer` declared before
+        /// the drain's sends it once the drain has returned. The watcher's
+        /// time therefore includes the drain, which is part of what the
+        /// statement cost. Nothing set means nothing sent, as before: an
+        /// allocation that failed on the way out told nobody.
+        const Verdict = struct {
+            said: bool = false,
+            rows: ?usize = null,
+            failed: bool = true,
+            problem: ?wire_mod.Problem = null,
+
+            fn set(v: *Verdict, rows: ?usize, failed: bool, problem: ?wire_mod.Problem) void {
+                v.* = .{ .said = true, .rows = rows, .failed = failed, .problem = problem };
+            }
+
+            fn send(
+                v: *const Verdict,
+                db: *const Self,
+                c: anytype,
+                started: ?i64,
+                sql: []const u8,
+                plan: ?[]const u8,
+            ) void {
+                if (!v.said) return;
+                db.told(c, started, sql, plan, v.rows, v.failed, v.problem);
+            }
+        };
+
         /// A statement that answers with a count rather than rows, timed.
         /// The one funnel for `exec`, so that a watcher sees an `UPDATE` that
         /// returns nothing on the same terms as a `SELECT`.
@@ -1434,12 +1470,15 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 self.told(scope, started, sql, null, null, true, problem);
                 return probeFailed(err);
             };
+            // Told after the result set is given back (`Verdict`).
+            var verdict: Verdict = .{};
+            defer verdict.send(self, scope, started, sql, null);
             defer w.drain(&rows);
             _ = w.next(&rows) catch |err| {
-                self.told(scope, started, sql, null, null, true, null);
+                verdict.set(null, true, null);
                 return probeFailed(err);
             };
-            self.told(scope, started, sql, null, 1, false, null);
+            verdict.set(1, false, null);
             return null;
         }
 
@@ -3481,6 +3520,9 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 };
             // Whatever happens below, the connection goes back usable —
             // including a handler's own error on the way past (`wire.zig`).
+            // Told after the result set is given back (`Verdict`).
+            var verdict: Verdict = .{};
+            defer verdict.send(db, c, started, sql, plan);
             defer w.drain(&rows);
 
             var out: std.ArrayList(Row) = .empty;
@@ -3490,12 +3532,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             // **once per statement** rather than once per row, and asked at
             // the first moment both drivers can answer it (ADR 106).
             const any = w.next(&rows) catch |err| {
-                db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                verdict.set(null, true, stepProblem(w, &rows, err, arena));
                 return err;
             };
             if (any) {
                 wideEnough(Row, if (total == null) 0 else 1, w, &rows) catch |err| {
-                    db.told(c, started, sql, plan, null, true, null);
+                    verdict.set(null, true, null);
                     return err;
                 };
                 // Read once rather than per row: `count(*) OVER ()` is the
@@ -3508,24 +3550,24 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                         comptime shape.width(Row),
                         c,
                     ) catch |err| {
-                        db.told(c, started, sql, plan, null, true, null);
+                        verdict.set(null, true, null);
                         return err;
                     };
                 }
                 while (true) {
                     const filled = readRow(Row, 0, w, &rows, c) catch |err| {
-                        db.told(c, started, sql, plan, null, true, null);
+                        verdict.set(null, true, null);
                         return err;
                     };
                     try out.append(arena, filled);
                     const more = w.next(&rows) catch |err| {
-                        db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                        verdict.set(null, true, stepProblem(w, &rows, err, arena));
                         return err;
                     };
                     if (!more) break;
                 }
             }
-            db.told(c, started, sql, plan, out.items.len, false, null);
+            verdict.set(out.items.len, false, null);
             return out.toOwnedSlice(arena);
         }
 
@@ -3611,11 +3653,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
+            // Told after the result set is given back (`Verdict`).
+            var verdict: Verdict = .{};
+            defer verdict.send(db, c, started, sql, plan);
             defer w.drain(&rows);
 
             var out: std.ArrayList(T) = .empty;
             const any = w.next(&rows) catch |err| {
-                db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                verdict.set(null, true, stepProblem(w, &rows, err, arena));
                 return err;
             };
             if (any) {
@@ -3623,23 +3668,23 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // answered rows, so this is the one width a scalar can be
                 // short of, and it is checked for the reason `wideEnough` is.
                 if (w.width(&rows) < 1) {
-                    db.told(c, started, sql, plan, null, true, null);
+                    verdict.set(null, true, null);
                     return error.QueryFailed;
                 }
                 while (true) {
                     const value = readColumn(w, &rows, T, 0, c) catch |err| {
-                        db.told(c, started, sql, plan, null, true, null);
+                        verdict.set(null, true, null);
                         return err;
                     };
                     try out.append(arena, value);
                     const more = w.next(&rows) catch |err| {
-                        db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                        verdict.set(null, true, stepProblem(w, &rows, err, arena));
                         return err;
                     };
                     if (!more) break;
                 }
             }
-            db.told(c, started, sql, plan, out.items.len, false, null);
+            verdict.set(out.items.len, false, null);
             return out.toOwnedSlice(arena);
         }
 
@@ -3673,27 +3718,30 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
+            // Told after the result set is given back (`Verdict`).
+            var verdict: Verdict = .{};
+            defer verdict.send(db, c, started, sql, plan);
             defer w.drain(&rows);
 
             // An aggregate answers with exactly one row. None would mean the
             // driver and Postgres disagree about what was sent, which is not
             // something to paper over with a zero.
             const any = w.next(&rows) catch |err| {
-                db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                verdict.set(null, true, stepProblem(w, &rows, err, arena));
                 return err;
             };
             if (!any) {
-                db.told(c, started, sql, plan, null, true, null);
+                verdict.set(null, true, null);
                 return error.QueryFailed;
             }
             const answer = w.read(&rows, T, 0) catch |err| {
-                db.told(c, started, sql, plan, null, true, null);
+                verdict.set(null, true, null);
                 return err;
             };
             // One row, which is what an aggregate is — the count in it is the
             // answer rather than the number of rows, and a watcher reading
             // `rows` gets what a `SELECT` would have given it.
-            db.told(c, started, sql, plan, 1, false, null);
+            verdict.set(1, false, null);
             return answer;
         }
 
@@ -3841,26 +3889,29 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
+            // Told after the result set is given back (`Verdict`).
+            var verdict: Verdict = .{};
+            defer verdict.send(db, c, started, sql, plan);
             defer w.drain(&rows);
 
             const any = w.next(&rows) catch |err| {
-                db.told(c, started, sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                verdict.set(null, true, stepProblem(w, &rows, err, arena));
                 return err;
             };
             // Nothing from the top either: the statement matches nothing.
             if (!any) {
-                db.told(c, started, sql, plan, 0, false, null);
+                verdict.set(0, false, null);
                 return 0;
             }
             wideEnough(Row, 1, w, &rows) catch |err| {
-                db.told(c, started, sql, plan, null, true, null);
+                verdict.set(null, true, null);
                 return err;
             };
             const total = readColumn(w, &rows, i64, comptime shape.width(Row), c) catch |err| {
-                db.told(c, started, sql, plan, null, true, null);
+                verdict.set(null, true, null);
                 return err;
             };
-            db.told(c, started, sql, plan, 1, false, null);
+            verdict.set(1, false, null);
             return total;
         }
 
@@ -4030,6 +4081,9 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                     db.told(c, started, stmt.sql, plan, null, true, problem);
                     return err;
                 };
+            // Told after the result set is given back (`Verdict`).
+            var verdict: Verdict = .{};
+            defer verdict.send(db, c, started, stmt.sql, plan);
             defer w.drain(&rows);
 
             var found: std.ArrayList(Child) = .empty;
@@ -4039,12 +4093,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // fails here is a statement that failed, and `sql.problem`
                 // answers for it.
                 const more = w.next(&rows) catch |err| {
-                    db.told(c, started, stmt.sql, plan, null, true, stepProblem(w, &rows, err, arena));
+                    verdict.set(null, true, stepProblem(w, &rows, err, arena));
                     return err;
                 };
                 if (!more) break;
                 const read = readChild(Child, numbered, w, &rows, c) catch |err| {
-                    db.told(c, started, stmt.sql, plan, null, true, null);
+                    verdict.set(null, true, null);
                     return err;
                 };
                 // The number is the parent's position, counted from where the
@@ -4052,14 +4106,14 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 // statement is not the one this was written against.
                 const at = read.number - D.ordinal_base;
                 if (at < last or at >= parents.len) {
-                    db.told(c, started, stmt.sql, plan, null, true, null);
+                    verdict.set(null, true, null);
                     return error.QueryFailed;
                 }
                 last = @intCast(at);
                 try found.append(arena, read.child);
                 ends[last] = found.items.len;
             }
-            db.told(c, started, stmt.sql, plan, found.items.len, false, null);
+            verdict.set(found.items.len, false, null);
 
             var from: usize = 0;
             for (parents, ends) |*parent, end| {
@@ -9589,6 +9643,46 @@ test "a problem left by the previous request on the same connection is not the n
     try testing.expect(lastProblem(&erased) != null);
     run.reset();
     try testing.expectEqual(@as(?wire_mod.Problem, null), lastProblem(&erased));
+}
+
+test "a problem told at a step survives another fiber's statement while the result set is drained" {
+    // `drain` can suspend (Postgres reads the rest off the socket, and the
+    // pool may dial), and another fiber on the thread then runs a statement
+    // of its own. The failed statement's Problem is recorded after the drain,
+    // so that statement cannot overwrite it before the `catch` reads it
+    // (ADR 117).
+    const Other = struct {
+        db: *FakeDb,
+        run: *nilo.Run,
+
+        fn statement(raw: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            // One statement at a time: the hook's own drain must not recurse.
+            self.db.wire.?.on_drain = null;
+            self.db.wire.?.fails_at_row = null;
+            self.db.wire.?.step_refuses = null;
+            _ = self.db.select(Person, self.run, .{}) catch {};
+        }
+    };
+
+    var db = FakeDb.init(testing.allocator, "postgres://test/test", .{});
+    defer db.deinit();
+    var mine = nilo.Run.init(testing.allocator);
+    defer mine.deinit();
+    var theirs = nilo.Run.init(testing.allocator);
+    defer theirs.deinit();
+    var other: Other = .{ .db = &db, .run = &theirs };
+    db.wire = .{
+        .answers = 1,
+        .fails_at_row = 0,
+        .step_refuses = .{ .message = "boom", .code = "23505", .constraint = "people_pkey" },
+        .on_drain = Other.statement,
+        .on_drain_ctx = &other,
+    };
+
+    try testing.expectError(error.QueryFailed, db.select(Person, &mine, .{}));
+    try testing.expect(lastProblem(&mine) != null);
+    try testing.expect(violated(&mine, Person, .{.id}));
 }
 
 test "a feed walks a list by cursor, says when there is more, and never counts" {

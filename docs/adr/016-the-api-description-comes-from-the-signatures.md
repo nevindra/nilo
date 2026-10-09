@@ -40,6 +40,10 @@ pub const nilo_openapi = .{ .type = "string", .format = "uuid" };
 
 **Silence is answered honestly rather than guessed at.** A third-party type with a custom writer and no marker becomes a schema of `{}` (true, JSON Schema for "anything") with a description explaining that it writes its own body and has not said what it looks like, and how to fix that.
 
+### A type read and written is two components when its halves differ
+
+A request schema keeps the readers' rule (a default or a `?T` may be left out) and a response schema lists every field the writer always sends as required, so one Zig type can have two shapes. Where they render the same (`rendersTheSame`, so a nested type that differs makes its holder differ), the type is one component. Where they differ, the response half keeps the plain name and the request half is `<Name>Input`, each a `$ref` from where it is used; a type only read keeps its plain name. This is the `Model-Input` / `Model-Output` convention of pydantic v2, except that the answer, the type a client reads most, is not renamed. A name the suffix would take from another type (`UserInput` beside `User`) goes to neither, and both keep their full names, the way two modules' `User` do. Rejected: writing both halves inline (the earlier position), which cost a generated client the name; and one component with the looser rule, which promised a field the server always sends as optional.
+
 ### Two named shapes that differ only by a lifetime are one component
 
 The rule is narrow: it fires when both names are the same stem under a `_Str` / `_Text` suffix *and* the two schemas render the same all the way down, every field name, every field's requiredness, every field's type, recursively (`rendersTheSame`, distinct from the field-name-only `sameShape` that tells two *different* types apart). Anything else keeps its own name: `Page_Order` and `Page_User` share field names and are not the same shape, and nothing here merges them. The pair is written under the stem, so a client gets `Meta` rather than one of `Meta_Str` and `Meta_Text` standing in for both; a `$ref` to either name resolves to it.
@@ -79,7 +83,7 @@ A specification that lies is worse than none, so the places where a Zig signatur
 - **A self-referential type is followed eight deep and then stops** (`max_depth`), because the alternative is a compiler that does not finish.
 - **A `400` is listed only where nilo can actually produce one**: a route with a typed path param, a query struct, or a body.
 
-What it does claim, it claims because the type said so: `:id` on a handler taking `u32` is an integer, a query or body field with a default, or a `?T`, is not required, an enum is the list of its names, `?T` is `anyOf [T, null]`.
+What it does claim, it claims because the type said so: `:id` on a handler taking `u32` is an integer, a query or body field with a default, or a `?T`, is not required, a field of a response is always required (the writer always sends it, `null` for an empty `?T`), an enum is the list of its names, `?T` is `anyOf [T, null]`.
 
 ### The one thing it gets wrong, and why it is left wrong
 

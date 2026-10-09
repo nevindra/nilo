@@ -1069,7 +1069,7 @@ pub const App = struct {
     /// says why. Called once; a second call is `error.FailureShapeAlreadySet`.
     pub fn failures(self: *App, comptime T: type) error{FailureShapeAlreadySet}!void {
         const write = comptime failurebody.writerOf(T);
-        const schema = comptime openapi.schemaOf(T);
+        const schema = comptime openapi.responseSchemaOf(T);
         if (self.failure_write != null) return error.FailureShapeAlreadySet;
         self.failure_write = write;
         self.failure_schema = schema;
@@ -1100,7 +1100,7 @@ pub const App = struct {
         self.describeLast(.{
             .status = 200,
             .content_type = health_mod.content_type,
-            .schema = comptime openapi.schemaOf(health_mod.Page),
+            .schema = comptime openapi.responseSchemaOf(health_mod.Page),
         });
     }
 

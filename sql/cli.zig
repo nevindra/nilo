@@ -287,6 +287,7 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
                 migrations.Error.BaselineRenames,
                 migrations.Error.NoGeneratedBlock,
                 migrations.Error.SnapshotBehind,
+                migrations.Error.SnapshotAhead,
                 => return try baselineRefused(a, io, dir, w, req, err),
                 error.ParseZon => return try snapshotRefused(a, io, dir, w, req),
                 else => return err,
@@ -859,6 +860,16 @@ fn writeBaselineRefusal(
                 .{ req.dir, last, req.dir, req.dir, last },
             );
         },
+        migrations.Error.SnapshotAhead => {
+            const last = if (entries.len > 0) entries[entries.len - 1].file else "no file";
+            try w.print(
+                "db: {s}/snapshot.zon is ahead of the newest version file ({s}). A " ++
+                    "version file was deleted or lost in a merge, and `db generate` would " ++
+                    "write that number again. Nothing was written: put the file back, or " ++
+                    "restore the snapshot from before it.\n",
+                .{ req.dir, last },
+            );
+        },
         migrations.Error.NoGeneratedBlock => {
             try w.print(
                 "db: {s}/0001_{s}.zig has no `{s}` line, so there is no telling which " ++
@@ -1102,6 +1113,23 @@ test "a refused rename says both names, because the fix is one of them" {
     try testing.expect(std.mem.indexOf(u8, text, "called `schema`") != null);
     try testing.expect(std.mem.indexOf(u8, text, "`--name initial`") != null);
     try testing.expect(std.mem.indexOf(u8, text, "pass `--name schema`") != null);
+}
+
+test "a snapshot ahead of the newest file is refused with the file to put back" {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    try writeBaselineRefusal(
+        &w,
+        migrations.Error.SnapshotAhead,
+        .{ .command = .generate, .name = "more", .dir = "db/versions" },
+        &.{.{ .number = 1, .name = "schema", .file = "0001_schema.zig" }},
+    );
+
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "db/versions/snapshot.zon is ahead of") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "0001_schema.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Nothing was written") != null);
 }
 
 test "a version file with no markers is refused with the line it is missing" {

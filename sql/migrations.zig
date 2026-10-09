@@ -109,6 +109,10 @@ pub const Error = error{
     /// a `generate` stopped between writing the version and the snapshot.
     /// Planning against it would write the same steps a second time.
     SnapshotBehind,
+    /// `snapshot.zon` records a version higher than the newest version file:
+    /// a file was deleted or lost in a merge. Planning against it would write
+    /// a number the snapshot has already spent.
+    SnapshotAhead,
 };
 
 // -- what the directory holds --------------------------------------------
@@ -360,7 +364,8 @@ pub fn check(
 /// snapshot that says the schema has moved. A run that dies between leaves a
 /// snapshot older than the newest version file, and the next `generate`
 /// refuses it, `Error.SnapshotBehind`: planning against it wrote the same
-/// steps again as the version after. The other order would leave a snapshot
+/// steps again as the version after. A snapshot ahead of the newest file is
+/// refused too, `Error.SnapshotAhead`, because the number it records is spent. The other order would leave a snapshot
 /// claiming a version that is not there, which nothing could notice.
 pub fn generate(
     gpa: std.mem.Allocator,
@@ -381,8 +386,13 @@ pub fn generate(
 
     // A snapshot written before snapshots carried a version says 0, and is
     // not behind anything.
-    if (state.had_snapshot and state.before.version != 0 and state.before.version < state.head())
-        return Error.SnapshotBehind;
+    if (state.had_snapshot and state.before.version != 0) {
+        if (state.before.version < state.head()) return Error.SnapshotBehind;
+        // **And not ahead either**: the version file was deleted or lost in a
+        // merge, and the next number would be one the snapshot has spent.
+        // `check` reports the same through `audit`.
+        if (state.before.version > state.head()) return Error.SnapshotAhead;
+    }
 
     const change = try migrate.plan(gpa, D, desired, state.before);
 
@@ -1239,6 +1249,24 @@ test "a generate that stopped before the snapshot is refused, not written a seco
     // went in as version 3.
     try testing.expectError(Error.SnapshotBehind, generate(box.a(), box.io(), box.dir(), Pg, grown, .{ .name = "users" }));
     try testing.expect(std.meta.isError(box.slurp("0003_users.zig")));
+}
+
+test "a snapshot ahead of the newest version file is refused rather than its number written again" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{Org} }), .{ .name = "initial" });
+    const grown = comptime migrate.desiredOf(Pg, .{ .tables = &.{ User, Org } });
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, grown, .{ .name = "users" });
+
+    // What a conflict resolved by deleting the newest file leaves: the
+    // snapshot says 2, the newest file is 1. The plan against it is empty
+    // and a later change would be written as version 2 again.
+    try box.dir().deleteFile(box.io(), "0002_users.zig");
+    const wider = comptime migrate.desiredOf(Pg, .{ .tables = &.{ User, Org, Member } });
+    try testing.expectError(Error.SnapshotAhead, generate(box.a(), box.io(), box.dir(), Pg, wider, .{ .name = "extra" }));
+    try testing.expect(std.meta.isError(box.slurp("0002_extra.zig")));
 }
 
 test "a generate that fails halfway leaves the version file and the snapshot where it was" {

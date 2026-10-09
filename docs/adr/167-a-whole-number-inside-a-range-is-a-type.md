@@ -57,10 +57,14 @@ The document says `{"type":"integer","minimum":1,"maximum":200}`, read off the
 type by name (`nilo_within`). A client generated from it refuses the same
 value before sending it, which is the half the two lines could never do.
 
-**And an unsigned integer says `minimum: 0`.** It refuses `-1` with a 400, so
-the document may promise it — a promise the signature settles, which is the
-only kind this document makes. Every `u32` in every document gains the key;
-a signed integer is any integer, as before.
+**And an integer says the range of its type.** It refuses `-1` on a `u32` and
+256 on a `u8` with a 400, so the document may promise both ends — a promise
+the signature settles, which is the only kind this document makes. A `u32` is
+`minimum: 0, maximum: 4294967295`, an `i8` is `-128` to `127`, and a `u64` or
+`i64` states its full range because the reader takes the token's digits
+exactly (ADR 084), so a number past 2^53 is not rounded. `Bounds` is an
+`i128`, so a `u128` states `minimum: 0` and no `maximum` rather than a wrong
+one.
 
 ## What it costs the caller
 
@@ -83,11 +87,13 @@ it did not hold would put a promise in the document nobody enforces. The
 bounds here are read off a type that enforces them, which is a different
 thing from letting any type declare them.
 
-**Documenting the width of every integer.** A `u8` is `0..255` and the
-document could say so. It says `minimum: 0` and not `maximum: 255`, because
-the lower bound is the one a client hits — `-1` is a mistake somebody makes,
-256 on a `u8` field is a field that should have been wider — and a document
-full of `maximum: 4294967295` is noise for a fact nobody planned against.
+**Leaving the upper bound of an integer's width out.** This said `minimum: 0`
+and not `maximum: 255`, on the ground that 256 on a `u8` is a field that
+should have been wider and a document full of `maximum: 4294967295` is noise.
+It was reversed because the server does refuse 256 on a `u8` with a 400, so a
+document that stays silent is looser than the server, and a generated client
+with a `u8` field cannot refuse the value before sending it. The noise is the
+price of the document being as strict as the server.
 
 ## Against ADR 017's four axes
 
@@ -98,7 +104,7 @@ no `Within`; one that does carries a `nilo_parse` per distinct range.
 ## Consequences
 
 - `nilo.Within(min, max)`, `.of(n)`, `.value`, `.lowest`, `.highest`.
-- Every unsigned integer in every generated document carries `minimum: 0`.
+- Every integer in every generated document carries its type's `minimum` and `maximum`.
   A test that compared the document byte for byte on such a field has one
   more key in it.
 - Two Refusals: bounds the wrong way round, and a default outside them.

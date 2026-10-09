@@ -24,7 +24,7 @@ Independent of the order: each touches files no stage of the direction above doe
 
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · The public surface has not been read back against the reference.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · Several comments and pages describe code that is no longer there.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A module header's code example is not compiled, so one can rot.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A rule a build step holds against the patterns the audit kept finding.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A mutation pass over the request path.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · The multipart parser is the one parser of untrusted bytes that no fuzzer reaches.
@@ -87,7 +87,6 @@ Independent of the order: each touches files no stage of the direction above doe
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · Migration steps and their words disagree with what runs.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `reset` and `squash` are missing from the migrations, and they are the debt that forward-only creates.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `db generate` reuses a version number when the snapshot is ahead of the newest file.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · A table cannot be renamed, and a foreign key has no `ON UPDATE`.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · The SQLite rebuild is a recipe in a Problem rather than a step.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `expect` compares the ledger's head only, and the startup check reads columns only.
@@ -119,7 +118,7 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · Inputs nothing refuses.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A backoff has no jitter.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A schedule is UTC.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A job whose work is a write to the same database cannot commit the write and its `done` together, so a crash between the two does the work again.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.

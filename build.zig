@@ -1761,6 +1761,18 @@ const job_refusals = [_]Refusal{
     },
     // A failure the kind says is final (ADR 179).
     .{
+        .name = "job_every_zero",
+        .says = "`job.every(0)` is a schedule with no gap between its ticks, and a worker given one never rests.",
+    },
+    .{
+        .name = "job_every_too_long",
+        .says = "`job.every(1000000000000000)` is a period of more than a hundred years, which is a mistake in the unit.",
+    },
+    .{
+        .name = "job_backoff_from_zero",
+        .says = "the job SendWelcome's exponential `backoff` starts at `from_ms = 0`, and doubling zero is zero.",
+    },
+    .{
         .name = "job_final_not_an_error_set",
         .says = "the job SendWelcome's `final` is not an error set.",
     },
@@ -1800,6 +1812,14 @@ const fetch_refusals = [_]Refusal{
     .{
         .name = "fetch_query_field_cannot_be_encoded",
         .says = "the query field `when` is a fetch_query_field_cannot_be_encoded.When, and a query value is an int, a bool, text, or an optional of one.",
+    },
+    .{
+        .name = "fetch_form_field_cannot_be_encoded",
+        .says = "the form field `when` is a fetch_form_field_cannot_be_encoded.When, and a form value is an int, a bool, text, or an optional of one.",
+    },
+    .{
+        .name = "fetch_form_body_is_text",
+        .says = "fetch.postForm was handed a *const [29:0]u8 for its params, and a form is a struct with one field per param.",
     },
     .{
         .name = "fetch_json_body_is_text",

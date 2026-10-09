@@ -13,9 +13,9 @@ Every API with accounts has the same shape: one prefix, almost all of it behind 
 
 ```zig
 fn timing(c: *Ctx, next: Next) !void {
-    var timer = try std.time.Timer.start();
+    const started = nilo.monotonicNanos();
     try next.run(c);
-    std.log.info("{s} took {d}µs", .{ c.path().view(), timer.read() / 1000 });
+    std.log.info("{s} took {d}µs", .{ c.path().view(), (nilo.monotonicNanos() - started) / std.time.ns_per_us });
 }
 
 const v1 = app.group("/v1");

@@ -210,7 +210,8 @@ a URL signed with temporary credentials **dies when they do**, not when
 and delivering six hours with nothing in the program able to tell. So the
 effective life is clamped to `min(requested, credential life)` and returned:
 `Presigned { url: Str, expires_at }`. A caller storing that URL in a database or
-mailing it has the number that is true.
+mailing it has the number that is true. A life of zero seconds is `Rejected`
+with a log line, since no caller means a link dead on arrival.
 
 ## The failures a handler can tell apart
 
@@ -225,6 +226,8 @@ handler would do something different, and **default 500 unless stated**.
 around it. `Throttled → 503` was considered and refused for the reason
 `sql` refused a default on `Locked`: for `GET /avatar/:id`, S3 shedding load may
 well mean a default image and a 200.
+
+A bucket that does not exist (`NoSuchBucket`) is `Rejected` and not `NotFound`: it is the program's configuration that is wrong, like its credentials, and a handler that answers a missing key with a 404 would otherwise answer a misspelt bucket name the same way for ever. A `head` cannot tell the two apart, having no body to read a code from, and logs the status and `x-amz-bucket-region` instead.
 
 `Rejected` is deliberately **not** 403. Telling a client they are not allowed,
 when the truth is that the server's credentials are wrong, is a lie in the one

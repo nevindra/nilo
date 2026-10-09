@@ -582,6 +582,45 @@ test "on SQLite retryDead takes the scheduled kinds it is told, and created_at i
     try testing.expect(try table.retryDead(&f.run, tick, 9, &.{"other"}));
 }
 
+/// Three rows finished at known moments: one done, one dead early, one dead
+/// late. Shared by the two databases, which differ in nothing this asks.
+fn sweepFixture(table: anytype, run: *core.Run) !void {
+    const done_id = (try table.push(run, "write-note", "{}", .{ .run_at = 0 })).?;
+    const early = (try table.push(run, "write-note", "{}", .{ .run_at = 0 })).?;
+    const late = (try table.push(run, "write-note", "{}", .{ .run_at = 0 })).?;
+    const a = (try table.claim(run, live_kinds, 1, 100)).?;
+    const b = (try table.claim(run, live_kinds, 1, 100)).?;
+    const c = (try table.claim(run, live_kinds, 1, 100)).?;
+    try testing.expectEqual(done_id, a.id);
+    try testing.expectEqual(early, b.id);
+    try testing.expectEqual(late, c.id);
+    try testing.expect(try table.done(run, a.id, a.attempts, 10));
+    try testing.expect(try table.dead(run, b.id, b.attempts, "Boom", 10));
+    try testing.expect(try table.dead(run, c.id, c.attempts, "Boom", 50));
+
+    // `sweep` still takes finished rows only: a dead row is evidence.
+    try testing.expectEqual(@as(usize, 0), try table.sweep(run, 10));
+    try testing.expectEqual(@as(usize, 0), try table.sweepDead(run, 10));
+    try testing.expectEqual(@as(usize, 1), try table.sweepDead(run, 11));
+    try testing.expectEqual(@as(u64, 1), (try table.stats(run)).dead);
+    try testing.expectEqual(@as(usize, 1), try table.sweepDead(run, 1_000));
+    try testing.expectEqual(@as(u64, 0), (try table.stats(run)).dead);
+}
+
+test "on SQLite sweepDead deletes dead rows that died before a moment, and sweep leaves them" {
+    const f = try Fixture.open();
+    defer f.close();
+    var table = SqliteTable.open(&f.db);
+    try sweepFixture(&table, &f.run);
+}
+
+test "on Postgres sweepDead deletes dead rows that died before a moment, and sweep leaves them" {
+    const p = (try Pg.open()) orelse return error.SkipZigTest;
+    defer p.close();
+    var table = PgTable.open(&p.db);
+    try sweepFixture(&table, &p.run);
+}
+
 /// A run that waits in the database for as long as the test lets it: what a
 /// refresh or a backfill looks like to the worker when the server is told to
 /// stop.

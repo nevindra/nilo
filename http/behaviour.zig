@@ -5881,7 +5881,7 @@ test "the document describes what the signatures say" {
     try testing.expect(std.mem.indexOf(
         u8,
         json,
-        "\"name\":\"id\",\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"integer\",\"minimum\":0}",
+        "\"name\":\"id\",\"in\":\"path\",\"required\":true,\"schema\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}",
     ) != null);
 
     // A catch-all has no OpenAPI spelling, so it is `{path}` in both places.
@@ -5977,11 +5977,29 @@ test "the document's Failure schema is the shape app.failures named" {
     try testing.expect(std.mem.indexOf(
         u8,
         json,
-        "\"Failure\":{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"integer\",\"minimum\":0},\"detail\":{\"type\":\"string\"}}",
+        "\"Failure\":{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535},\"detail\":{\"type\":\"string\"}}",
     ) != null);
     // Under `Failure` and not under its own name as well: one shape, one entry.
     try testing.expect(std.mem.indexOf(u8, json, "\"ApiError\"") == null);
     try testing.expect(std.mem.indexOf(u8, json, "\"$ref\":\"#/components/schemas/Failure\"") != null);
+}
+
+test "a field the server always writes is required in an answer, though a request may leave it out" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    app.docs(.{});
+    try app.get("/users/:id", docFindUser);
+    try app.post("/users", docMakeUser);
+
+    const json = try docsFor(&app);
+    // `admin` has a default and `DocUser` is only ever written, so a client
+    // generated from this reads it without a null check. `age` and `plan` of
+    // the body are the request's and keep the rule they had.
+    try testing.expect(std.mem.indexOf(u8, json, "\"DocUser\":{\"type\":\"object\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"required\":[\"id\",\"name\",\"admin\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"required\":[\"name\",\"plan\"]") != null);
 }
 
 test "a shape used by more than one route is written once and referred to" {
@@ -6012,7 +6030,7 @@ test "a shape used by more than one route is written once and referred to" {
     // one — three references and one copy, where there used to be three
     // copies.
     try testing.expectEqual(@as(usize, 3), found);
-    try testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"id\":{\"type\":\"integer\",\"minimum\":0}"));
+    try testing.expectEqual(@as(usize, 1), countOccurrences(json, "\"id\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}"));
 }
 
 /// Handlers that write their own answer, and one that merely reads the
@@ -6131,8 +6149,8 @@ test "a name two different generics both answer to belongs to neither" {
     // either way round would describe one endpoint as the other, so neither
     // gets the name and both are written out where they appear.
     try testing.expect(std.mem.indexOf(u8, json, "Box_u32") == null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"held\":{\"type\":\"integer\",\"minimum\":0}") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"thrown\":{\"type\":\"integer\",\"minimum\":0}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"held\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"thrown\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}") != null);
 }
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
@@ -10791,7 +10809,7 @@ test "a query field carries its bounds, and the document says them" {
 
     const json = try docsFor(&app);
     try testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"limit\",\"in\":\"query\",\"required\":false,\"schema\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}}") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"offset\",\"in\":\"query\",\"required\":false,\"schema\":{\"type\":\"integer\",\"minimum\":0}}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "{\"name\":\"offset\",\"in\":\"query\",\"required\":false,\"schema\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}}") != null);
 }
 
 test "a body field that parses itself is described as what it said, and so is a bounded one" {

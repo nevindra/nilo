@@ -312,7 +312,7 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// An object, whole, in the Scope's memory.
         ///
         /// One allocation, and it holds the body and the two pieces of
-        /// metadata beside it — see `finishGet`.
+        /// metadata beside it — see `bounded`.
         pub fn get(self: *Self, c: anytype, key: []const u8) Error!Object {
             comptime core.checkScope(@TypeOf(c), "bucket.get");
             return self.bounded(c, key, null, null) catch |err| switch (err) {
@@ -329,12 +329,26 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         pub fn getRange(self: *Self, c: anytype, key: []const u8, range: Range) Error!Object {
             comptime core.checkScope(@TypeOf(c), "bucket.getRange");
             var buf: [64]u8 = undefined;
-            const header = std.fmt.bufPrint(&buf, "bytes={d}-{d}", .{ range.from, range.to }) catch
-                unreachable;
+            const header = self.rangeHeader(&buf, range) orelse return error.Rejected;
             return self.bounded(c, key, header, null) catch |err| switch (err) {
                 error.NotModified => unreachable,
                 else => |e| e,
             };
+        }
+
+        /// `bytes=0-1023`, or null for a range S3 would answer with the whole
+        /// object: HTTP ignores a `Range` whose last byte is before its
+        /// first, so `from > to` would come back as a 200 and read as the
+        /// slice that was asked for.
+        fn rangeHeader(self: *const Self, buf: *[64]u8, range: Range) ?[]const u8 {
+            if (range.from > range.to) {
+                std.log.warn(
+                    "nilo_s3: {s}: a range from byte {d} to byte {d} ends before it starts",
+                    .{ self.name, range.from, range.to },
+                );
+                return null;
+            }
+            return std.fmt.bufPrint(buf, "bytes={d}-{d}", .{ range.from, range.to }) catch unreachable;
         }
 
         /// A get that may answer *nothing has changed*.
@@ -370,8 +384,20 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// it stands, leave it there.
         pub const Reading = struct {
             ex: fetch.Exchange = .idle,
-            /// How long the object is, from `content-length`.
+            /// How many bytes `pipe` will move, from `content-length`: the
+            /// object's, or the range's when one was asked for.
             len: u64 = 0,
+            /// How long the whole object is. The same as `len` for a whole
+            /// object, and the figure after the slash of `content-range` for
+            /// a range, which is what lets a caller serve its own
+            /// `Content-Range` for an object it never held.
+            total: u64 = 0,
+            /// A slice of the object, **set before `stream`** like
+            /// `timeout_ms`. Null, the default, is the whole object. `to` is
+            /// inclusive, as in `getRange`; a reversed range is
+            /// `error.Rejected`, and an answer that is not a 206 is
+            /// `error.Failed`, because it is not the slice that was asked for.
+            range: ?Range = null,
             /// **Borrowed, and valid only until `pipe`.** They point into the
             /// connection's read buffer, which the first byte of body reads
             /// over — the bargain `sql`'s Borrowed row makes, for the same
@@ -430,12 +456,18 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             var token_buf: [settings.session_token_max]u8 = undefined;
             var sig: sign.Signature = .none;
             var headers: Headers = .{};
+            var range_buf: [64]u8 = undefined;
+            const range_header: ?[]const u8 = if (out.range) |r|
+                (self.rangeHeader(&range_buf, r) orelse return error.Rejected)
+            else
+                null;
 
             const target = try self.urlFor(&url_buf, key);
             try self.prepare(&sig, &headers, .{
                 .method = "GET",
                 .key = key,
                 .payload = self.store.payloadNoBody(),
+                .range = range_header,
                 .token_buf = &token_buf,
             });
 
@@ -465,7 +497,9 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
 
             if (!got.ok()) return self.failure(c, &out.ex, got);
 
-            out.len = got.content_length orelse 0;
+            const len = got.content_length orelse return self.noLength(got);
+            out.total = if (out.range != null) self.rangedTotal(got) orelse return error.Failed else len;
+            out.len = len;
             out.content_type = got.content_type orelse "application/octet-stream";
             out.etag = got.header("etag") orelse "";
         }
@@ -1132,11 +1166,25 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             }) catch |err| return self.blame(err);
 
             // A HEAD carries no body, so there is no `<Code>` to read and the
-            // status is the whole of what S3 said.
-            if (!got.ok()) return code.errorFor(got.status, "");
+            // status is the whole of what S3 said, with the one header that
+            // can still say why: the region a bucket lives in, which a wrong
+            // `region` is answered with. A 404 is the ordinary answer to "is
+            // it there", so it is not logged; it also cannot tell a missing
+            // key from a missing bucket, which a `get` can.
+            if (!got.ok()) {
+                if (got.status != .not_found) {
+                    std.log.warn("nilo_s3: {s} answered a HEAD with {d}{s}{s}", .{
+                        self.name,
+                        @backingInt(got.status),
+                        if (got.header("x-amz-bucket-region") != null) ", the bucket's region is " else "",
+                        got.header("x-amz-bucket-region") orelse "",
+                    });
+                }
+                return code.errorFor(got.status, "");
+            }
 
             return .{
-                .len = got.content_length orelse 0,
+                .len = got.content_length orelse return self.noLength(got),
                 .content_type = c.str(try keepIn(c, got.content_type orelse "")),
                 .etag = c.str(try keepIn(c, got.header("etag") orelse "")),
             };
@@ -1544,6 +1592,11 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// this arithmetic is two chances to clamp against a different pair
         /// (ADR 112).
         fn life(wanted_seconds: u32, signing: Store.Signing, now_s: i64) Error!u32 {
+            // A link that is dead when it is made, which no caller means.
+            if (wanted_seconds == 0) {
+                std.log.warn("nilo_s3: a presigned URL was asked to live for 0 seconds", .{});
+                return error.Rejected;
+            }
             var expires = @min(wanted_seconds, settings.presign_max);
             if (signing.expires_at) |dies_at| {
                 const left = dies_at - now_s;
@@ -1708,7 +1761,8 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             if (got.status == .not_modified) return error.NotModified;
             if (!got.ok()) return self.failure(c, &ex, got);
 
-            const len = got.content_length orelse return error.Failed;
+            const len = got.content_length orelse return self.noLength(got);
+            const total = if (range != null) self.rangedTotal(got) orelse return error.Failed else len;
             // **Before a byte is read**, which is the difference between an
             // object over the ceiling costing one round trip and costing a
             // download. What is left of the body then makes `Exchange.end`
@@ -1734,6 +1788,35 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 .content_type = c.str(whole[room..][0..content_type.len]),
                 .etag = c.str(whole[room + content_type.len ..][0..etag.len]),
                 .len = len,
+                .total = total,
+            };
+        }
+
+        /// An answer with no `content-length` is not one to believe: chunked,
+        /// or cut, and a `len` of zero would read as an empty object.
+        fn noLength(self: *const Self, got: fetch.Exchange.Head) Error {
+            std.log.warn(
+                "nilo_s3: {s} answered {d} with no content-length",
+                .{ self.name, @backingInt(got.status) },
+            );
+            return error.Failed;
+        }
+
+        /// The size of the whole object behind a ranged answer, or null when
+        /// the answer is not the slice that was asked for: not a 206 (a
+        /// server that ignored the `Range` sent the whole object), or one
+        /// whose `content-range` does not say how long the object is.
+        fn rangedTotal(self: *const Self, got: fetch.Exchange.Head) ?u64 {
+            if (got.status != .partial_content) {
+                std.log.warn(
+                    "nilo_s3: {s} answered {d} to a ranged request, not 206",
+                    .{ self.name, @backingInt(got.status) },
+                );
+                return null;
+            }
+            return totalOf(got.header("content-range")) orelse {
+                std.log.warn("nilo_s3: {s} sent a 206 with no usable content-range", .{self.name});
+                return null;
             };
         }
 
@@ -1752,6 +1835,12 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                     "nilo_s3: {s} refused the request as too far from its own clock, " ++
                         "which reads {s}. The container's clock is what to fix.",
                     .{ self.name, reason.server_time },
+                );
+            } else if (code.isNoSuchBucket(reason.code)) {
+                std.log.warn(
+                    "nilo_s3: the bucket {s} does not exist, or not in the Store's region " ++
+                        "or at its endpoint. The bucket's name is what to check.",
+                    .{self.name},
                 );
             } else if (reason.code.len != 0) {
                 std.log.warn("nilo_s3: {s} answered {d} {s}: {s}", .{
@@ -1830,6 +1919,14 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
                 error.BodyTooLarge => error.TooLarge,
                 error.OutOfMemory => error.OutOfMemory,
                 error.Canceled => error.Canceled,
+                // Nothing was sent: the credentials cannot sign. The token's
+                // own line, with the number to raise, is logged where it is
+                // found (`Store.snapshot`).
+                error.SessionTokenTooLong => error.Failed,
+                error.AccessKeyIdTooLong => {
+                    std.log.warn("nilo_s3: {s}: the access key id is longer than a signature can carry", .{name_in_log});
+                    return error.Failed;
+                },
                 else => {
                     // The cause is here rather than in the return type,
                     // because no handler does anything different about a
@@ -1840,6 +1937,16 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             };
         }
     };
+}
+
+/// The length after the slash of a `content-range` (`bytes 0-9/100` is 100),
+/// or null for a header that is missing, malformed, or says the length is
+/// unknown (`bytes 0-9/*`).
+fn totalOf(content_range: ?[]const u8) ?u64 {
+    const text = content_range orelse return null;
+    if (!std.mem.startsWith(u8, text, "bytes ")) return null;
+    const slash = std.mem.lastIndexOfScalar(u8, text, '/') orelse return null;
+    return std.fmt.parseInt(u64, text[slash + 1 ..], 10) catch null;
 }
 
 /// What a bounded get answers with.
@@ -1853,7 +1960,11 @@ pub const Object = struct {
     bytes: Str,
     content_type: Str,
     etag: Str,
+    /// How many bytes `bytes` holds.
     len: u64,
+    /// How long the whole object is: `len` for a `get`, and for a
+    /// `getRange` the figure after the slash of `content-range`.
+    total: u64,
 };
 
 /// What a HEAD answers with: everything but the bytes.
@@ -2492,4 +2603,14 @@ test "a run-time name is refused by the rules the declared one is, with the reas
     try testing.expect(ByPath.nameProblem("a/b") != null);
     try testing.expect(ByPath.nameProblem("a?b") != null);
     try testing.expect(ByPath.nameProblem("ab") != null);
+}
+
+test "the size of the whole object is read from after the slash of a content-range" {
+    try std.testing.expectEqual(@as(?u64, 100), totalOf("bytes 0-9/100"));
+    try std.testing.expectEqual(@as(?u64, 5_000_000_000), totalOf("bytes 4-9/5000000000"));
+    try std.testing.expectEqual(@as(?u64, null), totalOf("bytes 0-9/*"));
+    try std.testing.expectEqual(@as(?u64, null), totalOf("bytes */100x"));
+    try std.testing.expectEqual(@as(?u64, null), totalOf("0-9/100"));
+    try std.testing.expectEqual(@as(?u64, null), totalOf(""));
+    try std.testing.expectEqual(@as(?u64, null), totalOf(null));
 }

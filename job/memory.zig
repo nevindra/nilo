@@ -216,11 +216,11 @@ pub const Memory = struct {
 
     pub fn dead(self: *Memory, scope: anytype, id: contract.Id, attempts: u32, err: []const u8, now: i64) !bool {
         _ = scope;
-        _ = now; // a dead row keeps no `finished_at` here; `job.Table` does
         self.lock.take();
         defer self.lock.release();
         const s = self.held(id, attempts) orelse return false;
         s.state = .dead;
+        s.finished_at = now;
         s.lease_until = 0;
         s.unique_len = 0;
         s.setError(err);
@@ -338,6 +338,27 @@ pub const Memory = struct {
         return true;
     }
 
+    /// Delete the dead rows that died before `before`, freeing their slots:
+    /// how many went. The `Table` method of the same name takes the same
+    /// moment, so a program moves between the two stores without changing
+    /// the job that calls it. A dead row is kept until somebody retries or
+    /// sweeps it, so on a fixed budget this is what keeps a long run of
+    /// failures from filling every slot and answering `QueueFull` to a push
+    /// that has nothing wrong with it (ADR 160).
+    pub fn sweepDead(self: *Memory, scope: anytype, before: i64) !usize {
+        _ = scope;
+        self.lock.take();
+        defer self.lock.release();
+        var n: usize = 0;
+        for (self.slots) |*s| {
+            if (s.state == .dead and s.finished_at < before) {
+                s.* = .{};
+                n += 1;
+            }
+        }
+        return n;
+    }
+
     /// Take a queued row out before it runs. `true` when a `queued` row was
     /// removed; `false` when it is running, finished or absent, since a
     /// row a worker holds is that worker's to finish
@@ -383,6 +404,8 @@ pub const Memory = struct {
         lease_until: i64 = 0,
         priority: contract.Priority = .normal,
         created_at: i64 = 0,
+        /// When it died, for a dead row: what `sweepDead` reads.
+        finished_at: i64 = 0,
         attempts: u32 = 0,
         payload_len: u32 = 0,
         kind_len: u8 = 0,
@@ -750,6 +773,41 @@ test "retryDead refuses a kind it is told is scheduled, and revives any other" {
     try testing.expectEqual(@as(u64, 2), (try store.stats(&run)).dead);
     try testing.expect(try store.retryDead(&run, plain, 700, &.{"tick"}));
     try testing.expectEqual(@as(u64, 1), (try store.stats(&run)).dead);
+}
+
+test "sweepDead takes the dead rows that died before a moment, frees their slots, and leaves the rest" {
+    var store = try Memory.open(testing.allocator, .{ .bytes = 64 << 10 });
+    defer store.deinit();
+    var run: core.Run = .init(testing.allocator);
+    defer run.deinit();
+
+    const old = (try store.push(&run, "a", "{}", .{ .run_at = 0 })).?;
+    const recent = (try store.push(&run, "a", "{}", .{ .run_at = 0 })).?;
+    const waiting = (try store.push(&run, "a", "{}", .{ .run_at = 0 })).?;
+    const c1 = (try store.claim(&run, test_kinds, 1, 100)).?;
+    const c2 = (try store.claim(&run, test_kinds, 1, 100)).?;
+    try testing.expectEqual(old, c1.id);
+    try testing.expectEqual(recent, c2.id);
+    try testing.expect(try store.dead(&run, c1.id, c1.attempts, "Boom", 10));
+    try testing.expect(try store.dead(&run, c2.id, c2.attempts, "Boom", 50));
+
+    // The moment is exclusive, as `Table.sweep`'s is.
+    try testing.expectEqual(@as(usize, 0), try store.sweepDead(&run, 10));
+    try testing.expectEqual(@as(usize, 1), try store.sweepDead(&run, 11));
+    const s = try store.stats(&run);
+    try testing.expectEqual(@as(u64, 1), s.dead);
+    try testing.expectEqual(@as(u64, 1), s.queued);
+    try testing.expect(store.find(waiting) != null);
+
+    // A full queue takes a push again once its dead rows are swept.
+    var tiny = try Memory.open(testing.allocator, .{ .bytes = 1, .max_payload = 16 });
+    defer tiny.deinit();
+    _ = (try tiny.push(&run, "a", "{}", .{ .run_at = 0 })).?;
+    const c = (try tiny.claim(&run, test_kinds, 1, 100)).?;
+    try testing.expect(try tiny.dead(&run, c.id, c.attempts, "Boom", 5));
+    try testing.expectError(error.QueueFull, tiny.push(&run, "a", "{}", .{ .run_at = 0 }));
+    try testing.expectEqual(@as(usize, 1), try tiny.sweepDead(&run, 6));
+    try testing.expect((try tiny.push(&run, "a", "{}", .{ .run_at = 0 })) != null);
 }
 
 test "an empty unique key is refused, and created_at is the push time" {

@@ -54,6 +54,7 @@ The client is a [service](./services.md): registered once, asked for by type. **
 | `api.patch(c, url, body_or_null, .{})` | `Response` |
 | `api.send(c, method, url, body_or_null, .{})` | for a method the five above do not cover |
 | `api.postJson(c, url, value, .{})` | `Response`: `value` written as JSON, with `content-type` set for you. `putJson`, `patchJson` and `sendJson` work the same way |
+| `api.postForm(c, url, fields, .{})` | `Response`: `fields` written as a form body (`application/x-www-form-urlencoded`), with `content-type` set for you. `putForm` and `sendForm` work the same way |
 
 **Most APIs take JSON, so you can pass the value itself.** `postJson` writes it out with `std.json` into the Scope's arena (the same one allocation every caller already paid by calling `std.json.Stringify.valueAlloc` by hand) and sets `content-type: application/json`, unless your `headers` name one, in which case yours is sent instead. It is the outgoing counterpart of `res.json(T, c)` ([ADR 061](../adr/061-a-fitting-borrows-the-loop.md)).
 
@@ -72,6 +73,21 @@ fn chargeJson(api: *fetch.Client, c: *nilo.Ctx) !Receipt {
 ```
 
 A body you already have as text is refused here while compiling: `std.json` would write it out as *one JSON string*, quotes and escapes included, and the far end would answer 400 to a body that looked right in your editor. Send that one with `post`.
+
+**An OAuth token endpoint takes a form, and `postForm` writes it.** The code exchange and the client-credentials grant are `application/x-www-form-urlencoded` (RFC 6749 §4.1.3, §4.4.2). `postForm` takes a struct under the same rules as a query (an int, a bool, text, or an optional of one, null left out), encodes it into one allocation sized exactly, and says the `content-type`. The one difference from a query string is the space, which is `+` in a form and `%20` in a URL; a literal `+` is `%2B` in both. When the provider wants `client_secret_basic`, `fetch.basicAuth` builds the header the RFC's way: the id and the secret are form-encoded before they are joined and base64-encoded, which plain Basic does not do, and a secret with a `+` or a `:` in it fails only at the provider ([ADR 061](../adr/061-a-fitting-borrows-the-loop.md)).
+
+<!-- compiles -->
+```zig
+const fetch = @import("nilo_fetch");
+
+fn token(api: *fetch.Client, c: *nilo.Ctx, client_id: []const u8, secret: []const u8) !fetch.Response {
+    const auth = try fetch.basicAuth(c, client_id, secret);
+    return api.postForm(c, "https://auth.example.com/oauth/token", .{
+        .grant_type = "client_credentials",
+        .scope = "read write", // goes as read+write
+    }, .{ .headers = &.{.{ .name = "authorization", .value = auth }} });
+}
+```
 
 **A query string is a struct, and the encoding is done for you.** `fetch.withQuery(c, base, params)` returns the URL with the params appended, percent-encoded, in the Scope's memory: one allocation, sized exactly. A field is an int, a bool, text (a `[]const u8`, a string literal, a `Str`) or an optional of one, where null leaves the param out; anything else is a Refusal naming the field. A base that already has a `?` gets `&`.
 
@@ -203,7 +219,7 @@ try app.provide(&stripe);
 | `user_agent` | the same |
 | `headers` | anything else the service always wants: `accept`, an API version, a tenant. A call's own header of the same name replaces it |
 
-Every call the client has, the target has with a **path** instead of the URL: `get`, `post`, `put`, `delete`, `patch`, `send`, `postJson`, `putJson`, `patchJson`, `sendJson`, and `url(c, path, args)` for just the URL (for an `Exchange` begun on the client, or a link written into a response).
+Every call the client has, the target has with a **path** instead of the URL: `get`, `post`, `put`, `delete`, `patch`, `send`, `postJson`, `putJson`, `patchJson`, `sendJson`, `postForm`, `putForm`, `sendForm`, and `url(c, path, args)` for just the URL (for an `Exchange` begun on the client, or a link written into a response).
 
 **The path is a template, checked while compiling.** `{}` is a segment filled by position from a tuple, and the count is checked: two `{}` and one argument is a compile error, not a 404 from the far end. A segment is an int, a bool or text, and text is percent-encoded with `/` treated as data, so an id from a request that says `../admin` stays one segment instead of walking up the path.
 

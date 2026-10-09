@@ -51,10 +51,6 @@ Nothing is open at this tier.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
-**Whether a failed statement's Problem can be overwritten before it is recorded, which would make `sql.violated` answer false for a unique that was hit.** `told` runs before the deferred `drain` (`db.zig:3243` against `:3252`, and the same in `fillScalar`, `only` and `rawTotalBehind`), and a drain can suspend: Postgres reads up to a megabyte off the socket, and `pool.release` may dial. Another fiber on the same thread can then overwrite `recent`, and `sql.violated` answers false for a unique that was hit. ADR 117 rests on there being no suspension point there.
-
-**What would settle it:** a probe with two fibers on one executor, or `told` moved after the drain, which makes the question moot.
-
 ### `nilo_http`
 
 **`park-check` fails about one run in six on an unchanged tree, so `zig build test` is red that often for nothing a change did.** It reports "1 of 48 idle connections hold a second page of stack". Run alone on one machine, 10 of 60 runs failed with the stop's doorbell and 11 of 60 without it, interleaved ([`build.md`](../bench/result/build.md#where-zig-build-test-waits-on-zig-017)), so the flake is older than that change and not from it. The program counts every fiber stack above one page against a count taken before the connections opened, so a server fiber that is not a connection (an acceptor, the main fiber, a service) deepening during the window reads the same as a connection whose park crossed the boundary; which of the two it is has not been looked at, and the second would be a real 4,096 bytes on some connections.
@@ -91,7 +87,7 @@ Nothing is open at this tier.
 
 ### Every module
 
-**The public surface has not been read back against the reference.** 1.0 freezes what a dependent may write, and nothing yet checks that every `pub` in a module is on its page in `docs/reference/`, or that every name on a page is still `pub`. Found by reading, a name that should not be public is a break before 1.0 and a promise after it.
+**The public surface has not been read back against the reference.** 1.0 freezes what a dependent may write, and nothing yet checks that every `pub` in a module is on its page in `docs/reference/`, or that every name on a page is still `pub`. Found by reading, a name that should not be public is a break before 1.0 and a promise after it. `nilo_fetch` is a known case: `queryLen`, `queryWrite`, `QueryValue` and `checkQueryField` are `pub` so `target.zig` can reach them, and the form body added `paramsLen`, `paramsWrite`, `Style`, `checkForm` and `QueryValue.lenAs`/`writeAs` the same way, none of them on the reference page.
 
 **Needs:** the read-back, one module at a time, and a decision on each name the code and the page disagree about: document it, or take it out of the surface.
 
@@ -109,12 +105,6 @@ Nothing is open at this tier.
 
 **Needs:** a way of being cheap in a test suite that is not also a way of being cheap in production.
 
-### `nilo_cache`
-
-**Small things that say the wrong thing.** `open` answers `error.TooSmall` when a shard would exceed 4 GiB (`store.zig:890`); `flat.zig:44`, `space.zig:107` and the `cache_value_over_the_ceiling` refusal still say a bucket's four ways are a cache line, where it is eight; `registerSpace` is documented as not thread-safe while the guide calls `Space.open` from handlers, so two at once race on `n_spaces`.
-
-**Needs:** each corrected, the refusal's `.says` with its text, and `registerSpace` made safe to call twice for one name.
-
 ### `nilo_fetch`
 
 **A plain call costs 4,139 bytes on every idle connection**, still the largest per-connection figure in the framework. It is fiber stack rather than buffers, at the depth `std.http.Client` drives it to. [`bench/result/fetch.md`](../bench/result/fetch.md) ranks the levers: moving the buffers into the arena costs +4,096 bytes since the stack release, shrinking them is worth nothing because a stack buffer no byte touches is never a resident page ([ADR 186](./adr/186-the-transfer-buffer-serves-nothing-here.md)), and what is left is the frame `std.http.Client` waits in.
@@ -123,13 +113,13 @@ Nothing is open at this tier.
 
 **Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
 
-**A form-encoded body, which every OAuth token endpoint takes, is written by hand.** The code exchange and the client-credentials grant are `application/x-www-form-urlencoded` (RFC 6749 §4.1.3, §4.4.2), and `nilo_fetch` has `postJson` and `withQuery` but no form body, so a caller encodes each field and writes the `content-type` line, the work `postJson` was added to take away ([ADR 061](./adr/061-a-fitting-borrows-the-loop.md)). `client_secret_basic` beside it has a trap of its own: the id and the secret are form-encoded before they are joined and base64-encoded (RFC 6749 §2.3.1), and a secret with a `+` or a `:` in it fails only at the provider. reqwest has `.form()` and `.basic_auth()`, Go `url.Values` and `SetBasicAuth`. The [sign-in entry](#p2-a-real-cost-and-a-smaller-one) under `nilo_http` would be built on both.
-
-**Needs:** `postForm` and `putForm` on the client and on `Target`, written by `queryLen` and `queryWrite` in one allocation sized exactly, with `withQuery`'s field types and Refusals; and a basic-auth value built the RFC's way.
-
 **A call cannot go through an egress proxy or trust a private certificate authority, though `std.http.Client` does both.** std has `http_proxy`, `https_proxy` and `ca_bundle` on the client; `Client.Settings` names none of them, and the way round is to reach into `client.inner` and `client.fresh` by hand, which nothing documents. A service in a network whose only way out is a proxy, or calling an internal one whose certificate a company CA signed, cannot be written without it. std reads no `NO_PROXY`. reqwest has `Proxy` with a no-proxy list and `add_root_certificate`.
 
 **Needs:** `Settings.proxy`, given explicitly rather than read from the environment by default, with a list of hosts that skip it; `Settings.roots`, the system's or a bundle the caller loaded; both set on both std clients; and the binary cost in ADR 017's running total.
+
+**Whether a pooled connection the server has closed fails the next call with `WriteFailed` rather than being dialled again.** While writing the form-body tests in `fetch/live.zig`, a `putForm` sent as the third call on one `Client` failed with `WriteFailed` against the canned server, which closes its socket after every answer; split into a test of its own, it passed. A server that closes an idle keep-alive connection is ordinary (nginx after 75 s, most load balancers sooner), so if a pooled connection is reused without noticing, the first call after a quiet spell fails in production. It was seen at `8f45fe0` and not reproduced since, and whether `postJson` meets it the same way was not checked.
+
+**What would settle it:** a test that makes three calls on one `Client` against a server that closes after each answer, without `Connection: close`, at main; if it fails, the call retried once on a fresh connection when the write to a reused one fails before any byte of the request was accepted, which is the one case a retry cannot send twice.
 
 **A call worth retrying is retried by a loop each caller writes, and the loop the guide teaches retries a POST.** `nilo_fetch` refuses a retry policy because how many times and how long between are facts about the other service (`fetch/fetch.zig:83`), and the guide's answer is three lines: a loop, a `nilo.sleep`, and a `switch` on the errors worth another try (`docs/guide/fetch.md:361`). Those three lines are where the traps are. A POST sent again charges twice unless it carries an `Idempotency-Key`; a sleep with no jitter sends every caller back at the same instant; `Retry-After` is read and capped by hand or not at all; and a loop with no budget turns a service's bad minute into three times its load, the thundering herd the refusal names as its reason. The numbers are the caller's, and the mechanism is the same for everybody: tower's retry budget allows retries up to a fraction of recent calls (20% by default) and the AWS SDKs keep a retry quota for the same purpose, go-retryablehttp reads `Retry-After`, and Stripe's own clients put an `Idempotency-Key` on a POST before they retry it. `nilo_s3` has no retry either, so its `Throttled` reaches every caller where an AWS SDK tries three times. No ADR holds the refusal; it is in the module's header, the guide and the reference.
 
@@ -140,9 +130,9 @@ Nothing is open at this tier.
 ### `nilo_job`
 
 
-**Inputs nothing refuses.** `every(0)` makes a worker busy-loop and `every` of a huge period overflows; `Backoff.exponential` with `from_ms = 0` stays at zero and has no jitter, so a downstream outage retries every row at the same instant; dead rows are never purged from `Memory`, which fills up and answers `QueueFull`, and `Table.sweep` deletes `done` rows only (`job/table.zig:350`), so a `Table`'s dead rows stay for good.
+**A backoff has no jitter.** `Backoff.exponential` doubles from `from_ms` to `to_ms` with nothing random in it, so a downstream outage that fails a hundred rows at once retries all hundred at the same instant, again at the next doubling, and keeps the herd together for as long as the outage lasts. A jitter option on `Backoff` (the same one `nilo_fetch`'s retry needs) spreads them. It waits because `Backoff` lives in `nilo_job` and `nilo_fetch` may not import a sibling, so the shared one is either moved to `nilo_core` or written twice, which is the question the `nilo_fetch` retry entry above already carries, and settling it for one settles it for the other.
 
-**Needs:** `every(0)` and `from_ms = 0` refused at compile time with a refusal file each, a jitter option (the `Backoff` the `nilo_fetch` retry entry shares), a purge for `Memory`'s dead rows, and a `sweep` that can take dead rows older than a moment.
+**Needs:** the answer to whether `Backoff` belongs in `nilo_core` ([ADR 057](./adr/057-percent-is-needed-by-two-layers.md)), the `nilo_fetch` retry entry's decision; then a jitter field on it (full or equal, the caller's choice) and a source of randomness the Fitting layer already has.
 
 **Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
 
@@ -169,20 +159,6 @@ Nothing is open at this tier.
 **Needs:** the store the `Idempotent` entry builds over the caller's `Db`, which has the two calls `within` asks for, or the unique key kept past `done` in `nilo_jobs` for a kind that asks, whichever that store's design picks.
 
 **Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
-
-### `nilo_s3`
-
-**A streamed object cannot be read from an offset.** `stream` has no range and `getRange` is bounded by `max_bytes`, so the guide's `.length = reading.len` "lets it resume with a `Range`" has no way to serve one for an object over `max_bytes`, and `getRange` returns no total size. `getRange` with `from > to` gets the whole object back as a 200 that is not checked for 206 (`bucket.zig:266`); `stream` and `head` report `len = 0` when `content-length` is missing (`:373`, `:541`).
-
-**Needs:** a range on `stream` with `Reading.total` from `content-range`, a reversed range refused, 206 required, and a missing length made `Failed`.
-
-**Failures that say nothing or the wrong thing.** `head` logs nothing on failure (`bucket.zig:538`), so a wrong region or a skewed clock is silent; `NoSuchBucket` maps to `NotFound` like a missing key; `blame` says "could not be reached" for `SessionTokenTooLong`; `presign` with `seconds = 0` is accepted.
-
-**Needs:** `head` logging the status and `x-amz-bucket-region`, `NoSuchBucket` told apart, credential errors named, and a zero life refused.
-
-**`canned.zig` checks less than S3 does.** `check()` verifies only the headers the client listed in `SignedHeaders`, so a sent `x-amz-*` header left unsigned still passes, where S3 refuses it; its `Seen` copies into fixed buffers with no bound; two comments refer to `finishGet`, which is now `bounded`; `code.zig`'s header still says `LIST` is not in v1.
-
-**Needs:** every `x-amz-*` header on the wire required in `SignedHeaders`, the harness bounded, and the stale text corrected.
 
 ### `nilo_sql`
 
@@ -221,12 +197,6 @@ Nothing is open at this tier.
 **A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.** The migrator compares a unique `ignoring_case` and not its operator class, so an existing database never gets the new index and its prefix search still scans on Postgres.
 
 **Needs:** the operator class in the snapshot's index and a step that rebuilds it, or a `db check` finding that names it.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
-**`db generate` reuses a version number when the snapshot is ahead of the newest file.** `db check` reports it through `migrations.audit`, and `generate` still refuses only a snapshot behind.
-
-**Needs:** `generate` refusing a snapshot ahead too, with the tests that build unusual snapshots checked.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
@@ -292,10 +262,6 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
-**The OpenAPI document is looser than the server.** An unsigned integer gets `minimum: 0` and no `maximum`, although a `u8` refuses 256 with a 400, and a field with a default or a `?T` is marked not required in a response schema, although the writer always sends it, so a generated client null-checks every one.
-
-**Needs:** `maximum` taken from the type, and `required` in a response schema meaning "always written".
-
 **The test `Client` accepts a request head of any size.** Its reader is `Reader.fixed` over the whole request, and `readHead` refuses a head only once it fills the buffer, so a test sending a large cookie or many headers passes where a server answers 431. Its cookie jar also keeps a cookie deleted by `Expires` alone and ignores the `__Host-` and `__Secure-` rules a browser applies.
 
 **Needs:** the test reader given the server's read-buffer size, and the jar honouring a past `Expires` and the two prefixes.
@@ -310,6 +276,10 @@ Nothing is open at this tier.
 
 **Needs:** an assertion that does not race the scheduler: the stop observed as the connection closing before any `Hang` handler returns, rather than a wall-clock figure, or a margin derived from the handlers' 4 s that a loaded machine cannot reach.
 
+**`park-check` failed once with "2 of 48 idle connections hold a second page of stack", and passed seven runs since on the same tree.** It was in a `zig build test` on the 16-core workstation on 2026-10-09, with no change to the connection path in the tree (the `http/` changes there were the OpenAPI writer, the JSON reader and comments). Either the measurement reads a page a parked connection touched once on its way to the park and gave back to nothing, which would make the step a flake, or two connections in 48 really do reach a second page on some schedule, which is the hard axis ADR 062 holds.
+
+**What would settle it:** `park-check` run a few hundred times on that machine, with the stack depth of each connection that fails printed, and the answer either a step that cannot fail on a schedule or a frame named in ADR 062.
+
 **A WebSocket over TLS has no test of its own for a second frame that arrived with the first.** `Wake.wait` answers `.readable` while the record layer holds ciphertext or decrypted bytes ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)), which a WebSocket's `park` waits in too, so the stall the HTTP/2 connection over TLS showed (one in a thousand) is closed for it by the same line. The test that holds it is HTTP/2's, `grpc_tls_live.zig`; `tls_live.zig` has no WebSocket test, so a change to how `park` waits could lose it unseen.
 
 **What would settle it:** a live test in `tls_live.zig` sending two WebSocket frames in one TLS write and timing the second.
@@ -320,9 +290,9 @@ Nothing is open at this tier.
 
 **What would settle it:** a decision between writing a `.bytes` field as base64 in a message's JSON, with the document saying so, and refusing JSON for a message that has one; either held by a test with a Connect client's bytes.
 
-**Several comments and pages describe code that is no longer there.** `bulkhead.zig`'s header lists a six-parameter `serve` (it has eight) under `src/engine/` (it is `http/engine/`), and leaves out `Peer`'s fields, `spawnLocal`, `Wake.rawIdle` and `Binding`, which a second Engine has to provide; `proxies.zig` says a `Forwarded` header is walked, and nothing reads it; the `accept` comment in `zio.zig` says a failure raises the stop flag; `middleware.zig`'s header and [ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md) use `std.time.Timer`, which Zig 0.16 removed; a link in `ctx.zig` says ADR 155 and points at 156.
+**A module header's code example is not compiled, so one can rot.** A `//!` block in `http/*.zig` and the other modules shows a call in a fenced `zig` block, and `zig build snippets` reads only Markdown pages (ADR 068): the header of `middleware.zig` and ADR 008 both showed `std.time.Timer`, which Zig 0.16 removed, for as long as nobody compiled them. About sixty headers carry such a block, and many use `…` or a type the shared world does not declare.
 
-**Needs:** each corrected, and the module headers' code examples brought under `zig build snippets` so the next one cannot rot.
+**Needs:** `Snippets.read` in `build.zig` reading a `.zig` file's `//!` lines as the page it is (the `<!-- compiles -->` mark and the fence are the same), a row in `pages` for each header whose example is rewritten to compile, and `unlisted` looking in `http/` for a mark nothing reads; and the choice of how many of the sixty are worth the rewrite.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
@@ -330,7 +300,7 @@ Nothing is open at this tier.
 
 **Needs:** two named signals rather than one flag — "the client half-closed and is waiting" and "the socket is gone". What is already real is a write that fails, and a handler sees that today.
 
-**A rule a build step holds against the patterns the audit kept finding.** Three of the four kinds of defect are spellable: `catch {}` and `else => {}` that swallow `error.Canceled` or `EndOfStream` on a connection path (the stop that waits, the upload that looks complete, the middleware's empty 200); `unreachable`, `std.debug.assert` and `catch unreachable` on a path a request reaches (`Room.print`, `Ctx.send`, `sayerFor`, `idempotentBegin`), each a remote panic in ReleaseSafe and undefined behaviour in ReleaseFast; and a module header's code example that no longer compiles (`std.time.Timer` in `middleware.zig` and ADR 008). The fourth kind, a comment or ADR claiming what the code does not do, a dozen of them, has no mechanism but probes. A step that refuses the three in `http/` unless the line carries a marked reason makes the next one a build failure rather than an audit finding.
+**A rule a build step holds against the patterns the audit kept finding.** Three of the four kinds of defect are spellable: `catch {}` and `else => {}` that swallow `error.Canceled` or `EndOfStream` on a connection path (the stop that waits, the upload that looks complete, the middleware's empty 200); `unreachable`, `std.debug.assert` and `catch unreachable` on a path a request reaches (`Room.print`, `Ctx.send`, `sayerFor`, `idempotentBegin`), each a remote panic in ReleaseSafe and undefined behaviour in ReleaseFast; and a module header's code example that no longer compiles. The fourth kind, a comment or ADR claiming what the code does not do, a dozen of them, has no mechanism but probes. A step that refuses the three in `http/` unless the line carries a marked reason makes the next one a build failure rather than an audit finding.
 
 **Needs:** the decision on how a justified case is marked (a comment tag, or a list in `build.zig` the way `layers` is), and whether the step starts as a report over today's tree or as a refusal with the existing cases listed.
 
@@ -361,10 +331,6 @@ Nothing is open at this tier.
 **A gRPC listener has no health service, and the guide does not say how to write one.** Kubernetes' gRPC probe and most load balancers call `grpc.health.v1.Health/Check`, which is an ordinary route under [ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md) and nothing documents; server reflection, which `grpcurl` wants, is not on record either way.
 
 **Needs:** a guide section showing `grpc.health.v1.Health/Check` as an ordinary route, and a decision on server reflection.
-
-**A number inside an externally tagged union, `std.json`'s own encoding of one, is still read by `std.json`'s grammar.** `{"a":"1_0"}` into a union with an `a: u32` arm is 10 there, where [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md) refuses it everywhere else in a body, because `json.innerRead` hands a union with no `jsonParse` to `std.json.innerParse` unchanged (found by reading the code; no test sends it yet). A map and a tuple are read by the rule now, and a `std.json.Value` never needed it: it keeps a string a string and a number too large for a float as its text.
-
-**Needs:** the union read through `innerRead`, with a test sending `"1_0"` to an arm.
 
 **Multipart, streamed: an upload holds the whole body in the arena, so a route raised to `maxBody(50 << 20)` holds up to 50 MB for each upload in flight.** `Form(T)` reads a multipart body whole, bounded only by `max_body` ([ADR 030](./adr/030-a-form-is-the-body-read-by-another-rule.md)), which is right for a form with a photo in it and wrong for a 2 GB video. Every Go and Rust framework compared bounds the memory instead (read in each one's source): Go's `ReadForm`, and so Gin and Echo, keeps a file in memory up to 32 MB and writes the rest to a temp file, Fiber through fasthttp at 16 MB; actix-multipart's and Rocket's `TempFile` stream a file to disk as it arrives, actix under two budgets, a total and a memory one (50 MiB and 2 MiB); axum hands each field to the handler as a stream; poem spools every upload to disk however small. actix declares a limit per field on the type (`#[multipart(limit = "2 KiB")]`) and Rocket per extension (`file/jpg`). The streaming version wants a parser that resumes across reads; an `Upload` that is bytes in the arena up to a threshold and a file past it; `saveTo` a rename where it can be, because Rocket's `persist_to` fails across filesystems and falls back to a copy; a limit per field declared on the field; and every limit counted on the bytes that arrive, not on `Content-Length`, since poem's `SizeLimit` reads only the header and refuses a chunked body. It inherits nothing from `sendfile`, because sending is a descriptor handed to the kernel and receiving is a parser holding its place.
 
@@ -399,6 +365,14 @@ Nothing is open at this tier.
 **22% of `std.flate`'s CPU on a 4 KB body is a buffer rebuilt after every block, and it has not been filed upstream.** `toks.* = .empty` in `writeBlock` rebuilds the 96 KB token buffer from its constant after every block, where assigning the fields one by one gives byte-identical output 18% to 44% faster ([`http.md`](../bench/result/http.md#which-deflate-is-fastest-and-whether-brotli-or-zstd-would-beat-it)). ADR 211 refuses a fork of `Compress.zig`.
 
 **Needs:** the issue filed against zig, `lib/std/compress/flate/Compress.zig` lines 987 and 1055. Last checked at 0.17.0, where both lines are unchanged.
+
+**The HttpArena entry still gzips with `std.flate`, so its `json-comp` profile pays for the compressor `-Dlibdeflate` replaced.** The copy the board runs pins `224a507`, on Zig 0.16 and zio 0.18.0, and builds without the flag ([ADR 248](./adr/248-gzip-is-libdeflate-when-a-build-asks-for-it.md)). Its last reading, on 2026-09-23, is 270k req/s at 4,096 and at 16,384 connections, 1,346 bytes a response ([the board's result file](https://github.com/MDA2AV/HttpArena/blob/5809ff76adb98e1f822445734c62ad20ae3e7b9b/site/data/results/nilo.json)). On the profile's own bodies libdeflate 6 is 2.5 to 4 times faster than `std.flate` 6 and 2% smaller ([`http.md`](../bench/result/http.md#libdeflate-against-stdflate-on-a-quiet-zen-5-and-what-it-keeps-resident)), and the model there puts the profile's score near 1.95 times the entry's, a figure never checked against the board.
+
+**Needs:** the entry moved to a commit built with `-Dlibdeflate`, which also moves its Dockerfile to Zig 0.17, and `json-comp` run locally against the pin it replaces, interleaved, before the pull request; the reading goes to `bench/result/http.md`.
+
+**Whether zio 0.19 lowers the CPU nilo spends a request on HttpArena's fixed-rate profiles has not been measured.** Those profiles hold the rate and score the CPU it took, and the entry's last reading, on zio 0.18.0, is 33.7 µs a request on `latency-10k` (19th of 101 entries, the lowest at 24.1), 31.2 µs on `latency-1m` (15th of 48, the lowest at 22.5) and 78.0 µs on `8gbit` (29th of 83, the lowest at 43.6); `baseline` spent 66.4 cores for 2.96M req/s, about 22.4 µs a request ([the board's result files](https://github.com/MDA2AV/HttpArena/tree/5809ff76adb98e1f822445734c62ad20ae3e7b9b/site/data/results)). At 10k req/s the request work is nearly nothing, so `latency-10k`'s figure is the standing cost of a running server. zio 0.19.0's release notes say idle executors park sooner and the event loop takes fewer syscalls and atomics, and main now builds zio 0.19 with `.pinned` scheduling ([ADR 199](./adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md)); what either did to these four figures is unknown, and so is what is left once they are counted.
+
+**What would settle it:** the entry at main and at `224a507` built the same way and run interleaved through `latency-10k`, `latency-1m` and `baseline` on one machine, CPU a request read from the cgroup as the board reads it; then, if a gap to the lowest entries is left, a profile of the idle server naming where its CPU goes.
 
 **The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.** It is upstream's `main`, the Zig 0.17 line, plus two commits: one signs an RSA key through its CRT form, 13.7 ms of handshake CPU down to 2.6 ([the run](../bench/result/http.md#what-an-rsa-certificate-costs-a-handshake)), and one adds the server's `offload` option, which runs the signature off the executor ([ADR 217](./adr/217-a-handshakes-signature-is-computed-off-the-executor.md)). The first was merged into `zig-0.16.x` as #59 and not into `main`. Once both merge into `main`, the pin moves to upstream's commit and the fork is not used again.
 

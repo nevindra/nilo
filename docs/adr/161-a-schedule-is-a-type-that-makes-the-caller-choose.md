@@ -87,6 +87,8 @@ The three policies, and how each is a row rather than a timer:
   started rather than at start-up. A program that wants a run at start-up
   pushes one.
 
+**`every`'s period is read while compiling, and `0` and anything over a hundred years (`job.max_every_ms`) are refused.** A zero period is a tick that is always due, which keeps a worker busy for ever; a number past a hundred years is seconds or microseconds written where milliseconds go, and the bound keeps the clock arithmetic far inside an `i64` (`Schedule.next` also saturates, for a `Schedule` built by hand). The rejected alternative is a runtime check with an error: a schedule is a `pub const` on the job, so there is no caller to hand an error to. For the same reason an exponential `retry.backoff` with `from_ms = 0` is refused: doubling zero is zero, which is `fixed_ms = 0` written as a growing wait.
+
 **`retry` has no default either**, on the same argument, and it applies to
 every job rather than only scheduled ones. How many times an email is tried
 is a promise about that email, and a default nobody read is not one.

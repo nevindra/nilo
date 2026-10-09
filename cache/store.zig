@@ -272,6 +272,9 @@ pub const OpenError = error{
     /// The numbers do not divide into a working cache: fewer than 64 KiB of
     /// value memory, or fewer entries than the shards have ways to hold them.
     TooSmall,
+    /// A shard's ring would be over 4 GiB, which its 32-bit cursors cannot
+    /// address. Ask for more `shards` or fewer `bytes`.
+    ShardTooLarge,
 };
 
 /// Hits and misses, so "why is my cache not hitting" has an answer that is not
@@ -827,6 +830,9 @@ pub const Store = struct {
     names: [max_spaces][]const u8 = undefined,
     ids: [max_spaces]u32 = undefined,
     n_spaces: usize = 0,
+    /// Held by `registerSpace` alone, because `Space.open` may be called from
+    /// handlers on several threads. Off the lookup path, so it costs no line there.
+    spaces_lock: std.atomic.Value(bool) = .init(false),
     /// A reading of the clock a test sets, so the second a put and a lookup
     /// fall in is chosen rather than waited for. It is a field only in a test
     /// build, so `elapsed` is the same one syscall it always was in a release.
@@ -887,7 +893,7 @@ pub const Store = struct {
         // to 63.
         const shards_n = std.math.floorPowerOfTwo(usize, @max(1, @min(asked, max_shards, total_cap / 4096)));
         const cap = total_cap / shards_n;
-        if (cap > std.math.maxInt(u32)) return error.TooSmall;
+        if (cap > std.math.maxInt(u32)) return error.ShardTooLarge;
 
         const buckets = total_slots / shards_n / ways;
         if (buckets == 0) return error.TooSmall;
@@ -956,9 +962,12 @@ pub const Store = struct {
         return self.shards.len * (s.ring.len + s.slots.len * @sizeOf(Slot));
     }
 
-    /// Called once per `Space`, before anything is served. Not threadsafe and
-    /// does not need to be: a Space opens where a Store does.
+    /// Called by every `Space.open`. Safe from several threads, and a name
+    /// registered twice, at once or one after the other, is one Space. The
+    /// lock is a spin for the reason the header gives, and nothing inside it waits.
     pub fn registerSpace(self: *Store, id: u32, name: []const u8) void {
+        while (self.spaces_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+        defer self.spaces_lock.store(false, .release);
         for (self.ids[0..self.n_spaces], self.names[0..self.n_spaces]) |other_id, other| {
             if (other_id != id) continue;
             if (std.mem.eql(u8, other, name)) return; // opened twice, which is fine
@@ -2416,4 +2425,31 @@ test "a Store with no seed takes its own, so two of them differ" {
     var out: [4]u8 = undefined;
     try testing.expectEqualStrings("v", out[0..a.get(1, "k", &out).?]);
     try testing.expect(a.del(1, "k"));
+}
+
+test "a shard over 4 GiB is refused as too large, not as too small" {
+    // Refused before anything is allocated, so the budget costs nothing here.
+    try testing.expectError(error.ShardTooLarge, Store.open(testing.allocator, .{
+        .bytes = 6 << 30,
+        .shards = 1,
+        .seed = 1,
+    }));
+}
+
+test "two threads registering the same names leave one of each" {
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p" };
+    const Reg = struct {
+        fn run(s: *Store) void {
+            for (names) |n| s.registerSpace(@truncate(std.hash.Wyhash.hash(0, n)), n);
+        }
+    };
+    // A fresh Store each round, because the race is in the first registration.
+    for (0..300) |_| {
+        var store = try openTest();
+        defer store.deinit();
+        var threads: [4]std.Thread = undefined;
+        for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Reg.run, .{&store});
+        for (threads) |t| t.join();
+        try testing.expectEqual(names.len, store.n_spaces);
+    }
 }

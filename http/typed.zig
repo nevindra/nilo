@@ -1371,7 +1371,7 @@ fn answerWith(comptime status: ?u16, comptime V: type) openapi.Answer {
         return .{
             .status = status,
             .content_type = if (ownbody.writesItsOwnBody(Present)) Present.nilo_content_type else contentTypeFor(Present),
-            .schema = openapi.schemaOf(Present),
+            .schema = openapi.responseSchemaOf(Present),
             .not_found = Present != V,
             .more_types = if (message.isMessage(Present) and !ownbody.writesItsOwnBody(Present)) &.{"application/proto"} else &.{},
         };

@@ -31,6 +31,7 @@ That gives you an OpenAPI 3.1 document at `/openapi.json`, and a page for readin
 | a path param | a `path` parameter, typed, required |
 | `Query(T)` | one query parameter per field; a field with a default, or a `?T`, is not required |
 | a struct argument | the request body schema; a field with a default, or a `?T`, is not required |
+| a returned struct | the response schema; **every field is required**, because the writer always sends it (a `?T` that is empty goes out as `null`), so a generated client does not null-check one. A type that is both read from a body and returned is two components when the two disagree about a field (see [Named schemas](#named-schemas-componentsschemas)) |
 | an enum | the list of its names |
 | an optional field | a nullable property |
 | `!T` | the 200 response schema |
@@ -65,6 +66,8 @@ This works with groups and with `with`, and two routes with the same name stop t
 ```
 
 so a route says `{"$ref":"#/components/schemas/Todo"}` instead of carrying a copy. Generated clients get one `Todo` type instead of five identical ones.
+
+**A type that is both read from a body and returned is two components when its two halves differ.** A request marks a field with a default, or a `?T`, as not required; a response marks every field it always sends as required. Where that makes the two shapes different, the response keeps the plain name and the request is the name with `Input` after it, `User` and `UserInput`, each referred to from where it is used, and a struct holding such a type is split the same way. Where the two halves agree there is one component, as before, and a type only ever read keeps its plain name. If another type is already called `UserInput`, neither takes the name and both are written under their full names.
 
 `Failure` is the shape every error body takes ([ADR 024](../adr/024-every-failure-answers-as-json.md)). It is nilo's own shape, or the struct you named with `app.failures(T)`, read from its fields and written under the name `Failure`, not again under the type's own name.
 
@@ -145,7 +148,7 @@ nilo's own types already do this: `nilo_id`'s `Uuid`, and `nilo_sql`'s `Timestam
 
 ## Number ranges
 
-**An unsigned integer is described as `{"type":"integer","minimum":0}`**, because it rejects `-1` with a 400, so the document can promise it. A signed integer is any integer. `nilo.Within(1, 200)` states both ends, `{"type":"integer","minimum":1,"maximum":200}`, read from the type that enforces the range, so a generated client rejects `500` before sending it ([ADR 167](../adr/167-a-whole-number-inside-a-range-is-a-type.md)):
+**An integer states the range of its type**: a `u8` is `{"type":"integer","minimum":0,"maximum":255}` and an `i8` is `-128` to `127`, because the server refuses anything outside it with a 400, so the document can promise it. A `u128` states no `maximum`, since its top does not fit the number the document is written with. `nilo.Within(1, 200)` states both ends, `{"type":"integer","minimum":1,"maximum":200}`, read from the type that enforces the range, so a generated client rejects `500` before sending it ([ADR 167](../adr/167-a-whole-number-inside-a-range-is-a-type.md)):
 
 <!-- compiles -->
 ```zig

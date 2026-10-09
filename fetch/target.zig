@@ -229,6 +229,29 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
             return self.through(c, method, path, args, bytes, "application/json", call);
         }
 
+        /// `Client.postForm` with a path: `fields` is the body, under
+        /// `withQuery`'s rules, and `args` fills the template as everywhere
+        /// else (ADR 061).
+        pub fn postForm(self: *Self, c: anytype, comptime path: []const u8, args: anytype, fields: anytype, call: Client.Call) Error!Response {
+            comptime core.checkScope(@TypeOf(c), "target.postForm");
+            comptime fetch.checkForm(@TypeOf(fields), "target.postForm");
+            return self.sendForm(c, .POST, path, args, fields, call);
+        }
+
+        pub fn putForm(self: *Self, c: anytype, comptime path: []const u8, args: anytype, fields: anytype, call: Client.Call) Error!Response {
+            comptime core.checkScope(@TypeOf(c), "target.putForm");
+            comptime fetch.checkForm(@TypeOf(fields), "target.putForm");
+            return self.sendForm(c, .PUT, path, args, fields, call);
+        }
+
+        /// `Client.sendForm` with a path.
+        pub fn sendForm(self: *Self, c: anytype, method: std.http.Method, comptime path: []const u8, args: anytype, fields: anytype, call: Client.Call) Error!Response {
+            comptime core.checkScope(@TypeOf(c), "target.sendForm");
+            comptime fetch.checkForm(@TypeOf(fields), "target.sendForm");
+            const bytes = try fetch.formBody(c, fields);
+            return self.through(c, method, path, args, bytes, fetch.form_content_type, call);
+        }
+
         /// The whole of the calls above: the URL, this target's permit, and
         /// the client's ordinary call with the standing headers under it.
         fn through(

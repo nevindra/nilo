@@ -44,8 +44,8 @@ const Str = str_mod.Str;
 pub const Schema = union(enum) {
     string,
     integer,
-    /// An integer with a bound the server holds: `minimum` for an unsigned
-    /// Zig integer, both for a `nilo.Within(min, max)`
+    /// An integer with a bound the server holds: both ends of a Zig integer's
+    /// own range (`widthOf`), or of a `nilo.Within(min, max)`
     /// ([ADR 167](../docs/adr/167-a-whole-number-inside-a-range-is-a-type.md)).
     bounded: Bounds,
     /// Text with a shape the server holds — `minLength`, `maxLength`, a
@@ -133,6 +133,11 @@ pub const Object = struct {
     /// request and no such thing for a response, which this schema is shared
     /// with and which a client reads ignoring keys it does not know.
     open: bool = false,
+    /// Whether this is the half a client sends, read from a request, as
+    /// against the half the server writes (`responseSchemaOf`). The two have
+    /// the same name; the document files them apart when they differ
+    /// ([ADR 016](../docs/adr/016-the-api-description-comes-from-the-signatures.md)).
+    input: bool = false,
 };
 
 /// A `union(enum)` and its two encodings.
@@ -365,11 +370,17 @@ const max_depth = 8;
 
 pub fn schemaOf(comptime T: type) *const Schema {
     comptime {
-        return schemaWithin(T, 0);
+        return schemaWithin(T, 0, false);
     }
 }
 
-fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
+pub fn responseSchemaOf(comptime T: type) *const Schema {
+    comptime {
+        return schemaWithin(T, 0, true);
+    }
+}
+
+fn schemaWithin(comptime T: type, comptime depth: usize, comptime written: bool) *const Schema {
     comptime {
         if (depth >= max_depth) return held(.unknown);
         // The same reason `covers` does it: reading the marker is what checks
@@ -383,7 +394,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
         // carries is "the field was not here at all", and JSON Schema says
         // that with `required`, which a default already takes care of.
         if (patch_mod.isPatch(T)) {
-            return held(.{ .nullable = schemaWithin(T.nilo_patch, depth + 1) });
+            return held(.{ .nullable = schemaWithin(T.nilo_patch, depth + 1, written) });
         }
 
         // A whole number inside a range says its range (ADR 167). Before
@@ -408,7 +419,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
         // `Theme` and is described as one, and `Json(std.json.Value)` falls
         // through to whatever the value says of itself — which for that one
         // is nothing, and `untold` below is the honest answer.
-        if (mark.documentOf(T)) |Inner| return schemaWithin(Inner, depth + 1);
+        if (mark.documentOf(T)) |Inner| return schemaWithin(Inner, depth + 1, written);
         if (writesItsOwnJson(T)) {
             if (@hasDecl(T, "nilo_openapi")) return held(.{ .told = toldOf(T) });
             return held(.untold);
@@ -433,10 +444,10 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
 
         return switch (@typeInfo(T)) {
             .bool => held(.boolean),
-            // An unsigned integer refuses `-1` with a 400, so the document
-            // may say so: `minimum: 0` is a promise the signature makes
+            // An integer refuses what its type cannot hold with a 400, so the
+            // document says both ends: a promise the signature makes
             // (ADR 167).
-            .int => |i| if (i.signedness == .unsigned) held(.{ .bounded = .{ .min = 0 } }) else held(.integer),
+            .int => held(.{ .bounded = widthOf(T) }),
             .comptime_int => held(.integer),
             .float, .comptime_float => held(.number),
 
@@ -449,7 +460,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 break :blk held(.{ .choice = names });
             },
 
-            .optional => |o| held(.{ .nullable = schemaWithin(o.child, depth + 1) }),
+            .optional => |o| held(.{ .nullable = schemaWithin(o.child, depth + 1, written) }),
 
             // A tagged union has a derivable shape and used to get `{}`
             // (ADR 016). `std.json` writes it externally tagged — one object
@@ -465,7 +476,7 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                     // A variant carrying nothing has no shape under its name,
                     // and only the internally tagged encoding can say so — the
                     // name is the whole of the object there (ADR 016).
-                    .schema = if (f_type == void) held(.unknown) else schemaWithin(f_type, depth + 1),
+                    .schema = if (f_type == void) held(.unknown) else schemaWithin(f_type, depth + 1, written),
                 }};
                 break :blk held(.{ .one_of = .{
                     .tag = if (said) |m| m.tag else null,
@@ -493,17 +504,26 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 for (s.field_names, s.field_types, s.field_attrs) |f_name, f_type, f_attrs| {
                     fields = fields ++ [_]Field{.{
                         .name = mark.wire(f_name, said),
-                        .schema = schemaWithin(f_type, depth + 1),
-                        // The rule the readers apply (`field.zig`): a field the
-                        // client may leave out is not required, whether it has
-                        // a default or is a `?T`.
-                        .required = !field_mod.FieldRule(f_type, f_attrs).may_be_absent,
+                        .schema = schemaWithin(f_type, depth + 1, written),
+                        // Read: the rule the readers apply (`field.zig`), a
+                        // field the client may leave out is not required,
+                        // whether it has a default or is a `?T`. Written: the
+                        // writer sends every field it has, a `?T` that is
+                        // empty as `null` (`json.zig`), so the answer is
+                        // required whatever its default is, and a client does
+                        // not null-check what the server always sends. A
+                        // `void` field is the one the writer skips.
+                        .required = if (written)
+                            f_type != void
+                        else
+                            !field_mod.FieldRule(f_type, f_attrs).may_be_absent,
                     }};
                 }
                 break :blk held(.{ .object = .{
                     .name = nameOf(T),
                     .fields = fields,
                     .open = mark.ignoresUnknown(T),
+                    .input = !written,
                 } });
             },
 
@@ -513,19 +533,38 @@ fn schemaWithin(comptime T: type, comptime depth: usize) *const Schema {
                 .slice => if (p.child == u8)
                     held(.string)
                 else
-                    held(.{ .array = schemaWithin(p.child, depth + 1) }),
+                    held(.{ .array = schemaWithin(p.child, depth + 1, written) }),
                 // A single-item pointer is followed: `*const Config` in a
                 // response is the config, as far as JSON is concerned.
-                .one => schemaWithin(p.child, depth + 1),
+                .one => schemaWithin(p.child, depth + 1, written),
                 else => held(.unknown),
             },
 
             .array => |a| if (a.child == u8)
                 held(.string)
             else
-                held(.{ .array = schemaWithin(a.child, depth + 1) }),
+                held(.{ .array = schemaWithin(a.child, depth + 1, written) }),
 
             else => held(.unknown),
+        };
+    }
+}
+
+/// The range an integer type holds. The reader takes the token's digits as
+/// they are (`parseInt`, [ADR 084](../docs/adr/084-a-number-in-a-request-is-not-a-zig-literal.md)),
+/// so a `u64` above 2^53 arrives exact and the bound is the type's own.
+/// `Bounds` is an `i128`, so a type whose top does not fit one (`u128`
+/// and wider) states no `maximum` rather than a wrong one, and one whose
+/// bottom does not fit (`i129` and wider) states neither end.
+fn widthOf(comptime T: type) Bounds {
+    comptime {
+        const i = @typeInfo(T).int;
+        const signed = i.signedness == .signed;
+        const fits_below = if (signed) i.bits <= 128 else true;
+        const fits_above = if (signed) i.bits <= 128 else i.bits <= 127;
+        return .{
+            .min = if (!fits_below) null else if (signed) std.math.minInt(T) else 0,
+            .max = if (fits_above) std.math.maxInt(T) else null,
         };
     }
 }
@@ -759,6 +798,16 @@ const Slot = struct {
     /// because its `Str` half and its `Text` half are separate Zig types
     /// (ADR 016). Empty for every other slot, which is most of them.
     twin: []const u8 = "",
+    /// The request half of a type (`Object.input`), which is a slot of its
+    /// own beside the response half under the same name.
+    input: bool = false,
+    /// Set by `settle` on a request half that renders exactly as the
+    /// response half of the same type: it is that slot, not a second one.
+    same_as: ?usize = null,
+    /// Set by `settle` on a request half that differs from a response half
+    /// beside it: it is written as `<Name>Input`. A request half with no
+    /// response half keeps the plain name.
+    suffixed: bool = false,
 };
 
 /// The named shapes a document refers to rather than repeating. Collected in
@@ -801,7 +850,7 @@ const Components = struct {
         switch (schema.*) {
             .object => |o| {
                 if (o.name) |full| {
-                    if (self.indexOf(full)) |i| {
+                    if (self.indexOf(full, o.input)) |i| {
                         // The same shape under the same name — and its fields
                         // were walked when it was first seen. This is also
                         // what stops a type holding one of its own from
@@ -820,7 +869,7 @@ const Components = struct {
                         self.slots.items[i].twin = full;
                         return;
                     } else {
-                        try self.slots.append(self.gpa, .{ .name = full, .schema = schema });
+                        try self.slots.append(self.gpa, .{ .name = full, .schema = schema, .input = o.input });
                     }
                 }
                 for (o.fields) |f| try self.add(f.schema);
@@ -849,7 +898,7 @@ const Components = struct {
         };
         if (one.fields.len != other.fields.len) return false;
         for (one.fields, other.fields) |f, g| {
-            if (!std.mem.eql(u8, f.name, g.name)) return false;
+            if (!std.mem.eql(u8, f.name, g.name) or f.required != g.required) return false;
         }
         return true;
     }
@@ -892,17 +941,43 @@ const Components = struct {
     /// The slot this shape is named in, or null if it has no name of its own
     /// in this document — either it never had one, or something else wanted
     /// the same one.
-    fn slotFor(self: *const Components, full: []const u8) ?usize {
-        const i = self.indexOf(full) orelse return null;
+    fn slotFor(self: *const Components, full: []const u8, input: bool) ?usize {
+        var i = self.indexOf(full, input) orelse return null;
+        if (self.slots.items[i].same_as) |into| i = into;
         return if (self.slots.items[i].contested) null else i;
     }
 
-    fn indexOf(self: *const Components, full: []const u8) ?usize {
+    fn indexOf(self: *const Components, full: []const u8, input: bool) ?usize {
         for (self.slots.items, 0..) |slot, i| {
-            if (std.mem.eql(u8, slot.name, full)) return i;
+            // A twin pair is the request half with `Str` in it and the
+            // response half with `Text`, and they merge only when they render
+            // the same, so whichever of the two arrived first holds both.
+            if (slot.input == input and std.mem.eql(u8, slot.name, full)) return i;
             if (slot.twin.len > 0 and std.mem.eql(u8, slot.twin, full)) return i;
         }
         return null;
+    }
+
+    /// Decide, once every shape is gathered, which request halves are the
+    /// response half of the same type and which are a component of their own.
+    /// A request schema keeps the rule the readers apply (a default or a
+    /// `?T` may be left out) and a response schema lists what the writer
+    /// always sends, so a type used both ways often has two shapes. Where
+    /// they render the same, one component serves both, as before. Where
+    /// they differ the response keeps the plain name and the request is
+    /// `<Name>Input`, each referred to from where it is used. The test is
+    /// the whole shape, so a type holding such a type differs too.
+    fn settle(self: *Components) void {
+        for (self.slots.items, 0..) |*slot, i| {
+            if (!slot.input or slot.contested) continue;
+            const j = self.indexOf(slot.name, false) orelse continue;
+            if (self.slots.items[j].contested) continue;
+            if (rendersTheSame(self.slots.items[j].schema, slot.schema)) {
+                self.slots.items[i].same_as = j;
+            } else {
+                self.slots.items[i].suffixed = true;
+            }
+        }
     }
 
     /// What this shape is called in the document: its short name, unless
@@ -911,7 +986,8 @@ const Components = struct {
     /// `User` meaning two shapes produces code that does not compile — so
     /// where that happens both keep their full names.
     fn writeName(self: *const Components, w: *std.Io.Writer, i: usize) !void {
-        return writeComponentName(w, self.nameAt(i));
+        try writeComponentName(w, self.nameAt(i));
+        if (self.slots.items[i].suffixed) try writeComponentName(w, self.suffixAt(i));
     }
 
     /// A merged pair drops the half that was only a lifetime, so the client
@@ -924,17 +1000,42 @@ const Components = struct {
         return if (self.shortIsFree(i, short)) short else full;
     }
 
+    /// What a request half with a response half beside it adds to its name.
+    /// Behind a full name it follows a `.`, which a component name may hold, so it
+    /// cannot meet a type whose own name ends in `Input`.
+    fn suffixAt(self: *const Components, i: usize) []const u8 {
+        const full = self.slots.items[i].name;
+        const base = nameAt(self, i);
+        return if (std.mem.eql(u8, base, full) and self.slots.items[i].twin.len == 0 and
+            !std.mem.eql(u8, base, shortNameOf(full))) ".Input" else "Input";
+    }
+
     fn shortIsFree(self: *const Components, i: usize, short: []const u8) bool {
-        if (std.mem.eql(u8, short, error_schema_name)) return false;
+        const mine: []const u8 = if (self.slots.items[i].suffixed) "Input" else "";
+        if (std.mem.eql(u8, short, error_schema_name) and mine.len == 0) return false;
         for (self.slots.items, 0..) |other, j| {
             // A contested slot is written nowhere, so it is not competing
-            // for the short name it would otherwise have taken.
-            if (other.contested) continue;
+            // for the short name it would otherwise have taken, and a request
+            // half that is another slot is not written either.
+            if (j == i or other.contested or other.same_as != null) continue;
             const other_short = if (other.twin.len > 0)
                 (stemOf(other.name) orelse other.name)
             else
                 shortNameOf(other.name);
-            if (j != i and std.mem.eql(u8, other_short, short)) return false;
+            const theirs: []const u8 = if (other.suffixed) "Input" else "";
+            if (sameJoined(other_short, theirs, short, mine)) return false;
+        }
+        return true;
+    }
+
+    /// Whether `a ++ b` is `c ++ d`, without building either.
+    fn sameJoined(a: []const u8, b: []const u8, c: []const u8, d: []const u8) bool {
+        if (a.len + b.len != c.len + d.len) return false;
+        var k: usize = 0;
+        while (k < a.len + b.len) : (k += 1) {
+            const x = if (k < a.len) a[k] else b[k - a.len];
+            const y = if (k < c.len) c[k] else d[k - c.len];
+            if (x != y) return false;
         }
         return true;
     }
@@ -1045,6 +1146,7 @@ pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, ops: []const Operation, 
             else => try components.add(shape),
         }
     }
+    components.settle();
 
     try w.writeAll("{\"openapi\":\"3.1.0\",\"info\":{\"title\":");
     try writeString(w, info.title);
@@ -1098,7 +1200,7 @@ pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, ops: []const Operation, 
     for (components.slots.items, 0..) |slot, i| {
         // A name two shapes wanted belongs to neither, and both were written
         // out where they appear rather than referred to here.
-        if (slot.contested) continue;
+        if (slot.contested or slot.same_as != null) continue;
         if (wrote_schema) try w.writeByte(',');
         wrote_schema = true;
         try w.writeByte('"');
@@ -1559,7 +1661,7 @@ fn writeSchema(
 
         .object => |o| {
             if (o.name) |full| {
-                if (components.slotFor(full)) |i| {
+                if (components.slotFor(full, o.input)) |i| {
                     try w.writeAll("{\"$ref\":\"#/components/schemas/");
                     try components.writeName(w, i);
                     try w.writeAll("\"}");
@@ -1718,13 +1820,167 @@ test "text with a shape says its shape, and a check of the caller's own is not c
 test "the plain types map to what JSON Schema calls them" {
     // An unsigned integer is refused below zero, and the document says so
     // (ADR 167). A signed one is any integer.
-    try expectSchema(u32, "{\"type\":\"integer\",\"minimum\":0}");
-    try expectSchema(i8, "{\"type\":\"integer\"}");
+    try expectSchema(u32, "{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}");
+    try expectSchema(i8, "{\"type\":\"integer\",\"minimum\":-128,\"maximum\":127}");
     try expectSchema(f64, "{\"type\":\"number\"}");
     try expectSchema(bool, "{\"type\":\"boolean\"}");
     try expectSchema(Str, "{\"type\":\"string\"}");
     // Text, not a list of numbers — the same reading std.json gives it.
     try expectSchema([]const u8, "{\"type\":\"string\"}");
+}
+
+test "an integer states the range its type holds, and leaves out a bound too wide to be an exact number" {
+    try expectSchema(u8, "{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}");
+    try expectSchema(i8, "{\"type\":\"integer\",\"minimum\":-128,\"maximum\":127}");
+    // A number past 2^53 is read exactly (`parseInt` on the token), so the
+    // bound is the type's own.
+    try expectSchema(u64, "{\"type\":\"integer\",\"minimum\":0,\"maximum\":18446744073709551615}");
+    try expectSchema(i64, "{\"type\":\"integer\",\"minimum\":-9223372036854775808,\"maximum\":9223372036854775807}");
+    try expectSchema(i128, "{\"type\":\"integer\",\"minimum\":-170141183460469231731687303715884105728,\"maximum\":170141183460469231731687303715884105727}");
+    // A `u128` reaches past what `Bounds` holds: no `maximum` rather than a wrong one.
+    try expectSchema(u128, "{\"type\":\"integer\",\"minimum\":0}");
+}
+
+fn responseJson(comptime T: type) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer out.deinit();
+    const none = Components.init(testing.allocator);
+    try writeSchema(&out.writer, &none, comptime responseSchemaOf(T));
+    return out.toOwnedSlice();
+}
+
+test "a response lists every field it always writes as required, and a request keeps its rule" {
+    const Row = struct {
+        name: Str,
+        nickname: ?Str,
+        plan: u8 = 1,
+    };
+    const response = try responseJson(Row);
+    defer testing.allocator.free(response);
+    try testing.expectEqualStrings(
+        \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"plan":{"type":"integer","minimum":0,"maximum":255}},"required":["name","nickname","plan"]}
+    , response);
+    // The same type read from a body is as it was: only `name` has to be sent.
+    try expectSchema(Row,
+        \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"plan":{"type":"integer","minimum":0,"maximum":255}},"required":["name"]}
+    );
+}
+
+test "a response is required all the way down, through a list, an optional and a union arm" {
+    const Inner = struct { n: u8 = 0, note: ?Str = null };
+    const Row = struct { inner: ?Inner, items: []const Inner, pick: union(enum) { a: Inner } };
+    const response = try responseJson(Row);
+    defer testing.allocator.free(response);
+    // Three objects with an optional or a default inside, and none leaves a field out.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, response, "\"required\":[\"n\",\"note\"]"));
+    try testing.expect(std.mem.indexOf(u8, response, "\"required\":[\"inner\",\"items\",\"pick\"]") != null);
+}
+
+/// A PUT-shaped route: `Req` read from the body, `Res` written back.
+fn roundTrip(comptime Req: type, comptime Res: type, comptime pattern: []const u8) Operation {
+    return .{
+        .method = .PUT,
+        .pattern = pattern,
+        .params = &.{},
+        .query = &.{},
+        .body = schemaOf(Req),
+        .answer = .{ .status = 200, .content_type = "application/json", .schema = responseSchemaOf(Res) },
+        .can_reject = false,
+    };
+}
+
+fn documentOf(ops: []const Operation, out: *std.Io.Writer.Allocating) ![]const u8 {
+    try write(testing.allocator, &out.writer, ops, .{});
+    return out.written();
+}
+
+test "a type read from a body and written back is two components when its two halves differ" {
+    const User = struct { name: Str, plan: u8 = 1 };
+    const ops = comptime [_]Operation{roundTrip(User, User, "/users")};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const doc = try documentOf(&ops, &out);
+    // The answer keeps the plain name, the body gets `Input` after it, and
+    // each is referred to where it is used.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/UserInput\"}}}}") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"schema\":{\"$ref\":\"#/components/schemas/User\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"UserInput\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"plan\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}},\"required\":[\"name\"]}") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"User\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"plan\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}},\"required\":[\"name\",\"plan\"]}") != null);
+    // Nothing is written inline.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, doc, "\"$ref\":"));
+}
+
+test "a type read and written whose halves agree stays one component" {
+    const Point = struct { x: i32, y: i32 };
+    const ops = comptime [_]Operation{roundTrip(Point, Point, "/points")};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const doc = try documentOf(&ops, &out);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, doc, "\"$ref\":\"#/components/schemas/Point\""));
+    try testing.expect(std.mem.indexOf(u8, doc, "PointInput") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, doc, "\"Point\":{"));
+}
+
+test "a type only read keeps its plain name" {
+    const NewUser = struct { name: Str, plan: u8 = 1 };
+    const Done = struct { ok: bool };
+    const ops = comptime [_]Operation{roundTrip(NewUser, Done, "/users")};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const doc = try documentOf(&ops, &out);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"$ref\":\"#/components/schemas/NewUser\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "NewUserInput") == null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"NewUser\":{") != null);
+}
+
+test "a type holding one whose halves differ is split as well, and refers to the half it is" {
+    const Inner = struct { n: u8 = 0 };
+    const Outer = struct { inner: Inner, tag: Str };
+    const ops = comptime [_]Operation{roundTrip(Outer, Outer, "/outers")};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const doc = try documentOf(&ops, &out);
+    // `Outer` has the same required fields both ways, but its `inner` points
+    // at a different component each way, so it is two as well.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"OuterInput\":{\"type\":\"object\",\"properties\":{\"inner\":{\"$ref\":\"#/components/schemas/InnerInput\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"Outer\":{\"type\":\"object\",\"properties\":{\"inner\":{\"$ref\":\"#/components/schemas/Inner\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"InnerInput\":{") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"Inner\":{") != null);
+}
+
+test "a split name another type already answers to is not overwritten" {
+    const a = struct {
+        const User = struct { name: Str, plan: u8 = 1 };
+    };
+    const b = struct {
+        const UserInput = struct { id: u32 };
+    };
+    const ops = comptime [_]Operation{
+        roundTrip(a.User, a.User, "/users"),
+        roundTrip(b.UserInput, b.UserInput, "/inputs"),
+    };
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const doc = try documentOf(&ops, &out);
+    // The plain `UserInput` type and the request half of `User` both want
+    // that name, so neither takes it: each keeps its full name, as two types
+    // with one short name do.
+    try testing.expect(std.mem.indexOf(u8, doc, "\"UserInput\":{") == null);
+    try testing.expect(std.mem.indexOf(u8, doc, "UserInput\":{\"type\":\"object\",\"properties\":{\"id\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, ".User.Input\":{") != null);
+    // Every name written is unique.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, doc, "\"type\":\"object\",\"properties\":{"));
+}
+
+test "the same routes give the same document twice, split components included" {
+    const User = struct { name: Str, plan: u8 = 1 };
+    const Other = struct { who: ?Str };
+    const ops = comptime [_]Operation{ roundTrip(User, User, "/users"), roundTrip(Other, Other, "/others") };
+    var one: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer one.deinit();
+    var two: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer two.deinit();
+    try testing.expectEqualStrings(try documentOf(&ops, &one), try documentOf(&ops, &two));
 }
 
 test "an enum becomes the strings it can be" {
@@ -1739,14 +1995,14 @@ test "a struct lists its fields, and a default is what makes one optional" {
         admin: bool = false,
     };
     try expectSchema(NewUser,
-        \\{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer","minimum":0},"admin":{"type":"boolean"}},"required":["name","age"]}
+        \\{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer","minimum":0,"maximum":4294967295},"admin":{"type":"boolean"}},"required":["name","age"]}
     );
 }
 
 test "a struct where nothing is required says so by leaving the list out" {
     const AllOptional = struct { page: u32 = 1 };
     try expectSchema(AllOptional,
-        \\{"type":"object","properties":{"page":{"type":"integer","minimum":0}}}
+        \\{"type":"object","properties":{"page":{"type":"integer","minimum":0,"maximum":4294967295}}}
     );
 }
 
@@ -1758,20 +2014,20 @@ test "a ?T with no default is optional in a struct as a default is, because abse
         plan: u8 = 1,
     };
     try expectSchema(Contact,
-        \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"age":{"anyOf":[{"type":"integer","minimum":0},{"type":"null"}]},"plan":{"type":"integer","minimum":0}},"required":["name"]}
+        \\{"type":"object","properties":{"name":{"type":"string"},"nickname":{"anyOf":[{"type":"string"},{"type":"null"}]},"age":{"anyOf":[{"type":"integer","minimum":0,"maximum":4294967295},{"type":"null"}]},"plan":{"type":"integer","minimum":0,"maximum":255}},"required":["name"]}
     );
 }
 
 test "an optional is the value or null, the 3.1 way" {
     try expectSchema(?u32,
-        \\{"anyOf":[{"type":"integer","minimum":0},{"type":"null"}]}
+        \\{"anyOf":[{"type":"integer","minimum":0,"maximum":4294967295},{"type":"null"}]}
     );
 }
 
 test "a list carries the shape of what is in it" {
     const Item = struct { id: u32 };
     try expectSchema([]const Item,
-        \\{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer","minimum":0}},"required":["id"]}}
+        \\{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295}},"required":["id"]}}
     );
 }
 
@@ -1795,7 +2051,7 @@ test "a tagged union is the alternatives it can be, one key each" {
         count: u32,
     };
     try expectSchema(Target,
-        \\{"oneOf":[{"type":"object","properties":{"link":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},"required":["link"]},{"type":"object","properties":{"count":{"type":"integer","minimum":0}},"required":["count"]}]}
+        \\{"oneOf":[{"type":"object","properties":{"link":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},"required":["link"]},{"type":"object","properties":{"count":{"type":"integer","minimum":0,"maximum":4294967295}},"required":["count"]}]}
     );
 }
 
@@ -1826,7 +2082,7 @@ test "a variant carrying nothing is the discriminator on its own" {
         running: struct { pid: u32 },
     };
     try expectSchema(Step,
-        \\{"oneOf":[{"type":"object","properties":{"step":{"type":"string","enum":["queued"]}},"required":["step"]},{"allOf":[{"type":"object","properties":{"pid":{"type":"integer","minimum":0}},"required":["pid"]},{"type":"object","properties":{"step":{"type":"string","enum":["running"]}},"required":["step"]}]}],"discriminator":{"propertyName":"step"}}
+        \\{"oneOf":[{"type":"object","properties":{"step":{"type":"string","enum":["queued"]}},"required":["step"]},{"allOf":[{"type":"object","properties":{"pid":{"type":"integer","minimum":0,"maximum":4294967295}},"required":["pid"]},{"type":"object","properties":{"step":{"type":"string","enum":["running"]}},"required":["step"]}]}],"discriminator":{"propertyName":"step"}}
     );
 }
 
@@ -1854,7 +2110,7 @@ test "a renamed struct is described by the keys it actually sends" {
         email_address: ?Str = null,
     };
     try expectSchema(Contact,
-        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0},"fullName":{"type":"string"},"emailAddress":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["id","fullName"]}
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295},"fullName":{"type":"string"},"emailAddress":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["id","fullName"]}
     );
 }
 
@@ -1902,8 +2158,8 @@ test "one shape split only by a lifetime is one component" {
     // only a lifetime. Three components rather than four: `Body`, `Row`, and
     // the one `Meta`.
     try testing.expectEqual(@as(usize, 3), components.count());
-    const meta = components.indexOf(comptime nameOf(Meta.of(Str)).?).?;
-    try testing.expectEqual(meta, components.indexOf(comptime nameOf(Meta.of([]const u8)).?).?);
+    const meta = components.indexOf(comptime nameOf(Meta.of(Str)).?, true).?;
+    try testing.expectEqual(meta, components.indexOf(comptime nameOf(Meta.of([]const u8)).?, true).?);
 
     const written = components.nameAt(meta);
     try testing.expect(std.mem.endsWith(u8, written, "_of"));
@@ -2099,7 +2355,7 @@ test "a struct that says .ignore is described as open, and one that says nothing
     };
     const Tight = struct { id: u32 };
     try expectSchema(Loose,
-        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0}},"required":["id"],"additionalProperties":true}
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295}},"required":["id"],"additionalProperties":true}
     );
     try expectSchema(Cased,
         \\{"type":"object","properties":{"fullName":{"type":"string"}},"required":["fullName"],"additionalProperties":true}
@@ -2107,7 +2363,7 @@ test "a struct that says .ignore is described as open, and one that says nothing
     // ADR 016 does not promise `false`: the schema is the response's too, and
     // a client reads a response ignoring the keys it does not know.
     try expectSchema(Tight,
-        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0}},"required":["id"]}
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295}},"required":["id"]}
     );
 }
 
@@ -2118,7 +2374,7 @@ test "openness is the type's own: a strict struct holding an open one says nothi
     };
     const Outer = struct { inner: Loose };
     try expectSchema(Outer,
-        \\{"type":"object","properties":{"inner":{"type":"object","properties":{"id":{"type":"integer","minimum":0}},"required":["id"],"additionalProperties":true}},"required":["inner"]}
+        \\{"type":"object","properties":{"inner":{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295}},"required":["id"],"additionalProperties":true}},"required":["inner"]}
     );
 }
 

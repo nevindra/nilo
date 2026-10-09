@@ -44,7 +44,7 @@ A gap that is the rule. Each was looked at, priced, and kept as it is, and the e
 
 ### `nilo_job`
 
-**Nothing sweeps finished rows.** `Table.sweep(scope, before)` deletes `done` rows older than a moment, and nothing calls it: a program that wants the table small runs it from a scheduled job of its own. Written down so nobody is surprised by a table that only grows.
+**Nothing sweeps finished rows.** `Table.sweep(scope, before)` deletes `done` rows older than a moment, `sweepDead` (on `Table` and `Memory`) the dead ones, and nothing calls either: a program that wants the table small runs it from a scheduled job of its own. Written down so nobody is surprised by a table that only grows.
 
 **Reopened by:** somebody who would rather have a `keep_done_s` setting than a three-line job.
 

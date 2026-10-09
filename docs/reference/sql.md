@@ -1136,7 +1136,7 @@ const out = try sql.migrations.generate(gpa, io, dir, Db.Dialect, desired, .{
 });
 ```
 
-**`read` opens a `migrations/` directory and returns the snapshot it holds and every version file in it, sorted.** `generate` runs the diff and writes three files: `NNNN_name.zig`, then `manifest.zig`, then `snapshot.zon`. **The order matters**: a run that dies halfway leaves a snapshot that is still behind, so the next run generates the same version again instead of skipping it. `generate` refuses a directory left in that state, where the snapshot is older than the newest version file, with `migrations.Error.SnapshotBehind`: planning against it would write the same steps again as the next version.
+**`read` opens a `migrations/` directory and returns the snapshot it holds and every version file in it, sorted.** `generate` runs the diff and writes three files: `NNNN_name.zig`, then `manifest.zig`, then `snapshot.zon`. **The order matters**: a run that dies halfway leaves a snapshot that is still behind, so the next run generates the same version again instead of skipping it. `generate` refuses a directory left in that state, where the snapshot is older than the newest version file, with `migrations.Error.SnapshotBehind`: planning against it would write the same steps again as the next version. It refuses the other direction too, a snapshot newer than the newest version file (a file deleted or lost in a merge), with `migrations.Error.SnapshotAhead`: the number the snapshot records is spent.
 
 `check` is `generate` with nothing written: the same `Plan`, so CI and the person at the keyboard see one answer. It also names any `.sql` twin that has gone stale, which is the one thing it reports that is not in the `Plan`.
 

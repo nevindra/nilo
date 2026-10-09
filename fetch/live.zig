@@ -1679,6 +1679,41 @@ test "a JSON body arrives written out, under a content-type the caller did not h
     }.run);
 }
 
+test "a form body arrives encoded, with its content-type and the OAuth basic authorization beside it" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(std.testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const auth = try fetch.basicAuth(&scope, "my id", "p+q:r s");
+            const res = try client.postForm(&scope, try canned.url(&buf), .{
+                .grant_type = "client_credentials",
+                .scope = "read write",
+            }, .{ .headers = &.{.{ .name = "authorization", .value = auth }} });
+            try testing.expect(res.ok());
+
+            served.await(io) catch {};
+            const sent = canned.request();
+            try testing.expect(std.mem.startsWith(u8, sent, "POST /"));
+            try testing.expectEqual(@as(usize, 1), countLines(sent, "content-type:"));
+            try testing.expect(std.mem.indexOf(u8, sent, "content-type: application/x-www-form-urlencoded") != null);
+            try testing.expectEqual(@as(usize, 1), countLines(sent, "authorization:"));
+            try testing.expect(std.mem.indexOf(u8, sent, "Basic bXkraWQ6cCUyQnElM0FyK3M=") != null);
+            try testing.expectEqualStrings("grant_type=client_credentials&scope=read+write", canned.requestBody());
+        }
+    }.run);
+}
+
 test "a response carries its headers, so the Retry-After off a 429 is one call away" {
     try withIo(struct {
         fn run(io: std.Io) !void {
@@ -2098,6 +2133,35 @@ test "a target's JSON call and its query arrive, and the target's own clock boun
                 const took_ms = @divTrunc(core.monotonicMicros() - began, std.time.us_per_ms);
                 try testing.expect(took_ms < 5_000);
             }
+        }
+    }.run);
+}
+
+test "a target's form call fills the path and sends the fields as the body" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+            var buf: [64]u8 = undefined;
+
+            const Api = fetch.Target("api", .{});
+            var api = try Api.open(&client, .{ .base = try canned.url(&buf) });
+
+            _ = try api.putForm(&scope, "/v1/clients/{id}", .{ .id = "c 1" }, .{ .name = "a b", .active = true }, .{});
+            served.await(io) catch {};
+            try testing.expect(std.mem.startsWith(u8, canned.request(), "PUT /v1/clients/c%201 "));
+            try testing.expectEqual(@as(usize, 1), countLines(canned.request(), "content-type:"));
+            try testing.expect(std.mem.indexOf(u8, canned.request(), "content-type: application/x-www-form-urlencoded") != null);
+            try testing.expectEqualStrings("name=a+b&active=true", canned.requestBody());
         }
     }.run);
 }

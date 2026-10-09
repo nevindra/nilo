@@ -1,13 +1,17 @@
 //! What S3 says when it says no, and what a handler is told instead.
 //!
 //! S3's failures arrive as a small XML document. **Reading it needs no XML
-//! parser** — a scan for `<Code>…</Code>` is twenty lines, and the whole
-//! reason `LIST` is not in v1 is that it is the one operation whose *success*
-//! path is XML ([ADR 059](../docs/adr/059-a-bucket-is-a-type-and-a-key-is-not.md)).
+//! parser** — a scan for `<Code>…</Code>` is twenty lines, and `LIST` is the
+//! one operation whose *success* path is XML, which is why it has the small
+//! reader in `listing.zig` ([ADR 059](../docs/adr/059-a-bucket-is-a-type-and-a-key-is-not.md)).
 //!
 //! The code is logged and does not reach the client (ADR 024). What reaches
 //! the client is one of seven errors, chosen because a handler would do
 //! something different about each.
+//!
+//! `NoSuchBucket` is `Rejected` and not `NotFound`: a handler that answers a
+//! missing key with a 404 would otherwise answer a misspelt bucket name the
+//! same way, for ever, with the cause in nobody's log.
 //!
 //! One is worth its extra five lines: `RequestTimeTooSkewed` is the single 403
 //! that is not the program's fault, and S3's body carries the server's clock in
@@ -75,7 +79,9 @@ fn between(body: []const u8, open: []const u8, close: []const u8) []const u8 {
 pub fn errorFor(status: std.http.Status, code: []const u8) Error {
     if (std.mem.eql(u8, code, "SlowDown")) return error.Throttled;
     if (std.mem.eql(u8, code, "NoSuchKey")) return error.NotFound;
-    if (std.mem.eql(u8, code, "NoSuchBucket")) return error.NotFound;
+    // The bucket is not there: a fault in the program's configuration, like
+    // credentials that are wrong, and not a key that is missing.
+    if (std.mem.eql(u8, code, "NoSuchBucket")) return error.Rejected;
 
     return switch (@backingInt(status)) {
         404 => error.NotFound,
@@ -85,6 +91,11 @@ pub fn errorFor(status: std.http.Status, code: []const u8) Error {
         500, 501, 502, 504 => error.Unavailable,
         else => error.Failed,
     };
+}
+
+/// The 404 that is about the bucket, not the key.
+pub fn isNoSuchBucket(code: []const u8) bool {
+    return std.mem.eql(u8, code, "NoSuchBucket");
 }
 
 /// The one 403 that is not the program's fault, told apart so the log can say
@@ -150,6 +161,8 @@ test "a code refines the status rather than the other way round" {
     // gateway error; the code is what means throttling either way.
     try testing.expectEqual(Error.Throttled, errorFor(.internal_server_error, "SlowDown"));
     try testing.expectEqual(Error.NotFound, errorFor(.forbidden, "NoSuchKey"));
+    // A missing bucket is the program's configuration, not a missing key.
+    try testing.expectEqual(Error.Rejected, errorFor(.not_found, "NoSuchBucket"));
     // A 503 with no body at all is still throttling, which is why the status
     // is read at all rather than only the code.
     try testing.expectEqual(Error.Throttled, errorFor(.service_unavailable, ""));

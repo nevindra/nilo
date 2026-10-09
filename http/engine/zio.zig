@@ -2486,12 +2486,14 @@ pub fn serve(
                     },
                     // Anything else is the listener's own failure, and it stops
                     // the server: the first acceptor to see one keeps it for
-                    // `serve` to return, and raises the stop flag so that the
-                    // others are cancelled and the drain begins. A client that
-                    // gave up while still in the backlog is not that: under zio
-                    // v0.17.0 it surfaced here as `error.ConnectionAborted` and
-                    // took the whole server down with it; since v0.18.0 `accept`
-                    // retries it inside, and it never reaches this line.
+                    // `serve` to return. The stop flag is not raised: `serve`'s
+                    // main fiber looks for a kept failure beside it, five times
+                    // a second, and then cancels the other acceptors and begins
+                    // the drain. A client that gave up while still in the
+                    // backlog is not that: under zio v0.17.0 it surfaced here as
+                    // `error.ConnectionAborted` and took the whole server down
+                    // with it; since v0.18.0 `accept` retries it inside, and it
+                    // never reaches this line.
                     else => {
                         sh.fail(err);
                         return;

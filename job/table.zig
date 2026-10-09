@@ -353,6 +353,19 @@ pub fn Table(comptime Db: type) type {
             });
         }
 
+        /// Delete rows that went dead before `before`: how many went. **Not
+        /// part of `sweep`**, because a dead row is the evidence of a failure
+        /// and a program that swept it by accident has lost the record; this
+        /// one is asked for by name, from the same scheduled job. Dead rows
+        /// are counted by `stats` and listed by `deadOnes` until it runs.
+        /// `job.Memory` has the same method on the same moment
+        /// ([ADR 160](../docs/adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)).
+        pub fn sweepDead(self: *Self, scope: anytype, before: i64) !usize {
+            return self.db.delete(Row, scope, .{
+                .where = .{ .state = contract.State.dead, .finished_at = .{ .lt = before } },
+            });
+        }
+
         const nowMicros = core.nowMicros;
     };
 }

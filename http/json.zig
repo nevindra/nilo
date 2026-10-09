@@ -227,8 +227,8 @@ const FiniteJson = struct {
 ///
 /// One pass over the bytes, no allocation `std.json` did not make: the number's
 /// token is the one `std.json` would have taken, and a body that was fine is
-/// still fine. A number inside a type this walk does not enter (a map, a
-/// `std.json.Value`) still goes by `std.json`'s rules.
+/// still fine. A number inside a type this walk does not enter (a type
+/// with its own `jsonParse`, a `std.json.Value`) still goes by that type's rules.
 pub fn parseLeaky(
     comptime T: type,
     gpa: std.mem.Allocator,
@@ -401,6 +401,31 @@ pub fn innerRead(
             }
             if (.object_begin != try source.next()) return error.UnexpectedToken;
             return readFields(T, null, false, gpa, source, options, options);
+        },
+        .@"union" => |u| {
+            // `std.json`'s encoding of a tagged union, an object of one key,
+            // read by its own walk with the payload swapped for this one, so a
+            // number in an arm is spelled as every other is (ADR 084). An
+            // untagged union is `std.json`'s own compile error.
+            if (comptime u.tag_type == null) return std.json.innerParse(T, gpa, source, options);
+            if (.object_begin != try source.next()) return error.UnexpectedToken;
+            const key = try source.nextAllocMax(gpa, .alloc_if_needed, options.max_value_len.?);
+            const name = switch (key) {
+                inline .string, .allocated_string => |slice| slice,
+                else => return error.UnexpectedToken,
+            };
+            inline for (u.field_names, u.field_types) |f_name, f_type| {
+                if (std.mem.eql(u8, f_name, name)) {
+                    const value: T = if (comptime f_type == void) void_arm: {
+                        if (.object_begin != try source.next()) return error.UnexpectedToken;
+                        if (.object_end != try source.next()) return error.UnexpectedToken;
+                        break :void_arm @unionInit(T, f_name, {});
+                    } else @unionInit(T, f_name, try innerRead(f_type, gpa, source, options));
+                    if (.object_end != try source.next()) return error.UnexpectedToken;
+                    return value;
+                }
+            }
+            return error.UnknownField;
         },
         .array => |a| {
             if (comptime a.child == u8) return std.json.innerParse(T, gpa, source, options);
@@ -1209,6 +1234,44 @@ test "a number in a map or a tuple is read, and one in a dynamic value is never 
     try testing.expectError(error.DuplicateField, parseLeaky(Counts, a, "{\"by_name\":{\"a\":1,\"a\":2}}", .{}));
     try testing.expectError(error.UnexpectedToken, parseLeaky(Counts, a, "{\"by_name\":[1]}", .{}));
     try testing.expectError(error.UnexpectedToken, parseLeaky(Counts, a, "{\"by_name\":{},\"pair\":[1]}", .{}));
+}
+
+test "a number in an externally tagged union is read by the rule every other field is" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Shape = union(enum) { a: u32, b: struct { n: u8 }, none: void };
+    const Own = union(enum) {
+        a: u32,
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            _ = allocator;
+            _ = options;
+            _ = try source.next();
+            _ = try source.next();
+            _ = try source.next();
+            _ = try source.next();
+            return .{ .a = 99 };
+        }
+    };
+    const Holder = struct { s: Shape, o: ?Own = null };
+
+    try testing.expectEqual(@as(u32, 7), (try parseLeaky(Holder, a, "{\"s\":{\"a\":7}}", .{})).s.a);
+    try testing.expectEqual(@as(u32, 10), (try parseLeaky(Holder, a, "{\"s\":{\"a\":\"10\"}}", .{})).s.a);
+    try testing.expectEqual(@as(u8, 3), (try parseLeaky(Holder, a, "{\"s\":{\"b\":{\"n\":3}}}", .{})).s.b.n);
+    try testing.expect((try parseLeaky(Holder, a, "{\"s\":{\"none\":{}}}", .{})).s == .none);
+
+    try testing.expectError(error.InvalidNumber, parseLeaky(Holder, a, "{\"s\":{\"a\":\"1_0\"}}", .{}));
+    try testing.expectError(error.InvalidNumber, parseLeaky(Holder, a, "{\"s\":{\"a\":\"+7\"}}", .{}));
+    try testing.expectError(error.InvalidNumber, parseLeaky(Holder, a, "{\"s\":{\"b\":{\"n\":\"0x1\"}}}", .{}));
+    try testing.expectError(error.Overflow, parseLeaky(Holder, a, "{\"s\":{\"b\":{\"n\":300}}}", .{}));
+    try testing.expectError(error.UnknownField, parseLeaky(Holder, a, "{\"s\":{\"c\":1}}", .{}));
+    try testing.expectError(error.UnexpectedToken, parseLeaky(Holder, a, "{\"s\":{\"a\":1,\"none\":{}}}", .{}));
+    try testing.expectError(error.UnexpectedToken, parseLeaky(Holder, a, "{\"s\":{}}", .{}));
+    try testing.expectError(error.UnexpectedToken, parseLeaky(Holder, a, "{\"s\":[1]}", .{}));
+    try testing.expectError(error.UnexpectedToken, parseLeaky(Holder, a, "{\"s\":{\"none\":1}}", .{}));
+
+    // A union that reads itself is left to its own reader.
+    try testing.expectEqual(@as(u32, 99), (try parseLeaky(Holder, a, "{\"s\":{\"a\":1},\"o\":{\"a\":\"1_0\"}}", .{})).o.?.a);
 }
 
 test "a repeated key is found at any depth, and a body without one has none" {

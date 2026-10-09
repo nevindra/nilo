@@ -24,8 +24,10 @@
 //! produces, since it adds a field of its own rather than appending to one the
 //! client sent. Reading the first field alone handed a client its own forgery
 //! back with the rules set: the proxy's honest field sat second and was never
-//! looked at. `Forwarded` below walks every field from the last entry of the
-//! last one, so where a proxy put its address makes no difference.
+//! looked at. The `Forwarded` struct below walks every `X-Forwarded-For` field
+//! from the last entry of the last one, so where a proxy put its address makes
+//! no difference. It is the only header read: the `Forwarded` header of RFC
+//! 7239 is not ([ADR 090](../docs/adr/090-a-request-can-be-read-past-the-parts-a-handler-names.md)).
 //!
 //! **What it costs.** Parsing happens once, at `listen()`. Per request it is a
 //! prefix compare per entry per rule, on requests that call `clientIp()` and

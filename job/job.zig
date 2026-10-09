@@ -149,7 +149,10 @@ pub const Schedule = union(enum) {
     pub fn next(self: Schedule, after_micros: i64) i64 {
         return switch (self) {
             .cron => |c| c.next(after_micros),
-            .every_ms => |ms| after_micros + @as(i64, @intCast(ms)) * std.time.us_per_ms,
+            // Saturating, so a period built by hand past `max_every_ms`
+            // (`every` refuses one) waits for ever rather than wrapping
+            // round to a moment in the past.
+            .every_ms => |ms| after_micros +| @as(i64, @intCast(@min(ms, std.math.maxInt(i64)))) *| std.time.us_per_ms,
         };
     }
 };
@@ -160,9 +163,25 @@ pub fn cron(comptime text: []const u8) Schedule {
     return .{ .cron = comptime cron_mod.parse(text) };
 }
 
+/// The longest period `every` accepts: a hundred years, in milliseconds.
+/// Nothing runs that seldom, so a number past it is seconds or microseconds
+/// written where milliseconds go; and a hundred years of microseconds, added
+/// to a clock that reads about 1.8e15 today, sits far inside an `i64`.
+pub const max_every_ms: u64 = 100 * 365 * 24 * 60 * 60 * 1000;
+
 /// Every so often, from whenever the worker started. For "every ten
-/// minutes" where it does not matter which ten.
-pub fn every(ms: u64) Schedule {
+/// minutes" where it does not matter which ten. The period is read while
+/// compiling: `0` is a tick that is always due, which keeps a worker busy
+/// for ever, and one past `max_every_ms` is a mistake in the unit.
+pub fn every(comptime ms: u64) Schedule {
+    if (ms == 0) @compileError(
+        "nilo: `job.every(0)` is a schedule with no gap between its ticks, and a worker given one never rests.\n" ++
+            "  The period is in milliseconds: `job.every(600_000)` is ten minutes (ADR 161).",
+    );
+    if (ms > max_every_ms) @compileError(
+        "nilo: `job.every(" ++ std.fmt.comptimePrint("{d}", .{ms}) ++ ")` is a period of more than a hundred years, which is a mistake in the unit.\n" ++
+            "  The period is in milliseconds, and the longest is " ++ std.fmt.comptimePrint("{d}", .{max_every_ms}) ++ " (ADR 161).",
+    );
     return .{ .every_ms = ms };
 }
 
@@ -1426,6 +1445,14 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type) void {
             "nilo: the job " ++ name ++ "'s `retry` is " ++ @typeName(@TypeOf(K.retry)) ++ " rather than a `job.Retry`.\n" ++
                 "  `pub const retry: job.Retry = …` — the type on the declaration is what makes it one.",
         );
+        switch (@as(Retry, K.retry).backoff) {
+            .fixed_ms => {},
+            .exponential => |e| if (e.from_ms == 0) @compileError(
+                "nilo: the job " ++ name ++ "'s exponential `backoff` starts at `from_ms = 0`, and doubling zero is zero.\n" ++
+                    "  Every wait would be none, and a downstream outage would have every failed row retried at the same instant. " ++
+                    "Start it at a real wait, `.from_ms = 1_000`, or say `.{ .fixed_ms = 0 }` if retrying at once is meant (ADR 161).",
+            ),
+        }
         if (@hasDecl(K, "final")) {
             if (@TypeOf(K.final) != type or @typeInfo(K.final) != .error_set or @typeInfo(K.final).error_set.error_names == null) @compileError(
                 "nilo: the job " ++ name ++ "'s `final` is not an error set.\n" ++
@@ -1653,6 +1680,13 @@ test "exponential backoff doubles from the first wait and stops at the ceiling" 
     const f: Retry = .{ .times = 2, .backoff = .{ .fixed_ms = 50 } };
     try testing.expectEqual(@as(u64, 50), f.delayMs(1));
     try testing.expectEqual(@as(u64, 50), f.delayMs(2));
+}
+
+test "a schedule built past the bound by hand waits for ever rather than wrapping into the past" {
+    const longest = every(max_every_ms);
+    try testing.expectEqual(@as(i64, 1_000 + @as(i64, @intCast(max_every_ms)) * 1_000), longest.next(1_000));
+    const by_hand: Schedule = .{ .every_ms = std.math.maxInt(u64) };
+    try testing.expectEqual(@as(i64, std.math.maxInt(i64)), by_hand.next(1_000));
 }
 
 // A little program, the way a user would write one.

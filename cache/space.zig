@@ -104,7 +104,7 @@ pub fn Space(comptime name: []const u8, comptime V: type, comptime opts: Options
     );
     if (kind == .bytes and opts.max_bytes > flat.max_value) @compileError(std.fmt.comptimePrint(
         "nilo: the cache Space \"{s}\" asks to hold {d} bytes, and an entry holds at most {d}.\n" ++
-            "  The length is stored in 16 bits so four ways of a bucket are one cache" ++
+            "  The length is stored in 16 bits so eight ways of a bucket are one cache" ++
             " line (ADR 109). Something larger wants a store of its own.",
         .{ name, opts.max_bytes, flat.max_value },
     ));

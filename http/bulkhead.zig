@@ -1,17 +1,28 @@
 //! Bulkhead — the internal boundary between nilo and the Engine.
 //!
 //! Everything nilo needs from the Engine goes through this file. No part
-//! of nilo outside `src/engine/` may name zio. Swapping the Engine means
+//! of nilo outside `http/engine/` may name zio. Swapping the Engine means
 //! swapping the one import below, without touching a line of user code.
 //!
 //! The contract an Engine has to meet:
 //! - reading the fields of `Options` that name a socket, a buffer or a
 //!   deadline. The struct itself is declared here, not by the Engine, so
 //!   that swapping the Engine cannot change what a user writes.
-//! - `serve(gpa, options, stop, state, ready, handler)` — listen, accept
-//!   connections, and run `handler(state, in, out, deadlines, waker, peer)`
-//!   for each one concurrently until that connection is done. `state` is
-//!   carried through as-is (normally `*App`). Returns when `stop` is set.
+//! - `serve(gpa, options, stop, state, ready, stopping, handler,
+//!   plain_handler, hand_on)` — listen, accept connections, and run
+//!   `handler(state, in, out, clocks, wake, peer)` for each one concurrently
+//!   until that connection is done. `state` is carried through as-is
+//!   (normally `*App`). Returns when `stop` is set, or with the error of a
+//!   listener that failed, once the connections still being served have
+//!   drained. `Bulkhead.serve` wraps all of it: the Engine hands over its
+//!   `Clocks` and `Wake`, and the handler `nilo` writes receives the
+//!   `Deadlines` and `Waker` built on them. The last two handlers are
+//!   `-Dhttp2`'s (ADR 259): `plain_handler` takes the arguments `handler`
+//!   does on a plain listener, serves HTTP/1.1 itself and answers `Hand`,
+//!   `.http2` when the first bytes were the HTTP/2 preface, and `hand_on`
+//!   then runs that connection from the entry's own frame, with the `Peer`
+//!   by pointer; a TLS listener runs `handler` and calls `hand_on` when its
+//!   ALPN chose `h2` (ADR 062).
 //! - `ready(state, io, limits, port)` inside that call — run once, after the
 //!   port is taken and before the first connection is accepted, and hand over
 //!   the `std.Io` the Engine runs on. This is the one thing here that exists
@@ -41,12 +52,24 @@
 //!   `nilo_core`'s, because the caller is a Service and a Service may not
 //!   import `nilo_http`.
 //! - `Peer` — who is at the other end of a connection. `accept` already
-//!   knows, so this asks the Engine for nothing it did not have.
+//!   knows, so this asks the Engine for nothing it did not have. Its
+//!   contract is `address()` (text, empty with no socket behind it), `port`,
+//!   `local` (a unix socket: no address, and this machine), `tls` (the
+//!   listener terminated TLS, so the client used `https`) and `listener`
+//!   (which of the `also` listeners took it, ADR 252), with `from(text)` and
+//!   `overUnixSocket()` for the test client and the unix listener, and a
+//!   `format` that writes the address.
 //! - `Deadlines.limit`/`Deadlines.timedOut` — put a time limit on the next
 //!   read or write of one connection, and say afterwards whether that limit
 //!   is what a failure was. An Engine that waits on sockets already has to
 //!   be able to wait with a limit, so this asks for nothing new of it
 //!   (ADR 022).
+//! - `Wake.rawIdle`/`Wake.raw` — the ciphertext layer under a TLS
+//!   connection, or null on a plain one and while decrypted bytes are still
+//!   waiting in it, so that the Bulkhead can give back the pages of the
+//!   record layer's buffers beside the cleartext pair's when a connection
+//!   goes quiet (`Waker.releaseStack`, ADR 212). `lookNow` is `Waker.poll`'s
+//!   half, for a `-Dhttp2` build.
 //! - `Waker.wait`/`Waker.post` — park a connection until its socket is
 //!   readable *or* another fiber has something to say to it, and wake one
 //!   from anywhere. Everything else in nilo is woken by the client at the
@@ -72,9 +95,12 @@
 //! - `beginShield`/`endShield` — keep a cancel from reaching the writes
 //!   between them, so a connection cancelled at shutdown can end the
 //!   streams it holds with their last frames (ADR 260).
-//! - `Binding`/`bindSlot`/`unbindSlot`/`slot` — one pointer bound to the
-//!   unit of work currently running (a fiber, a thread, whatever the
-//!   Engine uses), for hidden per-request state (ADR 006).
+//! - `Binding`/`binding_unset`/`bindSlot`/`unbindSlot`/`slot` — one pointer
+//!   bound to the unit of work currently running (a fiber, a thread,
+//!   whatever the Engine uses), for hidden per-request state (ADR 006).
+//!   `Binding` is the storage for one binding: a node the caller keeps on
+//!   its own stack, unmoved while it is bound, and `binding_unset` is the
+//!   value it starts as.
 //! - `bindsOn(io)`: whether `io` is the Engine's own loop, so a slot can be
 //!   bound under it; the boot work asks before it binds one (ADR 129).
 //! - `monotonicNanos` — a monotonic clock. Zig 0.16's `std.time` carries

@@ -112,7 +112,9 @@ fn register(c: *nilo.Ctx, db: *Db, jobs: *Jobs, body: SignIn) !void {
 | `.{ .times = 3, .backoff = .{ .fixed_ms = 30_000 } }` | thirty seconds between each |
 | `.{ .times = 5, .backoff = .{ .exponential = .{ .from_ms = 1_000, .to_ms = 3_600_000 } } }` | 1s, 2s, 4s, … and never more than an hour |
 
-A row past its last retry is **dead**: it stays in the table with the name of the error that killed it, `stats` counts it, `deadOnes` lists it, and `retryDead` is the only way to run it again. Nothing is deleted for you.
+An exponential backoff with `.from_ms = 0` is a compile error: doubling zero is zero, so it would be `.fixed_ms = 0` in a shape that looks like a growing wait.
+
+A row past its last retry is **dead**: it stays in the table with the name of the error that killed it, `stats` counts it, `deadOnes` lists it, and `retryDead` is the only way to run it again. Nothing is deleted for you: `sweepDead(c, before)` on the store (`job.Table` and `job.Memory` both have it) deletes the dead rows older than a moment, from a scheduled job of your own, and on `job.Memory` it is what stops a long run of failures filling every slot and answering `QueueFull`.
 
 **Some failures should be final on the first attempt.** A reset socket or a 429 may succeed ten seconds later; a 4xx saying *invalid from address* will be the same 4xx in an hour, yet both come back through the same error set. `final` is the error set that makes a `run` dead at once, whatever `retry` says ([ADR 179](../adr/179-a-run-can-say-its-failure-is-final.md)):
 
@@ -284,7 +286,7 @@ const Nightly = struct {
 | | |
 |---|---|
 | `job.cron("0 3 * * *")` | `minute hour day month weekday`, UTC, parsed while compiling. `*`, lists, ranges and `*/n`; a date that never comes (`0 0 31 2 *`) is a compile error. When either day field starts with `*`, the day must match both |
-| `job.every(600_000)` | every ten minutes from whenever the worker started, for when it does not matter which ten |
+| `job.every(600_000)` | every ten minutes from whenever the worker started, for when it does not matter which ten. Milliseconds, read while compiling: `0` and a period over a hundred years are compile errors |
 
 A field out of range, a sixth field or a backwards range is a compile error naming the field. **UTC only**: a program in Jakarta writes `0 20 * * *` with a comment, and `docs/todo.md` records the gap.
 

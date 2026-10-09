@@ -630,6 +630,15 @@ pub const Fake = struct {
     /// first run of a raw statement that could not be held against its Row,
     /// which is asked again on its next run (ADR 233).
     describe_fails: bool = false,
+    /// What `stepProblem` answers for a step that failed, or null for none:
+    /// the Problem a Wire like SQLite's reports at the step rather than at
+    /// `run` (ADR 117).
+    step_refuses: ?Problem = null,
+    /// Called inside `drain`, standing in for the other fibers that run while
+    /// a real drain waits on the socket or on a pool (ADR 117). It receives
+    /// `on_drain_ctx`.
+    on_drain: ?*const fn (?*anyopaque) void = null,
+    on_drain_ctx: ?*anyopaque = null,
 
     /// One column's answer. A NULL read into a field that cannot hold one
     /// fails the read, as it does on both real Wires.
@@ -782,6 +791,14 @@ pub const Fake = struct {
         self.drains += 1;
         rows.left = 0;
         rows.drained = true;
+        if (self.on_drain) |hook| hook(self.on_drain_ctx);
+    }
+
+    pub fn stepProblem(self: *Fake, rows: *const Rows, err: anytype, arena: std.mem.Allocator) ?Problem {
+        _ = rows;
+        _ = arena;
+        _ = &err;
+        return self.step_refuses;
     }
 
     pub fn exec(

@@ -169,6 +169,7 @@ test "a range asks for a slice and gets exactly that slice" {
 
             const part = try live.getRange(&scope, home ++ "range.txt", .{ .from = 4, .to = 9 });
             try testing.expectEqualStrings("456789", part.bytes.view());
+            try testing.expectEqual(@as(u64, 16), part.total);
         }
     }.run);
 }
@@ -199,6 +200,15 @@ test "an object over the ceiling costs a round trip rather than a download" {
             // exists: without it a large object has no way in at all.
             const head = try live.getRange(&scope, home ++ "big.bin", .{ .from = 0, .to = 1023 });
             try testing.expectEqual(@as(u64, 1024), head.len);
+            try testing.expectEqual(@as(u64, 5 << 20), head.total);
+
+            // And a stream from an offset, past the ceiling, which is what
+            // resuming an object bigger than `max_bytes` needs.
+            var reading: Live.Reading = .{ .range = .{ .from = 5 * 1024 * 1024 - 100, .to = 5 * 1024 * 1024 - 1 } };
+            defer reading.close();
+            try live.stream(&scope, home ++ "big.bin", &reading);
+            try testing.expectEqual(@as(u64, 100), reading.len);
+            try testing.expectEqual(@as(u64, 5 << 20), reading.total);
         }
     }.run);
 }
@@ -438,7 +448,7 @@ test "a list from a real server pages under a prefix, and the cursor reaches the
     }.run);
 }
 
-test "a bucket that is not there is a NotFound rather than a crash" {
+test "a bucket that is not there is Rejected, which a missing key is not" {
     try withStore(struct {
         fn run(store: *Store) !void {
             const Missing = bucket_mod.Bucket("nilo-no-such-bucket", .{ .style = .path });
@@ -448,7 +458,7 @@ test "a bucket that is not there is a NotFound rather than a crash" {
             var scope: core.Run = .init(testing.allocator);
             defer scope.deinit();
 
-            try testing.expectError(error.NotFound, missing.get(&scope, "anything"));
+            try testing.expectError(error.Rejected, missing.get(&scope, "anything"));
         }
     }.run);
 }

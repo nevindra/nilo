@@ -121,7 +121,7 @@ Given to `open`:
 | | |
 |---|---|
 | `pub const schedule = job.cron("0 3 * * *")` | `minute hour day month weekday`, UTC, parsed while compiling. Supports `*`, lists, ranges and `*/n`; a field out of range, or a day and month that never meet, is a Refusal naming it. When either day field starts with `*`, a day must match both |
-| `pub const schedule = job.every(600_000)` | at a fixed interval, counted from when the worker started |
+| `pub const schedule = job.every(600_000)` | at a fixed interval in milliseconds, counted from when the worker started. Read while compiling: `0` (a tick always due, a worker never resting) and a period over `job.max_every_ms`, a hundred years (a mistake in the unit), are Refusals |
 | `pub const overlap: job.Overlap` | required: `.skip` (a tick during a run does not happen) or `.queue` (it runs on another worker) |
 | `pub const missed: job.Missed` | required: `.drop` (a tick that is later than its own successor is forgotten) or `.catch_up` (it runs once) |
 
@@ -133,6 +133,7 @@ The next tick is a row with the unique key `"schedule"`, so several instances se
 |---|---|
 | `job.Table(Db)` | the queue as a `nilo_table` Row named `nilo_jobs`, over your `sql.Db` or `sql.Sqlite(…)`. `open(&db)`. Claims with `FOR UPDATE SKIP LOCKED` on Postgres, and without it on SQLite, where a claim is a write and `workers` is the number of writers. The claim asks only for the kinds this program runs (`kind IN (…)`), so a row another binary pushed under a kind you do not declare stays queued for the binary that does ([ADR 215](../adr/215-a-worker-claims-only-what-it-can-run.md)) |
 | `table.sweep(c, before)` | deletes `done` rows that finished before a moment. Nothing calls it for you |
+| `table.sweepDead(c, before)` | deletes dead rows that died before a moment, and returns how many went. Separate from `sweep` because a dead row is the record of a failure. `job.Memory` has the same method, which also frees the slots a long run of failures would otherwise fill |
 | `job.Memory` | the same contract, inside this process. `open(gpa, .{ .bytes, .max_payload = 4096 })`; when full, a push returns `error.QueueFull` and never writes over a row |
 
 ### Errors

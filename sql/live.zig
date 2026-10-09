@@ -129,6 +129,16 @@ const scoped_table = other_schema ++ ".widgets";
 /// into, so nothing in the suite could have said so.
 const session_table = "nilo_live_sessions_" ++ mode_suffix;
 
+/// Tables of the tests that read a Row's shape and its groups, each named
+/// for its mode like every table above, because the Debug and ReleaseSafe
+/// suites run at once against one database and would drop each other's.
+const unread_deals = "nilo_unread_deals_" ++ mode_suffix;
+const shape_customers = "nilo_shape_customers_" ++ mode_suffix;
+const shape_orders = "nilo_shape_orders_" ++ mode_suffix;
+const shape_lines = "nilo_shape_lines_" ++ mode_suffix;
+const group_customers = "nilo_group_customers_" ++ mode_suffix;
+const group_orders = "nilo_group_orders_" ++ mode_suffix;
+
 /// Created and dropped by `Live.open`, so a run leaves nothing behind and
 /// does not care what else is in the database.
 ///
@@ -6228,7 +6238,7 @@ test "a statement composed at run time fills a Row by position and runs unnamed"
 /// unread (item 102).
 const UnreadDeal = struct {
     pub const nilo_table = .{
-        .name = "nilo_unread_deals",
+        .name = unread_deals,
         .default = .{ .created_at = .now },
         .unread = .{ .created_at = types.Timestamp },
     };
@@ -6243,8 +6253,8 @@ test "a column the Row does not read is written, ordered, narrowed and checked o
 
     var run = nilo.Run.init(gpa);
     defer run.deinit();
-    _ = try stack.db.exec(&run, "DROP TABLE IF EXISTS nilo_unread_deals", .{});
-    _ = try stack.db.exec(&run, "CREATE TABLE nilo_unread_deals (id bigserial PRIMARY KEY, " ++
+    _ = try stack.db.exec(&run, "DROP TABLE IF EXISTS " ++ unread_deals, .{});
+    _ = try stack.db.exec(&run, "CREATE TABLE " ++ unread_deals ++ " (id bigserial PRIMARY KEY, " ++
         "title text NOT NULL, created_at timestamptz NOT NULL DEFAULT now())", .{});
 
     // Two written with a moment of their own, in 2001 and 2000, and one left
@@ -6265,13 +6275,13 @@ test "a column the Row does not read is written, ordered, narrowed and checked o
     // when the table has lost it.
     const arena = run.arena();
     var problems: std.ArrayList(schema.Problem) = .empty;
-    const columns = try stack.live.wire.columnsOf(arena, dialect.Postgres.introspect, null, "nilo_unread_deals");
+    const columns = try stack.live.wire.columnsOf(arena, dialect.Postgres.introspect, null, unread_deals);
     try testing.expectEqual(@as(usize, 0), try schema.compare(dialect.Postgres, UnreadDeal, columns, &problems, arena));
-    _ = try stack.db.exec(&run, "ALTER TABLE nilo_unread_deals DROP COLUMN created_at", .{});
-    const without = try stack.live.wire.columnsOf(arena, dialect.Postgres.introspect, null, "nilo_unread_deals");
+    _ = try stack.db.exec(&run, "ALTER TABLE " ++ unread_deals ++ " DROP COLUMN created_at", .{});
+    const without = try stack.live.wire.columnsOf(arena, dialect.Postgres.introspect, null, unread_deals);
     try testing.expectEqual(@as(usize, 1), try schema.compare(dialect.Postgres, UnreadDeal, without, &problems, arena));
     try testing.expectEqualStrings("created_at", problems.items[0].column);
-    _ = try stack.db.exec(&run, "DROP TABLE nilo_unread_deals", .{});
+    _ = try stack.db.exec(&run, "DROP TABLE " ++ unread_deals, .{});
 }
 
 // -- shaped Rows ---------------------------------------------------------
@@ -6282,14 +6292,14 @@ test "a column the Row does not read is written, ordered, narrowed and checked o
 // test reads as a `bool`.
 
 const ShapeCustomer = struct {
-    pub const nilo_table = .{ .name = "nilo_shape_customers" };
+    pub const nilo_table = .{ .name = shape_customers };
     id: i64,
     name: []const u8,
 };
 
 const ShapeOrder = struct {
     pub const nilo_table = .{
-        .name = "nilo_shape_orders",
+        .name = shape_orders,
         .references = .{ .customer_id = .{ ShapeCustomer, .id }, .referrer_id = .{ ShapeCustomer, .id } },
     };
     id: types.Uuid,
@@ -6300,7 +6310,7 @@ const ShapeOrder = struct {
 };
 
 const ShapeLine = struct {
-    pub const nilo_table = .{ .name = "nilo_shape_lines", .references = .{ .order_id = .{ ShapeOrder, .id } } };
+    pub const nilo_table = .{ .name = shape_lines, .references = .{ .order_id = .{ ShapeOrder, .id } } };
     id: i64,
     order_id: types.Uuid,
     sku: []const u8,
@@ -6463,19 +6473,19 @@ const ShapeOrderReferred = struct {
 };
 
 const shape_setup = [_][]const u8{
-    "DROP TABLE IF EXISTS nilo_shape_lines",
-    "DROP TABLE IF EXISTS nilo_shape_orders",
-    "DROP TABLE IF EXISTS nilo_shape_customers",
-    "CREATE TABLE nilo_shape_customers (id bigint PRIMARY KEY, name text NOT NULL)",
-    "CREATE TABLE nilo_shape_orders (id uuid PRIMARY KEY, customer_id bigint NOT NULL, " ++
+    "DROP TABLE IF EXISTS " ++ shape_lines,
+    "DROP TABLE IF EXISTS " ++ shape_orders,
+    "DROP TABLE IF EXISTS " ++ shape_customers,
+    "CREATE TABLE " ++ shape_customers ++ " (id bigint PRIMARY KEY, name text NOT NULL)",
+    "CREATE TABLE " ++ shape_orders ++ " (id uuid PRIMARY KEY, customer_id bigint NOT NULL, " ++
         "referrer_id bigint, total bigint NOT NULL, weight real NOT NULL)",
-    "CREATE TABLE nilo_shape_lines (id bigint PRIMARY KEY, order_id uuid NOT NULL, sku text NOT NULL)",
-    "INSERT INTO nilo_shape_customers VALUES (1, 'Acme'), (2, 'Borealis')",
-    "INSERT INTO nilo_shape_orders VALUES " ++
+    "CREATE TABLE " ++ shape_lines ++ " (id bigint PRIMARY KEY, order_id uuid NOT NULL, sku text NOT NULL)",
+    "INSERT INTO " ++ shape_customers ++ " VALUES (1, 'Acme'), (2, 'Borealis')",
+    "INSERT INTO " ++ shape_orders ++ " VALUES " ++
         "('00000000-0000-7000-8000-000000000001', 1, 2, 100, 1.5), " ++
         "('00000000-0000-7000-8000-000000000002', 1, NULL, 250, 2.5), " ++
         "('00000000-0000-7000-8000-000000000003', 2, 1, 40, 0.5)",
-    "INSERT INTO nilo_shape_lines VALUES " ++
+    "INSERT INTO " ++ shape_lines ++ " VALUES " ++
         "(2, '00000000-0000-7000-8000-000000000001', 'b'), (1, '00000000-0000-7000-8000-000000000001', 'a'), " ++
         "(3, '00000000-0000-7000-8000-000000000003', 'c')",
 };
@@ -6615,12 +6625,11 @@ test "a parent, its children and a sum come back from a real Postgres" {
     // Item 108: the same Row filled by a statement written by hand, one
     // field per column, held against it on its first run like any raw Row.
     const raw_flat = try stack.db.raw(ShapeOrderFlat, &run,
-        \\SELECT o.id, o.total, c.name AS customer_name, r.name AS referrer_name
-        \\FROM nilo_shape_orders o
-        \\JOIN nilo_shape_customers c ON c.id = o.customer_id
-        \\LEFT JOIN nilo_shape_customers r ON r.id = o.referrer_id
-        \\ORDER BY o.total DESC
-    , .{});
+        "SELECT o.id, o.total, c.name AS customer_name, r.name AS referrer_name" ++
+        " FROM " ++ shape_orders ++ " o" ++
+        " JOIN " ++ shape_customers ++ " c ON c.id = o.customer_id" ++
+        " LEFT JOIN " ++ shape_customers ++ " r ON r.id = o.referrer_id" ++
+        " ORDER BY o.total DESC", .{});
     try testing.expectEqual(@as(usize, 3), raw_flat.len);
     try testing.expect(raw_flat[0].referrer_name == null);
     try testing.expectEqualStrings("Borealis", raw_flat[1].referrer_name.?);
@@ -6666,7 +6675,7 @@ test "a parent, its children and a sum come back from a real Postgres" {
         .where = .{ .total = .{ .gt = @as(i64, 50) } },
         .order = .{ .total = .desc },
     });
-    try testing.expect(std.mem.indexOf(u8, plan, "nilo_shape_orders") != null);
+    try testing.expect(std.mem.indexOf(u8, plan, shape_orders) != null);
     try testing.expect(std.mem.indexOf(u8, plan, "Execution Time:") != null);
     try testing.expect(std.mem.indexOf(u8, plan, "\n") != null);
 
@@ -6674,14 +6683,14 @@ test "a parent, its children and a sum come back from a real Postgres" {
 }
 
 const GroupCustomer = struct {
-    pub const nilo_table = .{ .name = "nilo_group_customers" };
+    pub const nilo_table = .{ .name = group_customers };
     id: i64,
     name: []const u8,
 };
 
 const GroupOrder = struct {
     pub const nilo_table = .{
-        .name = "nilo_group_orders",
+        .name = group_orders,
         .references = .{ .customer_id = .{ GroupCustomer, .id } },
     };
     id: i64,
@@ -6706,12 +6715,12 @@ test "a grouped Row reading a name through a reference keeps two customers of on
     var run = nilo.Run.init(gpa);
     defer run.deinit();
     const group_setup = [_][]const u8{
-        "DROP TABLE IF EXISTS nilo_group_orders",
-        "DROP TABLE IF EXISTS nilo_group_customers",
-        "CREATE TABLE nilo_group_customers (id bigint PRIMARY KEY, name text NOT NULL)",
-        "CREATE TABLE nilo_group_orders (id bigint PRIMARY KEY, customer_id bigint NOT NULL, total bigint NOT NULL)",
-        "INSERT INTO nilo_group_customers VALUES (1, 'Ani'), (2, 'Ani'), (3, 'Budi')",
-        "INSERT INTO nilo_group_orders VALUES (1, 1, 100), (2, 1, 50), (3, 2, 7), (4, 3, 1)",
+        "DROP TABLE IF EXISTS " ++ group_orders,
+        "DROP TABLE IF EXISTS " ++ group_customers,
+        "CREATE TABLE " ++ group_customers ++ " (id bigint PRIMARY KEY, name text NOT NULL)",
+        "CREATE TABLE " ++ group_orders ++ " (id bigint PRIMARY KEY, customer_id bigint NOT NULL, total bigint NOT NULL)",
+        "INSERT INTO " ++ group_customers ++ " VALUES (1, 'Ani'), (2, 'Ani'), (3, 'Budi')",
+        "INSERT INTO " ++ group_orders ++ " VALUES (1, 1, 100), (2, 1, 50), (3, 2, 7), (4, 3, 1)",
     };
     for (group_setup) |text| _ = try stack.db.exec(&run, text, .{});
     defer for (group_setup[0..2]) |text| {

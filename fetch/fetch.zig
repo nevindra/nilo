@@ -362,6 +362,40 @@ pub const Client = struct {
         return self.sendJson(c, .PATCH, url, value, call);
     }
 
+    /// `post` with `fields` written as an `application/x-www-form-urlencoded`
+    /// body and that `content-type` said for you, unless `call.headers`
+    /// names one. What an OAuth token endpoint takes for the code exchange
+    /// and the client-credentials grant (RFC 6749 §4.1.3, §4.4.2). `fields`
+    /// is a struct under `withQuery`'s rules: an int, a bool, text, or an
+    /// optional of one, null left out, anything else a Refusal naming the
+    /// field ([ADR 061](../docs/adr/061-a-fitting-borrows-the-loop.md)).
+    pub fn postForm(self: *Client, c: anytype, url: []const u8, fields: anytype, call: Call) Error!Response {
+        comptime core.checkScope(@TypeOf(c), "fetch.postForm");
+        comptime checkForm(@TypeOf(fields), "fetch.postForm");
+        return self.sendForm(c, .POST, url, fields, call);
+    }
+
+    pub fn putForm(self: *Client, c: anytype, url: []const u8, fields: anytype, call: Call) Error!Response {
+        comptime core.checkScope(@TypeOf(c), "fetch.putForm");
+        comptime checkForm(@TypeOf(fields), "fetch.putForm");
+        return self.sendForm(c, .PUT, url, fields, call);
+    }
+
+    /// The whole of what the two above do, for a method they do not name.
+    pub fn sendForm(
+        self: *Client,
+        c: anytype,
+        method: std.http.Method,
+        url: []const u8,
+        fields: anytype,
+        call: Call,
+    ) Error!Response {
+        comptime core.checkScope(@TypeOf(c), "fetch.sendForm");
+        comptime checkForm(@TypeOf(fields), "fetch.sendForm");
+        const bytes = try formBody(c, fields);
+        return self.sendAs(c, method, url, bytes, form_content_type, call, .{});
+    }
+
     /// The whole of what the three above do, for a method they do not name
     /// — a DELETE with `{ids:[…]}` in it (ADR 174).
     pub fn sendJson(
@@ -2050,11 +2084,68 @@ pub fn withQuery(c: anytype, base: []const u8, params: anytype) error{OutOfMemor
     return w.buffered();
 }
 
+/// The `content-type` of a form body.
+pub const form_content_type = "application/x-www-form-urlencoded";
+
+/// `fields` as an `application/x-www-form-urlencoded` body in the Scope's
+/// memory: `grant_type=client_credentials&scope=a+b`, **one arena allocation,
+/// sized exactly**, by the walk `withQuery` uses. The field types and the
+/// Refusals are `withQuery`'s. The one difference is the space: `+` here,
+/// where a query string says `%20`, and a literal `+` is `%2B` either way.
+/// For a body to hand to `post` with a `content-type` of your own;
+/// `postForm` is this and the header said for you.
+pub fn formBody(c: anytype, fields: anytype) error{OutOfMemory}![]const u8 {
+    comptime core.checkScope(@TypeOf(c), "fetch.formBody");
+    comptime checkForm(@TypeOf(fields), "fetch.formBody");
+    const out = try c.arena().alloc(u8, paramsLen(fields, null, &.{}, .form));
+    var w: std.Io.Writer = .fixed(out);
+    paramsWrite(&w, fields, null, &.{}, .form);
+    std.debug.assert(w.buffered().len == out.len);
+    return w.buffered();
+}
+
+/// The value of an `authorization` header for HTTP Basic client
+/// authentication, the OAuth way: `Basic ` and the base64 of the form-encoded
+/// id, a colon, and the form-encoded secret (RFC 6749 §2.3.1). Plain Basic
+/// (RFC 7617) joins the two raw, and a secret holding a `+`, a `:` or a
+/// space then fails at the provider and nowhere else. Pass it as
+/// `.headers = &.{.{ .name = "authorization", .value = value }}`.
+///
+/// One arena allocation; the joined text sits at the tail of it while it is
+/// encoded into the front.
+pub fn basicAuth(c: anytype, id: []const u8, secret: []const u8) error{OutOfMemory}![]const u8 {
+    comptime core.checkScope(@TypeOf(c), "fetch.basicAuth");
+    const prefix = "Basic ";
+    const joined = textLen(id, .form) + 1 + textLen(secret, .form);
+    const encoder = std.base64.standard.Encoder;
+    const b64 = encoder.calcSize(joined);
+    const out = try c.arena().alloc(u8, prefix.len + b64 + joined);
+    const tail = out[prefix.len + b64 ..];
+    var w: std.Io.Writer = .fixed(tail);
+    textWrite(&w, id, .form) catch unreachable; // measured above
+    w.writeByte(':') catch unreachable;
+    textWrite(&w, secret, .form) catch unreachable;
+    std.debug.assert(w.buffered().len == joined);
+    @memcpy(out[0..prefix.len], prefix);
+    _ = encoder.encode(out[prefix.len..][0..b64], tail);
+    return out[0 .. prefix.len + b64];
+}
+
 /// The Refusal for params that are not a struct with one field per param,
 /// and for any field no query string can carry. `skip` names the fields
 /// that are not the query's — a target's path segments — so they are held
 /// to a segment's rules instead (ADR 061).
 pub fn checkQuery(comptime P: type, comptime called: []const u8, comptime skip: []const []const u8) void {
+    checkParams(P, called, skip, "query");
+}
+
+/// `checkQuery` for a form body: the same struct, the same field types, and
+/// a message that says "form" because that is what the caller wrote.
+pub fn checkForm(comptime P: type, comptime called: []const u8) void {
+    checkParams(P, called, &.{}, "form");
+}
+
+fn checkParams(comptime P: type, comptime called: []const u8, comptime skip: []const []const u8, comptime kind: []const u8) void {
     const info = @typeInfo(P);
     // A walk over every param, each asked whether it is skipped: a query of
     // 400 params stopped at "evaluation exceeded 1000 backwards branches" at
@@ -2072,9 +2163,9 @@ pub fn checkQuery(comptime P: type, comptime called: []const u8, comptime skip: 
         else => false,
     };
     if (!named) @compileError("nilo: " ++ called ++ " was handed a " ++ @typeName(P) ++
-        " for its params, and a query is a struct with one field per param.");
+        " for its params, and a " ++ kind ++ " is a struct with one field per param.");
     inline for (info.@"struct".field_names, info.@"struct".field_types) |name, FT| {
-        if (comptime !among(skip, name)) comptime checkQueryField(name, FT);
+        if (comptime !among(skip, name)) comptime checkParamField(name, FT, kind);
     }
 }
 
@@ -2092,13 +2183,25 @@ pub fn querySeparator(base: []const u8) ?u8 {
 /// before the first of them. The measuring half of `withQuery`, shared with
 /// a target's URL so that one is also one allocation sized exactly.
 pub fn queryLen(params: anytype, first: ?u8, comptime skip: []const []const u8) usize {
+    return paramsLen(params, first, skip, .query);
+}
+
+/// How `params` are spelled: a query string writes a space `%20`, a form
+/// body writes it `+` and a literal `+` `%2B` (the
+/// `application/x-www-form-urlencoded` of RFC 6749 §4.1.3). Everything else
+/// is the same encoding, which is why the two share one walk
+/// ([ADR 061](../docs/adr/061-a-fitting-borrows-the-loop.md)).
+pub const Style = enum { query, form };
+
+/// `queryLen` in either style.
+pub fn paramsLen(params: anytype, first: ?u8, comptime skip: []const []const u8, comptime style: Style) usize {
     var len: usize = 0;
     var written: usize = 0;
     inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |name| {
         if (comptime among(skip, name)) continue;
         if (queryValue(@field(params, name))) |v| {
             if (written > 0 or first != null) len += 1;
-            len += core.percent.encodedLen(name, .unreserved) + 1 + v.encodedLen();
+            len += textLen(name, style) + 1 + v.lenAs(style);
             written += 1;
         }
     }
@@ -2107,15 +2210,20 @@ pub fn queryLen(params: anytype, first: ?u8, comptime skip: []const []const u8) 
 
 /// The writing half of `queryLen`, into a writer already sized by it.
 pub fn queryWrite(w: *std.Io.Writer, params: anytype, first: ?u8, comptime skip: []const []const u8) void {
+    paramsWrite(w, params, first, skip, .query);
+}
+
+/// `queryWrite` in either style.
+pub fn paramsWrite(w: *std.Io.Writer, params: anytype, first: ?u8, comptime skip: []const []const u8, comptime style: Style) void {
     var sep = first;
     inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |name| {
         if (comptime among(skip, name)) continue;
         if (queryValue(@field(params, name))) |v| {
             if (sep) |ch| w.writeByte(ch) catch unreachable;
             sep = '&';
-            core.percent.encodeWrite(w, name, .unreserved) catch unreachable;
+            textWrite(w, name, style) catch unreachable;
             w.writeByte('=') catch unreachable;
-            v.write(w) catch unreachable;
+            v.writeAs(w, style) catch unreachable;
         }
     }
 }
@@ -2137,21 +2245,50 @@ pub const QueryValue = union(enum) {
     text: []const u8,
 
     pub fn encodedLen(self: QueryValue) usize {
-        return switch (self) {
-            .number => |n| n.len,
-            .word => |s| s.len,
-            .text => |s| core.percent.encodedLen(s, .unreserved),
-        };
+        return self.lenAs(.query);
     }
 
     pub fn write(self: QueryValue, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        return self.writeAs(w, .query);
+    }
+
+    pub fn lenAs(self: QueryValue, comptime style: Style) usize {
+        return switch (self) {
+            .number => |n| n.len,
+            .word => |s| s.len,
+            .text => |s| textLen(s, style),
+        };
+    }
+
+    pub fn writeAs(self: QueryValue, w: *std.Io.Writer, comptime style: Style) std.Io.Writer.Error!void {
         switch (self) {
             .number => |n| try w.writeAll(n.buf[0..n.len]),
             .word => |s| try w.writeAll(s),
-            .text => |s| try core.percent.encodeWrite(w, s, .unreserved),
+            .text => |s| try textWrite(w, s, style),
         }
     }
 };
+
+/// `raw` percent-encoded the way `style` spells it. The form style is the
+/// query style with each `%20` written `+`: `core.percent` has no `+` to give
+/// on purpose (its header says why, for signatures), so the one difference is
+/// made here, where the only caller that wants it is.
+fn textLen(raw: []const u8, comptime style: Style) usize {
+    const n = core.percent.encodedLen(raw, .unreserved);
+    if (style == .query) return n;
+    return n - 2 * std.mem.count(u8, raw, " ");
+}
+
+fn textWrite(w: *std.Io.Writer, raw: []const u8, comptime style: Style) std.Io.Writer.Error!void {
+    if (style == .query) return core.percent.encodeWrite(w, raw, .unreserved);
+    var rest = raw;
+    while (std.mem.indexOfScalar(u8, rest, ' ')) |at| {
+        try core.percent.encodeWrite(w, rest[0..at], .unreserved);
+        try w.writeByte('+');
+        rest = rest[at + 1 ..];
+    }
+    try core.percent.encodeWrite(w, rest, .unreserved);
+}
 
 /// The value of one field of a query struct as a `QueryValue`, or null for
 /// an optional that is null, which is the param left out.
@@ -2194,13 +2331,17 @@ pub fn isText(comptime T: type) bool {
 /// by the field, because the struct is anonymous and the field is what the
 /// caller wrote.
 pub fn checkQueryField(comptime field: []const u8, comptime T: type) void {
+    checkParamField(field, T, "query");
+}
+
+fn checkParamField(comptime field: []const u8, comptime T: type, comptime kind: []const u8) void {
     const ok = switch (@typeInfo(T)) {
         .int, .comptime_int, .bool, .null => true,
-        .optional => |o| return checkQueryField(field, o.child),
+        .optional => |o| return checkParamField(field, o.child, kind),
         else => isText(T),
     };
-    if (!ok) @compileError("nilo: the query field `" ++ field ++ "` is a " ++ @typeName(T) ++
-        ", and a query value is an int, a bool, text, or an optional of one.");
+    if (!ok) @compileError("nilo: the " ++ kind ++ " field `" ++ field ++ "` is a " ++ @typeName(T) ++
+        ", and a " ++ kind ++ " value is an int, a bool, text, or an optional of one.");
 }
 
 /// The Refusal for text handed to a JSON call. `std.json` would write it
@@ -2481,6 +2622,52 @@ test "a hop to another place drops credentials and a target's own headers, and n
     defer std.testing.allocator.free(bodiless);
     try std.testing.expectEqual(@as(usize, 6), bodiless.len);
     try std.testing.expectEqualStrings("Authorization", bodiless[0].name);
+}
+
+// ---- the ordinary call: a form body (ADR 061) ----
+
+test "a form body writes a space as plus and a plus, an ampersand and an equals sign as data" {
+    var run: core.Run = .init(std.testing.allocator);
+    defer run.deinit();
+
+    // The same fields `withQuery` takes, and the one difference between the
+    // two is the space: `%20` on a URL, `+` in a body.
+    const body = try formBody(&run, .{ .grant_type = "client_credentials", .scope = "read write", .n = @as(u8, 7), .on = true });
+    try std.testing.expectEqualStrings("grant_type=client_credentials&scope=read+write&n=7&on=true", body);
+
+    const awkward = try formBody(&run, .{ .v = "a b+c&d=e/f", .@"a b" = "x" });
+    try std.testing.expectEqualStrings("v=a+b%2Bc%26d%3De%2Ff&a+b=x", awkward);
+    const as_query = try withQuery(&run, "", .{ .v = "a b+c&d=e/f" });
+    try std.testing.expectEqualStrings("?v=a%20b%2Bc%26d%3De%2Ff", as_query);
+
+    // A null is left out, nothing is an empty body, and a form body has no
+    // leading separator.
+    const none: ?[]const u8 = null;
+    try std.testing.expectEqualStrings("a=1", try formBody(&run, .{ .skipped = none, .a = 1 }));
+    try std.testing.expectEqualStrings("", try formBody(&run, .{}));
+}
+
+test "a form body is written into exactly the bytes it was measured at" {
+    var run: core.Run = .init(std.testing.allocator);
+    defer run.deinit();
+    // The assert inside `formBody` holds the two walks together; spaces are
+    // where the measure and the write could part, so a value of nothing but.
+    try std.testing.expectEqualStrings("a=+++&b=%2B+", try formBody(&run, .{ .a = "   ", .b = "+ " }));
+}
+
+test "basic auth form-encodes the id and the secret before it joins and encodes them" {
+    var run: core.Run = .init(std.testing.allocator);
+    defer run.deinit();
+
+    // Plain text goes as RFC 7617 would write it:
+    // base64("client:secret") is Y2xpZW50OnNlY3JldA==.
+    try std.testing.expectEqualStrings("Basic Y2xpZW50OnNlY3JldA==", try basicAuth(&run, "client", "secret"));
+
+    // id `my id` and secret `p+q:r s` are `my+id` and `p%2Bq%3Ar+s`, and
+    // base64("my+id:p%2Bq%3Ar+s") is bXkraWQ6cCUyQnElM0FyK3M=. Joined raw
+    // they would be "my id:p+q:r s", whose first colon is no longer the one
+    // between them as far as the provider can tell.
+    try std.testing.expectEqualStrings("Basic bXkraWQ6cCUyQnElM0FyK3M=", try basicAuth(&run, "my id", "p+q:r s"));
 }
 
 test {
