@@ -612,9 +612,9 @@ pub const Options = struct {
     /// it, so that a client that keeps a connection for ever is moved off the
     /// instance and the executor it was dealt to
     /// ([ADR 275](../docs/adr/275-a-connection-is-ended-after-a-number-of-requests.md)).
-    /// The answer to the last request carries `Connection: close` on
-    /// HTTP/1.1, and an HTTP/2 connection is sent a GOAWAY naming the last
-    /// stream that will be answered. 0 turns it off.
+    /// The answer to the last request carries `Connection: close`. It counts
+    /// HTTP/1.1 connections only; `max_requests_per_h2_connection` is the
+    /// HTTP/2 one, and is off. 0 turns it off.
     ///
     /// **The number each connection gets is up to a tenth below this one**, so
     /// that a hundred connections opened together do not all end on the same
@@ -627,6 +627,21 @@ pub const Options = struct {
     /// actix have nothing. A client reconnects once in a thousand requests,
     /// which is under 0.1% of a loopback request's cost.
     max_requests_per_connection: u32 = 1000,
+
+    /// The same cap for an HTTP/2 connection (`-Dhttp2`): after this many
+    /// calls, less up to a tenth, the connection is sent a GOAWAY with
+    /// `NO_ERROR` naming the last call it will answer. 0, the default, means
+    /// never.
+    ///
+    /// **It is off because a GOAWAY is where clients differ.** Every client
+    /// reopens after `Connection: close`; a browser, Go's and gRPC's
+    /// transports reopen after a GOAWAY, and h2load 1.59, the load generator
+    /// HTTP/2 benchmarks are run with, does not: at 1,000 it ended 16
+    /// connections after 15,392 of 200,000 requests and counted the rest
+    /// failed ([ADR 275](../docs/adr/275-a-connection-is-ended-after-a-number-of-requests.md)).
+    /// A server whose clients are browsers or gRPC channels behind a
+    /// balancer sets it, nginx's 1,000 being the number to start from.
+    max_requests_per_h2_connection: u32 = 0,
 
     /// The most requests this process answers at once. 0, the default,
     /// means no limit.

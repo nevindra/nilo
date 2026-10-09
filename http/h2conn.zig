@@ -118,8 +118,9 @@ pub const Host = struct {
     gpa: std.mem.Allocator,
     stop: *const bulkhead.Stop,
     max_body: usize,
-    /// `max_requests_per_connection` (ADR 275): the calls a connection is
-    /// answered before it is sent a GOAWAY, 0 for no cap.
+    /// `max_requests_per_h2_connection` (ADR 275): the calls a connection is
+    /// answered before it is sent a GOAWAY, 0 for no cap. Not the HTTP/1.1
+    /// cap, which is on by default where this one is off.
     max_requests: u32 = 0,
     /// The most a route may raise its own limit to, and `max_body` where none
     /// does: what one connection's messages are bounded by together
@@ -6709,7 +6710,7 @@ test "a connection that has had its allowance of calls is sent a GOAWAY naming t
     var app = try testApp();
     defer app.deinit();
     // Under ten there is no spread, so the third call is the last.
-    app.max_requests_per_connection = 3;
+    app.max_requests_per_h2_connection = 3;
     var client = try TestClient.init();
     defer client.deinit();
     for ([_]u31{ 1, 3, 5, 7, 9 }) |id| try client.call(id, "/test.Echo/Say", "hello");
@@ -6736,6 +6737,21 @@ test "a connection with no cap is never sent a GOAWAY for the calls it makes" {
     var got = try converse(&app, &client);
     defer got.deinit();
     try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
+}
+
+test "the HTTP/1.1 cap on requests does not send an HTTP/2 connection a GOAWAY" {
+    var app = try testApp();
+    defer app.deinit();
+    // On by default for HTTP/1.1, and a load generator that takes a GOAWAY as
+    // the end of its run must not meet it on HTTP/2 (ADR 275).
+    app.max_requests_per_connection = 3;
+    var client = try TestClient.init();
+    defer client.deinit();
+    for ([_]u31{ 1, 3, 5, 7, 9 }) |id| try client.call(id, "/test.Echo/Say", "hello");
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(@as(?h2.ErrorCode, null), got.goaway());
+    for ([_]u31{ 1, 3, 5, 7, 9 }) |id| try testing.expectEqualStrings("hello", try got.message(id));
 }
 
 test "event streams count against the cap of streams like any open stream, and the one past it is refused" {

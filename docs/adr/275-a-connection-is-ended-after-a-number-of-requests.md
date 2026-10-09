@@ -18,7 +18,9 @@ Across instances, an instance added behind a balancer that balances connections 
 
 ## Decision
 
-**`Options.max_requests_per_connection`, default 1,000, 0 for never.** The answer to a connection's last request carries `Connection: close` on HTTP/1.1, as if the client had asked for it, and the connection is closed after it. On HTTP/2 (`-Dhttp2`) the connection is sent a GOAWAY with `NO_ERROR` naming the last call it will answer; the calls behind it are refused with `REFUSED_STREAM`, which a client may send again on a new connection (RFC 9113 section 6.8), the path a stopping server already takes.
+**`Options.max_requests_per_connection`, default 1,000, 0 for never, counts HTTP/1.1 connections.** The answer to a connection's last request carries `Connection: close`, as if the client had asked for it, and the connection is closed after it.
+
+**`Options.max_requests_per_h2_connection` is the same cap for HTTP/2 (`-Dhttp2`), and is off (0) by default.** Set, the connection is sent a GOAWAY with `NO_ERROR` naming the last call it will answer; the calls behind it are refused with `REFUSED_STREAM`, which a client may send again on a new connection (RFC 9113 section 6.8), the path a stopping server already takes. It is off because a GOAWAY is where clients differ and `Connection: close` is not: h2load 1.59 (nghttp2), the load generator HTTP/2 benchmarks run with, does not reopen after a GOAWAY. Against the hello example with one cap for both protocols at 1,000, `h2load -c 16 -m 32 -n 200000` started 15,392 requests and counted 184,624 failed; `h2load --h1` and wrk against the same server finished every request ([`http.md`](../../bench/result/http.md#a-goaway-ends-an-h2load-run-and-connection-close-does-not)). A browser, Go's transport and a gRPC channel do reopen, so a server whose HTTP/2 clients are those sets it.
 
 **The number each connection gets is up to a tenth below the option**, drawn per connection from a counter put through a mixer and the clock (`bulkhead.connectionBudget`), so that a pool of connections opened together does not end on the same request and come back together. Below ten there is no spread.
 
@@ -38,8 +40,10 @@ Across instances, an instance added behind a balancer that balances connections 
 
 **Redealing the connection to another executor without closing it.** Pinned scheduling (ADR 199) is what makes the executor's thread a property the handler may rely on; moving a live connection undoes it, and says nothing about the instance.
 
+**One cap for both protocols, on by default.** Its first version had it, and a benchmark of the default build through h2load lost 92% of its requests: the cap reads as a broken server to the person measuring it, on the protocol where the clients that matter (browsers, gRPC) are the ones that already reopen. nginx does send a GOAWAY at 1,000 on HTTP/2, and h2load users raise `keepalive_requests` to measure it; nilo's default is what somebody trying it first meets.
+
 **A first GOAWAY with the maximum stream id, then a second.** The polite two-step avoids refusing a call in flight. The stopping path does not take it, a refused call is safe to send again, and the cap does not need a stricter promise than the stop does.
 
 ## Consequences
 
-Every client now sees a connection end once in about a thousand requests: a client that does not reconnect on `Connection: close` or a GOAWAY, or a proxy that pipelines, has a setting to turn off (0). `Options` gains a field; nothing else a user wrote changes. Quiet connections still stay where they were dealt, which is the one thing left over from the todo item this closes, and an age cap is the answer if it matters.
+Every HTTP/1.1 client now sees a connection end once in about a thousand requests: a client that does not reconnect on `Connection: close`, or a proxy that pipelines, has a setting to turn off (0). An HTTP/2 connection is not ended unless `max_requests_per_h2_connection` is set, so the imbalance this closes stays open on HTTP/2 by default. `Options` gains a field; nothing else a user wrote changes. Quiet connections still stay where they were dealt, which is the one thing left over from the todo item this closes, and an age cap is the answer if it matters.

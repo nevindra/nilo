@@ -4523,3 +4523,17 @@ Under `.work_stealing` zio refuses `spawnInto(.local)`, and the engine's fallbac
 Over TLS nilo is already ahead. Cleartext, it spends twice the CPU a request; JSON, 2.3 times; static, 4.8 times, because the entry serves `/data/static` with `.reload` (an open, a stat and a read per request, and no compressed form) since the board's rule is that a cache must follow the disk, and nilo's held files do not.
 
 **What it decided.** The override leaves the entry and the entry sets the cap to 0 until the cap's HTTP/2 behaviour is settled. Three pieces of work follow, each measured against this table: a held static file that follows the disk, a request on HTTP/2 that does not cost twice the leader's, and JSON. Projected onto the board by these ratios, nilo would sit about seventh in the framework league's HTTP/2 composite; third needs static near swerver's, baseline-h2c at about 75% of its, and json-h2c at about two thirds.
+
+## A GOAWAY ends an h2load run, and `Connection: close` does not
+
+**What was run.** `a94221f`, 2026-10-09, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0. `zig build examples -Dhttp2 -Doptimize=ReleaseFast`, `example-hello` on 127.0.0.1:8787 (16 threads, the logger on), with one cap for both protocols at its default of 1,000 as ADR 275 first shipped it. The board's load generators from their images, `--network host`, not pinned: `h2load` (nghttp2 1.59.0) and `wrk`.
+
+| client | command | requests started | succeeded | failed |
+|---|---|---|---|---|
+| h2load, HTTP/2 | `-c 16 -m 32 -t 4 -n 200000` | 15,392 | 15,376 | 184,624 |
+| h2load, HTTP/1.1 | `--h1 -c 16 -t 4 -n 100000` | 100,000 | 100,000 | 0 |
+| wrk, HTTP/1.1 | `-c 16 -t 4 -d 3s` | 655,859 | 655,859 | 0 |
+
+h2load opens its connections once: each one took its GOAWAY after 900 to 1,000 calls (16 connections, 15,392 started) and every request it had left was counted failed. After `Connection: close` both tools open another connection. The arena rig showed the same first ([the section above](#the-arenas-http2-profiles-work-stealing-the-request-cap-and-where-nilo-stands-against-the-framework-leagues-leader): 195k req/s, 92,729 errored).
+
+**What it moved.** ADR 275's cap counts HTTP/1.1 only, and the HTTP/2 one is its own option, `max_requests_per_h2_connection`, off by default. Not a throughput figure: the logger was on and nothing was pinned, and the question was only whether the run survives.

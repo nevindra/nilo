@@ -245,6 +245,9 @@ pub const App = struct {
     /// that an App a test drives directly keeps connections as it always
     /// did; a test that wants the cap sets the field (ADR 275).
     max_requests_per_connection: u32 = 0,
+    /// From `listen(.{ .max_requests_per_h2_connection = … })`: the same cap
+    /// for an HTTP/2 connection, sent as a GOAWAY; 0 for never (ADR 275).
+    max_requests_per_h2_connection: u32 = 0,
     /// The key session cookies are sealed with, from
     /// `listen(.{ .session_secret = … })` and checked there. Null for an App
     /// with no sessions, and for one a test drives directly — a test that
@@ -1426,6 +1429,7 @@ pub const App = struct {
         // request, which is why it is a field of its own (ADR 075).
         self.arena_keep = options_.arena_keep;
         self.max_requests_per_connection = options_.max_requests_per_connection;
+        self.max_requests_per_h2_connection = options_.max_requests_per_h2_connection;
         // Not on the App, because there is one memory controller per process
         // rather than one per App: two Apps hashing eight each would be
         // sixteen, which is the number the measurement in ADR 044 says not
@@ -1848,7 +1852,7 @@ pub const App = struct {
             .gpa = self.gpa,
             .stop = &self.stop,
             .max_body = self.limits.max_body,
-            .max_requests = self.max_requests_per_connection,
+            .max_requests = self.max_requests_per_h2_connection,
             .ceiling = self.grpcBodyCeiling(),
             .body_limit = Adapter.bodyLimit,
             .routes = Adapter.routes,
