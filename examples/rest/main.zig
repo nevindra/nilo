@@ -10,6 +10,7 @@
 //! curl localhost:8787/users/1
 //! curl localhost:8787/users/999                 # 404, because the handler returns ?User
 //! curl -i -X POST localhost:8787/users -d '{"name":"wati","email":"wati@example.dev"}'
+//! curl -i -X POST localhost:8787/users -d '{"name":"","email":"wati"}'   # 400 naming the field
 //! curl -X PUT localhost:8787/users/1 -d '{"name":"wati","email":"w@example.dev"}'
 //! curl -X PATCH localhost:8787/users/1 -d '{"nickname":"wat"}'   # set it
 //! curl -X PATCH localhost:8787/users/1 -d '{"nickname":null}'    # clear it
@@ -190,9 +191,13 @@ fn getUser(store: *Store, id: u32) !?User {
     return store.find(id);
 }
 
+/// The shape of each field is its type: `Text` is a length the request is
+/// refused outside of, `Email` is an address, and the API description says
+/// both (`minLength`, `maxLength`, `format: email`). Nothing here is checked
+/// by hand, and a body that misses either never reaches the handler.
 const NewUser = struct {
-    name: nilo.Str,
-    email: nilo.Str,
+    name: nilo.Text(.{ .min = 1, .max = 80 }),
+    email: nilo.Email,
 };
 
 /// A struct argument is the request body, parsed from JSON. `Status(201, T)`
@@ -201,8 +206,6 @@ const NewUser = struct {
 /// instead of writing `default`. A `Location` on a 201 is the reason both
 /// halves are wanted, and neither costs a drop down to `*Ctx`.
 fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !nilo.Status(201, User) {
-    try checkUser(incoming);
-
     const created = try store.add(incoming.name.view(), incoming.email.view());
     return .{
         // `.of` copies the list into the response while it is still alive:
@@ -219,20 +222,8 @@ fn createUser(store: *Store, arena: std.mem.Allocator, incoming: NewUser) !nilo.
     };
 }
 
-/// The rules the types cannot state. A `fail` function is right here and
-/// stays invisible to the description — which is the honest limit of reading
-/// a contract off a signature, and why the description promises only what
-/// the signature settles.
-fn checkUser(incoming: NewUser) !void {
-    if (incoming.name.len() == 0) return fail.unprocessable("name must not be empty", .{});
-    if (std.mem.indexOfScalar(u8, incoming.email.view(), '@') == null) {
-        return fail.unprocessable("\"{s}\" is not an email address", .{incoming.email.view()});
-    }
-}
-
 /// PUT replaces the whole thing, so the body is the whole thing.
 fn replaceUser(store: *Store, id: u32, incoming: NewUser) !?User {
-    try checkUser(incoming);
     return store.write(id, incoming.name.view(), incoming.email.view(), null);
 }
 
@@ -241,8 +232,8 @@ fn replaceUser(store: *Store, id: u32, incoming: NewUser) !?User {
 /// identical, so "leave it alone" and "clear it" cannot be told apart.
 /// `Patch(T)` keeps all three answers.
 const EditUser = struct {
-    name: nilo.Patch(nilo.Str) = .absent,
-    email: nilo.Patch(nilo.Str) = .absent,
+    name: nilo.Patch(nilo.Text(.{ .min = 1, .max = 80 })) = .absent,
+    email: nilo.Patch(nilo.Email) = .absent,
     nickname: nilo.Patch(nilo.Str) = .absent,
 };
 
@@ -396,7 +387,7 @@ test "editUser tells a field left out from one sent as null" {
     _ = try store.write(wati.id, "wati", "wati@example.dev", "wat");
 
     // Not mentioned: left alone. This is the case `?Str` gets wrong.
-    const kept = try editUser(&store, wati.id, .{ .email = .{ .value = .static("new@example.dev") } });
+    const kept = try editUser(&store, wati.id, .{ .email = .{ .value = .of("new@example.dev") } });
     try testing.expectEqualStrings("wat", kept.?.nickname.?);
     try testing.expectEqualStrings("new@example.dev", kept.?.email);
 
@@ -417,7 +408,17 @@ test "deleteUser answers an empty 204, and a 404 the second time" {
     try testing.expectError(error.Failed, deleteUser(&store, wati.id));
 }
 
-test "createUser refuses a body that does not make sense" {
+test "a body that does not make sense is refused by its types, before createUser" {
+    // `fail.unprocessable` is for a rule the types cannot state. These two
+    // are stated, so the request never reaches the handler: the reader of
+    // `NewUser` asks each field's type, and a null from it is the 400.
+    try testing.expect(@FieldType(NewUser, "name").nilo_parse("") == null);
+    try testing.expect(@FieldType(NewUser, "name").nilo_parse("wati") != null);
+    try testing.expect(nilo.Email.nilo_parse("not-an-email") == null);
+    try testing.expect(nilo.Email.nilo_parse("wati@example.dev") != null);
+}
+
+test "createUser answers a 201 with a Location" {
     var store = Store{ .gpa = testing.allocator };
     defer store.deinit();
 
@@ -428,18 +429,9 @@ test "createUser refuses a body that does not make sense" {
     defer arena.deinit();
     const scratch = arena.allocator();
 
-    try testing.expectError(error.Failed, createUser(&store, scratch, .{
-        .name = .static(""),
-        .email = .static("wati@example.dev"),
-    }));
-    try testing.expectError(error.Failed, createUser(&store, scratch, .{
-        .name = .static("wati"),
-        .email = .static("not-an-email"),
-    }));
-
     const created = try createUser(&store, scratch, .{
-        .name = .static("wati"),
-        .email = .static("wati@example.dev"),
+        .name = .of("wati"),
+        .email = .of("wati@example.dev"),
     });
     // The 201 is in the return type, so there is nothing to assert about it
     // here — asking for `Status(201, User)` is asking for a 201.

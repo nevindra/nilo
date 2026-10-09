@@ -110,11 +110,17 @@ const Customer = struct {
     email: []const u8,
 };
 
+/// What the types can say, they say: a code is 1 to 40 characters, a name is
+/// 1 to 120, and an email is an address. The document carries `minLength`,
+/// `maxLength` and `format: email` for each, and a body outside them is a
+/// 400 that names the field before this handler runs.
 const NewCustomer = struct {
-    code: Str,
-    name: Str,
-    email: Str,
+    code: CustomerCode,
+    name: nilo.Text(.{ .min = 1, .max = 120 }),
+    email: nilo.Email,
 };
+
+const CustomerCode = nilo.Text(.{ .min = 1, .max = 40 });
 
 const Line = struct {
     no: u16,
@@ -271,20 +277,19 @@ const Orders = struct {
         errdefer row.memory.deinit();
 
         const mine = row.memory.allocator();
-        const lines = try mine.alloc(Line, incoming.lines.len);
+        const lines = try mine.alloc(Line, incoming.lines.len());
         var total: i64 = 0;
-        for (incoming.lines, lines, 1..) |asked, *line, no| {
+        for (incoming.lines.value, lines, 1..) |asked, *line, no| {
             const item = catalog.find(asked.sku.view()) orelse
                 return fail.unprocessable("no such sku: {s}", .{asked.sku.view()});
-            if (asked.quantity == 0) return fail.unprocessable("a line wants at least one of something", .{});
             line.* = .{
                 .no = @intCast(no),
                 .sku = try mine.dupe(u8, item.sku),
                 .name = try mine.dupe(u8, item.name),
-                .quantity = asked.quantity,
+                .quantity = asked.quantity.value,
                 .each_cents = item.each_cents,
             };
-            total += item.each_cents * asked.quantity;
+            total += item.each_cents * asked.quantity.value;
         }
 
         try self.lock.lock();
@@ -328,11 +333,11 @@ const Orders = struct {
             .no = nextLineNumber(row.order.lines),
             .sku = try mine.dupe(u8, item.sku),
             .name = try mine.dupe(u8, item.name),
-            .quantity = asked.quantity,
+            .quantity = asked.quantity.value,
             .each_cents = item.each_cents,
         };
         row.order.lines = grown;
-        row.order.total_cents += item.each_cents * asked.quantity;
+        row.order.total_cents += item.each_cents * asked.quantity.value;
         return try copyOut(into, row.order);
     }
 
@@ -599,7 +604,9 @@ fn needs(comptime wanted: Scope) nilo.Middleware {
 
 const NewLine = struct {
     sku: Str,
-    quantity: u16,
+    /// 1 to 1000 is the type: `0` is a 400 naming the field and the range,
+    /// where it used to be a check at the top of the handler.
+    quantity: nilo.Within(1, 1000),
 };
 
 /// The body that makes the point: a struct inside it, another struct inside
@@ -609,7 +616,10 @@ const NewLine = struct {
 const NewOrder = struct {
     customer: NewCustomer,
     ship_to: NewAddress,
-    lines: []const NewLine,
+    /// An order needs a line, and a body with a thousand is not an order.
+    /// The count is the type's, so the document says `minItems` and
+    /// `maxItems` and an empty list is refused before the handler runs.
+    lines: nilo.Many(NewLine, .{ .min = 1, .max = 100 }),
     priority: Priority = .normal,
     currency: Currency = .idr,
     note: ?Str = null,
@@ -680,8 +690,6 @@ fn placeOrder(
     arena: Allocator,
     incoming: NewOrder,
 ) !nilo.Status(201, Order) {
-    if (incoming.lines.len == 0) return fail.unprocessable("an order needs at least one line", .{});
-
     const placed = try orders.place(arena, catalog, incoming);
     return .{
         .headers = .of(&.{.{
@@ -700,8 +708,8 @@ fn editOrder(orders: *Orders, arena: Allocator, id: u32, incoming: EditOrder) !?
     return orders.edit(arena, id, incoming);
 }
 
-/// A resource inside a resource. The path param is still positional and
-/// still typed; there is just one of them.
+/// A resource inside a resource. The route has one path param, so it is still
+/// a bare typed argument; `dropLine` below has two and reads them by name.
 fn addLine(
     orders: *Orders,
     catalog: *const Catalog,
@@ -716,12 +724,13 @@ fn addLine(
     return .{ .value = grown orelse return fail.notFound("no order {d}", .{id}) };
 }
 
-/// **Two** path params, in the order they appear in the pattern:
-/// `/v1/orders/:id/lines/:no` hands `id` to the `u32` and `no` to the `u16`.
-/// Get the order wrong and nothing warns you, which is the honest cost of
-/// positional matching — the alternative is naming them, and naming them is
-/// what `Query(T)` is for.
-fn dropLine(orders: *Orders, id: u32, no: u16) !nilo.Status(204, void) {
+/// **Two** path params, read by name: `/v1/orders/:id/lines/:no` hands `id` to
+/// the `u32` field of that name and `no` to the `u16`. Swap the field names
+/// and the compiler says so; swap two bare arguments and nothing could, which
+/// is why a route with two params has no positional form (ADR 002).
+fn dropLine(orders: *Orders, p: nilo.Path(struct { id: u32, no: u16 })) !nilo.Status(204, void) {
+    const id = p.value.id;
+    const no = p.value.no;
     const dropped = orders.dropLine(id, no) catch |err| switch (err) {
         error.Conflict => return fail.conflict("order {d} has been placed, so its lines are settled", .{id}),
         else => |other| return other,
@@ -766,11 +775,9 @@ fn advanceOrder(
 fn putCustomer(
     orders: *Orders,
     arena: Allocator,
-    code: Str,
+    code: CustomerCode,
     incoming: NewCustomer,
 ) !nilo.Response(Customer) {
-    if (code.len() == 0) return fail.badRequest("a customer code cannot be empty", .{});
-
     const done = try orders.putCustomer(arena, code.view(), incoming);
     return .{
         .status = if (done.created) 201 else 200,
@@ -910,20 +917,20 @@ const testing = std.testing;
 ///
 /// [ADR 018]: ../../docs/adr/018-a-response-owns-its-headers.md
 const sample_lines = [_]NewLine{
-    .{ .sku = .static("kopi-250"), .quantity = 2 },
-    .{ .sku = .static("gula-1kg"), .quantity = 1 },
+    .{ .sku = .static("kopi-250"), .quantity = .of(2) },
+    .{ .sku = .static("gula-1kg"), .quantity = .of(1) },
 };
 
 const nonsense_lines = [_]NewLine{
-    .{ .sku = .static("bukan-sku"), .quantity = 1 },
+    .{ .sku = .static("bukan-sku"), .quantity = .of(1) },
 };
 
 fn sample() NewOrder {
     return .{
         .customer = .{
-            .code = .static("wati"),
-            .name = .static("Wati"),
-            .email = .static("wati@example.dev"),
+            .code = .of("wati"),
+            .name = .of("Wati"),
+            .email = .of("wati@example.dev"),
         },
         .ship_to = .{
             .line1 = .static("Jl. Melati 4"),
@@ -931,7 +938,7 @@ fn sample() NewOrder {
             .postcode = .static("40115"),
             .country = .static("ID"),
         },
-        .lines = &sample_lines,
+        .lines = .{ .value = &sample_lines },
     };
 }
 
@@ -950,7 +957,7 @@ test "an order is priced from the catalog, not from the body" {
 
     // A sku nobody sells is a 422 rather than a line priced at zero.
     var wrong = sample();
-    wrong.lines = &nonsense_lines;
+    wrong.lines = .{ .value = &nonsense_lines };
     try testing.expectError(error.Failed, placeOrder(&orders, &shop, arena, wrong));
 }
 
@@ -995,24 +1002,24 @@ test "a line can be added and dropped while an order is a draft, and not after" 
 
     const grown = (try addLine(&orders, &shop, arena, placed.id, .{
         .sku = .static("teh-100"),
-        .quantity = 4,
+        .quantity = .of(4),
     })).value;
     try testing.expectEqual(@as(usize, 3), grown.lines.len);
     try testing.expectEqual(@as(u16, 3), grown.lines[2].no);
 
-    _ = try dropLine(&orders, placed.id, 1);
+    _ = try dropLine(&orders, .{ .value = .{ .id = placed.id, .no = 1 } });
     const left = (try getOrder(&orders, arena, placed.id)).?;
     try testing.expectEqual(@as(usize, 2), left.lines.len);
     try testing.expectEqual(@as(i64, 4_200_000 + 2_750_000 * 4), left.total_cents);
 
     // A line number nobody has is a 404, and so is an order nobody has.
-    try testing.expectError(error.Failed, dropLine(&orders, placed.id, 99));
-    try testing.expectError(error.Failed, dropLine(&orders, 999, 1));
+    try testing.expectError(error.Failed, dropLine(&orders, .{ .value = .{ .id = placed.id, .no = 99 } }));
+    try testing.expectError(error.Failed, dropLine(&orders, .{ .value = .{ .id = 999, .no = 1 } }));
 
     // Once it is placed, the lines are settled.
     const caller = Caller{ .name = "wati", .scope = .admin };
     _ = try advanceOrder(&orders, &audit, arena, caller, placed.id, .{ .to = .placed });
-    try testing.expectError(error.Failed, dropLine(&orders, placed.id, 2));
+    try testing.expectError(error.Failed, dropLine(&orders, .{ .value = .{ .id = placed.id, .no = 2 } }));
 }
 
 test "a PATCH tells a field left out from one sent as null, even when the field is a struct" {
@@ -1064,18 +1071,18 @@ test "an upsert answers 201 the first time and 200 after that" {
     const arena = scratch.allocator();
 
     const incoming = NewCustomer{
-        .code = .static("ignored"),
-        .name = .static("Budi"),
-        .email = .static("budi@example.dev"),
+        .code = .of("ignored"),
+        .name = .of("Budi"),
+        .email = .of("budi@example.dev"),
     };
 
-    const made = try putCustomer(&orders, arena, .static("budi"), incoming);
+    const made = try putCustomer(&orders, arena, .of("budi"), incoming);
     try testing.expectEqual(@as(u16, 201), made.status);
     // The path wins over the body, so a mismatched code cannot make a
     // customer nobody can address.
     try testing.expectEqualStrings("budi", made.value.code);
 
-    const again = try putCustomer(&orders, arena, .static("budi"), incoming);
+    const again = try putCustomer(&orders, arena, .of("budi"), incoming);
     try testing.expectEqual(@as(u16, 200), again.status);
 }
 

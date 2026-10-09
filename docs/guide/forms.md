@@ -31,6 +31,7 @@ It works like [`Query(T)`](./requests.md#query-params), but reads the body inste
 | `remember: bool = false` | a checkbox, see below |
 | `tags: []const Str = &.{}` | a checkbox group or a `<select multiple>`, see below |
 | `avatar: Upload` | a file, see below |
+| `photos: []const Upload = &.{}` | every file of a `<input type="file" multiple>`, see below |
 
 The error messages are the same ones a query param gets, because it is the same code: `"age" has to be a whole number, not "soon"`.
 
@@ -64,7 +65,7 @@ fn create(incoming: nilo.Form(NewPost)) !nilo.Redirect(303) {
 }
 ```
 
-**Nothing ticked gives an empty list**, never a 400: a group with no box ticked sends no name at all, which is what every filter and every opt-in already means by not being sent. Give the field `= &.{}` and the document marks it optional. **An empty value adds nothing**, so a row of text boxes named `alias` with two left blank gives a list of the ones filled in. **A comma inside a value is just a comma**: a browser never joins a group with commas, so unlike a [query list](./requests.md#query-params) there is no second spelling to read, and `tags=a%2Cb` is one tag. A list of `Upload` is refused at compile time, because a file is a part, not a value, and a field takes one.
+**Nothing ticked gives an empty list**, never a 400: a group with no box ticked sends no name at all, which is what every filter and every opt-in already means by not being sent. Give the field `= &.{}` and the document marks it optional. **An empty value adds nothing**, so a row of text boxes named `alias` with two left blank gives a list of the ones filled in. **A comma inside a value is just a comma**: a browser never joins a group with commas, so unlike a [query list](./requests.md#query-params) there is no second spelling to read, and `tags=a%2Cb` is one tag. A list of files is read the same way, see [several files](#several-files-under-one-name).
 
 **A blank box on a field that may be absent counts as not given.** A browser sends an empty box as `age=`, so an optional or defaulted number, bool or choice reads it as its default, or null, rather than as a 400. Text keeps the empty string: an empty `?Str` is `""`, and `blank()` tells you whether anything was typed. A required field left blank is still refused.
 
@@ -110,6 +111,27 @@ this endpoint takes a file, so the form has to be sent as
 multipart/form-data — this one arrived as application/x-www-form-urlencoded.
 In HTML that is <form enctype="multipart/form-data">.
 ```
+
+### Several files under one name
+
+**A field typed `[]const nilo.Upload` collects every file sent under its name, in the order sent**, which is what `<input type="file" multiple>` posts:
+
+<!-- compiles -->
+```zig
+const Gallery = struct {
+    title: nilo.Str,
+    photos: []const nilo.Upload = &.{},
+};
+
+fn addPhotos(incoming: nilo.Form(Gallery)) !nilo.Status(201, void) {
+    for (incoming.value.photos) |photo| {
+        _ = photo.filename.view();
+    }
+    return .{ .value = {} };
+}
+```
+
+**No file is the empty list**, not a 400, and a file input left empty contributes nothing. How many files one form may hold is the limit every form has: 256 parts, inside the route's `max_body`. **A single `Upload` field that receives two or more files is a 400** saying to declare it `[]const nilo.Upload`, so a form never saves one photo of five and reports success. In the document the field is an array of binary strings.
 
 ### The uploaded filename
 
@@ -206,6 +228,8 @@ The field name in `given("…")` is checked at compile time; otherwise a typo th
 
 ### Validating text length and format
 
+The same types check a JSON body and a query string, and the page that teaches them there, with numbers, real ranges and lists, is [Checking what arrived](./requests.md#checking-what-arrived). This section is how they behave in a form.
+
 **`nilo.Text` checks a string's length or pattern the way a number type checks its range.** The failure reasons above are exactly the conversions nilo performs: `.missing`, `.not_a_number`, `.not_true_or_false`, `.not_a_choice`, `.wrong_kind`. **This is not a validation library.** But a `u8` already refuses 300 without anyone calling it validation, and text can have a shape in the same way ([ADR 193](../adr/193-text-with-a-shape-is-a-type-and-a-rule-about-the-struct-is-a-function-on-it.md)):
 
 <!-- compiles -->
@@ -240,6 +264,8 @@ With a plain `Form(SignUp)`, a field outside its shape is a 400, like a bad numb
 "password" has to be text of 10 to 72 characters, not 7;
 "confirm" has to match the password
 ```
+
+A list field that has to hold a number of values is a [`nilo.Many`](./requests.md#checking-what-arrived): `tags: nilo.Many(nilo.Str, .{ .min = 1, .max = 5 })` counts every value sent under `tags`, and `"tags" has to be a list of 1 to 5 items, not a list of 0` is the sentence.
 
 The API document includes the shape (`minLength`, `maxLength`, `format: email`), read from the type, so a generated client rejects the same text before sending it. A `check` and a `nilo_check` have no JSON Schema equivalent and are not described.
 

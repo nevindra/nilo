@@ -13,8 +13,9 @@
 //! |-----------------------|--------------------------------------------|
 //! | `*Ctx`                | the raw request — the way out when you need full control |
 //! | `*Db`, `*const Cfg`   | a service, matched by its type             |
-//! | `u32`, `Str`, `bool`, a float, an enum | a path param, in the order `:name` (and a trailing `*`) appears in the pattern |
-//! | a type carrying `nilo_parse` | a path param the type reads itself — `sql.Uuid` (ADR 113) |
+//! | `u32`, `Str`, `bool`, a float, an enum | the path param, on a route with exactly one |
+//! | a type carrying `nilo_parse` | the path param the type reads itself — `sql.Uuid` (ADR 113) |
+//! | `Path(T)`             | the path params, read by name into a struct of yours: one field per `:name`, `@"*"` for a trailing wildcard |
 //! | `Query(T)`            | the query string, read into a struct of yours |
 //! | `Form(T)`             | the body as an HTML form, into a struct of yours (ADR 030) |
 //! | `std.mem.Allocator`   | the request arena, freed when the request ends |
@@ -30,11 +31,14 @@
 //! headers of its own, and `Redirect(status)` when the answer is a
 //! `Location` (ADR 031).
 //!
-//! Zig does not keep argument names, so path params are matched **by
-//! position**, not by name. Every mismatch — the param count, a type that
-//! makes no sense, two request bodies — stops compilation with a message
-//! naming the route. That message quality is the only price this layer
-//! charges (ADR 002), so it is taken seriously here.
+//! Zig does not keep argument names, so a bare argument cannot say which
+//! `:name` it is: a route with one path param may read it positionally, and
+//! a route with two or more reads them by name, with `Path(T)`, whose field
+//! names Zig does keep. A positional read on such a route stops compilation
+//! and the message writes the struct (ADR 002). Every mismatch — the param
+//! count, a type that makes no sense, two request bodies — stops compilation
+//! with a message naming the route. That message quality is the only price
+//! this layer charges (ADR 002), so it is taken seriously here.
 
 const std = @import("std");
 const naming = @import("names.zig");
@@ -59,12 +63,14 @@ const bound_mod = @import("bound.zig");
 const filebody = @import("filebody.zig");
 const bytebody = @import("bytebody.zig");
 const json_mod = @import("json.zig");
+const many_mod = @import("many.zig");
 const mark = @import("jsonmark.zig");
 const ownbody = @import("ownbody.zig");
 const message = @import("message.zig");
 const proto = @import("nilo_proto");
 const versioned_mod = @import("versioned.zig");
 const verified_mod = @import("verified.zig");
+const pathparams = @import("pathparams.zig");
 
 const Ctx = ctx_mod.Ctx;
 const Str = str_mod.Str;
@@ -205,6 +211,10 @@ pub fn Query(comptime T: type) type {
     };
 }
 
+/// The path params, read by name into a struct of your own. See
+/// `pathparams.zig` (ADR 002).
+pub const Path = pathparams.Path;
+
 /// One request header, as a typed argument
 /// ([ADR 131](../docs/adr/131-a-header-a-handler-can-be-given.md)).
 ///
@@ -285,8 +295,11 @@ pub fn Idempotent(comptime Replays: type, comptime options: IdempotentOptions) t
 const Role = union(enum) {
     ctx,
     service,
-    /// Index of the path param in the route pattern, by position.
+    /// Index of the path param in the route pattern, by position. Only on a
+    /// route with exactly one param (ADR 002).
     param: usize,
+    /// Every path param, by name, into the struct a `Path(T)` carries.
+    path,
     body,
     query,
     /// One named request header, read into the type it was asked for
@@ -399,32 +412,11 @@ pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler
                     const P = p.?;
                     switch (comptime roles[i]) {
                         .ctx => args[i] = c,
-                        // **Logged as well as answered** (ADR 180). `listen()`
-                        // refuses to open the socket over this and names the type
-                        // and the routes, so a server never reaches here — but
-                        // `testing.Client` does not call `listen()`, and a test
-                        // used to get a bare 500 on every route that wanted the
-                        // service with nothing anywhere naming it. That is the
-                        // worst shape a clue can have, because the same routes
-                        // work over a real socket, so the evidence points at the
-                        // test.
-                        .service => args[i] = c._services.get(P) orelse {
-                            // A warning and not an error, for the reason the
-                            // unopened pool logs one: `std.log.err` fails the
-                            // test runner, and this fires in a test by design.
-                            std.log.warn(
-                                "service {s} was never registered, and route \"{s}\" needs it. " ++
-                                    "`app.listen()` refuses to start over this and says which routes; " ++
-                                    "a test driving the App itself does not, so here it is. " ++
-                                    "Call app.provide() before serving.",
-                                .{ @typeName(P), pattern },
-                            );
-                            return fail.internal(
-                                "service {s} was never registered; call app.provide() before app.listen()",
-                                .{@typeName(P)},
-                            );
-                        },
+                        // Logged as well as answered (ADR 180); the sentence is
+                        // `service.required`'s, shared with a typed middleware.
+                        .service => args[i] = try service_mod.required(P, "route \"" ++ pattern ++ "\"", c._services),
                         .param => |nth| args[i] = try paramValue(P, c, param_names[nth]),
+                        .path => args[i] = .{ .value = try pathparams.read(P.nilo_path, pattern, c) },
                         .body => args[i] = try readBody(P, c, &spelling),
                         .query => args[i] = .{ .value = try queryValue(P.nilo_query, c) },
                         .header => args[i] = .{ .value = try headerValue(P, c) },
@@ -1126,6 +1118,9 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
                 .param => |claimed| if (claimed == nth) {
                     schema = openapi.schemaOf(p.?);
                 },
+                .path => if (@hasField(p.?.nilo_path, name)) {
+                    schema = openapi.schemaOf(@FieldType(p.?.nilo_path, name));
+                },
                 else => {},
             };
             path_params = path_params ++ [_]openapi.Param{.{ .name = name, .schema = schema }};
@@ -1152,6 +1147,9 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
         for (params, 0..) |p, i| switch (roles[i]) {
             .ctx => wants_ctx = true,
             .param => can_reject = can_reject or p.? != Str,
+            .path => {
+                for (@typeInfo(p.?.nilo_path).@"struct".field_types) |F| can_reject = can_reject or F != Str;
+            },
             .query => {
                 query = queryFields(p.?.nilo_query);
                 can_reject = true;
@@ -1207,6 +1205,14 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             // The same scheme, which is what the document should have said
             // for a verified token all along (ADR 191).
             .verified => security = .bearer,
+            // A `Bearer(T)` reads the same header, sealed rather than signed,
+            // and the document says the same thing about it (ADR 265). Only
+            // the handler's own argument list is read: a resolver that takes
+            // one is a function body to the document, as a guard's cookie is
+            // until `app.guard` says so.
+            .resolved => if (@hasDecl(p.?, "nilo_bearer")) {
+                security = .bearer;
+            },
             // A required header parameter, the way a `FromHeader` is, plus
             // the two answers only this route can give (ADR 155).
             .idempotent => {
@@ -1529,6 +1535,7 @@ fn rolesOf(
         var query_at: ?usize = null;
         var idempotent_at: ?usize = null;
         var cached_at: ?usize = null;
+        var path_at: ?usize = null;
         var wants_ctx = false;
 
         for (params, 0..) |p, i| {
@@ -1540,9 +1547,23 @@ fn rolesOf(
             switch (roles[i]) {
                 .ctx => wants_ctx = true,
                 .param => {
+                    // The one rule that keeps a swapped pair from compiling
+                    // (ADR 002): which `:name` a bare `u32` is can only be a
+                    // guess, so past one param it is not allowed to guess.
+                    if (param_names.len >= 2) @compileError(positionalOnManyParams(pattern, params, param_names));
                     if (used == param_names.len) @compileError(tooFewPatternParams(pattern, P, i, param_names));
                     roles[i] = .{ .param = used };
                     used += 1;
+                },
+                .path => {
+                    if (path_at) |first| @compileError(
+                        "nilo: the handler for route \"" ++ pattern ++ "\" asks for the path params " ++
+                            "twice, argument " ++ num(first + 1) ++ " and argument " ++ num(i + 1) ++ ".\n" ++
+                            "  A route has one set of path params. Put every field in a single struct " ++
+                            "and ask for that.",
+                    );
+                    path_at = i;
+                    pathparams.checkShape(P.nilo_path, pathWhat(pattern, P));
                 },
                 // Both arguments are named, and on purpose. nilo cannot know
                 // which of the two was meant to be the body, so a message
@@ -1567,7 +1588,6 @@ fn rolesOf(
                     if (message.decodesItsOwnBody(P)) {
                         message.check(pattern, P);
                     } else {
-                        checkNotRenamed(pattern, readInto(roles[i], P), "request body");
                         checkReadable(pattern, readInto(roles[i], P));
                     }
                 },
@@ -1610,7 +1630,12 @@ fn rolesOf(
                 // message names the resolver rather than the route: the
                 // mistake belongs to the type, and would greet every route
                 // that asked for it.
-                .resolved => resolve.check(P),
+                .resolved => {
+                    resolve.check(P);
+                    // A `Path(T)` the resolver takes is held against this
+                    // route here, where the route is known (ADR 015).
+                    resolve.checkRoute(P, pattern);
+                },
                 .idempotent => {
                     if (idempotent_at) |first| @compileError(
                         "nilo: the handler for route \"" ++ pattern ++ "\" asks for the " ++
@@ -1669,48 +1694,66 @@ fn rolesOf(
                 "`multipart/form-data` instead of as JSON. Ask for one or the other, not both.",
         );
 
+        if (path_at) |at| {
+            if (used > 0) @compileError(
+                "nilo: the handler for route \"" ++ pattern ++ "\" reads a path param by position " ++
+                    "and also asks for " ++ naming.of(params[at].?) ++ " (argument " ++ num(at + 1) ++ ").\n" ++
+                    "  A route's params are read one way or the other. Put the positional one in the " ++
+                    "struct too: a field named like the `:name` in the pattern.",
+            );
+            // A handler holding a `*Ctx` may read the ones it leaves out
+            // with `c.param(\"…\")`, exactly as with the positional form.
+            pathparams.checkAgainst(params[at].?.nilo_path, pattern, pathWhat(pattern, params[at].?), !wants_ctx);
+        }
+
         // A handler holding a `*Ctx` may ignore path params — it can reach
         // them itself via `c.param("…")`. One without a `*Ctx` has no other
         // way in, so an unused param there is almost certainly a forgotten
         // argument.
-        if (!wants_ctx and used < param_names.len) @compileError(
-            "nilo: route \"" ++ pattern ++ "\" has " ++ num(param_names.len) ++ " path params (:" ++
-                join(param_names, ", :") ++ "), but its handler only takes " ++ num(used) ++ ".\n" ++
-                "  Path params are matched by position, so the ones at the end would never be read.\n" ++
-                "  Add the arguments (`id: u32`, `name: nilo.Str`, …), drop the unused `:` from the " ++
-                "pattern, or ask for a `*Ctx` if you would rather fetch them yourself with " ++
-                "`c.param(\"…\")`.",
-        );
+        if (!wants_ctx and path_at == null and used < param_names.len) {
+            if (param_names.len >= 2) @compileError(
+                "nilo: route \"" ++ pattern ++ "\" has " ++ num(param_names.len) ++ " path params (:" ++
+                    join(param_names, ", :") ++ "), but its handler reads none of them; read them by name: " ++
+                    pathparams.suggestion(param_names, &.{}) ++ "\n" ++
+                    "  Add that argument, drop the unused `:` from the pattern, or ask for a `*Ctx` " ++
+                    "if you would rather fetch them yourself with `c.param(\"…\")`.",
+            );
+            @compileError(
+                "nilo: route \"" ++ pattern ++ "\" has " ++ num(param_names.len) ++ " path param (:" ++
+                    join(param_names, ", :") ++ "), but its handler takes none.\n" ++
+                    "  Add the argument (`id: u32`, `name: nilo.Str`, …), drop the unused `:` from the " ++
+                    "pattern, or ask for a `*Ctx` if you would rather fetch it yourself with " ++
+                    "`c.param(\"…\")`.",
+            );
+        }
         const frozen = roles;
         return &frozen;
     }
 }
 
-/// Refuse a struct that renames its fields where a request is *read*
-/// ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
+/// Refuse a struct that renames or skips its fields where a **form or a query
+/// string** is read ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
 ///
-/// `rename_all` on a struct is a spelling for what goes out: `json.write` sends
-/// the renamed keys and the API description promises them. Nothing renames on
-/// the way in — `std.json` chooses the parser for a body and reads it into the
-/// field names as they are written — so a type used for both would send
-/// `fullName`, document `fullName`, and answer 400 to a client that sent it.
+/// A JSON body honours the marker both ways: `json.readFields` matches the wire
+/// spelling, so a body needs no such check. A form and a query string are read
+/// by the field names as they are written (`form.zig`, `convert.zig`), and
+/// `nilo_json` is a statement about JSON. A type used for both would document
+/// and send `fullName` and answer 400 to a browser form that posted it back.
 ///
-/// **A refusal rather than a second mechanism**, which is the whole of the
-/// decision. One direction that works beats two that can disagree about one
-/// field, and the two would be told apart by nothing a reader can see at the
-/// call site.
+/// **A refusal rather than a second mechanism**: the marker is how a type's
+/// JSON is spelled, and carrying it into URL-encoded text is a decision of its
+/// own, not a side effect of the marker being on the struct.
 fn checkNotRenamed(comptime pattern: []const u8, comptime T: type, comptime what: []const u8) void {
     comptime {
         const Renamed = mark.renamedFieldsWithin(T) orelse return;
         @compileError(
             "nilo: the " ++ what ++ " on route \"" ++ pattern ++ "\" is read into `" ++
-                naming.of(Renamed) ++ "`, which renames its fields — and a renamed field name is a " ++
-                "spelling for what goes out (ADR 148).\n" ++
-                "  nilo writes the renamed keys and the API description promises them; nothing " ++
-                "renames on the way in, so a client sending what the document says would be a 400 " ++
-                "naming every field.\n" ++
-                "  Keep this type for the response, and give what comes in a struct of its own, " ++
-                "spelled the way the wire spells it.",
+                naming.of(Renamed) ++ "`, which renames or skips its fields — and `nilo_json` is a " ++
+                "statement about JSON (ADR 148).\n" ++
+                "  A " ++ what ++ " is read by the field names as they are written, so a client " ++
+                "sending what a renamed key promises would be a 400 naming every field.\n" ++
+                "  Keep this type for JSON, and give the " ++ what ++ " a struct of its own, " ++
+                "spelled the way it is sent.",
         );
     }
 }
@@ -1764,6 +1807,7 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
         .query => .bound_query,
     };
     if (comptime hasNamedDecl(P, "nilo_query")) return .query;
+    if (comptime pathparams.isPath(P)) return .path;
     if (comptime hasNamedDecl(P, "nilo_header")) {
         checkHeaderValue(pattern, P, i);
         return .header;
@@ -1992,6 +2036,13 @@ fn checkQueryFields(comptime pattern: []const u8, comptime T: type, comptime i: 
                         "`nilo_parse`: `tags: []const nilo.Str = &.{}`.",
                 );
             }
+            if (many_mod.itemOf(f_type) != null) @compileError(
+                "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of the " ++
+                    "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
+                    "\" is a list with a length, which a query string does not carry.\n" ++
+                    "  `nilo.Many` counts the values of a JSON body or a form (ADR 266). " ++
+                    "A query list is a plain `[]const " ++ naming.of(many_mod.itemOf(f_type).?) ++ "` field.",
+            );
             @compileError(
                 "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of the " ++
                     "`Query(" ++ naming.of(T) ++ ")` on route \"" ++ pattern ++
@@ -2024,6 +2075,35 @@ fn orMeantAsAParam(
         "`pub fn nilo_parse(text: []const u8) ?Self`.";
 }
 
+/// "the `nilo.Path(X)` on route \"/a/:b\"", the subject of every sentence a
+/// `Path(T)` is refused in.
+fn pathWhat(comptime pattern: []const u8, comptime P: type) []const u8 {
+    return "the `" ++ naming.of(P) ++ "` on route \"" ++ pattern ++ "\"";
+}
+
+/// A positional read on a route with two or more params, refused with the
+/// fix written out: the handler's own positional types, in the order they
+/// were taken, which is the pattern's order if it meant what it said.
+fn positionalOnManyParams(
+    comptime pattern: []const u8,
+    comptime params: []const ?type,
+    comptime param_names: []const []const u8,
+) []const u8 {
+    comptime {
+        var known: []const type = &.{};
+        for (params, 0..) |p, i| {
+            if (roleOf(pattern, p.?, i) == .param) known = known ++ [_]type{p.?};
+        }
+        return "nilo: route \"" ++ pattern ++ "\" has " ++ num(param_names.len) ++ " path params (:" ++
+            join(param_names, ", :") ++ "); read them by name: " ++
+            pathparams.suggestion(param_names, known) ++ "\n" ++
+            "  Zig keeps no argument names, so a bare `u32` cannot say which `:name` it is, and a " ++
+            "swapped pair would compile and run with the wrong ids. A struct keeps its field " ++
+            "names: take it as one argument and read `p.value.<name>`.\n" ++
+            "  A route with one path param may still take it as a bare argument.";
+    }
+}
+
 fn tooFewPatternParams(
     comptime pattern: []const u8,
     comptime P: type,
@@ -2041,19 +2121,7 @@ fn tooFewPatternParams(
         " is a service — ask for it as a pointer: `*" ++ naming.of(P) ++ "`.";
 }
 
-/// The name of everything the pattern captures, in order of appearance:
-/// each `:param`, and a trailing `*` under the name `"*"`.
-fn patternParamNames(comptime pattern: []const u8) []const []const u8 {
-    comptime {
-        var names: []const []const u8 = &.{};
-        var segs = std.mem.splitScalar(u8, pattern, '/');
-        while (segs.next()) |s| {
-            if (s.len > 1 and s[0] == ':') names = names ++ [_][]const u8{s[1..]};
-            if (std.mem.eql(u8, s, router.wildcard)) names = names ++ [_][]const u8{router.wildcard};
-        }
-        return names;
-    }
-}
+const patternParamNames = pathparams.namesOf;
 
 fn num(comptime n: usize) []const u8 {
     return std.fmt.comptimePrint("{d}", .{n});

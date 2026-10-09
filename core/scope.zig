@@ -577,6 +577,44 @@ pub fn traceEndOf(scope: anytype, begun: trace.Outbound, ended: trace.Ended) voi
     scope.traceEnd(begun, ended);
 }
 
+/// How many milliseconds a Scope's work has left, or null: for a Scope with
+/// no deadline to declare (a `Run`, an `AnyScope`), and for a request whose
+/// route set none. Zero once the time has passed.
+///
+/// **The declaration is optional and read while compiling**, like
+/// `routeName`: a Scope that has `timeLeftMs()` is a request with a
+/// deadline (`Ctx`), and for any other the answer is the constant null, so
+/// the code it guards is not in the binary
+/// ([ADR 105](../docs/adr/105-a-route-can-say-how-long-it-has.md),
+/// [ADR 144](../docs/adr/144-a-scope-that-crosses-a-function-pointer.md)).
+/// It answers a duration rather than an instant so that this layer shares a
+/// clock with nobody: the Scope that owns the deadline reads its own.
+pub fn timeLeftOf(scope: anytype) ?u32 {
+    const S = switch (@typeInfo(@TypeOf(scope))) {
+        .pointer => |p| p.child,
+        else => @TypeOf(scope),
+    };
+    if (comptime !@hasDecl(S, "timeLeftMs")) return null;
+    return scope.timeLeftMs();
+}
+
+/// The shorter of a call's own bound and the time the Scope has left, for a
+/// module that is about to wait on something outside the process
+/// ([ADR 105](../docs/adr/105-a-route-can-say-how-long-it-has.md)).
+///
+/// `own_ms` is the call's bound in the unit every module uses, where zero
+/// means no limit; what comes back reads the same way, so it goes where
+/// `own_ms` went. **A Scope with nothing to say returns `own_ms` untouched**
+/// and, being resolved while compiling, costs nothing. A Scope whose time is
+/// already gone is `error.DeadlineExpired`: the call is not made at all,
+/// because dialling or querying for a caller that has already been answered
+/// 504 is work only the other end pays for.
+pub fn within(scope: anytype, own_ms: u32) error{DeadlineExpired}!u32 {
+    const left = timeLeftOf(scope) orelse return own_ms;
+    if (left == 0) return error.DeadlineExpired;
+    return if (own_ms == 0) left else @min(own_ms, left);
+}
+
 /// Two `@typeName` results naming the same type.
 ///
 /// The pointer comparison is the one that fires: `@typeName` of one type is
@@ -894,6 +932,41 @@ test "a Scope names the route its request matched, and a Run names none" {
     try testing.expectEqualStrings("listDeals", routeNameOf(&routed).?);
     routed.name = null;
     try testing.expect(routeNameOf(&routed) == null);
+}
+
+test "a Scope with a deadline narrows a call's bound, and a Run leaves it alone" {
+    var run = Run.init(testing.allocator);
+    defer run.deinit();
+    try testing.expect(timeLeftOf(&run) == null);
+    try testing.expectEqual(@as(u32, 30_000), try within(&run, 30_000));
+    try testing.expectEqual(@as(u32, 0), try within(&run, 0));
+
+    const Timed = struct {
+        left: ?u32,
+        pub fn timeLeftMs(self: *const @This()) ?u32 {
+            return self.left;
+        }
+    };
+    var timed: Timed = .{ .left = 2_000 };
+    // The shorter of the two wins, whichever it is.
+    try testing.expectEqual(@as(u32, 2_000), try within(&timed, 30_000));
+    try testing.expectEqual(@as(u32, 500), try within(&timed, 500));
+    // No limit of its own: the route's is the only one there is.
+    try testing.expectEqual(@as(u32, 2_000), try within(&timed, 0));
+    // A route that set none changes nothing.
+    timed.left = null;
+    try testing.expectEqual(@as(u32, 30_000), try within(&timed, 30_000));
+}
+
+test "a Scope whose time has run out refuses the call before it starts" {
+    const Timed = struct {
+        pub fn timeLeftMs(_: *const @This()) ?u32 {
+            return 0;
+        }
+    };
+    var timed: Timed = .{};
+    try testing.expectError(error.DeadlineExpired, within(&timed, 30_000));
+    try testing.expectError(error.DeadlineExpired, within(&timed, 0));
 }
 
 test "an erased Scope answers what the Run behind it was given, and NotGiven for the rest" {

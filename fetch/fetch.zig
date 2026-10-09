@@ -528,6 +528,7 @@ pub const Client = struct {
             .authorization = if (given.authorization) null else standing.authorization,
             .user_agent = if (given.user_agent) null else standing.user_agent,
             .timeout_ms = call.timeout_ms,
+            .route_left_ms = core.timeLeftOf(c),
             .stall_ms = call.stall_ms,
             .redirects = .{ .follow = &redirect_buffer },
             // A target's standing headers are written for its own origin
@@ -795,6 +796,12 @@ pub const Exchange = struct {
         user_agent: ?[]const u8 = null,
 
         timeout_ms: ?u32 = null,
+        /// The time the Scope's request has left, from `core.timeLeftOf`, or
+        /// null when it has no deadline. The call's bound is the shorter of
+        /// this and `timeout_ms`, and a request with none left makes no call
+        /// at all: `error.TimedOut` before the gate, the dial or a byte
+        /// ([ADR 105](../docs/adr/105-a-route-can-say-how-long-it-has.md)).
+        route_left_ms: ?u32 = null,
         /// Overrides `Settings.stall_ms` for this call (ADR 056).
         stall_ms: ?u32 = null,
 
@@ -959,11 +966,15 @@ pub const Exchange = struct {
         const io = client.inner.io;
         const uri = try std.Uri.parse(opts.url);
 
+        // A request whose deadline has passed is not dialled for (ADR 105).
+        if (opts.route_left_ms) |left| if (left == 0) return error.TimedOut;
+
         // The permit is taken before the deadline is armed, so a caller
         // queueing for one is not also being timed out of the queue by a clock
         // it has not started. It goes back in `end`, after the connection.
         // A queue is a park like a socket is, so the watchdog is told
         // (ADR 210).
+        const queued_at = core.monotonicMicros();
         {
             const w = client.limits.waiting();
             defer client.limits.waited(w);
@@ -971,13 +982,28 @@ pub const Exchange = struct {
         }
         self.permit = true;
 
+        // **The route's time is counted from when it was read, not from when
+        // the permit arrived** (ADR 105): what the queue took is already
+        // spent, and a request that is past its deadline after the wait is
+        // not dialled for. The wait itself is not bounded by the route's
+        // deadline, which stays an open item in `docs/todo.md`.
+        const route_left_ms: ?u32 = if (opts.route_left_ms) |left| blk: {
+            const spent_us = core.monotonicMicros() - queued_at;
+            const left_us = @as(i64, left) * std.time.us_per_ms - spent_us;
+            if (left_us <= 0) return error.TimedOut;
+            break :blk @intCast(@divFloor(left_us + std.time.us_per_ms - 1, std.time.us_per_ms));
+        } else null;
+
         // One deadline, held by whichever of the two can enforce it. Under an
         // Engine that is the Bound, which cancels the fiber; with none, it is
         // an absolute time every step below is run against as a task that
         // gets cancelled (ADR 056). Zero is no limit either way.
         // The other clock counts from the last byte, and until one arrives
         // that is now: a head that never comes is silence too (ADR 056).
-        const ms = opts.timeout_ms orelse client.settings.timeout_ms;
+        const own_ms = opts.timeout_ms orelse client.settings.timeout_ms;
+        // The route's deadline is one more bound on the call, and the
+        // shorter wins; zero is no limit at either end (ADR 105).
+        const ms = if (route_left_ms) |left| (if (own_ms == 0) left else @min(own_ms, left)) else own_ms;
         self.stall_ms = opts.stall_ms orelse client.settings.stall_ms;
         self.last_byte.store(core.monotonicMicros(), .release);
         if (client.limits.engineless()) {

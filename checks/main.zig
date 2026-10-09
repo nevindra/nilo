@@ -1,6 +1,6 @@
 //! The repository's own checks, as one program with a subcommand each:
 //! `layering`, `http-core`, `adr-check`, `docs-check`, `docs-index`,
-//! `fetch-check` and `notice`. `build.zig` builds this for the host and runs
+//! `fetch-check`, `template-check` and `notice`. `build.zig` builds this for the host and runs
 //! it from the repository root, one Run step to a check.
 //!
 //! **Why programs and not steps.** Zig 0.16 let `build.zig` define a step with
@@ -25,6 +25,7 @@ const layering = @import("layering.zig");
 const adr = @import("adr.zig");
 const docs = @import("docs.zig");
 const fetch = @import("fetch.zig");
+const template = @import("template.zig");
 
 /// Where a check puts what it found. Every message already begins `nilo: `,
 /// and is printed as it is found; a check that found any returns
@@ -90,6 +91,9 @@ fn dispatch(r: *Report, command: []const u8, rest: []const []const u8) !void {
     } else if (std.mem.eql(u8, command, "fetch-check")) {
         if (rest.len != 2) usage();
         return fetch.FetchCheck.run(r, rest[0], rest[1]);
+    } else if (std.mem.eql(u8, command, "template-check")) {
+        if (rest.len != 3) usage();
+        return template.TemplateCheck.run(r, rest[0], rest[1], rest[2]);
     } else if (std.mem.eql(u8, command, "notice")) {
         // Say out loud that a step asserted nothing: `error.SkipZigTest` is
         // invisible through `zig build`, so a step that is off says so itself
@@ -112,7 +116,7 @@ fn list(r: *Report, csv: []const u8) ![]const []const u8 {
 fn usage() noreturn {
     std.debug.print(
         "usage: checks layering <root=may,import=in,tests>... | http-core <core,..> <above,..> | " ++
-            "adr-check | docs-check | docs-index | fetch-check <zig> <cache> | notice <message>\n",
+            "adr-check | docs-check | docs-index | fetch-check <zig> <cache> | template-check <zig> <cache> <target> | notice <message>\n",
         .{},
     );
     std.process.exit(2);

@@ -51,6 +51,20 @@ is a silent failure that a parameter would have made reachable:
 What varies is one character: whether `/` is a separator or data. That is
 `Set.path` and `Set.unreserved`.
 
+## Timestamp and Date are the second file admitted this way
+
+`Timestamp` and `Date` lived in `sql/types.zig`, and `nilo_sql` exists only in a build with `.sql = true`, which fetches both database drivers. A service with a date in its JSON body had to turn that on or carry text, and a `time.Time` or a date in a request is the habit rather than the exception. Two layers need them: the App layer reads and writes them in a body, a query field, a path param and a form, and `nilo_sql` stores them.
+
+**They moved to `core/time.zig`, and `nilo_sql` re-exports both**, so a Row still says `sql.Timestamp` and `sql.Date` and no sql user changes a line. `nilo.Timestamp` and `nilo.Date` are the framework's exports of the same types. The representation is unchanged (microseconds since 1970 UTC, days since 1970), and so is the text: RFC 3339 with six fractional digits and an offset accepted on input, `YYYY-MM-DD`, and `nilo_openapi` saying `format: date-time` and `format: date`. The hooks that make them work in a request are the ones already there (`nilo_parse`, ADR 113, and `jsonParse`, ADR 166), so `http/` special-cases nothing.
+
+**What did not move is the opinion about the column.** `nilo_column = "timestamptz"` was a declaration on the type, which a Core type may not carry (it would name Postgres below the layer that owns it, the argument ADR 038 made for `Uuid`). `declaredColumn` in `sql/types.zig` now answers `timestamptz` and `date` for them, the way it already did for `Uuid`, and the Postgres wire's count from 2000 (`date_days_from_epoch_to_y2k`) is `nilo_sql`'s.
+
+The line they hold is unchanged: a type here carries a value and knows how to write itself, and does not calculate (no zones, no `addDays`). Both are `nilo_type_name`d bare (`Timestamp`, `Date`), since `core`, `sql` and `nilo` are all real import lines for one declaration.
+
+Cost: allocations per request and memory per idle connection are unchanged (no new code on a path that did not ask; a route with no such field links none of it). Throughput and p99 are unchanged, same functions. Binary size: a program that names neither links neither, since the linker drops unreferenced declarations; `zig test core/core.zig` runs the 30-odd moved tests with no module graph.
+
+**Rejected: a `nilo_time` module**, which the layering row and the benchmark program would cost and the two files do not justify; and **leaving them in `nilo_sql` and importing it from `http/`**, which `zig build layering` refuses and which would put both drivers in every HTTP build.
+
 ## Why this is allowed, and what it does not decide
 
 The entry condition for the bottom layer is that its tests need no module graph

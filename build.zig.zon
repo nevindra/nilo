@@ -116,6 +116,7 @@
         "sql",
         "s3",
         "dev",
+        "template",
         "LICENSE",
         "README.md",
     },

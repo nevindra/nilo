@@ -364,7 +364,7 @@ pub noinline fn serveRequest(
     // null pointer and no clock read at all (ADR 079).
     var record = metrics_mod.Record.begin(if (self.metrics_table) |*t| t else null);
     const failure = &in_flight.failure;
-    in_flight.startRequest("", "");
+    in_flight.startRequest();
     // What keeps fail functions working when App is called straight from a
     // test, with no Engine underneath. Only then: on a real server the
     // fiber's own slot is bound and is what they reach, and the fallback is
@@ -483,7 +483,7 @@ pub noinline fn serveRequest(
 
     // From here on the panic handler can name what was being served
     // (ADR 007). Both slices live in the request arena.
-    in_flight.startRequest(r.method, path);
+    in_flight.startRequest();
 
     var c = Ctx{
         .method = http1.methodFrom(r.method),
@@ -522,6 +522,13 @@ pub noinline fn serveRequest(
         // the caller runs the loop from *its* frame (ADR 062).
         ._handover = &handover,
     };
+
+    // A log line written from here on finds the request through the slot,
+    // and its id only if one is written (`log.zig`). Cleared on every way
+    // out, so a line between two requests on a connection carries none.
+    in_flight.request = &c;
+    in_flight.read_request = readRequest;
+    defer in_flight.request = null;
 
     // `listen()`'s deadline for every request, before the chain runs so a
     // route's own `nilo.deadline` replaces it rather than the other way
@@ -848,6 +855,17 @@ const RESPONSE_505 = http1.staticResponse(505, failure_content_type, staticFailu
 const RESPONSE_501 = http1.staticResponse(501, failure_content_type, staticFailure(501, "this server decodes Transfer-Encoding: chunked and nothing else"), .close);
 
 const failure_content_type = "application/json";
+
+/// What `fail.InFlight.read_request` calls: a part of the Ctx it was given.
+/// The id is made on the first ask and kept (`Ctx.requestId`).
+fn readRequest(p: *anyopaque, part: fail.InFlight.Part) []const u8 {
+    const c: *ctx_mod.Ctx = @ptrCast(@alignCast(p));
+    return switch (part) {
+        .id => c.requestId().view(),
+        .method => @tagName(c.method),
+        .path => c.path().view(),
+    };
+}
 
 /// Sent when the server is already answering `max_in_flight` requests
 /// (ADR 159). Assembled here rather than through `staticResponse` for the

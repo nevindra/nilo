@@ -13,6 +13,7 @@ const nilo = @import("nilo_http");
 
 pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;
+pub const panic = nilo.panic; // names the request that was in flight when the process goes down (ADR 007)
 
 /// Something for the ticker to have an opinion about.
 ///

@@ -1025,7 +1025,7 @@ pub const Wire = struct {
             const since_y2k = std.mem.readInt(i32, raw.data[0..4], .big);
             if (since_y2k == std.math.maxInt(i32) or since_y2k == std.math.minInt(i32))
                 return infinite("date", col, since_y2k > 0);
-            return .{ .days = std.math.add(i32, since_y2k, types.Date.days_from_epoch_to_y2k) catch
+            return .{ .days = std.math.add(i32, since_y2k, types.date_days_from_epoch_to_y2k) catch
                 return error.QueryFailed };
         }
         // **A `timestamp` read out of its own eight bytes**, for the reason the

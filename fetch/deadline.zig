@@ -205,6 +205,87 @@ fn callPatient(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
     return res.body;
 }
 
+/// What a call reports when it is timed against the clock: the error's name,
+/// and `fast` or `slow` by whether it came back inside two seconds. The
+/// calls below all have a bound of their own of twenty seconds or more (or
+/// 200 ms where the test says), so `fast` can only be the route's deadline
+/// or the call's own, whichever the test is staging (ADR 105).
+fn timed(c: anytype, api: *fetch.Client, own_ms: u32) !nilo.Str {
+    const began = nilo.nowMillis();
+    const verdict: []const u8 = if (api.get(c, quiet_url, .{ .timeout_ms = own_ms })) |_| "answered" else |err| @errorName(err);
+    const pace: []const u8 = if (nilo.nowMillis() - began < 2_000) "fast" else "slow";
+    return c.str(try std.fmt.allocPrint(c.arena(), "{s} {s}", .{ verdict, pace }));
+}
+
+/// A route that gave itself 400 ms and a call that would have waited twenty
+/// seconds. The deadline is taken off before the answer is written, because
+/// a spent one would also bound the write of this very response.
+fn callUnderRouteDeadline(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    c.giveDeadline(400);
+    const out = try timed(c, api, 20_000);
+    c.giveDeadline(0);
+    return out;
+}
+
+/// A route whose deadline is longer than the call's own bound: the call's
+/// 200 ms is the shorter, and the route's ten seconds changes nothing.
+fn callUnderLongerDeadline(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    c.giveDeadline(10_000);
+    const out = try timed(c, api, 200);
+    c.giveDeadline(0);
+    return out;
+}
+
+/// A route whose time is already gone when it calls out.
+fn callAfterDeadline(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    c.giveDeadline(1);
+    while (!c.overdue()) std.atomic.spinLoopHint();
+    const out = try timed(c, api, 20_000);
+    c.giveDeadline(0);
+    return out;
+}
+
+/// A `Run` has no deadline to declare, so the call keeps its own 200 ms
+/// even in a handler that has set one: the Run is not the request.
+fn callFromARun(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    c.giveDeadline(60);
+    var run = nilo.Run.init(std.heap.smp_allocator);
+    defer run.deinit();
+    const began = nilo.nowMillis();
+    const verdict: []const u8 = if (api.get(&run, quiet_url, .{ .timeout_ms = 200 })) |_| "answered" else |err| @errorName(err);
+    const waited = nilo.nowMillis() - began;
+    c.giveDeadline(0);
+    return c.str(try std.fmt.allocPrint(c.arena(), "{s} {s}", .{ verdict, if (waited >= 150) "own" else "early" }));
+}
+
+/// When the permit below went back, for the call that queued for it to
+/// compare itself with.
+var permit_back_ms: std.atomic.Value(i64) = .init(0);
+
+/// Holds the client's only permit for a second: a call begun and left open.
+/// Its own bound is what ends the body `end` has to read past on the
+/// endpoint that trickles, so the permit is back by 1.4 s at the latest.
+fn holdPermit(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    var ex: fetch.Exchange = .idle;
+    _ = ex.begin(api, .{ .method = .GET, .url = quiet_url, .timeout_ms = 1_400 }) catch |err| return c.str(@errorName(err));
+    nilo.sleep(1_000) catch {};
+    ex.end();
+    permit_back_ms.store(nilo.nowMillis(), .release);
+    return c.str("held");
+}
+
+/// A route with 500 ms that queues for the permit above until it is back, long
+/// after its time is gone. The time in the queue is spent: the call must be
+/// refused the moment it is let in, where a time counted from then would
+/// dial and wait another 500 ms, and the quiet endpoint never sees it.
+fn callQueued(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    c.giveDeadline(500);
+    const verdict: []const u8 = if (api.get(c, quiet_url, .{ .timeout_ms = 20_000 })) |_| "answered" else |err| @errorName(err);
+    const after = nilo.nowMillis() - permit_back_ms.load(.acquire);
+    c.giveDeadline(0);
+    return c.str(try std.fmt.allocPrint(c.arena(), "{s} {s}", .{ verdict, if (after < 250) "at once" else "late" }));
+}
+
 /// The nilo server under test, on a thread of its own, plus whether it ever
 /// got its port. `tryListen` blocks for the life of the server when it
 /// succeeds, so "did it bind?" cannot be read from the return value in time —
@@ -306,6 +387,93 @@ test "a body that trickles under the Engine is re-armed on every byte and never 
     // `begin` would have fired at one second, and one re-armed by each chunk
     // never does. The whole body coming back is the proof of the re-arm.
     try testing.expectEqualStrings(&@as([24]u8, @splat('x')), body);
+}
+
+test "a call made under a route's deadline gives up when the route's time does, not when its own bound would" {
+    const body = try drive(.nothing, "/route", callUnderRouteDeadline);
+    defer std.heap.smp_allocator.free(body);
+
+    // Twenty seconds of its own, 400 ms of the route's: the answer came back
+    // inside two seconds as a timeout, which only the route's bound can have
+    // done (ADR 105).
+    try testing.expectEqualStrings("TimedOut fast", body);
+}
+
+test "a route deadline longer than the call's own bound leaves the call's bound alone" {
+    const body = try drive(.nothing, "/longer", callUnderLongerDeadline);
+    defer std.heap.smp_allocator.free(body);
+
+    try testing.expectEqualStrings("TimedOut fast", body);
+}
+
+test "a call from a route whose deadline has already passed fails at once" {
+    const body = try drive(.nothing, "/spent", callAfterDeadline);
+    defer std.heap.smp_allocator.free(body);
+
+    try testing.expectEqualStrings("TimedOut fast", body);
+}
+
+test "a Run keeps the call's own bound, whatever deadline the request around it has" {
+    const body = try drive(.nothing, "/run", callFromARun);
+    defer std.heap.smp_allocator.free(body);
+
+    // The request had 60 ms and the Run did not know: the call waited its
+    // own 200 ms.
+    try testing.expectEqualStrings("TimedOut own", body);
+}
+
+test "a call that queued for a permit past its route's deadline is refused and never dialled" {
+    hushStartupWiring();
+    const gpa = std.heap.smp_allocator;
+
+    var quiet: Quiet = .{ .answer = .head_then_stall };
+    const quiet_thread = try std.Thread.spawn(.{}, Quiet.run, .{&quiet});
+    defer {
+        quiet.done.store(true, .release);
+        quiet.knock();
+        quiet_thread.join();
+    }
+    var waiting: std.Io.Threaded = .init(gpa, .{});
+    defer waiting.deinit();
+    for (0..5_000) |_| {
+        if (quiet.ready.load(.acquire)) break;
+        if (quiet.no_port.load(.acquire)) return error.NoFreePortForTheQuietEndpoint;
+        try std.Io.sleep(waiting.io(), .fromMilliseconds(1), .awake);
+    } else return error.QuietEndpointNeverCameUp;
+
+    var url_buf: [64]u8 = undefined;
+    quiet_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{quiet.port});
+
+    var api: fetch.Client = .init(gpa, .{ .max_in_flight = 1 });
+    defer api.deinit();
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.provide(&api);
+    try app.get("/hold", holdPermit);
+    try app.get("/queued", callQueued);
+
+    var serving: Serving = .{ .app = &app, .port = quiet.port + 200 };
+    const app_thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        app_thread.join();
+    }
+
+    const Holder = struct {
+        fn run(port: u16) void {
+            const body = askOnce(std.heap.smp_allocator, port, "/hold") catch return;
+            std.heap.smp_allocator.free(body);
+        }
+    };
+    const holder = try std.Thread.spawn(.{}, Holder.run, .{serving.port});
+    defer holder.join();
+    // Let the holder take the permit before the queued call asks.
+    try std.Io.sleep(waiting.io(), .fromMilliseconds(300), .awake);
+
+    const body = try askOnce(gpa, serving.port, "/queued");
+    defer gpa.free(body);
+    try testing.expectEqualStrings("TimedOut at once", body);
 }
 
 /// One request over a real socket, from a thread that is not the Engine's.

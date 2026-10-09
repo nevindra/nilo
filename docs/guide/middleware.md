@@ -23,13 +23,15 @@ try app.useOn("/api", requireToken);
 **Middleware is an onion: everything before `next.run(c)` happens on the way in, everything after it on the way out.** Not calling `next` at all ends the chain, which is all an auth middleware has to do to reject a request:
 
 ```zig
-fn requireToken(c: *nilo.Ctx, next: nilo.Next) !void {
+fn requireToken(c: *nilo.Ctx, next: nilo.Next, tokens: *TokenStore) !void {
     const token = c.header("Authorization") orelse
         return fail.unauthorized("this endpoint needs a token", .{});
-    if (!valid(token.view())) return fail.unauthorized("that token is not valid", .{});
+    if (!tokens.valid(token.view())) return fail.unauthorized("that token is not valid", .{});
     try next.run(c);
 }
 ```
+
+`tokens: *TokenStore` is a service, handed over by the same rule a handler follows. See [Giving a middleware what it needs](#giving-a-middleware-what-it-needs).
 
 Returning an error takes exactly the same path as a failing handler. **A middleware that stops the chain has to answer**, with a fail function or a `c.send`: one that returns without answering and without calling `next` is a 500, and the log names it as `middleware N of M`. The empty 200 a handler gets for returning nothing is the handler's, and a guard that forgot its 401 must not read as a success.
 
@@ -40,6 +42,33 @@ The order of `use` and `get` calls does not matter. Chains are resolved when `li
 `useOn(prefix, mw)` limits a middleware to paths that start with the prefix. `group("/api").use(mw)` does the same thing more clearly; see [Routing](./routing.md#groups).
 
 See [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md).
+
+### Giving a middleware what it needs
+
+**After `*Ctx` and `Next`, a middleware takes the services and resolved values it needs as arguments, and `listen()` checks that they exist.** A pointer is a service, and a value is a resolved value, as in a handler:
+
+```zig
+fn requireKey(c: *nilo.Ctx, next: nilo.Next, keys: *KeyStore, user: CurrentUser) !void {
+    if (!keys.allows(user.id)) return fail.forbidden("no key for {d}", .{user.id});
+    try next.run(c);
+}
+
+try app.provide(&keys);
+try app.use(requireKey);      // also useOn, a group's use, with, without
+```
+
+**A service nobody provided stops the server at `listen()`**, naming the middleware and the type, like a handler's. That is the point: fetching it inside the middleware with `c.service(*KeyStore)` gives a `?*KeyStore`, and `orelse return next.run(c)` lets every request through when the store is missing, which is the one mistake an auth middleware must not make. A resolved value is worked out once per request, so the middleware and the handler behind it share one `CurrentUser`, and a resolver that fails (`fail.unauthorized`) ends the chain through the normal error path.
+
+What a middleware may take after `Next`:
+
+| Argument | What it is |
+|---|---|
+| `*T`, `*const T` | a service |
+| a type carrying `nilo_resolve` | a resolved value |
+| `nilo.Path(T)` | the path params by name; each route the middleware covers must have them, or `listen()` says which route and which param |
+| `std.mem.Allocator`, `std.Io` | the request arena, the server's loop |
+
+**A query, a header, a form, a body or a bare path param is refused while compiling.** A middleware covers many routes, so it would read a different thing on each. Take the `*Ctx` it already has (`c.query("page")`), or move the read into a resolved value. A middleware with only `*Ctx` and `Next` is unchanged; this is optional. See [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md).
 
 ### Excluding routes from a middleware (`without`)
 
@@ -88,6 +117,8 @@ try app.use(nilo.cors.permissive);
 ```
 
 `logger.with(.{ .level = .debug, .slow_micros = 250_000 })` logs ordinary requests at a level you choose and anything slower than `slow_micros` at `.warn`, so slow requests stand out without a second tool.
+
+`logger.with(.{ .skip = &.{ "/healthz", "/metrics" } })` leaves those exact paths out of the log, so a health check called every second does not bury the requests that matter. Whether lines are text or JSON, and from which level, is not the logger's to say: it is `listen(.{ .log = .{ .format = .json, .level = .warn } })`, read at run time so one binary serves a laptop and a collector, and it needs `.logFn = nilo.logFn` in your root `std_options` (`nilo.std_options` has it). In JSON the access line is one flat object with `time` and `level` beside the request's fields ([ADR 262](../adr/262-a-log-line-has-one-sink.md)).
 
 `cors.with(.{ .origins = &.{"https://app.example.com"}, .credentials = true })` also accepts `methods`, `headers`, `expose` and `max_age`. `permissive` is `origins: &.{"*"}` with no credentials, which is reasonable for a public API and wrong for one behind a cookie.
 
@@ -196,6 +227,37 @@ try app.useOn("/sign-in", nilo.allowance.with(.{
 
 **`.name` keeps two allowances separate.** Two `with()` calls with the same options share one table. That is usually what you want (the same allowance applied in two places), and wrong as soon as the two are meant to be counted separately. Different numbers already make them different tables; give one a name when the numbers happen to match.
 
+### Limits and policy from the environment
+
+**A rate limit and a Content-Security-Policy are facts about where the program was deployed, so they can be filled from your settings before `listen()`.** Give the options the address of a variable instead of a literal. The variable is a container-level `var`, so its address is known while compiling, and the middleware reads it on each request ([ADR 264](../adr/264-a-deployment-fact-is-a-late-value.md), after [ADR 088](../adr/088-an-origin-is-a-fact-about-the-deployment.md)):
+
+<!-- compiles -->
+```zig
+const std = @import("std");
+const nilo = @import("nilo_http");
+
+// Read with nilo_config (see Settings); a plain struct here.
+const Settings = struct {
+    api_rate: u32 = 100,                      // API_RATE
+    csp: []const u8 = "default-src 'self'",   // CSP
+};
+var settings: Settings = .{};
+
+pub fn main() !void {
+    var app = nilo.App.init(std.heap.smp_allocator);
+    defer app.deinit();
+
+    // settings = read.value().?;  // from the environment, before the next lines
+    try app.useOn("/api", nilo.allowance.with(.{ .per_window = &settings.api_rate, .window_s = 60 }));
+    try app.use(nilo.secure.pages(.{ .csp = &settings.csp }));
+    try app.listen(.{});
+}
+```
+
+Numbers are `u32` (a `u16` field is a compile error naming the type), and the CSP is a `[]const u8`; both can also stay literals. A held value that cannot work (a count of zero, a count over 1023 on an address-keyed allowance, an empty CSP) answers 500 with a sentence naming the allowance or the policy until it is fixed, because a middleware has no hook at `listen()`. The table's `.slots` stays a constant: it sizes `.bss`.
+
+**Every answer through an allowance says where the client stands**: `RateLimit-Policy: "default";q=100;w=60` and `RateLimit: "default";r=37;t=21`, the remaining count and the seconds to the end of the window, from the IETF draft that clients are starting to read. `.headers = false` turns them off. A million an hour is only writable on `allowance.keyed` (`.per_window = 1_000_000, .window_s = 3600`): an address's slot stops at 1023.
+
 ### Rate limiting behind a proxy
 
 **Tell nilo which machines are in front of it, or every request is counted against the proxy's address.** The allowance counts against `c.clientIp()`, which is the socket's address unless you have said what stands in front:
@@ -255,15 +317,14 @@ fn me(user: CurrentUser) !Profile {
 
 There is no registration step and nothing to add to `main`. A resolver that fails takes the same path as a failing handler, so it rejects with `fail.unauthorized`. And `me` is still an ordinary function: call `me(.{ .id = 7, .name = … })` in a test.
 
-A resolver can take a `*Ctx`, a service, a `std.mem.Allocator`, and **other resolved values**. That last one is how `Admin` is built from `CurrentUser` instead of from a second copy of the auth code. It cannot take a path param or the body: a resolver belongs to the request, not to a route, and the same `CurrentUser` serves `/me` and `/orders/:id`. Ask for a `*Ctx` if you need one.
+A resolver can take a `*Ctx`, a service, a `std.mem.Allocator`, and **other resolved values**. That last one is how `Admin` is built from `CurrentUser` instead of from a second copy of the auth code. It can take the path params by name, `Path(T)`, to work something out of one (the tenant out of `:org`); it cannot take a bare path param or the body, because a resolver belongs to the request rather than to a route, and the same `CurrentUser` serves `/me` and `/orders/:id`. From a handler, the field names are checked against that route while compiling; from a middleware's `c.resolve`, they are read at run time and a route without the name is a 500 naming the resolver, the param and the route. Ask for a `*Ctx` if you need the query or the body.
 
 It is worked out **once per request**, which matters as soon as you also want to guard a whole prefix.
 
 ## Middleware or resolved value?
 
 ```zig
-fn requireAdmin(c: *nilo.Ctx, next: nilo.Next) !void {
-    const user = try c.resolve(CurrentUser);
+fn requireAdmin(c: *nilo.Ctx, next: nilo.Next, user: CurrentUser) !void {
     if (!user.is_admin) return fail.forbidden("admins only", .{});
     try next.run(c);
 }
@@ -272,7 +333,7 @@ try app.useOn("/admin", requireAdmin);
 fn stats(user: CurrentUser) !Stats { … }   // the same user, not a second lookup
 ```
 
-**Use middleware to secure a prefix, and a resolved value to hand the user to a handler.** Only routes that name a resolved value get it, so it is the wrong tool for securing a prefix: a handler that forgets the argument is simply not authenticated. `useOn` makes a rule apply whether or not the handler cooperates. `c.resolve` is where the two meet: the middleware's lookup and the handler's argument are the same single lookup.
+**Use middleware to secure a prefix, and a resolved value to hand the user to a handler.** Only routes that name a resolved value get it, so it is the wrong tool for securing a prefix: a handler that forgets the argument is simply not authenticated. `useOn` makes a rule apply whether or not the handler cooperates. A middleware takes the resolved value as an argument, as above, and the middleware's lookup and the handler's argument are the same single lookup. `c.resolve(CurrentUser)` does the same from a middleware that takes no arguments.
 
 See [ADR 015](../adr/015-resolved-values-are-declared-by-their-type.md).
 

@@ -28,6 +28,14 @@ pub const url = @import("url.zig");
 pub const Ctx = @import("ctx.zig").Ctx;
 pub const Str = @import("nilo_core").Str;
 
+/// A moment (microseconds since 1970-01-01 UTC) and a calendar day (days
+/// since 1970-01-01), usable in a body, a query, a path and a form with no
+/// database in the build: RFC 3339 and `YYYY-MM-DD` text both ways, and
+/// `format: date-time` / `format: date` in the OpenAPI document. They live in
+/// `nilo_core` and `nilo_sql` re-exports the same types (ADR 057).
+pub const Timestamp = @import("nilo_core").Timestamp;
+pub const Date = @import("nilo_core").Date;
+
 /// A Scope for work that is not a request — a CLI run, the tick of a
 /// scheduled task, a test (ADR 038). A `Ctx` is the Scope a handler has;
 /// this is the one a program with no request in it hands to a module that
@@ -120,10 +128,10 @@ pub const debug_io = @import("bulkhead.zig").debug_io;
 
 /// The other half of the wiring: `pub const std_options = nilo.std_options;`
 ///
-/// All it does is turn the Engine's debug chatter down to warnings. Without
-/// it a debug build opens with `debug(zio): Spawning worker thread 1` and
-/// buries your own logs — the Engine is an implementation detail, so it
-/// should not be the first thing anybody sees.
+/// It turns the Engine's debug chatter down to warnings, and installs
+/// `logFn`. Without the first a debug build opens with `debug(zio): Spawning
+/// worker thread 1` and buries your own logs — the Engine is an
+/// implementation detail, so it should not be the first thing anybody sees.
 ///
 /// To keep your own settings, start from this one:
 ///
@@ -131,11 +139,26 @@ pub const debug_io = @import("bulkhead.zig").debug_io;
 /// pub const std_options: std.Options = .{
 ///     .log_level = .debug,
 ///     .log_scope_levels = nilo.std_options.log_scope_levels,
+///     .logFn = nilo.logFn,
 /// };
 /// ```
 pub const std_options: std.Options = .{
+    .logFn = logFn,
     .log_scope_levels = &.{.{ .scope = .zio, .level = .warn }},
 };
+
+/// The sink a program's log lines go through, one line per call:
+///
+/// ```zig
+/// pub const std_options: std.Options = .{ .logFn = nilo.logFn };
+/// ```
+///
+/// Text or JSON by `listen(.{ .log = .{ .format = … } })`, filtered by
+/// `.log.level` at run time inside `std_options.log_level`, and a line
+/// written during a request carries that request's id. Without it a
+/// `.format = .json` line reaches stderr behind std's `info: ` prefix, which
+/// `listen()` says at startup (ADR 262).
+pub const logFn = @import("log.zig").logFn;
 
 /// A lock for a Service that gets written to. Handlers run concurrently on
 /// several OS threads, so shared mutable state needs one — and this is the
@@ -386,9 +409,22 @@ pub const testing = @import("testing.zig");
 /// ```
 pub const Query = @import("typed.zig").Query;
 
-/// A whole number inside a range, as a type — for the `limit` every list
-/// endpoint bounds and every document should say it bounds
+/// The path params, read by name into a struct of yours: one field per
+/// `:name` of the pattern, `@"*"` for a trailing wildcard. Required on a route
+/// with two or more params, which a bare argument cannot tell apart
+/// ([ADR 002](../docs/adr/002-typed-handlers-are-a-thin-layer-over-ctx.md)).
+///
+/// ```zig
+/// const Member = struct { org: u32, id: u32 };
+/// fn member(p: nilo.Path(Member)) !?User { … p.value.org … }
+/// app.get("/orgs/:org/members/:id", member);
+/// ```
+pub const Path = @import("pathparams.zig").Path;
+
+/// A number inside a range, as a type, whole or real — for the `limit` every
+/// list endpoint bounds and every document should say it bounds
 /// ([ADR 167](../docs/adr/167-a-whole-number-inside-a-range-is-a-type.md)).
+/// A bound written with a point (`Within(0.0, 1.0)`) makes it a real number.
 ///
 /// ```zig
 /// const ListQuery = struct { limit: nilo.Within(1, 200) = .of(50), offset: u32 = 0 };
@@ -398,6 +434,17 @@ pub const Query = @import("typed.zig").Query;
 /// `maximum`, and the value is `q.value.limit.value`. Read wherever a `u8`
 /// is: a path param, a query value, a form field, a JSON body.
 pub const Within = @import("within.zig").Within;
+
+/// A list with a length, as a type — `minItems` and `maxItems` in the
+/// document and one sentence naming the field, the count and the bound
+/// ([ADR 266](../docs/adr/266-a-list-with-a-length-is-a-type.md)).
+///
+/// ```zig
+/// const NewPost = struct { tags: nilo.Many(nilo.Str, .{ .min = 1, .max = 5 }) };
+/// ```
+///
+/// Read where a list is: a JSON body and a form. The slice is `.value`.
+pub const Many = @import("many.zig").Many;
 
 /// One request header, as a typed argument — the same family as `Query(T)`
 /// and `Form(T)`, on a header
@@ -642,6 +689,12 @@ pub const SameSite = @import("cookie.zig").SameSite;
 /// compiling.
 pub const Session = @import("session.zig").Session;
 
+/// A sealed token for a client with no cookie jar: `Authorization: Bearer …`,
+/// opened under the same secret as `Session(T)` and bound to its own purpose.
+/// `Bearer(T).issue(c, value, .{ .max_age = 3600 })` mints one; a handler
+/// taking `Bearer(T)` reads it with `get()` or `require()` (ADR 265).
+pub const Bearer = @import("session.zig").Bearer;
+
 /// Everything else session: `Options` for `setWith`, `key_len` for the
 /// secret, and `max_cookie_bytes`.
 pub const session = @import("session.zig");
@@ -735,6 +788,12 @@ pub const deadline = @import("deadline.zig").with;
 /// ([ADR 156](../docs/adr/156-a-route-can-say-how-much-body-it-takes.md)).
 pub const maxBody = @import("maxbody.zig").with;
 
+/// A value stated in the program or filled before `listen()`: what
+/// `allowance`, `secure` and `maxBody` take where a deployment fact is
+/// wanted, as `.per_window = 100` or `.per_window = &config.rate`
+/// ([ADR 088](../docs/adr/088-an-origin-is-a-fact-about-the-deployment.md)).
+pub const Late = @import("late.zig").Late;
+
 /// Static files, held in memory (ADR 009). Used through `app.static()`;
 /// the module itself is here for its `Options`.
 /// What an `Accept` header says about one media type: `.named`, `.anything`,
@@ -774,12 +833,12 @@ fn panicNamingRequest(msg: []const u8, first_trace_addr: ?usize) noreturn {
     // say nothing rather than guess. A wrong path in a crash log sends you
     // off debugging the wrong endpoint.
     if (fail.inFlight()) |r| {
-        if (r.path.len > 0) {
+        if (r.requestLine()) |line| {
             var buf: [512]u8 = undefined;
             const named = std.fmt.bufPrint(
                 &buf,
                 "{s} (while handling {s} {s})",
-                .{ msg, r.method, r.path },
+                .{ msg, line.method, line.path },
             ) catch msg;
             std.debug.defaultPanic(named, first_trace_addr);
         }
@@ -843,7 +902,7 @@ test "a fail function inside blocking reaches the request that made the call" {
     const bulkhead = @import("bulkhead.zig");
 
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("GET", "/users/9");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1010,6 +1069,8 @@ test {
     _ = @import("fail.zig");
     _ = @import("service.zig");
     _ = @import("resolve.zig");
+    _ = @import("pathparams.zig");
+    _ = @import("typedmw.zig");
     _ = @import("openapi.zig");
     _ = @import("stream.zig");
     _ = @import("framing.zig");
@@ -1025,14 +1086,17 @@ test {
     _ = @import("middleware.zig");
     _ = @import("typed.zig");
     _ = @import("within.zig");
+    _ = @import("many.zig");
     _ = @import("authorization.zig");
     _ = @import("idempotent.zig");
     _ = @import("cached.zig");
     _ = @import("health.zig");
     _ = @import("ctx.zig");
     _ = @import("logger.zig");
+    _ = @import("log.zig");
     _ = @import("cors.zig");
     _ = @import("csrf.zig");
+    _ = @import("late.zig");
     _ = @import("secure.zig");
     _ = @import("trace.zig");
     _ = @import("otlp.zig");

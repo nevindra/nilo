@@ -65,7 +65,7 @@ const mw = @import("middleware.zig");
 pub fn with(comptime limit: anytype) mw.Limited {
     const Limit = @TypeOf(limit);
     switch (@typeInfo(Limit)) {
-        .comptime_int, .int => return .{ .run = fixed(limit), .limit = .{ .bytes = limit } },
+        .comptime_int, .int => return .{ .run = fixed(limit), .limit = .{ .value = limit } },
         .pointer => |p| if (p.size == .one and p.child == usize) return .{ .run = reading(limit), .limit = .{ .held = limit } },
         else => {},
     }

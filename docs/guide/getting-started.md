@@ -1,25 +1,58 @@
 # Getting started
 
-**Add nilo to a Zig 0.17 project, write a first server, and restart it on every save.**
+**Start a Zig 0.17 project with nilo in four commands, add it to one you have, and restart the server on every save.**
 
 **Reference:** [`App`](../reference/app.md#app), [`listen` options](../reference/app.md#listen-options), [root wiring](../reference/README.md#declarations-in-the-root-file) · **Design:** [nilo's design principles](../design/principles.md)
 
 nilo needs **Zig 0.17**. Nothing else: no C library, no system package. **v0.7.0, the tag pinned below, and every tag before it build on Zig 0.16.0**, and this page describes `main`: with 0.16, pin the tag and read the page at that tag.
 
-## Add it to your project
+## Start a project
 
-**Run `zig init` first, then `zig fetch --save` with the pinned commit.** `zig fetch --save` writes into `build.zig.zon` and fails with `no build.zig file found` if there isn't one yet:
+**Copy `template/` out of the package, fetch nilo into it, and run `zig build dev`.** The template is a working server with two routes and a test, and `zig build dev` restarts it on every save:
 
 ```
-zig init
+mkdir hello && cd hello
+curl -L https://github.com/nevindra/nilo/archive/e1b859f8230a4cffd09d8e84411f7bcd7524258a.tar.gz | tar -xz --strip-components=2 nilo-e1b859f8230a4cffd09d8e84411f7bcd7524258a/template
 zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
+zig build dev
 ```
 
-That writes nilo into your `build.zig.zon`, pinned to the commit the tag points at. **Keep the `#commit`.** The `?ref=` on its own is not a pin: nilo's tags are annotated, `zig fetch` does not resolve an annotated tag (checked again on 0.17.0), and what it gives you for `?ref=v0.7.0` alone is whatever `main` was that day. Two people installing a week apart would get two different versions, and neither asked for one. The commit for each tag is on [its release page](https://github.com/nevindra/nilo/releases).
+```
+$ curl localhost:8787/greet/wati
+wati
+```
 
-`zig init` leaves a library-and-executable scaffold built around `src/root.zig`, which is not what you want. **Replace the generated `build.zig` with the one below instead of pasting into it, and delete `src/root.zig`.** That template comes from Zig, and nilo can't change it. Keep `build.zig.zon`, which is where `zig fetch` just wrote nilo.
+The first command takes the template directory of that commit and nothing else. The second writes nilo into the `build.zig.zon` it brought, pinned to the commit the tag points at. **Keep the `#commit`.** The `?ref=` on its own is not a pin: nilo's tags are annotated, `zig fetch` does not resolve an annotated tag (checked again on 0.17.0), and what it gives you for `?ref=v0.7.0` alone is whatever `main` was that day. Two people installing a week apart would get two different versions, and neither asked for one. The commit for each tag is on [its release page](https://github.com/nevindra/nilo/releases).
 
-Then pass the module to whatever imports it, in `build.zig`:
+`zig build test` runs the template's test, and `.name = .hello` in `build.zig.zon` and `"hello"` in `build.zig` are the two places to rename it (after changing the name, delete `.fingerprint` and Zig prints the one to use).
+
+## Add it to a project you already have
+
+**Two lines of `build.zig` and one `zig fetch --save` add nilo to an existing project.** Fetch it as above, then call `nilo.app` from your `build.zig`:
+
+```zig
+const std = @import("std");
+const nilo = @import("nilo");
+
+pub fn build(b: *std.Build) void {
+    _ = nilo.app(b, .{ .name = "my-app", .root = b.path("src/main.zig") });
+}
+```
+
+That reads `-Dtarget` and `-Doptimize`, fetches nilo with the same mode (see below), builds the executable with `nilo_http` imported, installs it, and adds the steps `run`, `dev` and `test`. `zig init` writes a library-and-executable scaffold around `src/root.zig`, which is not what a server wants; replace its `build.zig` with the five lines above and delete `src/root.zig`.
+
+Options go in the struct: `.sql = true` imports `nilo_sql` and fetches its drivers, `.tls`, `.http2` and `.libdeflate` pass the matching [build flags](../reference/app.md#niloapp) to the dependency, and `.target` and `.optimize` replace the ones read from the command line. It returns the executable, the test artifact and the dependency, so a project can add to any of them:
+
+```zig
+const built = nilo.app(b, .{ .name = "my-app", .root = b.path("src/main.zig"), .sql = true });
+built.exe.root_module.addImport("nilo_id", built.dependency.module("nilo_id"));
+```
+
+[Restarting on every save](#restarting-on-every-save), below, says what `dev` does and how to write it by hand.
+
+### Without the helper
+
+**`nilo.app` is a convenience and the dependency is a plain package.** A `build.zig` that does what it does by hand is the one below, and nothing in nilo requires the helper ([ADR 263](../adr/263-a-first-project-is-one-call-from-its-build-file.md)):
 
 ```zig
 const std = @import("std");
@@ -47,8 +80,6 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the server").dependOn(&run.step);
 }
 ```
-
-That is the whole file. Next come `zig build run` and `src/main.zig`. [Restarting on every save](#restarting-on-every-save), below, adds four more lines once the server exists.
 
 ### Fixing the `.sframe` link error
 
@@ -85,7 +116,7 @@ gets missed.
 
 **The test step is the one people usually miss**, which is why `nilo.testing.Client` prints the same warning, not only `listen()`. A suite that runs in both optimize modes fetches the dependency in the same place, and a ReleaseSafe suite running against a Debug nilo is testing a setup nobody deploys ([ADR 069](../adr/069-a-library-can-tell-what-mode-the-program-was-built-in.md)).
 
-## A first server
+## The server in the template
 
 ```zig
 const std = @import("std");
@@ -127,7 +158,7 @@ wati
 
 ## Restarting on every save
 
-**`nilo-dev` rebuilds and restarts your server every time you save.** A Zig binary cannot swap its own code, so there is no hot reload. Instead, `nilo-dev` (shipped with the package) runs one `zig build --watch` and restarts your server whenever the binary it produces changes ([ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)). Add these lines under the `run` step:
+**`nilo-dev` rebuilds and restarts your server every time you save.** A Zig binary cannot swap its own code, so there is no hot reload. Instead, `nilo-dev` (shipped with the package) runs one `zig build --watch` and restarts your server whenever the binary it produces changes ([ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md)). `nilo.app` writes the `dev` step for you. In a `build.zig` of your own, add these lines under the `run` step:
 
 ```zig
 const dev = b.addRunArtifact(nilo.artifact("nilo-dev"));
@@ -189,14 +220,17 @@ $ zig build dev -- --no-incremental
 pub const std_options = nilo.std_options;
 ```
 
-This turns the Engine's debug output down to warnings. Without it, a debug build starts with `debug(zio): Spawning worker thread 1` and your own logs get buried. To keep settings of your own, start from this one:
+This turns the Engine's debug output down to warnings. Without it, a debug build starts with `debug(zio): Spawning worker thread 1` and your own logs get buried. It also installs `nilo.logFn`, which writes every log line as one line with a time, in the format `listen(.{ .log = … })` asks for (text, or JSON for a collector) and with the id of the request a line was written in. To keep settings of your own, start from this one:
 
 ```zig
 pub const std_options: std.Options = .{
     .log_level = .debug,
     .log_scope_levels = nilo.std_options.log_scope_levels,
+    .logFn = nilo.logFn,
 };
 ```
+
+Leave `.logFn` out and `.format = .json` reaches stderr behind std's `info: ` prefix, which no collector parses; `listen()` says so at startup.
 
 ```zig
 pub const std_options_debug_io = nilo.debug_io;

@@ -19,6 +19,7 @@ const field_mod = @import("field.zig");
 const framing_mod = @import("framing.zig");
 const http1 = @import("http1.zig");
 const json_mod = @import("json.zig");
+const many_mod = @import("many.zig");
 const jsonmark = @import("jsonmark.zig");
 const password_mod = @import("password.zig");
 const router = @import("router.zig");
@@ -97,6 +98,9 @@ pub const json_hint = 512;
 /// the trade runs this way at all: 32 bytes of a transient frame against an
 /// allocation on the path nearly every app serves (ADR 017).
 pub const inline_headers = 7;
+
+/// How long a line `Ctx.headerScratch` holds.
+pub const header_scratch_len = 64;
 
 /// One resolved value, kept for the rest of the request that asked for it.
 ///
@@ -187,6 +191,10 @@ pub const Ctx = struct {
     /// and therefore on the fiber's stack — not on the connection, whose
     /// 4,669 idle bytes are an invariant rather than a budget (ADR 017).
     _request_id_buf: [16]u8 = undefined,
+    /// Where a middleware builds one response header line that changes per
+    /// request, so that it costs no allocation (`headerScratch`). On the
+    /// fiber's stack with the request id, for the same reason.
+    _header_scratch: [header_scratch_len]u8 = undefined,
     /// The App's tracer, when `app.trace` was called. Null on a request of an
     /// App that does not trace (ADR 247).
     _tracer: ?*trace_mod.Tracer = null,
@@ -1159,7 +1167,9 @@ pub const Ctx = struct {
     }
 
     /// How many milliseconds are left, or null when this request has no
-    /// deadline. Zero once it has passed.
+    /// deadline. Zero once it has passed, and **rounded up**: a request with
+    /// any time left reads at least 1, so a caller handing it on
+    /// (`core.within`) never mistakes a sliver for a spent deadline.
     ///
     /// For a handler that has a limit of its own to hand somewhere else — an
     /// outbound call, say — and should not be given longer than the request
@@ -1169,7 +1179,7 @@ pub const Ctx = struct {
         if (until == 0) return null;
         const now = bulkhead.monotonicNanos();
         if (now >= until) return 0;
-        return @intCast(@min((until - now) / std.time.ns_per_ms, std.math.maxInt(u32)));
+        return @intCast(@min((until - now + std.time.ns_per_ms - 1) / std.time.ns_per_ms, std.math.maxInt(u32)));
     }
 
     /// The address of the client, looking through whatever `listen()` was told
@@ -1736,6 +1746,16 @@ pub const Ctx = struct {
     /// whatever those bytes have become. When in doubt, `setHeader`.
     pub fn setStaticHeader(self: *Ctx, name: []const u8, value: []const u8) !void {
         return self.putHeader(.{ .name = name, .value = value });
+    }
+
+    /// Sixty-four bytes of the Ctx's own, for a header value that is worked
+    /// out per request and that a middleware would otherwise copy into the
+    /// arena: `nilo.allowance`'s `RateLimit` is one. Hand the filled part to
+    /// `setStaticHeader`, which does not copy it, and it lives as long as the
+    /// request does. One buffer, so one such header per request; the next
+    /// caller overwrites the last (ADR 264).
+    pub fn headerScratch(self: *Ctx) *[header_scratch_len]u8 {
+        return &self._header_scratch;
     }
 
     /// The response headers added so far, in the order they were set.
@@ -3172,12 +3192,19 @@ fn collectBadBody(
     var out: T = undefined;
     var any = false;
 
+    comptime json_mod.refuseUnreadableSkips(T);
     const info = @typeInfo(T).@"struct";
     inline for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
         const rule = field_mod.FieldRule(f_type, f_attrs);
         outcomes[i] = .{};
 
-        if (object.get(f_name)) |given| {
+        // A skipped field is never read: it is whatever its default says,
+        // and a key by its name was refused above as an unknown one (ADR 148).
+        if (comptime jsonmark.fieldSkipped(T, f_name)) {
+            @field(out, f_name) = comptime rule.absent();
+            continue;
+        }
+        if (object.get(comptime jsonmark.fieldWire(T, f_name))) |given| {
             // Only a string has text to quote back. A list or an object is
             // described by its kind instead, which is what `kind` is for.
             if (given == .string) outcomes[i].given = Str.fromRequest(given.string, lifetime);
@@ -3225,8 +3252,16 @@ fn collectBadBody(
                     // A word that is not one of the choices is the one wrong
                     // value that is the right *kind*, and it gets the sentence a
                     // bad `?stage=` gets rather than one arguing with itself.
-                    if (given == .string and comptime choicesOf(f_type) != null) {
+                    if (given == .string and comptime choicesOfBody(f_type) != null) {
                         outcomes[i].reason = .not_a_choice;
+                    } else if (comptime manyOf(f_type) != null) {
+                        // The right kind of thing and not as many as the
+                        // type holds: the count is the sentence (ADR 266).
+                        outcomes[i].reason = .wrong_kind;
+                        outcomes[i].kind = if (given == .array)
+                            std.fmt.allocPrint(arena, "a list of {d}", .{given.array.items.len}) catch "a list"
+                        else
+                            kindOf(given);
                     } else if (numberFault(f_type, arena, given)) |said| {
                         // The number is the right kind and not a value of
                         // this field, so it is quoted back like a query's.
@@ -3305,17 +3340,22 @@ fn describeObject(
     // the rule a query struct and a form follow (`field.zig`).
     const info = @typeInfo(T).@"struct";
     inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
-        if (!field_mod.FieldRule(f_type, f_attrs).may_be_absent and !object.contains(f_name)) return fail.badRequest(
-            "the request body is missing \"{s}\" ({s})",
-            .{ nameWithin(arena, where, f_name), comptime expectedOf(f_type) },
-        );
+        const on_the_wire = comptime jsonmark.fieldWire(T, f_name);
+        if (comptime !jsonmark.fieldSkipped(T, f_name) and !field_mod.FieldRule(f_type, f_attrs).may_be_absent) {
+            if (!object.contains(on_the_wire)) return fail.badRequest(
+                "the request body is missing \"{s}\" ({s})",
+                .{ nameWithin(arena, where, on_the_wire), comptime expectedOfBody(f_type) },
+            );
+        }
     }
 
     // Everything is present and nothing is spare, so a value is the wrong
     // shape for the field it landed in — here, or somewhere further down.
     inline for (info.field_names, info.field_types) |f_name, f_type| {
-        if (object.get(f_name)) |given| {
-            if (describeField(f_type, arena, given, nameWithin(arena, where, f_name), depth, deeper)) |found| {
+        if (comptime jsonmark.fieldSkipped(T, f_name)) continue;
+        const on_the_wire = comptime jsonmark.fieldWire(T, f_name);
+        if (object.get(on_the_wire)) |given| {
+            if (describeField(f_type, arena, given, nameWithin(arena, where, on_the_wire), depth, deeper)) |found| {
                 return found;
             }
         }
@@ -3339,12 +3379,16 @@ fn takes(comptime T: type, comptime within: Within) []const u8 {
         if (within.tag.len == 0) return fieldList(T);
         if (@typeInfo(T) != .@"struct") return within.tag;
         const info = @typeInfo(T).@"struct";
+        @setEvalBranchQuota(10_000 + 4 * convert.budget(info.field_names));
         var entries: [info.field_names.len + 1][]const u8 = undefined;
         entries[0] = within.tag;
-        for (info.field_names, info.field_types, info.field_attrs, 1..) |f_name, f_type, f_attrs, i| {
-            entries[i] = f_name ++ (if (field_mod.FieldRule(f_type, f_attrs).may_be_absent) " (optional)" else "");
+        var n: usize = 1;
+        for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+            if (jsonmark.fieldSkipped(T, f_name)) continue;
+            entries[n] = jsonmark.fieldWire(T, f_name) ++ (if (field_mod.FieldRule(f_type, f_attrs).may_be_absent) " (optional)" else "");
+            n += 1;
         }
-        return nameList(&entries);
+        return nameList(entries[0..n]);
     }
 }
 
@@ -3432,7 +3476,7 @@ fn describeField(
         // sentence arguing with itself. It gets the wording a bad `?stage=`
         // gets, which quotes back what was actually sent.
         if (given == .string) {
-            if (comptime choicesOf(T)) |choices| return fail.badRequest(
+            if (comptime choicesOfBody(T)) |choices| return fail.badRequest(
                 "\"{s}\" is not one of the known choices ({s}): \"{s}\"",
                 .{ name, choices, given.string },
             );
@@ -3443,9 +3487,15 @@ fn describeField(
         if (comptime numberOf(T)) |N| {
             if (numberFault(T, arena, given)) |said| return fail.badRequest(
                 "\"{s}\" has to be {s}, not {s}",
-                .{ name, comptime expectedOf(N), said },
+                .{ name, comptime expectedOfBody(N), said },
             );
         }
+        // A list with a length that is the right kind and the wrong count
+        // says the bound and the count (ADR 266).
+        if (given == .array) if (comptime manyOf(T)) |M| return fail.badRequest(
+            "\"{s}\" has to be {s}, not a list of {d}",
+            .{ name, comptime expectedOf(M), given.array.items.len },
+        );
         // The same for a type that parses itself and said no: what arrived
         // was the right kind and the wrong text, and the sentence is the one
         // a query value of that type gets, quoting it (ADR 166).
@@ -3464,13 +3514,13 @@ fn describeField(
                 }
                 return fail.badRequest(
                     "\"{s}\" has to be {s}, not \"{s}\"",
-                    .{ name, comptime expectedOf(T), text },
+                    .{ name, comptime expectedOfBody(T), text },
                 );
             }
         }
         return fail.badRequest(
             "\"{s}\" has to be {s}, not {s}",
-            .{ name, comptime expectedOf(T), kindOf(given) },
+            .{ name, comptime expectedOfBody(T), kindOf(given) },
         );
     }
 
@@ -3496,6 +3546,14 @@ fn describeField(
     // A value that parsed itself is one value, whatever its kind of type:
     // a `Uuid` is a struct with nothing inside it to point at.
     if (comptime convert.parsesItself(Inner)) return null;
+
+    if (comptime many_mod.itemOf(Inner)) |Item| {
+        for (given.array.items, 0..) |item, i| {
+            const at = std.fmt.allocPrint(arena, "{s}[{d}]", .{ name, i }) catch name;
+            if (describeField(Item, arena, item, at, depth - 1, deeper)) |found| return found;
+        }
+        return null;
+    }
 
     if (Inner != Str) switch (@typeInfo(Inner)) {
         .@"struct" => return describeObject(Inner, arena, given.object, name, .{}, depth - 1, deeper),
@@ -3524,6 +3582,7 @@ fn hasInsides(comptime T: type, given: std.json.Value) bool {
     };
     if (Inner == Str) return false;
     if (comptime convert.parsesItself(Inner)) return false;
+    if (comptime many_mod.itemOf(Inner) != null) return given == .array and given.array.items.len > 0;
     return switch (@typeInfo(Inner)) {
         .@"struct" => given == .object,
         .@"union" => comptime tagOf(Inner) != null and given == .object,
@@ -3575,24 +3634,44 @@ fn kindOf(value: std.json.Value) []const u8 {
 /// field that was not sent is missing in the same way a body field is, and
 /// says so in the same sentence (`form.zig`).
 pub fn expectedOf(comptime T: type) []const u8 {
+    return expectedIn(T, false);
+}
+
+/// `expectedOf` for a JSON body, where an enum's choices are the spelling the
+/// reader accepts (`rename_all`, ADR 148); a query and a form read the tag
+/// names as written and use `expectedOf`.
+pub fn expectedOfBody(comptime T: type) []const u8 {
+    return expectedIn(T, true);
+}
+
+fn enumNames(comptime E: type, comptime wire: bool) []const u8 {
+    comptime {
+        const e = @typeInfo(E).@"enum";
+        const marked = if (wire) jsonmark.of(E) else null;
+        @setEvalBranchQuota(10_000 + 4 * convert.budget(e.field_names));
+        var out: []const u8 = "";
+        for (e.field_names, 0..) |f_name, i| out = out ++ (if (i == 0) "" else ", ") ++ jsonmark.wire(f_name, marked);
+        return out;
+    }
+}
+
+fn expectedIn(comptime T: type, comptime wire: bool) []const u8 {
     comptime {
         if (T == Str) return "text";
         // A `Patch(T)` takes the value or null; leaving it out is the third
         // thing it can be, and that is not a value to describe.
-        if (patch_mod.isPatch(T)) return expectedOf(T.nilo_patch) ++ " or null";
+        if (patch_mod.isPatch(T)) return expectedIn(T.nilo_patch, wire) ++ " or null";
         // What the type said it expects, or its name — the words a query
         // value of the same type is asked for in (ADR 166).
         if (convert.parsesItself(T)) return convert.expects(T);
+        // A list with a length says its length (ADR 266).
+        if (many_mod.itemOf(T) != null) return T.nilo_expects;
         return switch (@typeInfo(T)) {
-            .optional => |o| expectedOf(o.child) ++ " or null",
+            .optional => |o| expectedIn(o.child, wire) ++ " or null",
             .bool => "true or false",
             .int, .comptime_int => "a whole number",
             .float, .comptime_float => "a number",
-            .@"enum" => |e| blk: {
-                var out: []const u8 = "one of ";
-                for (e.field_names, 0..) |f_name, i| out = out ++ (if (i == 0) "" else ", ") ++ f_name;
-                break :blk out;
-            },
+            .@"enum" => "one of " ++ enumNames(T, wire),
             .@"struct" => "an object",
             .@"union" => if (tagOf(T)) |key| "an object whose \"" ++ key ++ "\" is one of " ++ variantList(T) else "something this endpoint understands",
             .pointer => |p| if (p.size == .slice and p.child == u8) "text" else "a list",
@@ -3605,16 +3684,21 @@ pub fn expectedOf(comptime T: type) []const u8 {
 /// through an optional or a `Patch`, since `?Stage` is as much a list of
 /// choices as `Stage` is.
 fn choicesOf(comptime T: type) ?[]const u8 {
+    return choicesIn(T, false);
+}
+
+/// `choicesOf` for a JSON body: the spelling the reader accepts.
+fn choicesOfBody(comptime T: type) ?[]const u8 {
+    return choicesIn(T, true);
+}
+
+fn choicesIn(comptime T: type, comptime wire: bool) ?[]const u8 {
     comptime {
         if (T == Str) return null;
-        if (patch_mod.isPatch(T)) return choicesOf(T.nilo_patch);
+        if (patch_mod.isPatch(T)) return choicesIn(T.nilo_patch, wire);
         return switch (@typeInfo(T)) {
-            .optional => |o| choicesOf(o.child),
-            .@"enum" => |e| blk: {
-                var out: []const u8 = "";
-                for (e.field_names, 0..) |f_name, i| out = out ++ (if (i == 0) "" else ", ") ++ f_name;
-                break :blk out;
-            },
+            .optional => |o| choicesIn(o.child, wire),
+            .@"enum" => enumNames(T, wire),
             else => null,
         };
     }
@@ -3624,11 +3708,15 @@ fn choicesOf(comptime T: type) ?[]const u8 {
 fn fieldList(comptime T: type) []const u8 {
     comptime {
         const info = @typeInfo(T).@"struct";
+        @setEvalBranchQuota(10_000 + 4 * convert.budget(info.field_names));
         var entries: [info.field_names.len][]const u8 = undefined;
-        for (info.field_names, info.field_types, info.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
-            entries[i] = f_name ++ (if (field_mod.FieldRule(f_type, f_attrs).may_be_absent) " (optional)" else "");
+        var n: usize = 0;
+        for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+            if (jsonmark.fieldSkipped(T, f_name)) continue;
+            entries[n] = jsonmark.fieldWire(T, f_name) ++ (if (field_mod.FieldRule(f_type, f_attrs).may_be_absent) " (optional)" else "");
+            n += 1;
         }
-        return nameList(&entries);
+        return nameList(entries[0..n]);
     }
 }
 
@@ -3708,11 +3796,28 @@ fn usableRequestId(text: []const u8) bool {
     return true;
 }
 
+/// Whether a key a client sent is one of `T`'s: compared with the wire
+/// spelling, the one the writer sends and the reader matches, and never with
+/// a skipped field, which has no key (ADR 148).
 fn hasField(comptime T: type, name: []const u8) bool {
     inline for (@typeInfo(T).@"struct".field_names) |f_name| {
-        if (std.mem.eql(u8, f_name, name)) return true;
+        if (comptime !jsonmark.fieldSkipped(T, f_name)) {
+            if (std.mem.eql(u8, comptime jsonmark.fieldWire(T, f_name), name)) return true;
+        }
     }
     return false;
+}
+
+/// The `Many` inside `T`, or `T` itself, or null when it is not one: through
+/// an optional, like `parsedOf` (ADR 266).
+fn manyOf(comptime T: type) ?type {
+    comptime {
+        const Inner = switch (@typeInfo(T)) {
+            .optional => |o| o.child,
+            else => T,
+        };
+        return if (many_mod.itemOf(Inner) != null) Inner else null;
+    }
 }
 
 /// The type that parses itself inside `T` — `T` itself, or the child of an
@@ -3814,6 +3919,14 @@ fn numberFault(comptime T: type, arena: std.mem.Allocator, given: std.json.Value
 /// Whether a JSON value could have become a `T`. Loose on purpose: it is
 /// only ever asked about a parse std.json has already refused, so its job is
 /// to find the field that explains the refusal, not to re-decide it.
+fn isEnumWire(comptime E: type, text: []const u8) bool {
+    inline for (@typeInfo(E).@"enum".field_names, comptime jsonmark.wireNames(E)) |f_name, on_the_wire| {
+        _ = f_name;
+        if (std.mem.eql(u8, text, on_the_wire)) return true;
+    }
+    return false;
+}
+
 fn fits(comptime T: type, value: std.json.Value) bool {
     if (T == Str) return value == .string;
     if (comptime patch_mod.isPatch(T)) return value == .null or fits(T.nilo_patch, value);
@@ -3825,13 +3938,17 @@ fn fits(comptime T: type, value: std.json.Value) bool {
         const text = textOf(value, &buf) orelse return false;
         return T.nilo_parse(text) != null;
     }
+    // A list with a length fits when it is a list of that many; what is in
+    // it is for the walk inside to say (ADR 266).
+    if (comptime many_mod.itemOf(T) != null) return value == .array and T.fitsCount(value.array.items.len);
     return switch (@typeInfo(T)) {
         .optional => |o| value == .null or fits(o.child, value),
         .bool => value == .bool,
         .int, .float => numberFits(T, value),
         // A string that is not one of the names is the whole reason an enum
         // field fails, so the tag has to be checked and not just the kind.
-        .@"enum" => value == .string and std.meta.stringToEnum(T, value.string) != null,
+        // By the spelling the body reader accepts (`rename_all`, ADR 148).
+        .@"enum" => value == .string and isEnumWire(T, value.string),
         .@"struct" => value == .object,
         .@"union" => if (comptime tagOf(T) != null) value == .object else true,
         .pointer => |p| if (p.size == .slice and p.child == u8) value == .string else value == .array,

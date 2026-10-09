@@ -4,7 +4,7 @@
 
 **Guide:** [Middleware and resolved values](../guide/middleware.md) · **Reference:** [Middleware](../reference/middleware.md)
 
-The code is `http/middleware.zig` (`Middleware`, `Next`, `chainFor`), `http/app.zig` (`use`, `useOn`, `with`, `without`, `GroupWith`), `http/wiring.zig` (`resolveChains`), and `http/ctx.zig` (`routeName`).
+The code is `http/middleware.zig` (`Middleware`, `Next`, `chainFor`), `http/typedmw.zig` (a middleware given services and resolved values), `http/app.zig` (`use`, `useOn`, `with`, `without`, `GroupWith`), `http/wiring.zig` (`resolveChains`), and `http/ctx.zig` (`routeName`).
 
 ## Overview
 
@@ -25,6 +25,7 @@ The code is `http/middleware.zig` (`Middleware`, `Next`, `chainFor`), `http/app.
 
 1. **Middleware works on the `Ctx` and produces no value for the handler: middleware enforces, a resolved value provides.** They are not two ways to do the same thing. [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)
 2. **A middleware is one function, `fn(*Ctx, Next) anyerror!void`, wrapped around the rest of the chain, not split into `before`/`after` hooks.** A local variable needed on both sides of `next.run(c)`, such as a timer's start, would have nowhere to live with two hooks; with one function it is an ordinary local. [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)
+2a. **A middleware may be given what it needs after `Next`: services, resolved values, `Path(T)`, the arena.** It is wrapped while compiling into the bare form, and what it declares is held at `listen()`: a missing service stops the server, and a `Path(T)` is held against every route the middleware covers. A query, a body or a bare path param is refused, because a middleware covers many routes. [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md), `http/typedmw.zig`
 3. **Not calling `next` ends the chain**, which is all a middleware that rejects a request (such as auth) needs to do. A middleware that fails goes through the same fail-function path a handler does (full rule on [`errors`](./errors.md)). [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)
 4. **The chain is a slice built once, at `listen()`, by `resolveChains`, not fused into a single function at compile time.** `Next` is two words passed by value and allocates nothing per request. Fusing the chain was measured against ADR 017's throughput threshold and rejected, because of the ordering rules it would impose on every route. [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)
 5. **Because chains are built at `listen()` rather than when each route is registered, it does not matter whether `use` comes before or after a route.** The order of `use`/`useOn` calls among themselves still matters: middleware runs in registration order, and middleware registered with a prefix only runs on routes under that prefix. [ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)
@@ -44,6 +45,7 @@ The code is `http/middleware.zig` (`Middleware`, `Next`, `chainFor`), `http/app.
 | [008](../adr/008-middleware-is-an-onion-of-ctx-functions.md) | The wrapped-function design, `Next`, chains built at `listen()`, and `without` |
 | [099](../adr/099-a-route-can-say-what-covers-it.md) | `with`, the counterpart to `without`, added innermost |
 | [162](../adr/162-a-middleware-can-learn-which-route-it-is-in-front-of.md) | `c.routeName()`, so a permission table can use the same names the document prints |
+| [262](../adr/262-a-log-line-has-one-sink.md) | `nilo.logFn`, the one sink: JSON that is JSON, a handler's line joined to its request, format and level set in `listen()`, and `logger`'s `skip` |
 
 Related topics: the fail-function path a middleware's failure goes through, and the fiber-bound `Failure` the panic handler reads, are in [`errors`](./errors.md) (ADR 004, ADR 006); the built-in middleware (`logger`, `cors`, `allowance`, `deadline`, `maxBody`) is documented in the reference, and `allowance`'s own rules are in [`rate-limiting`](./rate-limiting.md); resolved values as the alternative to a guard passing state is [ADR 015](../adr/015-resolved-values-are-declared-by-their-type.md) (typed-handlers); the `operationId` a route can give itself, which `routeName` returns, is [ADR 119](../adr/119-a-route-can-say-its-own-name.md) (openapi).
 

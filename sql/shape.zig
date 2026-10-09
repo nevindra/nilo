@@ -819,7 +819,7 @@ pub fn assertShape(comptime Row: type) void {
                         if (f_type != ?Bare) @compileError(
                             "nilo: " ++ @typeName(Row) ++ " reads `." ++ f_name ++ "`, the " ++ over.word ++
                                 " of `" ++ column ++ "` over the rows pointing back, as " ++
-                                @typeName(f_type) ++ ".\n" ++
+                                types_mod.nameOf(f_type) ++ ".\n" ++
                                 "  It answers the column's own type, and null for a row none point " ++
                                 "back at: `" ++ f_name ++ ": ?" ++ @typeName(Bare) ++ "`.",
                         );

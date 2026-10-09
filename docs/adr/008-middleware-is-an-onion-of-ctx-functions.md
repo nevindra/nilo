@@ -98,13 +98,43 @@ The exclusion list is a comptime parameter of the group's type, `GroupOf(prefix,
 
 ### `mounted_at` is published
 
-A group publishes the prefix it was built with as `mounted_at`, and so does the App (`""`). A `Middleware` is a bare function pointer with nowhere to keep state, so an exclusion or a plugin that needs to know its own prefix used to have no way to ask; a `mount(g: anytype)` plugin now reads `@TypeOf(g).mounted_at` rather than parsing `@typeName` or being handed the prefix a second time as an argument that can fall out of step with the first.
+A group publishes the prefix it was built with as `mounted_at`, and so does the App (`""`). A bare `Middleware` is a function pointer with nowhere to keep state, so an exclusion or a plugin that needs to know its own prefix used to have no way to ask; a `mount(g: anytype)` plugin now reads `@TypeOf(g).mounted_at` rather than parsing `@typeName` or being handed the prefix a second time as an argument that can fall out of step with the first.
+
+### A middleware is given what it needs, after `Next`
+
+```zig
+fn requireKey(c: *Ctx, next: Next, keys: *KeyStore, user: CurrentUser) !void {
+    if (!keys.allows(user.id)) return fail.forbidden("no key for {d}", .{user.id});
+    try next.run(c);
+}
+
+try app.use(requireKey);
+```
+
+`use`, `useOn`, a group's `use`, `with` and `without` take either a bare `Middleware` (unchanged) or a function with arguments after `*Ctx` and `Next`, which is wrapped while compiling into an ordinary `Middleware` (`http/typedmw.zig`). The onion, `Next` and the chain are the ones a bare function runs in. The rule is the handler's, narrowed to what a middleware can mean: **a pointer is a service, a value is what belongs to the request, and nothing belongs to one route.**
+
+| Argument after `Next` | What it means |
+|---|---|
+| `*T`, `*const T` | a service, fetched by the one function a handler uses (`service.required`) |
+| a type carrying `nilo_resolve` | a resolved value, worked out once per request and shared with the handler ([ADR 015](./015-resolved-values-are-declared-by-their-type.md)); a resolver's failure ends the chain through the normal error path |
+| `nilo.Path(T)` | the path params by name |
+| `std.mem.Allocator`, `std.Io` | the request arena, the server's loop |
+
+A query, a header, a form, a body and a bare path param are refused while compiling with a sentence that says why: a middleware covers many routes, so it would read a different thing on each or nothing on most. It takes the `*Ctx` it already has, or moves the read into a resolved value. A first argument that is not `*Ctx`, a second that is not `Next`, and a return type other than `void` or an error union of `void` are refused too. An optional resolved value is not accepted, because a handler does not accept one either.
+
+**What it declares, `listen()` holds.** The services a typed middleware needs, and those behind its resolved values, join the requirements handlers and resolvers declare, so a missing one stops the server naming the middleware and the type, instead of an auth middleware letting every request through because `c.service(T)` was `null` and the code said `orelse return next.run(c)`. A `Path(T)` it takes, directly or through a resolver, is held against every route its chain covers: each route needs a `:name` for every field, or `listen()` (and `app.start`) refuses naming the middleware, the route and the param. A middleware that is not on a route's chain is not held against it, so `useOn("/orgs/:org", readsOrg)` is fine beside `/health`. A route whose coverage only the real path decides (`useOn("/api", …)` beside `/:version/list`) is held too, conservatively. A static mount under the prefix is refused at `listen()`, because a file has no params and would be served unguarded: move the mount or the middleware. A request that matched neither a route nor a static file (a 404 or 405) has no params, so a typed middleware with path needs hands on to `next` there and the request gets the answer it would have got without it. The run-time 500 of `pathparams.readByName` stays as the last line for `c.resolve(T)` called by hand in a bare middleware. Zig keeps no function names while compiling, so a message names a typed middleware by what it takes: "the middleware taking (*KeyStore, CurrentUser)".
+
+**Wrapped, not stored.** The wrapper is a generated `fn (*Ctx, Next) anyerror!void` that fetches each argument and calls the function, so a request pays what the same arguments cost a handler, and nothing else. The same function gives the same pointer, so `without(requireKey)` finds what `use(requireKey)` put in the chain.
 
 ### A guard reads what it needs; it does not hand it over
 
 A middleware guarding `/api` can reject a request but was once unable to pass the user it had just resolved on to the handler, which would have meant a `c.locals` map, untyped state smuggled back in through the side door. **The thing middleware was asked for, a resolved user, is a resolved value instead** ([ADR 015](./015-resolved-values-are-declared-by-their-type.md)): worked out once per request from a function the type itself carries, and asked for by writing the type in a handler's argument list. A middleware guards, a resolved value provides, and `c.resolve(T)` is how a guard reads one without making the handler behind it work the same thing out twice.
 
 ## What was rejected
+
+**A bare function pointer as the only shape of a middleware.** This was the rule: `Middleware = *const fn (*Ctx, Next)` and nothing else, so a middleware could not be given a setting or a service. nilo's own worked round it three ways, `cors.reading(&origins)`, `csrf.reading` and `maxBody(&limit)`, each pointing at a container-level `var`, and a team's auth middleware reached for a global or for `c.service(T)`, which is `?T`: the startup check that names a missing service read handlers and resolvers, not middleware, so a key store nobody provided was `orelse return next.run(c)` and every request got through. Go's `func Auth(db *DB) func(http.Handler) http.Handler` and a Fastify plugin's options are the habit this met. The bare shape is still accepted and still the right one for a middleware that needs nothing.
+
+**A closure or a struct holding the service**, `app.use(Auth{ .keys = &keys })`. It would carry state, and it would make the middleware a value the chain stores and calls through a context pointer, which is a second kind of chain entry for `without`, `with` and the exemptions to match. The wrapped function keeps one kind and puts the need in the signature, where `listen()` can read it.
 
 **A path skip-list inside the middleware.** Default-deny, which is the right direction, but the exception is a string compared against `c.path()` in a framework whose whole claim is that the compiler checks the contract. Rename the route and the guard protects a 404 while the real one goes open, and nothing fails to compile.
 
@@ -140,9 +170,9 @@ A middleware guarding `/api` can reject a request but was once unable to pass th
 
 | Axis | Cost |
 |---|---|
-| Allocations per request | 0. `Next` is two words passed by value; a request that matches no `without` exemption allocates nothing extra. A route behind `next.hold` pays a copy of a body sent with `c.send`, one arena bump, and a growth of the arena past 16 KiB when the body is larger |
+| Allocations per request | 0, and a typed middleware adds none beyond what the same argument costs a handler (a service is a registry lookup; a resolved value is worked out once per request). `Next` is two words passed by value; a request that matches no `without` exemption allocates nothing extra. A route behind `next.hold` pays a copy of a body sent with `c.send`, one arena bump, and a growth of the arena past 16 KiB when the body is larger |
 | Memory per idle connection | 0 |
 | Throughput and p99 | 1.3% of throughput in the default build for the bookkeeping a hold needs ([ADR 254](./254-an-answer-can-carry-trailers.md) has the run). An indirect call per middleware layer, two to four deep on a typical route; fusing the chain to remove it was measured against [ADR 017](./017-the-trade-budget-has-four-axes.md)'s threshold and not worth the ordering it would force on the caller |
-| Binary size | The exclusion list is a comptime parameter folded away for a group with none; an App with no `without` call carries one empty `ArrayList` and never looks at it |
+| Binary size | A typed middleware costs one generated wrapper function; a bare one costs nothing more than before. The exclusion list is a comptime parameter folded away for a group with none; an App with no `without` call carries one empty `ArrayList` and never looks at it |
 
 Chains, and the exemptions inside them, are resolved once per route in `resolveChains`, which runs at `listen()`; the request path only ever sees a resolved slice of function pointers.

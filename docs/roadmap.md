@@ -51,31 +51,6 @@ Independent of the order: each touches files no stage of the direction above doe
 
 ## Next
 
-### A developer from Go or Node meets no silent trap in the first week
-
-**The habits a Go or Node developer brings either work in nilo or stop the compiler, and none of them compiles and does the wrong thing.** The traps the design review at 0.7.0 found are of one kind: a path param matched by position, so two ids swap without a word; a middleware with no arguments, so its key store is a global or a lookup that fails open; a renamed struct that cannot be read back; a JSON log line that is not JSON; a route deadline that the calls it makes never hear of; a server in a container listening on loopback; a panic that takes every connection with no warning that the root cannot name the request. Putting uploads beside Go's and Rust's frameworks found two more of the same kind: a file input a browser left empty arrives as a file, and a second file under one field is dropped without a word. Putting `nilo_fetch` beside reqwest found one that is worse than a trap: a token sent with a call follows a redirect to another host, which Go's `net/http`, Node's `fetch` and reqwest all refuse to do. A mobile client signed in with a bearer token is one more: the developer looks for a JWT signer, finds none, and writes the HMAC by hand, where a sealed session in the header was the answer all along. Around them are the things that are only slow to find: validation taught under forms, a second service of the same type, dates that live in `nilo_sql`, and six steps before the first route. Most of these change the API every user writes, so they are paid before 1.0 under principle 3 rather than carried past it.
-
-<!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
-
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · Path params are matched by position, so two of the same type in the wrong order compile and read the wrong row.
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A middleware is a bare function pointer, so it cannot be given a setting or a service, and the first one a team writes reaches for a global or for a lookup that fails open.
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · A JSON log line is not JSON, and a line a handler logs cannot be joined to its request.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A renamed struct cannot be a request body, and the reason the guide gives no longer holds.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · `Timestamp` and `Date` are in `nilo_sql`, so an HTTP-only service with a date in its body turns on `-Dsql` or carries text.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A route's deadline stops at the route: the calls it makes keep their own.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A rate limit, the access log's level and the CSP are fixed while compiling, so a deployment cannot set them from its environment.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · The validation types are taught under forms only, and the two largest examples check by hand.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A second service of the same type is refused with a bare error, and the way round it is written only in an ADR.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A first project is six steps before its first route, and nothing writes them.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A server in a container listens where nothing can reach it, and no page shows a container build.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A panic ends the process, and `listen()` does not say so when the root file has no `nilo.panic` to name the request that did it.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · Several files under one form field are refused, and a single `Upload` field sent several keeps the first without a word.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A client that sends its session as a bearer token, a native mobile application most often, has nothing in nilo to sign in with, and the way round it on record is the trap.
-
-<!-- /gathered -->
-
-**What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from the getting-started page with a database, a login middleware and a container, and every mistake they make is a compile error or a refusal at `listen()` naming the fix.
-
 ### A migration history a project can keep for years
 
 **A schema that changes for years is the case `nilo_sql`'s migrations have not met yet: there is no way back for a laptop, no way to keep the version list short, and no way to change a big live table without blocking its writes.** Forward-only versions diffed against a snapshot ship ([ADR 123](./adr/123-a-migration-is-a-diff-against-a-snapshot.md)). What a project three years in meets is what is missing around them: `reset` and `squash`, an index built `CONCURRENTLY` outside its version's transaction, a table renamed rather than dropped, SQLite's rebuild as a step rather than a recipe, a Problem with a way out other than editing `snapshot.zon`, and the locks and words of each step made to match what runs. It depends on nothing in `http/`, so it can run beside any direction there.
@@ -170,6 +145,18 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 <!-- /gathered -->
 
 **What would settle it:** a `Target` whose service answers 503 for a minute under load sending no more than its budget above the calls it was given, a POST retried under one key and charged once by a canned service, and the fibers held while a service is down measured with and without a breaker.
+
+### A developer from Go or Node meets no silent trap in the first week
+
+**The habits a Go or Node developer brings either work in nilo or stop the compiler, and none of them compiles and does the wrong thing.** The design review at 0.7.0 and the comparisons with Go's and Rust's frameworks found the traps of this kind, and each is now closed by a type the caller writes or a refusal that names the fix: path params read by name through `Path(T)` ([ADR 002](./adr/002-typed-handlers-are-a-thin-layer-over-ctx.md)), a middleware that takes its services and is checked at `listen()` ([ADR 008](./adr/008-middleware-is-an-onion-of-ctx-functions.md)), one log sink whose JSON is JSON and whose lines name their request ([ADR 262](./adr/262-a-log-line-has-one-sink.md)), a renamed Row read as a body ([ADR 148](./adr/148-a-field-name-is-a-spelling-too.md)), dates without `-Dsql` ([ADR 057](./adr/057-percent-is-needed-by-two-layers.md)), a route deadline the toolkit hears ([ADR 105](./adr/105-a-route-can-say-how-long-it-has.md)), deployment facts set from the environment ([ADR 264](./adr/264-a-deployment-fact-is-a-late-value.md)), a bearer token sealed like a session ([ADR 265](./adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md)), several files under one field, the checking types taught on JSON, and a first project that is one call in its build file ([ADR 263](./adr/263-a-first-project-is-one-call-from-its-build-file.md)). What is left is the test none of those tests is: somebody who did not build them, trying.
+
+<!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
+
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.
+
+<!-- /gathered -->
+
+**What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from the getting-started page with a database, a login middleware and a container, and every mistake they make is a compile error or a refusal at `listen()` naming the fix.
 
 ## Later
 

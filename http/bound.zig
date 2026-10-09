@@ -55,6 +55,8 @@ const convert = @import("convert.zig");
 const ctx_mod = @import("ctx.zig");
 const fail_mod = @import("fail.zig");
 const form_mod = @import("form.zig");
+const jsonmark = @import("jsonmark.zig");
+const many_mod = @import("many.zig");
 const naming = @import("names.zig");
 const patch_mod = @import("patch.zig");
 const str_mod = @import("nilo_core");
@@ -471,13 +473,20 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
         };
 
         const table = blk: {
+            @setEvalBranchQuota(10_000 + 4 * convert.budget(info.field_names));
             var t: [field_count]Entry = undefined;
-            for (info.field_names, info.field_types, 0..) |f_name, f_type, i| t[i] = .{
-                .name = f_name,
-                .expected = expectedFor(f_type),
-                .say = sayerFor(slot, f_type, f_name),
-                .say_rule = ruleSayerFor(slot, f_name),
-            };
+            for (info.field_names, info.field_types, 0..) |f_name, f_type, i| {
+                // A JSON body names a field by the key the client sends, which
+                // is the wire spelling when the struct has one (ADR 148); a
+                // form or a query string reads the names as written.
+                const named = if (slot == .body) jsonmark.fieldWire(T, f_name) else f_name;
+                t[i] = .{
+                    .name = named,
+                    .expected = expectedFor(slot, f_type),
+                    .say = sayerFor(slot, f_type, named),
+                    .say_rule = ruleSayerFor(slot, named),
+                };
+            }
             const frozen = t;
             break :blk frozen;
         };
@@ -660,15 +669,17 @@ fn canFail(comptime F: type) bool {
 fn convertsAs(comptime F: type) type {
     const Inner = innerOf(F);
     if (convert.listElement(Inner)) |Item| return Item;
+    // A list with a length converts as its element, like any list (ADR 266).
+    if (many_mod.itemOf(Inner)) |Item| return Item;
     return Inner;
 }
 
 /// What a field would have taken, in the words the messages already use.
-fn expectedFor(comptime F: type) []const u8 {
+fn expectedFor(comptime slot: Slot, comptime F: type) []const u8 {
     // `expectedOf` would call an Upload "an object", which is true of the
     // struct and useless to somebody who has to put a file in it.
     if (innerOf(F) == Upload) return "a file";
-    return ctx_mod.expectedOf(F);
+    return if (slot == .body) ctx_mod.expectedOfBody(F) else ctx_mod.expectedOf(F);
 }
 
 /// What a field is called when a message points at it. The three slots name
@@ -695,7 +706,7 @@ fn sayMissing(
             "the form is missing the file \"" ++ name ++ "\""
         else
             "the form is missing \"" ++ name ++ "\" (" ++ ctx_mod.expectedOf(F) ++ ")",
-        .body => "the request body is missing \"" ++ name ++ "\" (" ++ ctx_mod.expectedOf(F) ++ ")",
+        .body => "the request body is missing \"" ++ name ++ "\" (" ++ ctx_mod.expectedOfBody(F) ++ ")",
         .query => "?" ++ name ++ " is required",
     };
     try w.writeAll(said);
@@ -717,8 +728,12 @@ fn sayerFor(
                 // Only a JSON body reaches this: a value that is the wrong
                 // kind of thing rather than text that would not convert.
                 .wrong_kind => try w.print(
-                    labelFor(slot, name) ++ " has to be " ++ comptime expectedFor(F) ++ ", not {s}",
+                    labelFor(slot, name) ++ " has to be " ++ comptime expectedFor(slot, F) ++ ", not {s}",
                     .{f.kind},
+                ),
+                .several_files => try w.writeAll(
+                    "several files arrived under \"" ++ name ++ "\", which takes one: " ++
+                        "declare the field as `[]const nilo.Upload` to accept several",
                 ),
                 // `convertsAs` rather than `innerOf`: for a list it is the
                 // element that would not convert, and the element is what the
@@ -730,7 +745,7 @@ fn sayerFor(
                 else => if (comptime canFail(F))
                     try convert.sayWhy(convertsAs(F), slot, f.given, labelFor(slot, name), w)
                 else
-                    try w.writeAll(comptime (labelFor(slot, name) ++ " has to be " ++ expectedFor(F))),
+                    try w.writeAll(comptime (labelFor(slot, name) ++ " has to be " ++ expectedFor(slot, F))),
             }
         }
     }.say;
@@ -897,7 +912,7 @@ test "a JSON body names the field the way the body parser already does" {
 
 test "one failure fails with the sentence it would have failed with anyway" {
     var in_flight = fail_mod.InFlight{};
-    in_flight.startRequest("POST", "/sign-up");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -917,7 +932,7 @@ test "one failure fails with the sentence it would have failed with anyway" {
 
 test "more than one failure is counted, and every one is named" {
     var in_flight = fail_mod.InFlight{};
-    in_flight.startRequest("POST", "/sign-up");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -949,7 +964,7 @@ const Wide = struct {
 
 test "a 422 with more failures than fit says how many it could not name" {
     var in_flight = fail_mod.InFlight{};
-    in_flight.startRequest("POST", "/sign-up");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1040,7 +1055,7 @@ test "a rule that holds is not a failure, and a binding with none is unchanged" 
 
 test "two kinds of failure come out as one 422 in one shape" {
     var in_flight = fail_mod.InFlight{};
-    in_flight.startRequest("POST", "/sign-up");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1172,7 +1187,7 @@ test "a check is not run over a field that never bound" {
 
 test "a handler's own must comes after the struct's, in the same 422" {
     var in_flight = fail_mod.InFlight{};
-    in_flight.startRequest("POST", "/sign-up");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1197,7 +1212,7 @@ test "a handler's own must comes after the struct's, in the same 422" {
 
 test "a plain slot is refused with the same 422 when the struct's check does not hold" {
     var in_flight = fail_mod.InFlight{};
-    in_flight.startRequest("POST", "/sign-up");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 

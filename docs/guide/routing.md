@@ -85,6 +85,8 @@ try metrics(app.group("/internal"));
 
 Because it's handed the group rather than the App, the same function mounts at any prefix, or at two. `anytype` is the usual signature, because a group's type carries its prefix, so every prefix is a different type. To spell one out, the type is `nilo.Group("/internal")`.
 
+**A group's `provide` is App-wide.** A service is found by its type, and a group does not scope that: a plugin that provides a `Cache` has provided it for every route, and a second plugin providing another `Cache` is refused at startup ([Two of the same type](./services.md#two-of-the-same-type)).
+
 Passing the App itself works too, since it has the same methods: a plugin mounted at the root is `try metrics(&app)`.
 
 **A group says where it is mounted**, which is what a plugin needs when its own routes have to know their absolute paths (a link in a response body, a redirect target):

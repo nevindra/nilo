@@ -65,6 +65,8 @@ about a proxy over TCP, established here without a rule at all. It is still an
 opt-in: with `.trusted_proxies` unset the header is not read, and `clientIp()`
 on such a connection is empty.
 
+**A loopback address in a container is warned about, not changed.** The default stays `127.0.0.1`: on a machine you own it is the safe one, and a default of `0.0.0.0` would put a development server on every network the machine is on. Inside a container it is a server that is up and unreachable, so `listen()` logs one warn line when an address is loopback and the process is in a container (`/.dockerenv`, `/run/.containerenv`, or a runtime named in PID 1's cgroup; Linux only, read once, nothing kept). Rejected: defaulting to `0.0.0.0` when a container is detected, because the address would then depend on where the program runs, and a test run in CI would listen on a different interface than on a laptop. The cost is three `openat` calls and one 4 KiB stack read at startup, on no request path.
+
 ## What it costs
 
 **Nothing per request**, and nothing per connection. The branch is one

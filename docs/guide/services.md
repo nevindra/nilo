@@ -20,11 +20,30 @@ error: service *main.Db was never registered, but 4 routes need it
 ("/users", "/users/:id", "/admin/stats", …) — call app.provide() before app.listen()
 ```
 
-`*const Config` and `*Config` are different types and are looked up separately, so a read-only service can say so. From a handler that took no typed arguments, or from middleware, `c.service(*Db)` does the same lookup.
+`*const Config` and `*Config` are different types and are looked up separately, so a read-only service can say so. From a handler that took no typed arguments, `c.service(*Db)` does the same lookup. A middleware takes a service as an argument after `Next`, like a handler, and `listen()` refuses to start when it is missing; `c.service` inside a middleware is a `?*Db`, which fails open if it is written `orelse return next.run(c)` ([Middleware](./middleware.md#giving-a-middleware-what-it-needs)).
 
 The App is a service like any other (`try app.provide(&app)`), which is how an admin endpoint gets at `app.shutdown()`.
 
 See [ADR 005](../adr/005-services-via-a-runtime-registry.md).
+
+## Two of the same type
+
+**A service is found by its type, so a second one of the same type is refused when it is provided.** A primary and a replica, or two upstream clients, are both a `Db` or a `Client`; the way round it is a struct of its own per instance, which is a different type and so a different service:
+
+```zig
+const Primary = struct { db: Db };
+const Replica = struct { db: Db };
+
+var primary: Primary = .{ .db = try Db.open("primary.sqlite") };
+var replica: Replica = .{ .db = try Db.open("replica.sqlite") };
+try app.provide(&primary);
+try app.provide(&replica);
+
+fn getUser(r: *Replica, id: u32) !User { return r.db.find(id); }
+fn saveUser(p: *Primary, body: NewUser) !User { return p.db.insert(body); }
+```
+
+Providing a second `Db` instead stops with a sentence naming the type and this fix, and `app.provide` returns `error.ServiceAlreadyRegistered` for a caller that wants to branch on it. A group's `provide` is App-wide too, so this holds inside a plugin as well (ADR 002, ADR 005).
 
 ## Locking a shared service
 

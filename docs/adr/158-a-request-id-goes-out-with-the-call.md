@@ -92,4 +92,4 @@ it always has.
 to send, and `Call.timeout_ms` is where a caller puts it today. Making it
 automatic would give every outbound call the *whole* of the request's
 remaining time, which is right for the last call a handler makes and wrong for
-the first. The caller knows which it is.
+the first. The caller knows which it is. What is automatic since ADR 105 is only the ceiling: the route's time left caps a call's own bound and never replaces it, so no call is given more than the request has and none is given the whole of it by default.

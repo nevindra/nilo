@@ -6,7 +6,7 @@ What happens between `## Unreleased` and a tag. Read it when you cut one; the re
 
 - `.version` in `build.zig.zon`
 - the badge and the `?ref=` in `README.md`
-- the `?ref=` in `docs/guide/getting-started.md`
+- the `?ref=` in `docs/guide/getting-started.md`, and the commit in the `curl` line beside it that fetches `template/`
 - the `Ranked at` line in `docs/todo.md`, once the list has been ranked again against the release's numbers ([its rule 9](./todo.md#how-this-file-is-written)) and the roadmap's order read again ([its rule 6](./roadmap.md#how-this-file-is-written)); `docs-check` refuses the commit until it says the new version
 - the comment in `stress/arsip/build.zig.zon`
 

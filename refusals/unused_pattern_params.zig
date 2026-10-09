@@ -1,5 +1,5 @@
-//! One argument for two captures. Params are matched by position, so `:pet`
-//! would never be read.
+//! One argument for two captures. A bare argument cannot say which `:name`
+//! it is, so a route with two params is read by name, with `Path(T)` (ADR 002).
 
 const nilo = @import("nilo_http");
 

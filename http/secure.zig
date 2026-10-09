@@ -50,6 +50,9 @@
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
 const mw = @import("middleware.zig");
+const fail = @import("fail.zig");
+const late = @import("late.zig");
+const Late = late.Late;
 
 /// `Referrer-Policy`: how much of this page's address another site is told
 /// when a link or a request leaves it.
@@ -99,8 +102,9 @@ pub const Hsts = struct {
 /// The policy for a server that answers with JSON and serves no pages.
 pub const Api = struct {
     /// Nothing loads, nothing runs and nothing frames this answer, should a
-    /// browser ever be pointed at it.
-    csp: ?[]const u8 = "default-src 'none'; frame-ancestors 'none'",
+    /// browser ever be pointed at it. Text, or the address of a
+    /// `[]const u8` the program fills before `listen()` (`nilo.Late`).
+    csp: ?Late([]const u8) = .{ .value = "default-src 'none'; frame-ancestors 'none'" },
     hsts: ?Hsts = .{},
     frame_options: ?Frame = .deny,
     referrer_policy: ?Referrer = .no_referrer,
@@ -115,10 +119,12 @@ pub const Pages = struct {
     /// Scripts, styles, fonts and images from this origin; inline styles and
     /// styles from `https:` too, because a CSS-in-JS library writes `style`
     /// attributes; no plugins, no inline script, no `<base>` pointing away,
-    /// no form posting away, and framing only by this origin.
-    csp: ?[]const u8 = "default-src 'self'; base-uri 'self'; font-src 'self' https: data:; " ++
+    /// no form posting away, and framing only by this origin. Text, or the
+    /// address of a `[]const u8` the program fills before `listen()`, for a
+    /// CDN or an API host that is a fact about the deployment.
+    csp: ?Late([]const u8) = .{ .value = "default-src 'self'; base-uri 'self'; font-src 'self' https: data:; " ++
         "form-action 'self'; frame-ancestors 'self'; img-src 'self' data:; object-src 'none'; " ++
-        "script-src 'self'; script-src-attr 'none'; style-src 'self' https: 'unsafe-inline'",
+        "script-src 'self'; script-src-attr 'none'; style-src 'self' https: 'unsafe-inline'" },
     hsts: ?Hsts = .{},
     frame_options: ?Frame = .same_origin,
     /// The browsers' own default, written down: a page sends only its origin
@@ -135,22 +141,62 @@ pub const Pages = struct {
 };
 
 /// The policy for a server that answers with JSON and serves no pages.
-pub fn api(comptime options: Api) mw.Middleware {
-    return writing(comptime block(options));
+pub fn api(comptime given: anytype) mw.Middleware {
+    return writing(comptime late.fill(Api, given));
 }
 
 /// The policy for a server whose answers include its own pages.
-pub fn pages(comptime options: Pages) mw.Middleware {
-    return writing(comptime block(options));
+pub fn pages(comptime given: anytype) mw.Middleware {
+    return writing(comptime late.fill(Pages, given));
 }
 
-fn writing(comptime lines: []const u8) mw.Middleware {
-    return struct {
+/// A policy stated while compiling is one block and one store. One whose CSP
+/// is held is the same block without that line, and the CSP set beside it
+/// from where the program keeps it: a handler's own
+/// `Content-Security-Policy` replaces it by name as it replaces the block's
+/// line, and the block's other lines are still one slot.
+fn writing(comptime options: anytype) mw.Middleware {
+    const lines = comptime block(options);
+    const held = comptime if (options.csp) |csp| csp.isHeld() else false;
+    if (!held) return struct {
         fn run(c: *Ctx, next: mw.Next) anyerror!void {
             try c.putPolicy(lines);
             return next.run(c);
         }
     }.run;
+
+    return struct {
+        /// Set once the held policy has passed `cspProblem`; a held value is
+        /// filled before `listen()` and is not watched afterwards, so the
+        /// scan of its bytes is not repeated on every request.
+        var checked: std.atomic.Value(bool) = .init(false);
+
+        fn run(c: *Ctx, next: mw.Next) anyerror!void {
+            const csp = options.csp.?.read();
+            if (!checked.load(.monotonic)) {
+                if (cspProblem(csp)) |why| return refused(why);
+                checked.store(true, .monotonic);
+            }
+            try c.putPolicy(lines);
+            try c.setStaticHeader("Content-Security-Policy", csp);
+            return next.run(c);
+        }
+
+        noinline fn refused(why: []const u8) anyerror {
+            return fail.internal("the secure csp this server was started with {s}", .{why});
+        }
+    }.run;
+}
+
+/// What is wrong with a policy that arrived at run time, said as the end of
+/// a sentence, or null. The same two things the compiler refuses in a stated
+/// one.
+fn cspProblem(csp: []const u8) ?[]const u8 {
+    if (csp.len == 0) return "is empty, which sends a header that allows everything. " ++
+        "Leave it out with `.csp = null`, or write the policy before listen().";
+    if (!lineOk(csp)) return "holds a control byte, which would end the header line early. " ++
+        "Write the policy on one line; directives are separated by `; `.";
+    return null;
 }
 
 /// Every line the options ask for, `Name: value\r\n` each, as one string.
@@ -159,7 +205,9 @@ fn block(comptime options: anytype) []const u8 {
     comptime {
         check(options);
         var out: []const u8 = "X-Content-Type-Options: nosniff\r\n";
-        if (options.csp) |csp| out = out ++ "Content-Security-Policy: " ++ csp ++ "\r\n";
+        if (options.csp) |csp| if (csp == .value) {
+            out = out ++ "Content-Security-Policy: " ++ csp.value ++ "\r\n";
+        };
         if (options.hsts) |h| out = out ++ "Strict-Transport-Security: " ++ hstsValue(h) ++ "\r\n";
         if (options.frame_options) |f| out = out ++ "X-Frame-Options: " ++ switch (f) {
             .deny => "DENY",
@@ -196,7 +244,8 @@ fn spelled(comptime tag: anytype) []const u8 {
 /// a header that would go out and do nothing, or do something nobody meant.
 fn check(comptime options: anytype) void {
     comptime {
-        if (options.csp) |csp| {
+        if (options.csp) |held| if (held == .value) {
+            const csp = held.value;
             if (csp.len == 0) @compileError(
                 "nilo: secure was given an empty csp, which sends a header that allows everything.\n" ++
                     "  Leave it out with `.csp = null`, or write the policy: " ++
@@ -206,7 +255,7 @@ fn check(comptime options: anytype) void {
                 "nilo: the secure csp holds a control byte, which would end the header line early.\n" ++
                     "  Write the policy on one line; directives are separated by `; `.",
             );
-        }
+        };
         if (options.permissions_policy) |p| {
             if (p.len == 0) @compileError(
                 "nilo: secure was given an empty permissions_policy, which sends a header that says nothing.\n" ++
@@ -233,7 +282,7 @@ fn check(comptime options: anytype) void {
     }
 }
 
-fn lineOk(comptime text: []const u8) bool {
+fn lineOk(text: []const u8) bool {
     for (text) |ch| if (ch < 0x20 or ch == 0x7f) return false;
     return true;
 }
@@ -302,4 +351,86 @@ test "a handler's own header takes the place of the block's line for it" {
     // A name the block does not carry leaves it as it was, unallocated.
     const same = try http1.withoutLine(testing.allocator, lines, "permissions-policy");
     try testing.expectEqual(lines.ptr, same.ptr);
+}
+
+const App = @import("app.zig").App;
+const nilo_testing = @import("testing.zig");
+
+fn secureOk(_: *Ctx) anyerror!void {}
+
+var deployed_csp: []const u8 = "default-src 'self'";
+
+test "a held csp is sent as the program set it, and the rest of the block is as ever" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(pages(.{ .csp = &deployed_csp }));
+    try app.get("/", secureOk);
+
+    // Filled after the middleware was registered, before anything is served.
+    deployed_csp = "default-src 'self'; img-src https://cdn.example.com";
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings(
+        "default-src 'self'; img-src https://cdn.example.com",
+        answer.header("Content-Security-Policy").?,
+    );
+    try testing.expectEqualStrings("nosniff", answer.header("X-Content-Type-Options").?);
+    try testing.expect(answer.header("Strict-Transport-Security") != null);
+}
+
+test "a handler's own csp replaces a held one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(api(.{ .csp = &deployed_csp }));
+    try app.get("/", struct {
+        fn h(c: *Ctx) anyerror!void {
+            try c.setHeader("Content-Security-Policy", "default-src 'none'");
+        }
+    }.h);
+    deployed_csp = "default-src 'self'";
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+    const answer = try client.get(&app, "/");
+    try testing.expectEqualStrings("default-src 'none'", answer.header("Content-Security-Policy").?);
+}
+
+var malformed_csp: []const u8 = "";
+
+test "a held csp that is empty or holds a control byte answers 500 until it is fixed" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(pages(.{ .csp = &malformed_csp }));
+    try app.get("/", secureOk);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const empty = try client.get(&app, "/");
+    try testing.expectEqual(@as(u16, 500), empty.status);
+    try testing.expect(std.mem.indexOf(u8, empty.body, "is empty") != null);
+
+    malformed_csp = "default-src 'self'\r\nX-Evil: 1";
+    const newline = try client.get(&app, "/");
+    try testing.expectEqual(@as(u16, 500), newline.status);
+    try testing.expect(std.mem.indexOf(u8, newline.body, "control byte") != null);
+
+    malformed_csp = "default-src 'self'";
+    try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/")).status);
+}
+
+test "a stated csp is still one block and the held machinery is not linked for it" {
+    const stated = comptime late.fill(Api, .{});
+    try testing.expect(stated.csp.? == .value);
+    try testing.expectEqual(@as(usize, 200), comptime block(stated).len);
+    const held = comptime late.fill(Api, .{ .csp = &deployed_csp });
+    // No CSP line in the block when the policy is held: it is set beside it.
+    try testing.expect(std.mem.indexOf(u8, comptime block(held), "Content-Security-Policy") == null);
 }

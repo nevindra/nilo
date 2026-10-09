@@ -214,6 +214,10 @@ anybody targeting it. That is the honest shape of this structure under load, and
 it is why the module header calls it a shaper rather than an enforcement
 mechanism.
 
+## The numbers may arrive at run time
+
+`.per_window` and `.window_s` are `nilo.Late(u32)` ([ADR 264](./264-a-deployment-fact-is-a-late-value.md)): a literal is settled while compiling as above, and the address of a `u32` filled before `listen()` is read on each request. The table's `.slots` stays a constant because it sizes `.bss`, and a held count is bounded by what the slot's counters hold (1023 for an address, so the fingerprint keeps 28 bits). Every answer through an allowance also carries `RateLimit-Policy` and `RateLimit`.
+
 ## What it costs
 
 - **Allocations per request: zero.** The `Retry-After` is a compile-time

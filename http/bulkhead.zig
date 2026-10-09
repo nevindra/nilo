@@ -237,6 +237,27 @@ pub const Stat = engine.Stat;
 /// time zio was replaced. The Engine reads the fields it knows and never
 /// names the rest.
 pub const Options = struct {
+    /// What `log` names: the shape and the floor of a log line.
+    pub const Log = struct {
+        pub const Format = enum {
+            /// `2026-10-09T12:00:00.123Z warn(scope) message request=ab12`:
+            /// what a person reads in a terminal.
+            text,
+            /// One object a line: `time`, `level`, `scope` and `request`
+            /// when there are any, `msg`, or the access fields beside them.
+            json,
+        };
+
+        format: Format = .text,
+        /// The lowest level written: `.warn` writes `warn` and `err`. Null,
+        /// the default, is whatever the program's `std_options.log_level`
+        /// says (which is itself `.debug` in Debug and `.info` in the release
+        /// modes unless set), so a program that sets nothing logs what
+        /// `std.log` would have, and the run-time floor can never be above
+        /// the comptime one by default.
+        level: ?std.log.Level = null,
+    };
+
     /// What a nilo compile error calls this type, which is the name the
     /// reader's own import line gives it (ADR 074).
     pub const nilo_type_name = "nilo.Options";
@@ -746,6 +767,19 @@ pub const Options = struct {
     /// per request, and a detector that only runs where the bug cannot
     /// happen would never have fired.
     block_warning_ms: u32 = 250,
+
+    /// How the process writes a log line, and the lowest level it writes.
+    /// Run-time facts of the deployment, read once here for the reason
+    /// `cors.reading` reads its origins at run time: the same binary runs
+    /// with text lines on a laptop and JSON lines under a collector, and the
+    /// value belongs in `nilo_config` rather than in a rebuild
+    /// ([ADR 262](../docs/adr/262-a-log-line-has-one-sink.md)).
+    ///
+    /// **They apply to what goes through `nilo.logFn`**, the sink a program
+    /// puts in its root `std_options`, and to the access line `logger`
+    /// writes. `std_options.log_level` stays the comptime ceiling: a call
+    /// below it is compiled out, and `level` filters within it.
+    log: Log = .{},
 
     /// The secret `Session(T)` cookies are sealed with — exactly
     /// `nilo.session.key_len` (32) bytes. Null means this application has no

@@ -44,13 +44,33 @@
 //! Middleware still produces no value for the handler, and it no longer
 //! needs to: the thing it used to be asked for — auth resolving a user — is
 //! a resolved value now (ADR 015). A middleware guards, a resolved value
-//! provides, and `c.resolve(T)` is how a guard reads one without making the
-//! handler behind it work the same thing out twice.
+//! provides, and a guard reads one without making the handler behind it work
+//! the same thing out twice.
+//!
+//! **A middleware is given what it needs, after `Next`** (ADR 008,
+//! `typedmw.zig`):
+//!
+//! ```zig
+//! fn requireKey(c: *Ctx, next: Next, keys: *KeyStore, user: CurrentUser) !void {
+//!     if (!keys.allows(user.id)) return fail.forbidden("no key", .{});
+//!     try next.run(c);
+//! }
+//! try app.use(requireKey);
+//! ```
+//!
+//! A service, a resolved value, `Path(T)`, the arena: by the rule a handler
+//! follows, and wrapped while compiling into the bare `Middleware` below, so
+//! the onion and the chain are unchanged. What it needs is checked at
+//! `listen()`, where `c.service(T) orelse return next.run(c)` would have let
+//! every request through when the service was missing. The bare form is
+//! still the right one for a middleware that needs nothing.
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
 const fail = @import("fail.zig");
 const http1 = @import("http1.zig");
+const Late = @import("late.zig").Late;
+const typedmw = @import("typedmw.zig");
 
 /// The innermost layer: a plain Ctx handler. This is what the typed layer
 /// compiles down to, and what the onion wraps.
@@ -73,25 +93,25 @@ pub const Limited = struct {
     limit: Limit,
 
     /// Where the number is: in the program, or in a `usize` it fills before
-    /// `listen()`.
-    pub const Limit = union(enum) {
-        bytes: usize,
-        held: *const usize,
-    };
+    /// `listen()` (`nilo.Late`).
+    pub const Limit = Late(usize);
 
     /// The limit now, 0 for none: a held limit left at zero leaves
     /// `listen()`'s number in force, as it does on HTTP/1.
     pub fn read(self: Limited) usize {
-        return switch (self.limit) {
-            .bytes => |n| n,
-            .held => |p| p.*,
-        };
+        return self.limit.read();
     }
 };
 
 /// The function a registration was handed, whether it was a bare
-/// `Middleware` or a `Limited`.
+/// `Middleware`, a `Limited`, or a typed function that takes services and
+/// resolved values after `Next`, which is wrapped here into a bare one
+/// (`typedmw.zig`, ADR 008). A function body is comptime-known whatever the
+/// parameter says, which is all wrapping needs; a `Middleware` held in a
+/// runtime variable is passed through as it always was.
 pub fn runOf(middleware: anytype) Middleware {
+    comptime typedmw.refuseRuntimePointer(@TypeOf(middleware));
+    if (comptime typedmw.isTypedType(@TypeOf(middleware))) return typedmw.wrap(middleware);
     return if (@TypeOf(middleware) == Limited) middleware.run else middleware;
 }
 

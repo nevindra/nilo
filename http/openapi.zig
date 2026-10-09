@@ -48,6 +48,12 @@ pub const Schema = union(enum) {
     /// own range (`widthOf`), or of a `nilo.Within(min, max)`
     /// ([ADR 167](../docs/adr/167-a-whole-number-inside-a-range-is-a-type.md)).
     bounded: Bounds,
+    /// A real number with a bound the server holds, read off a
+    /// `nilo.Within(0.0, 1.0)` (ADR 167).
+    ranged: Range,
+    /// A list whose length the server holds, `minItems` and `maxItems`, read
+    /// off a `nilo.Many` (ADR 266).
+    limited: Limited,
     /// Text with a shape the server holds — `minLength`, `maxLength`, a
     /// `format` — read off a `nilo.Text`
     /// ([ADR 193](../docs/adr/193-text-with-a-shape-is-a-type-and-a-rule-about-the-struct-is-a-function-on-it.md)).
@@ -85,6 +91,23 @@ pub const Bounds = struct {
     min: ?i128 = null,
     max: ?i128 = null,
 };
+
+/// The bounds on a real number (`nilo.Within(0.0, 1.0)`), both inclusive.
+pub const Range = struct {
+    min: f64,
+    max: f64,
+};
+
+/// The length bounds on a list and the schema of what is in it
+/// (`nilo.Many`, ADR 266).
+pub const Limited = struct {
+    of: *const Schema,
+    min: ?usize = null,
+    max: ?usize = null,
+};
+
+/// The declaration a list with a length carries (`nilo.Many`), read by name.
+const many_marker = "nilo_many";
 
 /// The declaration a bounded integer carries (`nilo.Within`), read by name.
 const within_marker = "nilo_within";
@@ -400,7 +423,13 @@ fn schemaWithin(comptime T: type, comptime depth: usize, comptime written: bool)
         // A whole number inside a range says its range (ADR 167). Before
         // the writer check below, because it writes itself as the number and
         // the number's bounds are the thing worth telling a client.
-        if (withinOf(T)) |bounds| return held(.{ .bounded = bounds });
+        if (withinOf(T)) |said| return held(said);
+        // A list with a length says its length, and what is in it (ADR 266).
+        if (manyOf(T)) |said| return held(.{ .limited = .{
+            .of = schemaWithin(said.Item, depth + 1, written),
+            .min = said.min,
+            .max = said.max,
+        } });
         // Text with a shape says its shape, for the same reason (ADR 193).
         if (textOf(T)) |shape| return held(.{ .sized = shape });
 
@@ -502,6 +531,9 @@ fn schemaWithin(comptime T: type, comptime depth: usize, comptime written: bool)
                 // 20000 backwards branches" at this line.
                 @setEvalBranchQuota(20_000 + 4 * convert.budget(s.field_names));
                 for (s.field_names, s.field_types, s.field_attrs) |f_name, f_type, f_attrs| {
+                    // A skipped field is on the wire in neither direction
+                    // (ADR 148), so the document does not know it.
+                    if (mark.skipped(said, f_name)) continue;
                     fields = fields ++ [_]Field{.{
                         .name = mark.wire(f_name, said),
                         .schema = schemaWithin(f_type, depth + 1, written),
@@ -589,10 +621,11 @@ fn textOf(comptime T: type) ?TextShape {
     }
 }
 
-/// `T.nilo_within`, or null for a type that carries none. Read by name for
-/// the reason every marker is, and checked here so a marker written wrong is
-/// a sentence rather than a `has no member named 'min'` inside this file.
-fn withinOf(comptime T: type) ?Bounds {
+/// `T.nilo_within`, as the schema it makes, or null for a type that carries
+/// none. Read by name for the reason every marker is, and checked here so a
+/// marker written wrong is a sentence rather than a `has no member named
+/// 'min'` inside this file. Bounds written with a point are a real range.
+fn withinOf(comptime T: type) ?Schema {
     comptime {
         const holds = switch (@typeInfo(T)) {
             .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, within_marker),
@@ -603,10 +636,33 @@ fn withinOf(comptime T: type) ?Bounds {
         const Said = @TypeOf(said);
         if (@typeInfo(Said) != .@"struct" or !@hasField(Said, "min") or !@hasField(Said, "max")) @compileError(
             "nilo: " ++ @typeName(T) ++ "'s `" ++ within_marker ++ "` does not say both a `min` " ++
-                "and a `max`, which is what a bounded integer's document carries.\n" ++
+                "and a `max`, which is what a bounded number's document carries.\n" ++
                 "  Write `pub const " ++ within_marker ++ " = .{ .min = 1, .max = 200 };`, or use `nilo.Within(1, 200)`.",
         );
-        return .{ .min = said.min, .max = said.max };
+        if (@TypeOf(said.min) == comptime_float or @TypeOf(said.max) == comptime_float)
+            return .{ .ranged = .{ .min = said.min, .max = said.max } };
+        return .{ .bounded = .{ .min = said.min, .max = said.max } };
+    }
+}
+
+/// What `T.nilo_many` says, or null for a type that carries none.
+const ManyShape = struct { Item: type, min: ?usize, max: ?usize };
+
+fn manyOf(comptime T: type) ?ManyShape {
+    comptime {
+        const holds = switch (@typeInfo(T)) {
+            .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, many_marker),
+            else => false,
+        };
+        if (!holds) return null;
+        const said = @field(T, many_marker);
+        const Said = @TypeOf(said);
+        if (@typeInfo(Said) != .@"struct" or !@hasField(Said, "Item") or !@hasField(Said, "min") or !@hasField(Said, "max")) @compileError(
+            "nilo: " ++ @typeName(T) ++ "'s `" ++ many_marker ++ "` does not say `Item`, `min` and `max`, " ++
+                "which is what a list with a length carries.\n" ++
+                "  Use `nilo.Many(Item, .{ .min = 1, .max = 10 })`.",
+        );
+        return .{ .Item = said.Item, .min = said.min, .max = said.max };
     }
 }
 
@@ -875,6 +931,7 @@ const Components = struct {
                 for (o.fields) |f| try self.add(f.schema);
             },
             .array => |item| try self.add(item),
+            .limited => |l| try self.add(l.of),
             .nullable => |inner| try self.add(inner),
             .one_of => |o| for (o.cases) |case| try self.add(case.schema),
             else => {},
@@ -1056,6 +1113,8 @@ const Components = struct {
         return switch (a.*) {
             .string, .integer, .number, .boolean, .binary, .untold, .unknown => true,
             .bounded => |x| x.min == b.bounded.min and x.max == b.bounded.max,
+            .ranged => |x| x.min == b.ranged.min and x.max == b.ranged.max,
+            .limited => |x| x.min == b.limited.min and x.max == b.limited.max and rendersTheSame(x.of, b.limited.of),
             .sized => |x| x.min == b.sized.min and x.max == b.sized.max and
                 ((x.format == null and b.sized.format == null) or
                     (x.format != null and b.sized.format != null and
@@ -1545,6 +1604,14 @@ fn writeSchema(
             try w.writeAll("{\"type\":\"integer\"");
             if (b.min) |min| try w.print(",\"minimum\":{d}", .{min});
             if (b.max) |max| try w.print(",\"maximum\":{d}", .{max});
+            try w.writeByte('}');
+        },
+        .ranged => |r| try w.print("{{\"type\":\"number\",\"minimum\":{d},\"maximum\":{d}}}", .{ r.min, r.max }),
+        .limited => |l| {
+            try w.writeAll("{\"type\":\"array\",\"items\":");
+            try writeSchema(w, components, l.of);
+            if (l.min) |min| try w.print(",\"minItems\":{d}", .{min});
+            if (l.max) |max| try w.print(",\"maxItems\":{d}", .{max});
             try w.writeByte('}');
         },
         .sized => |s| {
@@ -2112,6 +2179,27 @@ test "a renamed struct is described by the keys it actually sends" {
     try expectSchema(Contact,
         \\{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295},"fullName":{"type":"string"},"emailAddress":{"anyOf":[{"type":"string"},{"type":"null"}]}},"required":["id","fullName"]}
     );
+}
+
+test "a skipped field is in the document in neither direction, and a request uses the wire names" {
+    const Account = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase, .skip = &.{"password_hash"} };
+
+        id: u32,
+        full_name: Str,
+        password_hash: Str = Str.static(""),
+    };
+    const want =
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":4294967295},"fullName":{"type":"string"}},"required":["id","fullName"]}
+    ;
+    // Read: the keys a client sends, and no property for the skipped field.
+    try expectSchema(Account, want);
+    // Written: the same keys, and the same absence.
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const none = Components.init(testing.allocator);
+    try writeSchema(&out.writer, &none, comptime responseSchemaOf(Account));
+    try testing.expectEqualStrings(want, out.written());
 }
 
 test "a renamed enum lists the choices it actually sends" {

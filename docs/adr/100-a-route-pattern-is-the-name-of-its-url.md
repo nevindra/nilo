@@ -48,8 +48,9 @@ try c.redirect(303, where.view());
 
 Four refusal files hold those messages ([ADR 026](026-the-rule-about-error-messages-is-held-by-a-build-step.md)).
 
-**Matched by name, not by position.** `typed.zig` matches a handler's path
-params by position because Zig does not keep argument names. A struct's fields
+**Matched by name, not by position.** A bare handler argument cannot say which
+`:name` it is, because Zig does not keep argument names (ADR 002 reads a route
+with two params through `Path(T)` for that reason). A struct's fields
 do have names, so `.{ .slug = t, .id = 42 }` and `.{ .id = 42, .slug = t }` are
 the same URL, and a two-param pattern is safe to write either way round.
 

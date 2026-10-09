@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const naming = @import("names.zig");
+const fail = @import("fail.zig");
 
 const Limits = @import("nilo_core").Limits;
 const AnyScope = @import("nilo_core").AnyScope;
@@ -35,6 +36,34 @@ pub fn requirementFor(comptime P: type, comptime route: []const u8) Requirement 
         .type_name = @typeName(info.child),
         .needs_mutable = !info.attrs.@"const",
         .route = route,
+    };
+}
+
+/// Fetch the service `P` for the thing that asked for it, or answer 500
+/// naming it. The one place a typed handler, a resolver's caller and a typed
+/// middleware turn "never registered" into an answer, so all three say the
+/// same sentence (ADR 005, ADR 008). `needer` completes "and ___ needs it":
+/// `route "/users"`, `the middleware taking (*Keys)`.
+///
+/// **Logged as well as answered** (ADR 180). `listen()` refuses to open the
+/// socket over a missing service and names the type and who needs it, so a
+/// server never reaches here; but `testing.Client` does not call `listen()`,
+/// and a test used to get a bare 500 with nothing anywhere naming the cause.
+/// A warning and not an error, because `std.log.err` fails the test runner
+/// and this fires in a test by design.
+pub fn required(comptime P: type, comptime needer: []const u8, services: *const Registry) !P {
+    return services.get(P) orelse {
+        std.log.warn(
+            "service {s} was never registered, and {s} needs it. " ++
+                "`app.listen()` refuses to start over this and says what needs it; " ++
+                "a test driving the App itself does not, so here it is. " ++
+                "Call app.provide() before serving.",
+            .{ @typeName(P), needer },
+        );
+        return fail.internal(
+            "service {s} was never registered; call app.provide() before app.listen()",
+            .{@typeName(P)},
+        );
     };
 }
 
@@ -316,6 +345,17 @@ pub const Registry = struct {
         });
     }
 
+    /// The sentence for `error.ServiceAlreadyRegistered`: which type, and the
+    /// way round it (ADR 002). A function of the type so a test can read it
+    /// without provoking the `std.log.err` that `App.provide` prints, which
+    /// would fail the run.
+    pub fn duplicateMessage(comptime T: type) []const u8 {
+        const n = comptime naming.of(T);
+        return "a second " ++ n ++ " was provided, and a service is found by its type, so there " ++
+            "can be only one " ++ n ++ ". Give each instance a type of its own: " ++
+            "`const Replica = struct { db: " ++ n ++ " };` and take `*Replica` in the handler (ADR 002).";
+    }
+
     /// Run every service's `nilo_check`, in the order they were provided.
     /// Once, after the work `before` registered has finished, and before
     /// anything is accepted (ADR 180). The first failure stops the rest and
@@ -465,6 +505,13 @@ test "two services of the same type are rejected" {
     var two = Db{};
     try r.add(&one);
     try testing.expectError(error.ServiceAlreadyRegistered, r.add(&two));
+}
+
+test "the refusal of a second service names the type and the wrapper that fixes it" {
+    const msg = Registry.duplicateMessage(Db);
+    try testing.expect(std.mem.indexOf(u8, msg, "a second ") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, comptime naming.of(Db)) != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "struct { db: ") != null);
 }
 
 test "registered const, asked for mutable, rejected" {

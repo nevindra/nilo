@@ -141,4 +141,4 @@ fn wire(app: *nilo.App, google: *jwt.Keyring, api: *fetch.Client) !void {
 
 ### What it does not do
 
-**Not included:** HS256, any curve but P-256, encrypted tokens, signing, discovery, PKCE and the nonce. There is no signing because a server issuing its own sessions has [`Session(T)`](./ctx.md#sessiont) and needs no token. The rest is the sign-in flow, which is yours.
+**Not included:** HS256, any curve but P-256, encrypted tokens, signing, discovery, PKCE and the nonce. There is no signing because a server issuing its own sessions has [`Session(T)`](./ctx.md#sessiont), and a client that cannot hold a cookie has [`Bearer(T)`](./ctx.md#bearert), and neither needs a token the client can read. The rest is the sign-in flow, which is yours.

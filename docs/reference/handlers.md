@@ -10,9 +10,11 @@
 |---|---|
 | `*Ctx` | the request itself |
 | `*Db`, `*const Config` | a service, by type |
-| `u32`, `f64`, `Str`, `bool`, an enum | a path param, by position |
+| `u32`, `f64`, `Str`, `bool`, an enum | the path param, on a route with exactly one |
+| `Path(T)` | the path params, read by name into a struct; required from two params up (see [`Path(T)`](#patht)) |
 | a type with `nilo_parse` | also a path param; `sql.Uuid` is one |
-| `Within(1, 200)` | a whole number inside a range; `.value` is the number |
+| `Within(1, 200)`, `Within(0.0, 1.0)` | a number inside a range, whole or real; `.value` is the number |
+| `Text(…)`, `Email`, `Many(T, …)` | text, an address, a list with a length; `.value` is the `Str` or the slice |
 | `Query(T)` | the query string as a struct |
 | `FromHeader("X-Staff-Id", T)` | one request header, converted like a path param |
 | `Authorization(.bearer)`, `Authorization(.{ .basic = "realm" })` | the `Authorization` header as one scheme. Missing, or another scheme, is a 401 with the challenge header |
@@ -21,6 +23,7 @@
 | `Form(T)` | the body as an HTML form, urlencoded or multipart |
 | `Bound(W)` | any of the three above, with its failures handed to you instead of a 400 |
 | `Session(T)` | the session, read from its cookie |
+| `Bearer(T)` | the same sealed value, read from `Authorization: Bearer …` |
 | `std.mem.Allocator` | the request arena |
 | `std.Io` | the server's loop, for a `std.Io.Queue` or `std.Io.Event` a handler waits on while a fiber from `app.spawn` answers ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)). A resolver may take it too |
 | a type with `nilo_resolve` | a resolved value |
@@ -55,7 +58,7 @@ A body containing a type that parses itself but has no `jsonParse` is a compile 
 
 ### `Within(min, max)`
 
-**`Within(min, max)` is a whole number inside a range** ([ADR 167](../adr/167-a-whole-number-inside-a-range-is-a-type.md)). It is a type that parses itself, so it can be used anywhere a `u8` can. A value outside the range is rejected with `?limit has to be a whole number from 1 to 200, not "500"`, and the document describes it with `minimum` and `maximum`. The number is `.value`; a default goes through `.of`, which checks it against the range while compiling:
+**`Within(min, max)` is a number inside a range, both ends inclusive** ([ADR 167](../adr/167-a-whole-number-inside-a-range-is-a-type.md)). It is a type that parses itself, so it can be used anywhere a `u8` can. A value outside the range is rejected with `?limit has to be a whole number from 1 to 200, not "500"`, and the document describes it with `minimum` and `maximum`. The number is `.value`; a default goes through `.of`, which checks it against the range while compiling. **A bound written with a point makes it a real number**: `Within(0.0, 1.0)` holds an `f64` (`Within.Number` is the type), is read the way an `f64` field is (`nan`, `inf`, `1e999` and a hex float are refused), says `a number from 0 to 1` in a 400, and is `type: number` with `minimum` and `maximum` in the document. A bound that is not a number, a bound the wrong way round and a default outside the range are compile errors:
 
 <!-- compiles -->
 ```zig
@@ -65,10 +68,28 @@ const ListQuery = struct {
 };
 ```
 
+```zig
+const Rated = struct {
+    score: nilo.Within(0.0, 1.0) = .of(0.5),   // an f64, 0 to 1
+    stars: nilo.Within(1, 5),                    // a u3, 1 to 5
+};
+```
+
 ### `Text`, `Email` and `Url`
 
 **`Text(.{ .min, .max, .check, .said })` is text with a shape, and `Email` and `Url` are presets of it** ([ADR 193](../adr/193-text-with-a-shape-is-a-type-and-a-rule-about-the-struct-is-a-function-on-it.md)). It is a `Str` that parses itself, usable wherever a `Str` is, rejected with one sentence wherever it appears, and described with `minLength`, `maxLength` and `format`. `min` and `max` count code points. `check` is a `fn ([]const u8) bool` of your own and needs `said` next to it: its error sentence, in the same form as `must`'s. A `Text` never quotes the text back (`"password" has to be text of 10 to 72 characters, not 7`), but the presets do. The `Str` is `.value`, with `view`, `len`, `eql` and `blank` forwarded; `.of("…")` is a default, checked against the shape while compiling. Each of these is a compile error: bounds in the wrong order, a `Text` with no bound and no check, a check with no `said`, and a default outside the shape.
 
+
+### `Many(T, .{ .min, .max })`
+
+**`Many(T, opts)` is a list with a length** ([ADR 266](../adr/266-a-list-with-a-length-is-a-type.md)). The slice is `.value` (a `[]const T`) and `len()` is forwarded; `.of(&.{…})` is a default, checked against the count while compiling. A list outside the bound is a 400 naming the field, the bound and the count (`"tags" has to be a list of 1 to 5 items, not a list of 7`), a bad element is named by its position (`"tags[2]"`), `Bound` collects it beside the other fields, and the document says `minItems` and `maxItems` around the element's own schema. It is read where a list is read: a JSON body and a form (every value under one name is counted). A query string is a compile error naming the field, because `?tag=a,b` is a plain `[]const T` there. Each of these is a compile error: a `Many` with neither bound, bounds in the wrong order, `Many(u8, …)` (bytes are text; use `Text`), and a default outside the bound. A `Many` in a response is written as its array, with `rename_all` inside its items applied as for a plain slice.
+
+<!-- compiles -->
+```zig
+const NewPost = struct {
+    tags: nilo.Many(Str, .{ .min = 1, .max = 5 }),
+};
+```
 ### `nilo_check`
 
 **`nilo_check` is a rule about the whole struct, declared on the struct** (same ADR): `pub fn nilo_check(self: T, r: *nilo.Rules(T)) void`. It runs once every field has bound, in a form, a query string, a JSON body, and under `Bound`, with `r.must(field, holds, sentence)` in the same form as `Bound.must`. On a plain argument, any rule that did not hold makes a 422 naming every failed rule; under `Bound`, the sentences join the other failures. It does not run on a value with a field that failed to bind, it takes only the value, and a different signature is a compile error.
@@ -86,9 +107,22 @@ const SignUp = struct {
 };
 ```
 
+### `Path(T)`
+
+**The path params of the route, read by name into a struct of yours.** Each field is spelled like a `:name` of the pattern (`@"*"` for a trailing wildcard) and typed as anything a bare path param may be: a number, a `bool`, an enum, a `Str`, a type with `nilo_parse`. `.value` is the struct.
+
+```zig
+fn member(p: nilo.Path(struct { org: u32, id: u32 })) !?User { … p.value.org … }
+try app.get("/orgs/:org/members/:id", member);
+```
+
+**It is required from two params up, and a bare path param there is a Refusal** that writes the `Path(…)` to use from the handler's own types, because two bare `u32` cannot say which `:name` each is. A route with one param may use either form. Refusals, each naming the route: a field that names no param (with the route's params and the likeliest spelling), a param with no field (unless the handler holds a `*Ctx`), an optional field, a field a path param cannot be, two `Path(T)` arguments, and a `Path(T)` beside a bare path param. A value that does not convert is the 400 the bare form gives, naming the field. The fields are located while compiling, so reading costs no string comparison and no allocation ([ADR 002](../adr/002-typed-handlers-are-a-thin-layer-over-ctx.md)).
+
+**A resolver may take it** ([ADR 015](../adr/015-resolved-values-are-declared-by-their-type.md)): from a typed handler its fields are checked against that route while compiling and need not cover every param; from a bare middleware (`c.resolve(T)`) they are read by name at run time, and a name the matched route lacks is a 500 naming the resolver, the param and the route. The document lists each path parameter by its name, typed from its field.
+
 ### `Form(T)`
 
-**`Form(T)` and a plain struct fill the same argument slot** (a form *is* the body), so asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a `bool`, an enum or an `Upload`, optionally in a `?`. A default is what "not sent" means. An empty value on an optional or defaulted field whose type has no empty value (`age=` on a `?u32`) also counts as "not sent", in a `Query(T)` too. An empty `?Str` is `""`.
+**`Form(T)` and a plain struct fill the same argument slot** (a form *is* the body), so asking for both is a compile error. A `Form(T)` field is a `Str`, a number, a `bool`, an enum or an `Upload`, optionally in a `?`, or a slice of any of them but an optional: `[]const Upload` takes every file under the name. A default is what "not sent" means. An empty value on an optional or defaulted field whose type has no empty value (`age=` on a `?u32`) also counts as "not sent", in a `Query(T)` too. An empty `?Str` is `""`.
 
 **A field that is a slice of one of those types is a list**, with one element per occurrence of the name (a checkbox group, a `<select multiple>`), in the order sent. Nothing sent is an empty list and never a 400, an empty value adds nothing, and a comma is part of the data, because a browser never joins a group with commas, so there is no second spelling like there is for a query. A list of `Upload` is a Refusal. Under `Bound(Form(T))`, the first value that fails to convert is the one reported, and the rest are still read ([ADR 132](../adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)). See [Forms](../guide/forms.md#checkbox-groups-and-multiple-selects).
 
@@ -445,6 +479,7 @@ const Condition = union(enum) {
 | `.tag` | the discriminator's key. For a `union(enum)` only: the variant's name goes under it, and the variant's own fields go beside it in the same object |
 | `.rename_all` | how names are spelled on the wire: an enum's tags, a union's variants, or **a struct's field names** |
 | `.rename` | names spelled one at a time, such as `.{ .amount_minor = "amountMinor" }`, which take priority over `.rename_all` ([ADR 168](../adr/168-one-field-can-be-spelled-on-its-own.md)) |
+| `.skip` | a struct's fields that are never written and never read: `&.{"password_hash"}`. A client sending one has sent an unknown key; the API description leaves it out; read from a body it needs a default or a `?T` ([ADR 148](../adr/148-a-field-name-is-a-spelling-too.md)) |
 
 `.rename_all` takes `.lowercase`, `.UPPERCASE`, `.camelCase`, `.PascalCase`, `.SCREAMING_SNAKE_CASE` and `.@"kebab-case"`. The first two join the words (`not_found` becomes `notfound`); `.SCREAMING_SNAKE_CASE` keeps the underscore. There is no `.snake_case`, because that is what a Zig field name already is, and asking for it is a compile error instead of a silent no-op. Two names that end up the same are also a compile error, in every case, because the object would have the same key twice.
 
@@ -487,9 +522,9 @@ An entry naming a field the struct does not have, one that spells a field the wa
 
 #### Renamed types are for output only
 
-**A renamed spelling is for what goes *out*, and using the type for input is a Refusal.** `std.json` chooses the parser for a body and reads it into the field names as written, so such a type would document `fullName` and answer 400 to a client that sent it. A struct with `rename_all` used as a request body, a form or a query string is a compile error naming the route. Give the input its own struct, spelled the way the wire spells it.
+**A renamed spelling is for what goes out and what comes in as JSON.** A request body is matched against the wire names (`fullName`, not `full_name`), the sentences of a 400 or a `Bound` 422 quote the name the client sent, and the API description lists the same keys, so one Row is posted and returned under one spelling. A form and a query string read field names as written, so a struct with `rename_all`, `.rename` or `.skip` used as one of those is a compile error naming the route; give it its own struct. A skipped field read from a body needs a default value or a `?T`, and a type without one is a compile error naming the field.
 
-A renamed struct that nilo's own writer cannot handle is also refused. A shape it does not recognise (a tuple, an array of bytes, an untagged union, a type that writes its own JSON without describing it, anything more than eight levels deep) sends the whole value to `std.json`, which does not read the marker.
+A renamed or skipping struct that nilo's own writer cannot handle is also refused. A shape it does not recognise (a tuple, an array of bytes, an untagged union, a type that writes its own JSON without describing it, anything more than eight levels deep) sends the whole value to `std.json`, which does not read the marker.
 
 #### Leaf types
 
@@ -555,7 +590,7 @@ Five things are compile errors: `.misfit = 400` (it is the default), any other s
 
 ### `nilo.jsonParseFor`
 
-**`nilo.jsonParseFor(@This())` is the parser, and it is a separate line** because `std.json` picks the parser from the type, and nothing can add a declaration to a type you wrote. You only need it if the type arrives in a request; sending needs nothing. On a type with `nilo_parse`, it is the parser that passes the string to `nilo_parse` ([ADR 166](../adr/166-a-body-field-that-parses-itself.md)). Adding it to a type with neither a `nilo_json` nor a `nilo_parse` is a compile error, and so is adding it to a struct that only renames, because there is nothing for the parser to do differently.
+**`nilo.jsonParseFor(@This())` is the parser, and it is a separate line** because `std.json` picks the parser from the type, and nothing can add a declaration to a type you wrote. You only need it if the type arrives in a request; sending needs nothing. On a type with `nilo_parse`, it is the parser that passes the string to `nilo_parse` ([ADR 166](../adr/166-a-body-field-that-parses-itself.md)). Adding it to a type with neither a `nilo_json` nor a `nilo_parse` is a compile error, and so is adding it to a struct that only renames or skips, because nilo already reads a struct's marker.
 
 ### Unions
 

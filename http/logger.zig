@@ -4,18 +4,24 @@
 //! ```zig
 //! try app.use(logger.standard);
 //! try app.use(logger.with(.{ .level = .debug, .slow_micros = 50_000 }));
-//! try app.use(logger.with(.{ .format = .json, .request_id = true }));
+//! try app.use(logger.with(.{ .request_id = true, .skip = &.{"/healthz"} }));
 //! ```
 //!
-//! Configured at compile time, so an option nobody switched on costs
-//! nothing at runtime.
+//! What the line says is configured at compile time, so an option nobody
+//! switched on costs nothing at run time. **How it is written is not the
+//! middleware's to say**: text or JSON, and the lowest level written, are
+//! `listen(.{ .log = … })`, because they are facts about the deployment and
+//! every other line the process writes follows them too
+//! ([ADR 262](../docs/adr/262-a-log-line-has-one-sink.md)).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Ctx = @import("ctx.zig").Ctx;
 const mw = @import("middleware.zig");
 const fail = @import("fail.zig");
 const bulkhead = @import("bulkhead.zig");
 const json_mod = @import("json.zig");
+const log_mod = @import("log.zig");
 
 /// How much of a line is written before it is handed to `std.log`. A path is
 /// the long part and a request head bounds it; past this the line is cut
@@ -23,20 +29,25 @@ const json_mod = @import("json.zig");
 /// ([ADR 004](../docs/adr/004-http-errors-via-fail-functions.md)).
 const max_line = 1024;
 
-pub const Format = enum {
-    /// `GET /users/7 200 59µs` — what a person reads in a terminal.
-    text,
-    /// One JSON object per line, for whatever collects them.
-    json,
-};
+/// `text` is `GET /users/7 200 59µs`, what a person reads in a terminal;
+/// `json` is one object per line, for whatever collects them. Chosen by
+/// `listen(.{ .log = .{ .format = … } })`, not by the middleware.
+pub const Format = log_mod.Format;
 
 pub const Options = struct {
-    /// The level ordinary requests are logged at.
+    /// The level ordinary requests are logged at. Which level a line *is* is
+    /// a fact about the code, like `slow_micros`; whether that level is
+    /// written at all is `listen(.{ .log = .{ .level = … } })`.
     level: std.log.Level = .info,
+    /// Paths that are never logged, compared exactly with the request's
+    /// path: a health check a load balancer calls every second is not worth
+    /// a line each. Empty costs nothing, and the compare is unrolled over
+    /// the literals when it is not. The request is still answered, its
+    /// `X-Request-Id` still set, and an error is still passed along.
+    skip: []const []const u8 = &.{},
     /// Requests taking longer than this are logged at `.warn` instead, so
     /// they stand out without needing a second tool. 0 turns that off.
     slow_micros: u64 = 0,
-    format: Format = .text,
     /// Give every request an id: `X-Request-Id` on the way out, and the same
     /// id on its log line.
     ///
@@ -54,8 +65,6 @@ pub const standard = with(.{});
 pub fn with(comptime options: Options) mw.Middleware {
     return struct {
         fn run(c: *Ctx, next: mw.Next) anyerror!void {
-            const started = bulkhead.monotonicNanos();
-
             if (options.request_id) {
                 // Set before the handler runs, not after: a response is
                 // flushed the moment it is sent, so a header put on
@@ -68,6 +77,14 @@ pub fn with(comptime options: Options) mw.Middleware {
                 // the id.
                 c.setStaticHeader("X-Request-Id", c.requestId().view()) catch {};
             }
+
+            if (comptime options.skip.len > 0) {
+                const path = c.path().view();
+                inline for (options.skip) |skipped| {
+                    if (std.mem.eql(u8, path, skipped)) return next.run(c);
+                }
+            }
+            const started = bulkhead.monotonicNanos();
 
             // The handler's error is reported and then passed along
             // untouched — App is what turns it into a response, and a
@@ -104,24 +121,44 @@ pub fn with(comptime options: Options) mw.Middleware {
             const slow = options.slow_micros > 0 and took > options.slow_micros;
             const level: std.log.Level = if (slow) .warn else options.level;
 
+            // The run-time floor first, so a line the process does not write
+            // is not built either. Only under `nilo.logFn`: behind std's
+            // default there is no floor but the comptime one.
+            if (log_mod.floorApplies() and !log_mod.enabled(level)) return;
+
             // Assembled into a stack buffer and handed on as one `{s}`.
             // Both shapes are built the same way so there is one place a
             // line is put together — and the JSON one has to be, because a
             // path is a stranger's text and needs escaping.
             var buf: [max_line]u8 = undefined;
-            const line = lineFor(options, &buf, c, status, took, err_name);
+            const line = lineFor(options, &buf, c, status, took, err_name, log_mod.format());
+
+            if (builtin.is_test) if (tap) |sink| {
+                sink.writeAll(line) catch {};
+                sink.writeByte('\n') catch {};
+                return;
+            };
+
+            // Under `nilo.logFn` the scope tells the sink to put the object's
+            // fields beside `time` and `level`; under std's default there is
+            // no such sink, and a scope would only be noise in front.
+            const out = std.log.scoped(if (log_mod.installed) log_mod.access_scope else .default);
 
             // std.log's level is comptime, so the branch is unrolled here
             // rather than passed along as a value.
             switch (level) {
-                .err => std.log.err("{s}", .{line}),
-                .warn => std.log.warn("{s}", .{line}),
-                .info => std.log.info("{s}", .{line}),
-                .debug => std.log.debug("{s}", .{line}),
+                .err => out.err("{s}", .{line}),
+                .warn => out.warn("{s}", .{line}),
+                .info => out.info("{s}", .{line}),
+                .debug => out.debug("{s}", .{line}),
             }
         }
     }.run;
 }
+
+/// Test-only: where the line goes instead of `std.log`, which the test
+/// runner owns and a suite cannot read back.
+pub threadlocal var tap: ?*std.Io.Writer = null;
 
 /// The line one request is logged as. A free function rather than something
 /// buried inside `with`, so the shape of a line can be asserted without
@@ -137,9 +174,20 @@ pub fn lineFor(
     status: u16,
     took: u64,
     err_name: ?[]const u8,
+    as: Format,
 ) []const u8 {
     var w = std.Io.Writer.fixed(buf);
-    writeLine(options, &w, c, status, took, err_name) catch {};
+    writeLine(options, &w, c, status, took, err_name, as, c.path().view()) catch {
+        // A JSON object cut short is not JSON, and a collector drops the
+        // line. The path is the one field with no bound but the request
+        // head's, so it is the one shortened, and the object closed whole.
+        if (as == .json) {
+            w.end = 0;
+            const path = c.path().view();
+            const short = path[0..fail.wholeCharacters(path[0..@min(path.len, 100)])];
+            writeLine(options, &w, c, status, took, err_name, as, short) catch {};
+        }
+    };
     return buf[0..w.end];
 }
 
@@ -150,11 +198,12 @@ fn writeLine(
     status: u16,
     took: u64,
     err_name: ?[]const u8,
+    as: Format,
+    path: []const u8,
 ) !void {
     const method = @tagName(c.method);
-    const path = c.path().view();
 
-    switch (options.format) {
+    switch (as) {
         .text => {
             try w.print("{s} ", .{method});
             try writeEscaped(w, path);
@@ -174,7 +223,9 @@ fn writeLine(
             try w.writeAll("{\"method\":");
             try json_mod.writeString(w, method);
             try w.writeAll(",\"path\":");
-            try json_mod.writeString(w, path);
+            // Lossy: a path is a stranger's bytes, and `%ff` decodes to one
+            // that is not text. JSON is UTF-8, so it goes out as U+FFFD.
+            try json_mod.writeLossyString(w, path);
             try w.print(",\"status\":{d},\"us\":{d}", .{ status, took });
             if (err_name) |name| {
                 try w.writeAll(",\"error\":");
@@ -260,11 +311,11 @@ test "a text line reads the way it always has" {
 
     try testing.expectEqualStrings(
         "GET /users/7 200 59µs",
-        lineFor(.{}, &buf, &c, 200, 59, null),
+        lineFor(.{}, &buf, &c, 200, 59, null, .text),
     );
     try testing.expectEqualStrings(
         "GET /users/7 500 59µs error=OutOfMemory",
-        lineFor(.{}, &buf, &c, 500, 59, "OutOfMemory"),
+        lineFor(.{}, &buf, &c, 500, 59, "OutOfMemory", .text),
     );
 }
 
@@ -275,12 +326,12 @@ test "a json line carries the same four things, and the id when asked" {
 
     try testing.expectEqualStrings(
         "{\"method\":\"GET\",\"path\":\"/users/7\",\"status\":200,\"us\":59}",
-        lineFor(.{ .format = .json }, &buf, &c, 200, 59, null),
+        lineFor(.{}, &buf, &c, 200, 59, null, .json),
     );
     try testing.expectEqualStrings(
         "{\"method\":\"GET\",\"path\":\"/users/7\",\"status\":500,\"us\":59," ++
             "\"error\":\"OutOfMemory\",\"request_id\":\"abc123\"}",
-        lineFor(.{ .format = .json, .request_id = true }, &buf, &c, 500, 59, "OutOfMemory"),
+        lineFor(.{ .request_id = true }, &buf, &c, 500, 59, "OutOfMemory", .json),
     );
 }
 
@@ -297,12 +348,12 @@ test "on an App that traces, a line carries the trace id in both formats" {
 
     try testing.expectEqualStrings(
         "GET /users/7 200 59µs trace=4bf92f3577b34da6a3ce929d0e0e4736",
-        lineFor(.{}, &buf, &c, 200, 59, null),
+        lineFor(.{}, &buf, &c, 200, 59, null, .text),
     );
     try testing.expectEqualStrings(
         "{\"method\":\"GET\",\"path\":\"/users/7\",\"status\":200,\"us\":59," ++
             "\"trace_id\":\"4bf92f3577b34da6a3ce929d0e0e4736\"}",
-        lineFor(.{ .format = .json }, &buf, &c, 200, 59, null),
+        lineFor(.{}, &buf, &c, 200, 59, null, .json),
     );
 }
 
@@ -313,7 +364,7 @@ test "a path that would break the line out of its own field cannot" {
     var c = requestThatWas(&lifetime, "/x\",\"status\":200,\"path\":\"\n/y", null);
     var buf: [max_line]u8 = undefined;
 
-    const line = lineFor(.{ .format = .json }, &buf, &c, 404, 3, null);
+    const line = lineFor(.{}, &buf, &c, 404, 3, null, .json);
     try testing.expectEqualStrings(
         "{\"method\":\"GET\",\"path\":\"/x\\\",\\\"status\\\":200,\\\"path\\\":\\\"\\n/y\"," ++
             "\"status\":404,\"us\":3}",
@@ -331,7 +382,7 @@ test "a line too long for the buffer is cut, not dropped" {
     var c = requestThatWas(&lifetime, "/" ++ (&@as([200]u8, @splat('x'))), null);
     var buf: [64]u8 = undefined;
 
-    const line = lineFor(.{}, &buf, &c, 200, 1, null);
+    const line = lineFor(.{}, &buf, &c, 200, 1, null, .text);
     try testing.expect(line.len > 0);
     try testing.expect(line.len <= buf.len);
     try testing.expect(std.mem.startsWith(u8, line, "GET /xxx"));
@@ -342,10 +393,25 @@ test "a text line writes a path's control bytes escaped, so a terminal cannot be
     var c = requestThatWas(&lifetime, "/a\x1b[31mRED\rFAKE\x7f", "id\x1b");
     var buf: [max_line]u8 = undefined;
 
-    const line = lineFor(.{ .request_id = true }, &buf, &c, 404, 3, null);
+    const line = lineFor(.{ .request_id = true }, &buf, &c, 404, 3, null, .text);
     try testing.expectEqualStrings(
         "GET /a\\x1b[31mRED\\x0dFAKE\\x7f 404 3µs req=id\\x1b",
         line,
     );
     for (line) |byte| try testing.expect(byte >= 0x20 and byte != 0x7f);
+}
+
+test "a path that is not UTF-8 is written as U+FFFD, so the json line still parses" {
+    var lifetime: str_mod.Lifetime = .{};
+    var c = requestThatWas(&lifetime, "/a\xff\xfeb", null);
+    var buf: [max_line]u8 = undefined;
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        lineFor(.{}, &buf, &c, 404, 3, null, .json),
+        .{},
+    );
+    defer parsed.deinit();
+    try testing.expectEqualStrings("/a\u{FFFD}\u{FFFD}b", parsed.value.object.get("path").?.string);
 }

@@ -168,12 +168,12 @@ fn schemeWord(comptime scheme: Scheme) []const u8 {
     };
 }
 
-const Split = struct { scheme: []const u8, credentials: []const u8 };
+pub const Split = struct { scheme: []const u8, credentials: []const u8 };
 
 /// `credentials = auth-scheme [ 1*SP ( token68 / #auth-param ) ]`, read the
 /// way clients actually write it: any run of blanks between the two, and
 /// none counted at either end.
-fn split(value: []const u8) Split {
+pub fn split(value: []const u8) Split {
     const blank = " \t";
     const trimmed = std.mem.trim(u8, value, blank);
     const gap = std.mem.indexOfAny(u8, trimmed, blank) orelse

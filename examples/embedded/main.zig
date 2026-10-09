@@ -19,6 +19,7 @@ const frontend = @import("frontend");
 // if either is missing.
 pub const std_options = nilo.std_options; // keeps the Engine's debug chatter out of your logs
 pub const std_options_debug_io = nilo.debug_io; // keeps `std.log` from blocking the event loop
+pub const panic = nilo.panic; // names the request that was in flight when the process goes down (ADR 007)
 
 const Task = struct { id: u32, title: []const u8 };
 

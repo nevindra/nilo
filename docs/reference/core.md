@@ -1,6 +1,6 @@
 # Core
 
-**`nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding and the clock.**
+**`nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock and `Timestamp` and `Date`.**
 
 **Guide:** [Handlers](../guide/handlers.md), [Work that is not a request](../guide/background.md), [Decoding a cookie](../guide/cookies.md#decoding-an-encoded-value) · **Design:** [Memory per request and per connection](../design/memory.md), [The clock, entropy, and a UUID](../design/id-clock-entropy.md)
 
@@ -101,6 +101,13 @@ A request never needs `give`. A value read from the request is a `nilo_resolve`,
 
 **A Scope is not a type: it is the two calls `arena()` and `str()` that [`Run`](#run) lists.** A `Ctx` has them and a `Run` has them, and anything that asks for a Scope takes either ([ADR 038](../adr/038-a-module-sits-where-the-loop-puts-it.md)). It is checked while compiling, so passing something else is a Refusal naming the missing call, not an error from inside the module.
 
+**A Scope may also declare `timeLeftMs() ?u32`**, the milliseconds its work has left (`null` for none, `0` once gone). A `Ctx` does, from the route's [`nilo.deadline`](./middleware.md#nilodeadline) or `request_deadline_ms`; a `Run` and an `AnyScope` do not. `nilo_fetch`, `nilo_s3` and `nilo_sql` read it so that a call takes the shorter of its own bound and the time left ([ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)):
+
+| Call | Does |
+|---|---|
+| `core.timeLeftOf(scope)` | `?u32`: the Scope's `timeLeftMs()`, or `null` for a Scope that does not declare one. Resolved while compiling |
+| `core.within(scope, own_ms)` | `error{DeadlineExpired}!u32`: the shorter of `own_ms` and the time left, where `0` means no limit at either end. A Scope with no deadline gives `own_ms` back; one whose time has passed is `error.DeadlineExpired` |
+
 Both live in `nilo_core`. A project that imports `nilo` never has to name it (`nilo.Str` and `nilo.Run` are the same declarations), but a program with no server in it can depend on `nilo_core` alone.
 
 ### `AnyScope`
@@ -178,6 +185,17 @@ Three things are not options, because getting any of them wrong fails silently: 
 These are plain functions, not calls on a `Ctx` or a `Run`: reading the wall clock needs no event loop and nobody owns the time, so there is nothing for a Scope to hold ([ADR 041](../adr/041-core-knows-what-time-it-is.md)). They belong to `nilo_core`, so a program with no server in it has them too. A call takes 15ns.
 
 **Use `monotonicMicros` for a duration, never the other two.** A wall clock moves when an operator changes it or NTP steps it, so two readings a second apart can come back in either order. It is the clock `db.watching` uses to time a statement ([ADR 108](../adr/108-a-statement-can-be-watched.md)).
+
+## `Timestamp` and `Date`
+
+| | |
+|---|---|
+| `nilo.Timestamp` | a moment: `micros: i64`, microseconds since 1970-01-01 UTC. `.now()`, `.fromSeconds(s)`, `.seconds()`, `.writeRfc3339(w)`, `.nilo_parse(text)` |
+| `nilo.Date` | a calendar day: `days: i32`, days since 1970-01-01, no hour and no zone. `.fromDays(n)`, `.utcOf(timestamp)`, `.atMidnightUtc()`, `.writeIso(w)`, `.nilo_parse(text)` |
+
+**They work in a build with no database**: as a JSON body field and a JSON response field (an RFC 3339 string and a `YYYY-MM-DD` string), a query field, a path param and a form field, and the OpenAPI document says `type: string` with `format: date-time` and `format: date`. They live in `nilo_core` and `sql.Timestamp` and `sql.Date` are the same types, so a Row field and a request field are one declaration ([ADR 057](../adr/057-percent-is-needed-by-two-layers.md)).
+
+A `Timestamp` is written as RFC 3339 in UTC with six fractional digits (`2026-08-16T09:30:00.700000Z`), from 0001-01-01 to 9999-12-31; a moment outside that is `error.OutOfRange` and a 500 in a response, never `null`. It reads an offset (`+07:00`) and normalises to UTC, and fractional seconds to the microsecond, and **refuses text with no zone**, because there is no correct reading of it. A `Date` reads `2026-09-17` and nothing else: a date with a time on it is refused rather than read by dropping the time. Neither calculates (no zones, no `addDays`).
 
 ## `nilo_core.tmpDir`
 

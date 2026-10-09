@@ -55,8 +55,23 @@ fn submit(incoming: form_mod.Form(WideForm)) u32 {
     return @field(incoming.value, last_of_query);
 }
 
-fn eight(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32) u32 {
-    return a + b + c + d + e + f + g + h;
+const Eight = struct {
+    param_a_with_a_long_descriptive_name: u32,
+    param_b_with_a_long_descriptive_name: u32,
+    param_c_with_a_long_descriptive_name: u32,
+    param_d_with_a_long_descriptive_name: u32,
+    param_e_with_a_long_descriptive_name: u32,
+    param_f_with_a_long_descriptive_name: u32,
+    param_g_with_a_long_descriptive_name: u32,
+    param_h_with_a_long_descriptive_name: u32,
+};
+
+fn eight(p: typed.Path(Eight)) u32 {
+    const v = p.value;
+    return v.param_a_with_a_long_descriptive_name + v.param_b_with_a_long_descriptive_name +
+        v.param_c_with_a_long_descriptive_name + v.param_d_with_a_long_descriptive_name +
+        v.param_e_with_a_long_descriptive_name + v.param_f_with_a_long_descriptive_name +
+        v.param_g_with_a_long_descriptive_name + v.param_h_with_a_long_descriptive_name;
 }
 
 fn deep(id: u32) u32 {

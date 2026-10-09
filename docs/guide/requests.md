@@ -6,19 +6,32 @@
 
 ## Path params
 
-**A `:name` in the pattern arrives as the argument in the same position, and the argument's type decides the conversion:**
+**A route with one `:name` takes it as a bare argument, and the argument's type decides the conversion. A route with two or more reads them by name, in a struct:**
 
 ```zig
 try app.get("/users/:id", getUser);
 fn getUser(db: *Db, id: u32) !User { … }
 
 try app.get("/posts/:year/:slug", getPost);
-fn getPost(year: u16, slug: nilo.Str) !Post { … }
+fn getPost(p: nilo.Path(struct { year: u16, slug: nilo.Str })) !Post { … p.value.year … }
 ```
 
-The type can be `u32`, `i64`, `f64`, `bool`, an enum, or a `Str` for the text as it arrived. A value that doesn't convert is a 400 saying which param and what was expected, and your handler doesn't run. Values are percent-decoded before conversion.
+Zig keeps no argument names, so `fn getPost(year: u16, slug: nilo.Str)` could not say which `:name` each argument is, and two `u32` on `/orgs/:org/members/:id` would compile either way round and run a tenant-scoped query with the ids swapped. A struct keeps its field names, so `Path(T)` reads each field from the `:name` it is spelled like, in whatever order you list them, and the compiler checks the two together. The positional form on a route with two or more params is a compile error that writes the `Path(…)` for you.
 
-A `*` as the last segment matches the whole rest of the path and arrives under the name `*`. That is not a legal Zig identifier, so you read it from a `*Ctx`: [`c.param("*")`](../reference/ctx.md#reading).
+<!-- compiles -->
+```zig
+const Member = struct { org: u32, id: u32 };
+
+fn member(p: nilo.Path(Member)) u32 {
+    return p.value.org + p.value.id;
+}
+```
+
+The fields can be a `u32`, `i64`, `f64`, `bool`, an enum, a type carrying `nilo_parse`, or a `Str` for the text as it arrived; never optional, because a param on a route that matched is always there. A value that doesn't convert is a 400 saying which param and what was expected, and your handler doesn't run. Values are percent-decoded before conversion. A field that names no param of the route, and a param of the route with no field, stop the compiler with a sentence naming the route (a handler holding a `*Ctx` may leave params out and read them with `c.param`).
+
+A `*` as the last segment matches the whole rest of the path and is the field `@"*"`: `p: nilo.Path(struct { repo: nilo.Str, @"*": nilo.Str })`. A `*Ctx` handler reads it with [`c.param("*")`](../reference/ctx.md#reading).
+
+A [resolved value](./middleware.md#resolved-values) may take a `Path(T)` too, to work something out of a param (the tenant out of `:org`). Reached from a handler, its field names are checked against that handler's route while compiling. Reached from a bare middleware through `c.resolve`, there is no route to check, so the names are read at run time and a route without one answers a 500 naming the resolver, the param and the route.
 
 ## Query params
 
@@ -102,6 +115,8 @@ the request body has a field "x" the "tight" variant does not know. It takes: ki
 the request body is empty. This endpoint expects an object whose "kind" is one of loose, tight, off
 ```
 
+**A body is read by the keys its struct goes out under.** A struct with `rename_all` or `.rename` in its `nilo_json` is posted under the renamed keys (`fullName`), and every sentence above quotes that spelling, so a camelCase front end can post the same snake_case Row it receives. `.skip = &.{"password_hash"}` takes a field out of the body altogether: a client that sends its key has sent an unknown one, and the field needs a default value ([the guide](./responses.md#json-field-names-and-union-tags), [ADR 148](../adr/148-a-field-name-is-a-spelling-too.md)).
+
 **To accept a body that carries keys your type does not list**, say so on the type with `pub const nilo_json = .{ .unknown_fields = .ignore };`. That is for a webhook or an OTLP/HTTP JSON receiver whose sender adds fields over time; it applies to that struct alone and not to the ones it holds ([reference](../reference/handlers.md#skipping-the-keys-a-body-struct-does-not-know)).
 
 **To answer JSON of the wrong shape with a 422 rather than a 400**, the line an axum server draws and its clients read, say so on the body's type with `pub const nilo_json = .{ .misfit = 422 };`. Text that is not JSON, an empty body and one nested past 64 levels stay a 400, because none of them is a body of any shape. A missing field, a value of the wrong kind, a key the type does not know, a key given twice and a body that is not an object become a 422 with the same sentence. It holds under `Bound(T)` for what the binding cannot collect, and the API document lists the 422 beside the 400 ([reference](../reference/handlers.md#answering-json-of-the-wrong-shape-with-a-422), [ADR 251](../adr/251-json-that-does-not-fit-can-be-a-422.md)).
@@ -119,6 +134,21 @@ which part is wrong. The mistake is somewhere below that.
 That message means the shape is too deep to name, not that the depth is refused: a body that *fits* is parsed however deep it goes.
 
 A `Str` field lives in the request arena, so like every `Str` it stops being valid when the request ends. `keep` it if the value goes into a service.
+
+### Dates and times
+
+**`nilo.Timestamp` and `nilo.Date` are a moment and a calendar day, and they read and write as text everywhere request data does, with no database in the build:** a JSON body field, a JSON response field, a query field, a path param and a form field. The OpenAPI document says `type: string` with `format: date-time` and `format: date`.
+
+<!-- compiles -->
+```zig
+const Booking = struct { starts_at: nilo.Timestamp, on: nilo.Date, ends_at: ?nilo.Timestamp = null };
+
+fn book(incoming: Booking) Booking {
+    return incoming;
+}
+```
+
+`{"starts_at":"2026-08-16T16:30:00+07:00","on":"2026-09-17"}` is read, the offset normalised to UTC, and comes back as `"2026-08-16T09:30:00.000000Z"` and `"2026-09-17"`. A time with no zone is a 400, because there is no correct reading of it, and so is a date with a time on it. They carry no calendar arithmetic and no time zones ([`Timestamp` and `Date` in the reference](../reference/core.md#timestamp-and-date)). `sql.Timestamp` and `sql.Date` are the same types, so a column and a field agree.
 
 ### Reporting every bad field at once
 
@@ -190,6 +220,81 @@ It takes arena memory as the bytes arrive, not as `Content-Length` promises them
 The limits: the compressed bytes are bounded by `max_body`, and so is what they decompress to. That is checked against the length the stream announces before a byte is decompressed, so a small body that would expand into a large one is a 413, not a megabyte. A stream that does not decode is a 400 naming the coding. Every other coding (`br`, `deflate`, `zstd`, two stacked) is still a 415 naming the header. A gzipped request costs one more arena allocation, of exactly the decompressed size; a request that is not gzipped pays nothing.
 
 `c.bodyStream()` is the exception: a stream hands bytes out as they arrive and holds nothing, so there is nowhere to decompress into, and a gzipped body on a streaming route is a 415 that says so.
+
+## Checking what arrived
+
+**The type of a field is its rule.** A number inside a range, text of a given length or shape, a list of a given size: each is a type, and each is read the same way in a JSON body, a form, a query string or a path param (a list is the exception, below). It is the job go-playground's `validate:"min=1,email"` tag does and zod's `z.string().email().min(1)` does, with the rule in the type rather than a string or a call chain, so the compiler sees it, a bad default is a compile error, and the API description is written from the same declaration the server enforces.
+
+<!-- compiles -->
+```zig
+const NewPost = struct {
+    title: nilo.Text(.{ .min = 1, .max = 120 }),
+    author: nilo.Email,
+    rating: nilo.Within(1, 5),
+    weight: nilo.Within(0.0, 1.0) = .of(0.5),
+    tags: nilo.Many(Str, .{ .min = 1, .max = 5 }),
+    slug: nilo.Text(.{ .check = isSlug, .said = "has to be lowercase words joined by dashes" }),
+    password: nilo.Text(.{ .min = 10 }),
+    confirm: Str,
+
+    pub fn nilo_check(self: NewPost, r: *nilo.Rules(NewPost)) void {
+        r.must("confirm", self.password.eql(self.confirm.view()), "has to match the password");
+    }
+};
+
+fn isSlug(text: []const u8) bool {
+    for (text) |ch| {
+        if (!std.ascii.isLower(ch) and !std.ascii.isDigit(ch) and ch != '-') return false;
+    }
+    return text.len > 0;
+}
+
+fn createPost(post: NewPost) usize {
+    return post.tags.len() + post.rating.value;
+}
+```
+
+Each one is a struct holding the value as `.value`, so the handler reads `post.rating.value` (an integer) and `post.weight.value` (an `f64`). A body outside a rule is a 400 that names the field, what it has to be and, for a number or a list, what it was; nothing quotes a `Text` back, because a password in a response is a leak, except an `Email`, where seeing the address is how the typo is found:
+
+```
+"title" has to be text of 1 to 120 characters, not 0
+"author" has to look like an address, not "wati"
+"rating" has to be a whole number from 1 to 5, not "9"
+"weight" has to be a number from 0 to 1, not "1.5"
+"tags" has to be a list of 1 to 5 items, not a list of 7
+"tags[2]" has to be text, not a number
+```
+
+| Type | Holds | The rule | The document says |
+|---|---|---|---|
+| `Text(.{ .min, .max, .check, .said })` | a `Str` | length in characters, and a function of yours | `minLength`, `maxLength` |
+| `Email`, `Url` | a `Str` | an address, a URL | `format: email`, `format: uri` |
+| `Within(min, max)` | an integer, or an `f64` when a bound is written with a point | inclusive range; `nan` and `inf` are refused | `minimum`, `maximum` |
+| `Many(T, .{ .min, .max })` | a `[]const T` | how many | `minItems`, `maxItems` |
+
+A default is written `.of(…)` (`weight: nilo.Within(0.0, 1.0) = .of(0.5)`) and is checked against the rule while compiling, because a default is the one value a request never sends. A bound the wrong way round, a `Many` with no bound and a default outside its range are compile errors naming the type.
+
+**A rule about the struct goes on the struct.** `nilo_check` runs once every field has bound and says what did not hold with `r.must`, whichever way the struct arrived. It is the place for "confirm matches password" and "end is after start". A rule that needs the database ("that address is taken") goes in the handler as [`b.must`](./forms.md#custom-validation-rules).
+
+**`Bound(T)` collects them all.** A plain body stops at the first bad field with a 400, the way `std.json` stops. `Bound` keeps going and answers a 422 naming each one, the way a form with three wrong boxes should:
+
+<!-- compiles -->
+```zig
+fn createPostBound(b: nilo.Bound(NewPost)) !usize {
+    const post = b.value() orelse return b.fail();
+    return post.tags.len();
+}
+```
+
+```
+3 fields did not fit: "rating" has to be a whole number from 1 to 5, not "9";
+"tags" has to be a list of 1 to 5 items, not a list of 0;
+"confirm" has to match the password
+```
+
+A `Many` also reads a form: the values sent under one name (a checkbox group, a `<select multiple>`) are counted, and an empty group is a count of none. It is not read from a query string, where `?tag=a,b` is a plain `[]const T` and the count is yours to check. Its elements are read as they are in any list, so a `Many(Text(…), …)` holds each element to its own shape and names a bad one by position.
+
+The numbers are read as a query's are ([ADR 084](../adr/084-a-number-in-a-request-is-not-a-zig-literal.md)), which is why `Within(0.0, 1.0)` refuses `nan`, `1e999` and `0x1p-1`. nilo has no validation language: a rule a type cannot state is a `check`, a `nilo_check` or a [`must`](./forms.md#custom-validation-rules), and whether an age is plausible is still the application's question ([ADR 167](../adr/167-a-whole-number-inside-a-range-is-a-type.md), [ADR 193](../adr/193-text-with-a-shape-is-a-type-and-a-rule-about-the-struct-is-a-function-on-it.md), [ADR 266](../adr/266-a-list-with-a-length-is-a-type.md)).
 
 ## Protobuf and other formats
 

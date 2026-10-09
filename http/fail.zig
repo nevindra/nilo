@@ -85,7 +85,7 @@ pub const Failure = struct {
 /// character: step back over continuation bytes to the lead byte, and drop
 /// that too when the character it starts is not all there. Text that already
 /// ends on a boundary, or is not UTF-8 at all, keeps its length.
-fn wholeCharacters(text: []const u8) usize {
+pub fn wholeCharacters(text: []const u8) usize {
     var start = text.len;
     var back: usize = 0;
     while (start > 0 and back < 3 and text[start - 1] & 0xC0 == 0x80) : (back += 1) start -= 1;
@@ -100,20 +100,45 @@ fn wholeCharacters(text: []const u8) usize {
 pub const InFlight = struct {
     failure: Failure = .{},
 
-    /// The request line, for the panic handler. Slices into the request
-    /// arena, so valid for exactly as long as the request is.
-    method: []const u8 = "",
-    path: []const u8 = "",
-
     /// Whether this request is holding its thread (ADR 013). Here for the
     /// same reason everything else is: `nilo.blocking` has to find it from
     /// inside a call that knows nothing about the request it is part of.
     watch: watchdog.Watch = .{},
 
-    pub fn startRequest(self: *InFlight, method: []const u8, path: []const u8) void {
+    /// The Ctx of this request and the one function that reads it, for the
+    /// two things that must find the request from the fiber slot without
+    /// knowing a Ctx: `nilo.logFn` (the id, ADR 262) and the panic handler
+    /// (the request line, ADR 007). **Two words replace the method and path
+    /// slices this struct held, which were four**, so a connection's frame,
+    /// where this lives for as long as it waits for the next request, is
+    /// 16 bytes smaller than it was (ADR 062). Opaque because `ctx.zig`
+    /// imports this file; set by `serve.serveRequest` once the Ctx exists and
+    /// cleared when it returns, so nothing is named between two requests. The
+    /// id is looked up only when a line is written, which keeps a request
+    /// that logs nothing from paying for one.
+    request: ?*anyopaque = null,
+    read_request: ?*const fn (*anyopaque, Part) []const u8 = null,
+
+    pub const Part = enum { id, method, path };
+
+    pub fn startRequest(self: *InFlight) void {
         self.failure.clear();
-        self.method = method;
-        self.path = path;
+        self.request = null;
+    }
+
+    fn part(self: *const InFlight, which: Part) ?[]const u8 {
+        const read = self.read_request orelse return null;
+        return read(self.request orelse return null, which);
+    }
+
+    /// The id of the request this is serving, or null when there is none.
+    pub fn requestId(self: *const InFlight) ?[]const u8 {
+        return self.part(.id);
+    }
+
+    /// The method and path, for a crash report; null outside a request.
+    pub fn requestLine(self: *const InFlight) ?struct { method: []const u8, path: []const u8 } {
+        return .{ .method = self.part(.method) orelse return null, .path = self.part(.path) orelse return null };
     }
 };
 

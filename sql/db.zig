@@ -96,6 +96,92 @@ const types = @import("types.zig");
 const where_mod = @import("where.zig");
 const wire_mod = @import("wire.zig");
 
+/// One call to the Wire under the route's deadline
+/// ([ADR 105](../docs/adr/105-a-route-can-say-how-long-it-has.md)).
+///
+/// **A request with no deadline takes the plain call**, decided at run time
+/// on `core.timeLeftOf`, and the `core.Limits.Bound` (192 bytes) lives in
+/// `armed`, a function of its own that is never inlined, so a route that
+/// asked for no deadline reserves none of it on its frame (ADR 062: a
+/// fiber's stack high-water is held for the life of the connection). A Scope
+/// that cannot declare a deadline never reaches `armed` at all, resolved
+/// while compiling.
+///
+/// What it bounds is whatever the Wire waits on until the call returns: the
+/// pool's queue, and the socket the statement is sent down, because the
+/// Engine's timer reaches a fiber as a cancellation. **A connection cancelled
+/// mid-statement is never handed on out of step**: pg.zig's pool replaces a
+/// connection that is not idle when it is released (`Pool.release`), and
+/// `Wire.drain` throws the rest of a result away or leaves the connection
+/// non-idle if the read is cancelled; a SQLite statement is not interrupted
+/// at all, because the thread it runs on finishes it before the fiber hears
+/// of the cancellation. **What it does not do** is tell the server: no cancel
+/// request is sent (a second connection, a round trip the caller did not ask
+/// for), so Postgres finishes the statement it was sent until it notices the
+/// socket is gone. Rows read after the call returns are not bounded.
+const Armer = struct {
+    limits: core.Limits = .off,
+    io: ?std.Io = null,
+};
+
+fn bounded(armer: Armer, c: anytype, comptime f: anytype, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    const left = core.timeLeftOf(c) orelse return @call(.auto, f, args);
+    return @call(.never_inline, armed, .{ f, armer, left, args });
+}
+
+/// **The cancellation a fired Bound leaves is spent here, once.** The
+/// Engine's timer cancels the fiber: one error is delivered to the statement,
+/// and the Wire hands it back with `Io.recancel` on its way out so the caller
+/// sees it too (ADR 223), which is right for a cancellation somebody else
+/// owns. For this one the caller is us, and `Bound.finish` spends only the
+/// timer's own count, so the re-armed error stayed on the fiber and the
+/// *next* cancellation point, a different call, got `error.Canceled` for a
+/// deadline long over (and `translate` re-armed again, which zio asserts
+/// against). So when the Bound fired, the errors still pending are taken off.
+///
+/// **That drain cannot tell a shutdown's cancel from ours, and does not need
+/// to except in one window.** zio exposes no count and no flag through
+/// `std.Io`, and `recancel` asserts when nothing is cancelled, so "put back
+/// exactly one if a user cancel is in force" cannot be asked. What does hold:
+/// `finish` answers true only when no user cancel was in force at that
+/// instant (zio gives a user cancel priority over an auto one), so everything
+/// pending then is ours, and a shutdown that was already under way makes it
+/// answer false and the drain is not run. The one case left is a shutdown
+/// landing between `finish` and the loop below, a few instructions wide, and
+/// there the pending error is lost with ours. Closing it needs zio to count
+/// the errors an auto-cancel owns (`AutoCancel.check`), recorded in ADR 105.
+///
+/// **Only the cancellation becomes `TimedOut`.** A fired timer does not make
+/// a real answer a timeout: a success stays one (the statement finished in
+/// spite of the timer), and an error the database gave, a unique violation or
+/// a syntax error with its Problem, comes back as itself. The Wire reports its
+/// own cancellation as `Disconnected` or `QueryFailed` with no Problem set,
+/// and those are the two that are read as the deadline.
+fn armed(comptime f: anytype, armer: Armer, left: u32, args: anytype) @typeInfo(@TypeOf(f)).@"fn".return_type.? {
+    // Nothing left: nothing is sent.
+    if (left == 0) return error.TimedOut;
+    var bound: core.Limits.Bound = .idle;
+    bound.arm(armer.limits, left);
+    const result = @call(.auto, f, args);
+    if (!bound.finish()) return result;
+    if (armer.io) |io| while (true) {
+        io.checkCancel() catch continue;
+        break;
+    };
+    const err = if (result) |_| return result else |e| e;
+    if (err != error.Disconnected and err != error.QueryFailed) return err;
+    // A statement the database answered has said so in its Problem: a
+    // SQLSTATE, or words of its own. The cancellation leaves the driver's
+    // error name there instead (`postgres.reported`: `Canceled`).
+    const Last = @TypeOf(args[args.len - 1]);
+    if (comptime @typeInfo(Last) == .pointer and @typeInfo(Last).pointer.child == ?wire_mod.Problem) {
+        if (args[args.len - 1].*) |problem| {
+            if (problem.code.len != 0 or !std.mem.eql(u8, problem.message, "Canceled")) return err;
+        }
+    }
+    return error.TimedOut;
+}
+
 const builtin = @import("builtin");
 
 /// What a handler writes: `*sql.Db`. The Wire is chosen here rather than
@@ -524,6 +610,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// Null until `nilo_start`. A handler cannot observe the null: the
         /// server does not accept a connection until the hook has run.
         wire: ?W = null,
+        /// What the Engine arms a deadline with, kept from `nilo_start` so
+        /// that a route's deadline can bound the calls it makes
+        /// ([ADR 105](../docs/adr/105-a-route-can-say-how-long-it-has.md)).
+        /// `.off` until then, and for a `Db` no App holds.
+        armer: Armer = .{},
         /// The schema check, with the Row list baked in by `checking`. Null
         /// when nobody asked for one.
         check: ?*const fn (*Self) anyerror!usize = null,
@@ -1169,12 +1260,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const w = try self.wireOf();
             var problem: ?wire_mod.Problem = null;
             const changed = if (tx) |t|
-                t.exec(arena, sql, values, plan, &problem) catch |err| {
+                bounded(self.armer, c, W.Tx.exec, .{ t, arena, sql, values, plan, &problem }) catch |err| {
                     self.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.exec(arena, sql, values, plan, &problem) catch |err| {
+                bounded(self.armer, c, W.exec, .{ w, arena, sql, values, plan, &problem }) catch |err| {
                     self.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
@@ -1243,6 +1334,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 .{nilo_type_name},
             );
 
+            self.armer = .{ .limits = limits, .io = io };
             var opened = W.open(io, self.gpa, self.url, .{
                 .size = self.opts.size,
                 .connect_on_init = if (dialing_for_check) 1 else self.opts.connect_on_init,
@@ -1824,13 +1916,8 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const w = try self.wireOf();
             const started = self.timing();
             var problem: ?wire_mod.Problem = null;
-            const rows = w.run(
-                arena,
-                text,
-                try valuesOf(stmt, Row, options, c),
-                plan,
-                &problem,
-            ) catch |err| {
+            const given = try valuesOf(stmt, Row, options, c);
+            const rows = bounded(self.armer, c, W.run, .{ w, arena, text, given, plan, &problem }) catch |err| {
                 self.told(c, started, text, plan, null, true, problem);
                 return err;
             };
@@ -2563,7 +2650,15 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn begin(self: *Self, c: anytype, comptime opts: wire_mod.Begin) !Tx {
             opening(c, "db.begin");
             const w = try self.wireOf();
-            const inner = try w.begin(c.arena(), opts);
+            // Bounds the wait for a connection and the BEGIN (ADR 105). The
+            // transaction's later statements are bounded from what the
+            // route has left by then.
+            const Begin = struct {
+                fn go(wire: *W, arena: std.mem.Allocator) wire_mod.Error!W.Tx {
+                    return wire.begin(arena, opts);
+                }
+            };
+            const inner = try bounded(self.armer, c, Begin.go, .{ w, c.arena() });
             if (traps_enabled) self.hold(&self.open_transactions, .Add);
             return .{ .db = self, .w = w, .inner = inner, .scope = c.arena(), .serial = core.serialOf(c) };
         }
@@ -3509,12 +3604,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var problem: ?wire_mod.Problem = null;
 
             var rows = if (tx) |t|
-                t.run(arena, sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
@@ -3644,12 +3739,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var problem: ?wire_mod.Problem = null;
 
             var rows = if (tx) |t|
-                t.run(arena, sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
@@ -3709,12 +3804,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var problem: ?wire_mod.Problem = null;
 
             var rows = if (tx) |t|
-                t.run(arena, sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
@@ -3880,12 +3975,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const again = fromTheTop(paged, values);
 
             var rows = if (tx) |t|
-                t.run(arena, sql, again, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, again, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, sql, again, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.run, .{ w, arena, sql, again, plan, &problem }) catch |err| {
                     db.told(c, started, sql, plan, null, true, problem);
                     return err;
                 };
@@ -4072,12 +4167,12 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const started = db.timing();
             var problem: ?wire_mod.Problem = null;
             var rows = if (tx) |t|
-                t.run(arena, stmt.sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.Tx.run, .{ t, arena, stmt.sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, stmt.sql, plan, null, true, problem);
                     return err;
                 }
             else
-                w.run(arena, stmt.sql, values, plan, &problem) catch |err| {
+                bounded(db.armer, c, W.run, .{ w, arena, stmt.sql, values, plan, &problem }) catch |err| {
                     db.told(c, started, stmt.sql, plan, null, true, problem);
                     return err;
                 };
@@ -5078,7 +5173,7 @@ fn assertReadable(comptime Row: type) void {
             // `cannot decode value of type` from four frames down.
             if (listed and readable(Item) and !listReadable(Item)) @compileError(
                 "nilo: " ++ @typeName(Row) ++ " reads `" ++ f_name ++ "` as " ++
-                    @typeName(f_type) ++ ", a list of " ++ @typeName(Item) ++ ", which the driver " ++
+                    types.nameOf(f_type) ++ ", a list of " ++ types.nameOf(Item) ++ ", which the driver " ++
                     "cannot decode as an array element.\n" ++
                     "  A list holds `i16`, `i32`, `i64`, `f32`, `f64`, `bool`, text, `sql.Uuid` " ++
                     "or an enum, each optional if the array may hold NULL.\n" ++

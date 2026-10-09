@@ -36,7 +36,7 @@ The two slots pick different wire contracts, because they answer to different cl
 
 A `Form(T)` field is filled from a repeated name and nothing else, and a comma is data. A browser sends a checkbox group or a `<select multiple>` as the same name once per value and never comma-joined, so there is no client to keep in step with and no second spelling in the world to read; the document already describes a form array as `explode: true`, which is the repeated name, so nilo has nothing to write. Splitting on a comma here would turn `a,b` typed into one box into two tags, for no client that exists.
 
-**A list of `Upload` is a Refusal.** `<input type="file" multiple>` is the one somebody will reach for, and it is refused by name rather than read as text: an `Upload` is a part rather than a value, and a field takes one. Reading several is a design of its own, how many, how big together, and is not this entry.
+**A list of `Upload` is every file under the name.** `<input type="file" multiple>` sends one part per file under one name, and a field declared `[]const Upload` is filled from all of them, in the order sent. The bytes, names and types are slices of the body, as for one file; the only allocation is the slice of `Upload`s, sized by a count first. No new limit: the parts are the form's parts, so `max_parts` and `max_body` bound the list. A file input left empty sends a part that is dropped, so it adds nothing. **A single `Upload` that receives two or more files is a 400** (a `Bound` records `several_files`) naming the field and saying to declare it `[]const nilo.Upload`, never the first kept and the rest dropped. The unbound reader has `Fields.fileCount` and `Fields.filesNamed`.
 
 ### The rules a list follows, on both slots
 
@@ -61,17 +61,19 @@ A browser submits an empty text box as `age=`, never as nothing, on a POST form 
 
 **Reading a form's list in `typed.zig` beside the query one.** The query collectors read `c.queries()`, and a form's values are in the `Fields` the body parser produced, so the collectors sit in `form.zig` beside `fill` and `fillCollecting`, the one place that knows both the parsed body and the slot's conversion rules.
 
+**Refusing a list of `Upload`**, on the grounds that an `Upload` is a part rather than a value and a field takes one. It left `<input multiple>` silently keeping the first file and dropping the rest, so a handler saved one photo of five and the browser showed success. Gin and Echo bind a slice of file headers, actix-multipart and Rocket a `Vec` of files, so the refusal was the odd one out. The "how many, how big together" question it deferred was already answered by `max_parts` and `max_body`.
+
 ## What it costs
 
 | Axis | Cost |
 |---|---|
-| Allocations per request | One, on a route that asked for a list and on no other, for the slice of elements, sized by a first pass. The elements point into the query string or the parsed body, which live as long as the request; only the slice holding them is allocated, out of the request arena. `test "the request path stays inside its allocation budget"` covers a route with no list field and is unmoved, the invariant [ADR 017](./017-the-trade-budget-has-four-axes.md) guards: a DX feature may not add an allocation to a path that did not ask for it. |
+| Allocations per request | One, on a route that asked for a list (of values or of files) and on no other, for the slice of elements, sized by a first pass. The elements point into the query string or the parsed body, which live as long as the request; only the slice holding them is allocated, out of the request arena. `test "the request path stays inside its allocation budget"` covers a route with no list field and is unmoved, the invariant [ADR 017](./017-the-trade-budget-has-four-axes.md) guards: a DX feature may not add an allocation to a path that did not ask for it. |
 | Memory per idle connection | Unchanged. |
 | Throughput and p99 | A route with a list field walks its fields once more per list field, which is the count; a route without one does not. |
-| Binary size | Two collectors instantiated per list element type a program names. |
+| Binary size | Two collectors instantiated per list element type a program names; the file list adds a third pair, only in a program with a `[]const Upload` field. |
 
 ## Consequences
 
 - `queryList`, `countList`, `collectList` and `collectListCollecting` in `typed.zig`; the same shapes in `http/form.zig` (`Fields.count`, `collectList`, `collectListCollecting`) for a form, with `fill` and `fillCollecting` taking the arena; one field on `openapi.Field` and clauses in the writer for both slots.
-- `checkFields` accepts a slice of a convertible element and refuses a list of `Upload` or of an optional (`refusals/form_list_element_cannot_convert`).
+- `checkFields` accepts a slice of a convertible element and refuses a list of an optional (`refusals/form_list_of_optional_cannot_convert`) and accepts a list of `Upload`, filled by `collectFiles`.
 - Thirteen lines and a paragraph of convention delete themselves in the port that reported the query case, per list screen; the roadmap loses "A form field cannot bind to a list".

@@ -2941,14 +2941,14 @@ fn greet(name: Str) Str {
     return name;
 }
 
-fn multiply(a: i32, b: i32) i64 {
-    return @as(i64, a) * b;
+fn multiply(p: typed.Path(struct { a: i32, b: i32 })) i64 {
+    return @as(i64, p.value.a) * p.value.b;
 }
 
 const Colour = enum { red, green, blue };
 
-fn pickColour(c: Colour, bright: bool) []const u8 {
-    return if (bright) @tagName(c) else "dark";
+fn pickColour(p: typed.Path(struct { c: Colour, bright: bool })) []const u8 {
+    return if (p.value.bright) @tagName(p.value.c) else "dark";
 }
 
 test "path params typed as Str, a number, an enum, and a bool" {
@@ -3139,6 +3139,457 @@ test "HEAD on an unknown route and on the failure path is also body-less" {
     const unrouted = h.send(&app, "HEAD /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.startsWith(u8, unrouted.response, "HTTP/1.1 404 Not Found\r\n"));
     try testing.expect(std.mem.endsWith(u8, unrouted.response, "\r\n\r\n"));
+}
+
+const Member = struct { id: u32, org: u32 };
+
+/// The fields are written in the opposite order to the pattern on purpose:
+/// they are read by name, so the order of the struct means nothing.
+fn memberOf(arena: std.mem.Allocator, p: typed.Path(Member)) ![]const u8 {
+    return std.fmt.allocPrint(arena, "org={d} id={d}", .{ p.value.org, p.value.id });
+}
+
+fn fileTail(p: typed.Path(struct { @"*": Str, repo: Str }), c: *Ctx) !void {
+    try c.sendText(200, p.value.@"*".view());
+    _ = p.value.repo;
+}
+
+fn onlyOne(p: typed.Path(struct { id: u32 })) u32 {
+    return p.value.id;
+}
+
+test "path params are read by name, whatever order the struct lists them in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/orgs/:org/members/:id", memberOf);
+    try app.get("/one/:id", onlyOne);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /orgs/3/members/9 HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "org=3 id=9"));
+
+    // A struct is also the way to read the only param, if one likes.
+    const one = h.send(&app, "GET /one/12 HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, one.response, "12"));
+}
+
+test "a path param that will not convert is the same 400, naming the field" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/orgs/:org/members/:id", memberOf);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /orgs/3/members/abc HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, ":id has to be a whole number") != null);
+}
+
+test "a trailing wildcard is a field named star" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/files/:repo/*", fileTail);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /files/nilo/a/b.txt HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "a/b.txt"));
+}
+
+test "the document names a Path field's parameter and types it from the field" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/orgs/:org/members/:id", memberOf);
+    app.docs(.{ .title = "t", .version = "1" });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const doc = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, doc.response, "\"name\":\"org\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc.response, "\"name\":\"id\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc.response, "\"type\":\"integer\"") != null);
+}
+
+const InOrg = struct {
+    pub const nilo_resolve = orgOf;
+
+    org: u32,
+};
+
+fn orgOf(p: typed.Path(struct { org: u32 })) !InOrg {
+    return .{ .org = p.value.org };
+}
+
+fn showInOrg(arena: std.mem.Allocator, scope: InOrg, p: typed.Path(struct { org: u32, id: u32 })) ![]const u8 {
+    return std.fmt.allocPrint(arena, "scope={d} id={d}", .{ scope.org, p.value.id });
+}
+
+/// Asks for a param no route in the test has.
+const InTeam = struct {
+    pub const nilo_resolve = teamOf;
+
+    team: u32,
+};
+
+fn teamOf(p: typed.Path(struct { team: u32 })) !InTeam {
+    return .{ .team = p.value.team };
+}
+
+fn guardTeam(c: *Ctx, next: mw.Next) anyerror!void {
+    _ = try c.resolve(InTeam);
+    try next.run(c);
+}
+
+fn okText(c: *Ctx) !void {
+    try c.sendText(200, "ok");
+}
+
+test "a resolver takes the path params by name, from a handler and from a middleware" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/orgs/:org/members/:id", showInOrg);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /orgs/3/members/9 HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, result.response, "scope=3 id=9"));
+}
+
+test "a resolver reached from a middleware whose route lacks the param is a 500, not a panic" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(guardTeam);
+    try app.get("/orgs/:org", okText);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /orgs/3 HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 "));
+    // The sentence naming the resolver, the param and the route is for the
+    // operator's log; what the client gets is the plain 500 (ADR 006).
+}
+
+// ---- a middleware that is given what it needs (ADR 008) ----
+
+fn rowCounting(c: *Ctx, next: mw.Next, db: *Db) !void {
+    var buf: [8]u8 = undefined;
+    try c.setHeader("X-Rows", try std.fmt.bufPrint(&buf, "{d}", .{db.rows.len}));
+    try next.run(c);
+}
+
+test "a typed middleware is given a service" {
+    var db = Db{ .rows = &.{ .{ .id = 7, .name = "wati" }, .{ .id = 8, .name = "budi" } } };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.use(rowCounting);
+    try app.get("/ok", okText);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /ok HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Rows: 2\r\n") != null);
+}
+
+test "a service only a typed middleware needs is a requirement listen() refuses by name" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(rowCounting);
+    try app.get("/ok", okText);
+
+    // Through the predicate, for the reason the handler test above it gives:
+    // `checkServices` logs an error and the runner counts it (ADR 005).
+    const missing = app.missingService().?;
+    try testing.expectEqualStrings(@typeName(Db), missing.type_name);
+    try testing.expect(std.mem.startsWith(u8, missing.route, "the middleware taking (*"));
+}
+
+test "a typed middleware given a service on a group, a prefix and a route is checked once" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    const api = app.group("/api");
+    try api.use(rowCounting);
+    try app.with(rowCounting).get("/x", okText);
+    try app.useOn("/y", rowCounting);
+    try testing.expectEqual(@as(usize, 1), app.requirements.items.len);
+    try testing.expect(app.missingService() == null);
+}
+
+var counted_runs: u32 = 0;
+
+const Counted = struct {
+    pub const nilo_resolve = countedOf;
+
+    n: u32,
+};
+
+fn countedOf(c: *Ctx) !Counted {
+    _ = c;
+    counted_runs += 1;
+    return .{ .n = counted_runs };
+}
+
+fn takesCounted(c: *Ctx, next: mw.Next, who: Counted) !void {
+    var buf: [8]u8 = undefined;
+    try c.setHeader("X-Seen", try std.fmt.bufPrint(&buf, "{d}", .{who.n}));
+    try next.run(c);
+}
+
+fn showCounted(who: Counted) !u32 {
+    return who.n;
+}
+
+test "a resolved value a middleware and its handler both take is worked out once" {
+    counted_runs = 0;
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(takesCounted);
+    try app.get("/n", showCounted);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /n HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expectEqual(@as(u32, 1), counted_runs);
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Seen: 1\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "1"));
+}
+
+const Refused = struct {
+    pub const nilo_resolve = refusedOf;
+
+    n: u32,
+};
+
+fn refusedOf(c: *Ctx) !Refused {
+    _ = c;
+    return fail.unauthorized("no credentials", .{});
+}
+
+var guarded_ran: bool = false;
+
+fn takesRefused(c: *Ctx, next: mw.Next, who: Refused) !void {
+    _ = who;
+    try next.run(c);
+}
+
+fn guardedHandler(c: *Ctx) !void {
+    guarded_ran = true;
+    try c.sendText(200, "in");
+}
+
+test "a resolver failing in a middleware answers through the error path and the handler never runs" {
+    guarded_ran = false;
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(takesRefused);
+    try app.get("/in", guardedHandler);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /in HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 401 "));
+    try testing.expect(!guarded_ran);
+}
+
+fn readsOrg(c: *Ctx, next: mw.Next, p: typed.Path(struct { org: u32 })) !void {
+    var buf: [8]u8 = undefined;
+    try c.setHeader("X-Org", try std.fmt.bufPrint(&buf, "{d}", .{p.value.org}));
+    try next.run(c);
+}
+
+fn readsOrgThroughResolver(c: *Ctx, next: mw.Next, scope: InOrg) !void {
+    _ = scope;
+    try next.run(c);
+}
+
+test "a typed middleware reads the path param by name" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/orgs/:org", readsOrg);
+    try app.get("/orgs/:org/members", okText);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    try testing.expect(app.middlewarePathGap() == null);
+    const result = h.send(&app, "GET /orgs/42/members HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Org: 42\r\n") != null);
+}
+
+test "a typed middleware that reads path params stands aside on a request that matched no route" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/orgs/:org", readsOrg);
+    try app.get("/orgs/:org/members", okText);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const missing = h.send(&app, "GET /orgs/42/nothing HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, missing.response, "HTTP/1.1 404 "));
+    try testing.expect(std.mem.indexOf(u8, missing.response, "X-Org") == null);
+    const wrong = h.send(&app, "POST /orgs/42/members HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, wrong.response, "HTTP/1.1 405 "));
+    const found = h.send(&app, "GET /orgs/42/members HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, found.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, found.response, "X-Org: 42\r\n") != null);
+}
+
+test "a static mount under a prefix a path-reading middleware covers is refused at listen()" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/orgs/:org", readsOrg);
+    try app.get("/orgs/:org/members", okText);
+    try app.embedded("/orgs/logos", &.{.{ .path = "a.txt", .bytes = "hi" }});
+    try app.resolveChains();
+
+    const gap = app.middlewarePathGap().?;
+    try testing.expect(gap.static);
+    try testing.expectEqualStrings("/orgs/logos", gap.route);
+    try testing.expectEqualStrings("org", gap.param);
+}
+
+test "a static mount outside a path-reading middleware's prefix is not refused" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/orgs/:org", readsOrg);
+    try app.get("/orgs/:org/members", okText);
+    try app.embedded("/assets", &.{.{ .path = "a.txt", .bytes = "hi" }});
+    try app.resolveChains();
+    try testing.expect(app.middlewarePathGap() == null);
+}
+
+test "a route whose coverage only the real path decides is held against a path-reading middleware" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.useOn("/api", readsOrg);
+    try app.get("/:version/list", okText);
+    try app.resolveChains();
+
+    const gap = app.middlewarePathGap().?;
+    try testing.expectEqualStrings("org", gap.param);
+    try testing.expectEqualStrings("/:version/list", gap.route);
+}
+
+test "a typed middleware's Path(T) is held against every route it covers at listen()" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(readsOrg);
+    try app.get("/orgs/:org/members", okText);
+    try app.get("/health", okText);
+    try app.resolveChains();
+
+    // The predicate `checkMiddlewarePaths` reports through, so the test does
+    // not count its error line as a failure.
+    const gap = app.middlewarePathGap().?;
+    try testing.expectEqualStrings("org", gap.param);
+    try testing.expectEqualStrings("/health", gap.route);
+    try testing.expect(std.mem.startsWith(u8, gap.who, "the middleware taking ("));
+}
+
+test "a Path(T) a typed middleware reaches through a resolver is held at listen() too" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(readsOrgThroughResolver);
+    try app.get("/orgs/:org/members", okText);
+    try app.get("/health", okText);
+    try app.resolveChains();
+
+    const gap = app.middlewarePathGap().?;
+    try testing.expectEqualStrings("org", gap.param);
+    try testing.expectEqualStrings("/health", gap.route);
+}
+
+test "a bare middleware beside a typed one still runs, in the order registered" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.use(tagOuter);
+    try app.use(rowCounting);
+    try app.use(tagInner);
+    try app.get("/ok", okText);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const result = h.send(&app, "GET /ok HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 200 "));
+    try testing.expect(std.mem.indexOf(u8, result.response, "X-Rows: 0\r\n") != null);
+}
+
+test "without() takes a typed middleware off a route that is excused from it" {
+    var db = Db{ .rows = &.{} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.use(rowCounting);
+    try app.without(rowCounting).get("/open", okText);
+    try app.get("/shut", okText);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const open = h.send(&app, "GET /open HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, open.response, "X-Rows") == null);
+    const shut = h.send(&app, "GET /shut HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.indexOf(u8, shut.response, "X-Rows") != null);
+}
+
+fn passingWithService(c: *Ctx, next: mw.Next, db: *Db) !void {
+    _ = db;
+    try next.run(c);
+}
+
+test "a typed middleware that takes only a service adds no allocation to the request path" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.use(cors.permissive);
+    try app.use(passingWithService);
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+    }
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // The budget test's own number: the JSON body, and nothing for the
+    // middleware's service (ADR 008, ADR 017).
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
 }
 
 fn ctxOnly(c: *Ctx) !void {
@@ -6823,19 +7274,24 @@ test "a route that resolves nothing still costs what it always did" {
     try testing.expectEqual(@as(usize, 1), counting.allocs);
 }
 
-test "the in-flight request is readable, which is what the panic handler uses" {
+fn namesItsOwnRequestLine(c: *Ctx) ![]const u8 {
+    const line = fail.inFlight().?.requestLine().?;
+    return std.fmt.allocPrint(c.arena(), "{s} {s}", .{ line.method, line.path });
+}
+
+test "the in-flight request is readable from a handler, which is what the panic handler uses" {
     var app = App.init(testing.allocator);
     defer app.deinit();
-    try app.get("/known", plainOk);
+    try app.get("/known", namesItsOwnRequestLine);
 
     var h = Harness.init();
     defer h.deinit();
-    _ = h.send(&app, "GET /known HTTP/1.1\r\nHost: t\r\n\r\n");
+    const answer = h.send(&app, "GET /known HTTP/1.1\r\nHost: t\r\n\r\n");
 
-    // App records these before running the chain, so a panic anywhere
-    // inside it can name the request (ADR 007).
-    try testing.expectEqualStrings("GET", h.in_flight.method);
-    try testing.expectEqualStrings("/known", h.in_flight.path);
+    // App records the request before running the chain, so a panic anywhere
+    // inside it can name it (ADR 007); and between requests it names none.
+    try testing.expect(std.mem.endsWith(u8, answer.response, "GET /known"));
+    try testing.expect(h.in_flight.requestLine() == null);
 }
 
 // ---- responses written in pieces (ADR 019) ----
@@ -9484,9 +9940,110 @@ test "the document says a ?T with no default may be left out of a query and a bo
 // ---- request ids ----
 
 const logger_mod = @import("logger.zig");
+const log_mod = @import("log.zig");
 
 fn echoesItsRequestId(c: *Ctx) ![]const u8 {
     return c.requestId().view();
+}
+
+fn warnsFromTheHandler(c: *Ctx) ![]const u8 {
+    _ = c;
+    log_mod.logFn(.warn, .default, "stock is low for {s}", .{"widgets"});
+    return "ok";
+}
+
+test "a handler's log line carries the id of the request it was written in" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/x", warnsFromTheHandler);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    var sink_buf: [1024]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    log_mod.capture = &sink;
+    defer log_mod.capture = null;
+    log_mod.configure(.{ .format = .json });
+    defer log_mod.configure(.{});
+
+    const answer = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\nX-Request-Id: 2f8a4c1e-5b6d\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 200"));
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, sink.buffered(), .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("stock is low for widgets", parsed.value.object.get("msg").?.string);
+    try testing.expectEqualStrings("2f8a4c1e-5b6d", parsed.value.object.get("request").?.string);
+
+    // And a line written once the request is over carries none.
+    sink.end = 0;
+    log_mod.logFn(.warn, .default, "idle again", .{});
+    try testing.expect(std.mem.indexOf(u8, sink.buffered(), "request") == null);
+}
+
+test "the access line is one flat json object, and a skipped path writes none" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.with(.{ .request_id = true, .skip = &.{"/healthz"} }));
+    try app.get("/x", echoesItsRequestId);
+    try app.get("/healthz", echoesItsRequestId);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    var sink_buf: [1024]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    logger_mod.tap = &sink;
+    defer logger_mod.tap = null;
+    log_mod.configure(.{ .format = .json });
+    defer log_mod.configure(.{});
+
+    const skipped = h.send(&app, "GET /healthz HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, skipped.response, "HTTP/1.1 200"));
+    try testing.expect(sentHeader(skipped.response, "X-Request-Id") != null);
+    try testing.expectEqual(@as(usize, 0), sink.end);
+
+    _ = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, sink.buffered(), .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("/x", parsed.value.object.get("path").?.string);
+    try testing.expectEqual(@as(i64, 200), parsed.value.object.get("status").?.integer);
+}
+
+test "the run-time level decides whether the access line is written at all" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.standard);
+    try app.get("/x", echoesItsRequestId);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    var sink_buf: [1024]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    logger_mod.tap = &sink;
+    defer logger_mod.tap = null;
+    defer log_mod.configure(.{});
+
+    log_mod.pretend_installed = true;
+    defer log_mod.pretend_installed = false;
+    log_mod.configure(.{ .level = .warn });
+    _ = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expectEqual(@as(usize, 0), sink.end);
+
+    // Behind std's own logFn nobody chose a floor, so none applies.
+    log_mod.pretend_installed = false;
+    _ = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(sink.end > 0);
+    sink.end = 0;
+    log_mod.pretend_installed = true;
+
+    log_mod.configure(.{ .level = .info });
+    _ = h.send(&app, "GET /x HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, sink.buffered(), "GET /x 200 "));
 }
 
 test "a request with no id of its own is given one, and told which" {
@@ -9941,6 +10498,25 @@ fn docsSignIn(_: form_mod.Form(SignIn)) !redirect_mod.Redirect(303) {
 
 fn docsUpload(_: form_mod.Form(NewAvatar)) !typed.Status(201, DocUser) {
     return .{ .value = .{ .id = 1, .name = .static("x") } };
+}
+
+const NewGallery = struct {
+    caption: Str,
+    photos: []const form_mod.Upload = &.{},
+};
+
+fn docsGallery(_: form_mod.Form(NewGallery)) !typed.Status(201, DocUser) {
+    return .{ .value = .{ .id = 1, .name = .static("x") } };
+}
+
+test "a list of files is an array of binary strings in the document" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/gallery", docsGallery);
+    app.docs(.{ .title = "Forms" });
+    const document = try docsFor(&app);
+    try testing.expect(std.mem.indexOf(u8, document, "\"multipart/form-data\":{\"schema\":") != null);
+    try testing.expect(std.mem.indexOf(u8, document, "\"photos\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"format\":\"binary\"}}") != null);
 }
 
 test "the document says which encoding a form takes, and where a redirect sends you" {
@@ -12421,4 +12997,448 @@ fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
         break :blk final;
     };
     return &built;
+}
+
+// ---- a body is read by the keys it is written under, and a field can stay off the wire (ADR 148) ----
+
+const WireRow = struct {
+    pub const nilo_json = .{
+        .rename_all = .camelCase,
+        .rename = .{ .nick_name = "handle" },
+        .skip = &.{"password_hash"},
+    };
+
+    full_name: []const u8,
+    nick_name: ?[]const u8 = null,
+    due_at: u32,
+    password_hash: []const u8 = "",
+};
+
+const WireOuter = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+    owner_row: WireRow,
+};
+
+fn echoWireRow(row: WireRow) WireRow {
+    // A Row out of a database holds the hash; the marker keeps it off the wire.
+    var out = row;
+    out.password_hash = "never-sent";
+    return out;
+}
+
+fn wireOuterOwner(outer: WireOuter) []const u8 {
+    return outer.owner_row.full_name;
+}
+
+fn wireRowBound(b: bound_mod.Bound(WireRow)) ![]const u8 {
+    return (b.value() orelse return b.fail()).full_name;
+}
+
+test "a body is read into the keys its struct is written under, and the same Row goes back out" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/rows", echoWireRow);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // camelCase from the case, `handle` from the entry: what the document says.
+    const posted = try client.postWith(&app, "/rows", "application/json", "{\"fullName\":\"Wati\",\"handle\":\"w\",\"dueAt\":7}");
+    try testing.expectEqual(@as(u16, 200), posted.status);
+    try testing.expectEqualStrings("{\"fullName\":\"Wati\",\"handle\":\"w\",\"dueAt\":7}", posted.body);
+
+    // A field the body leaves out is its default, by its wire name too.
+    const lean = try client.postWith(&app, "/rows", "application/json", "{\"fullName\":\"Wati\",\"dueAt\":7}");
+    try testing.expectEqualStrings("{\"fullName\":\"Wati\",\"handle\":null,\"dueAt\":7}", lean.body);
+}
+
+test "a key spelled as the Zig field is an unknown key once the struct renames it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/rows", echoWireRow);
+    try app.post("/outer", wireOuterOwner);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const snake = try client.postWith(&app, "/rows", "application/json", "{\"full_name\":\"Wati\",\"dueAt\":7}");
+    try testing.expectEqual(@as(u16, 400), snake.status);
+    try testing.expect(try answerSays(snake, "the request body has a field \"full_name\" this endpoint does not know. It takes: fullName, handle (optional), dueAt"));
+
+    // The entry replaced the case's spelling, it did not add to it.
+    const cased = try client.postWith(&app, "/rows", "application/json", "{\"fullName\":\"Wati\",\"nickName\":\"w\",\"dueAt\":7}");
+    try testing.expectEqual(@as(u16, 400), cased.status);
+    try testing.expect(try answerSays(cased, "a field \"nickName\""));
+
+    // Missing and wrong-typed keys are quoted as the client sent them, nested too.
+    const missing = try client.postWith(&app, "/rows", "application/json", "{\"dueAt\":7}");
+    try testing.expect(try answerSays(missing, "the request body is missing \"fullName\" (text)"));
+    const wrong = try client.postWith(&app, "/rows", "application/json", "{\"fullName\":5,\"dueAt\":7}");
+    try testing.expect(try answerSays(wrong, "\"fullName\" has to be text, not a number"));
+    const nested = try client.postWith(&app, "/outer", "application/json", "{\"ownerRow\":{\"fullName\":\"W\",\"dueAt\":\"soon\"}}");
+    try testing.expectEqual(@as(u16, 400), nested.status);
+    try testing.expect(try answerSays(nested, "\"ownerRow.dueAt\" has to be a whole number"));
+    const fine = try client.postWith(&app, "/outer", "application/json", "{\"ownerRow\":{\"fullName\":\"W\",\"dueAt\":1}}");
+    try testing.expectEqualStrings("W", fine.body);
+}
+
+test "a skipped field is never read from a body and never written in an answer" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/rows", echoWireRow);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    // Under either spelling, the key is one the struct has not got.
+    for ([_][]const u8{ "password_hash", "passwordHash" }) |key| {
+        var buf: [128]u8 = undefined;
+        const body = try std.fmt.bufPrint(&buf, "{{\"fullName\":\"W\",\"dueAt\":1,\"{s}\":\"x\"}}", .{key});
+        const sent = try client.postWith(&app, "/rows", "application/json", body);
+        try testing.expectEqual(@as(u16, 400), sent.status);
+        try testing.expect(try answerSays(sent, "this endpoint does not know"));
+        // Its name is not offered as one the endpoint takes.
+        try testing.expect(!try answerSays(sent, "passwordHash (optional)"));
+    }
+
+    // And the answer above never carried it, though the handler set it.
+    const ok = try client.postWith(&app, "/rows", "application/json", "{\"fullName\":\"W\",\"dueAt\":1}");
+    try testing.expect(std.mem.indexOf(u8, ok.body, "never-sent") == null);
+    try testing.expect(std.mem.indexOf(u8, ok.body, "assword") == null);
+}
+
+test "a Bound body names its fields by the keys the client sent" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/bound", wireRowBound);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const ok = try client.postWith(&app, "/bound", "application/json", "{\"fullName\":\"Wati\",\"dueAt\":7}");
+    try testing.expectEqualStrings("Wati", ok.body);
+
+    const refused = try client.postWith(&app, "/bound", "application/json", "{\"dueAt\":\"soon\"}");
+    try testing.expectEqual(@as(u16, 422), refused.status);
+    try testing.expect(try answerSays(refused, "the request body is missing \"fullName\""));
+    try testing.expect(try answerSays(refused, "\"dueAt\" has to be"));
+}
+
+const WireLevel = enum {
+    pub const nilo_json = .{ .rename_all = .SCREAMING_SNAKE_CASE };
+    pub const jsonParse = @import("jsonmark.zig").parseFor(@This());
+    very_high,
+    low,
+};
+const WireTask = struct { level: WireLevel };
+
+fn takeWireTask(t: WireTask) []const u8 {
+    return @tagName(t.level);
+}
+fn takeWireTaskBound(b: bound_mod.Bound(WireTask)) ![]const u8 {
+    return @tagName((b.value() orelse return b.fail()).level);
+}
+
+test "a body 400 about an enum lists the spelling the reader accepts" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/task", takeWireTask);
+    try app.post("/bound", takeWireTaskBound);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const ok = try client.postWith(&app, "/task", "application/json", "{\"level\":\"VERY_HIGH\"}");
+    try testing.expectEqualStrings("very_high", ok.body);
+
+    const word = try client.postWith(&app, "/task", "application/json", "{\"level\":\"very_high\"}");
+    try testing.expectEqual(@as(u16, 400), word.status);
+    try testing.expect(try answerSays(word, "\"level\" is not one of the known choices (VERY_HIGH, LOW): \"very_high\""));
+
+    const kind = try client.postWith(&app, "/task", "application/json", "{\"level\":5}");
+    try testing.expect(try answerSays(kind, "\"level\" has to be one of VERY_HIGH, LOW, not a number"));
+
+    const missing = try client.postWith(&app, "/task", "application/json", "{}");
+    try testing.expect(try answerSays(missing, "the request body is missing \"level\" (one of VERY_HIGH, LOW)"));
+
+    const bound = try client.postWith(&app, "/bound", "application/json", "{\"level\":\"low\"}");
+    try testing.expectEqual(@as(u16, 422), bound.status);
+    try testing.expect(try answerSays(bound, "VERY_HIGH, LOW"));
+}
+
+// ---- a real range and a list with a length (ADR 167, ADR 266) ----
+
+const Rated = struct {
+    score: @import("within.zig").Within(0.0, 1.0),
+    tags: @import("many.zig").Many(Str, .{ .min = 1, .max = 3 }),
+    title: text_mod.Text(.{ .min = 1, .max = 20 }) = .of("x"),
+};
+
+fn rate(body: Rated) !struct { tags: usize, score: f64 } {
+    return .{ .tags = body.tags.len(), .score = body.score.value };
+}
+
+fn rateBound(b: bound_mod.Bound(Rated)) ![]const u8 {
+    const rated = b.value() orelse return b.fail();
+    _ = rated;
+    return "ok";
+}
+
+fn rateForm(in: form_mod.Form(Rated)) !usize {
+    return in.value.tags.len();
+}
+
+fn rateFormBound(b: bound_mod.Bound(form_mod.Form(Rated))) !usize {
+    const rated = b.value() orelse return b.fail();
+    return rated.tags.len();
+}
+
+test "a real range and a list with a length are refused in one sentence each, in a JSON body" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/rate", rate);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const json = "application/json";
+    const ok = postSignUp(&h, &app, "/rate", json, "{\"score\":0.5,\"tags\":[\"a\",\"b\"]}");
+    try testing.expect(std.mem.startsWith(u8, ok, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, ok, "{\"tags\":2,\"score\":0.5}"));
+
+    // Both ends of both bounds are inside.
+    const edges = postSignUp(&h, &app, "/rate", json, "{\"score\":1,\"tags\":[\"a\",\"b\",\"c\"]}");
+    try testing.expect(std.mem.startsWith(u8, edges, "HTTP/1.1 200"));
+    const low = postSignUp(&h, &app, "/rate", json, "{\"score\":0,\"tags\":[\"a\"]}");
+    try testing.expect(std.mem.startsWith(u8, low, "HTTP/1.1 200"));
+
+    const over = postSignUp(&h, &app, "/rate", json, "{\"score\":1.01,\"tags\":[\"a\"]}");
+    try testing.expect(std.mem.startsWith(u8, over, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(over, "\"score\" has to be a number from 0 to 1, not \"1.01\""));
+
+    const nan = postSignUp(&h, &app, "/rate", json, "{\"score\":\"nan\",\"tags\":[\"a\"]}");
+    try testing.expect(std.mem.startsWith(u8, nan, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(nan, "\"score\" has to be a number from 0 to 1, not \"nan\""));
+
+    const none = postSignUp(&h, &app, "/rate", json, "{\"score\":0.5,\"tags\":[]}");
+    try testing.expect(std.mem.startsWith(u8, none, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(none, "\"tags\" has to be a list of 1 to 3 items, not a list of 0"));
+
+    const long = postSignUp(&h, &app, "/rate", json, "{\"score\":0.5,\"tags\":[\"a\",\"b\",\"c\",\"d\"]}");
+    try testing.expect(try Harness.saysFailure(long, "\"tags\" has to be a list of 1 to 3 items, not a list of 4"));
+
+    const not_a_list = postSignUp(&h, &app, "/rate", json, "{\"score\":0.5,\"tags\":\"a\"}");
+    try testing.expect(try Harness.saysFailure(not_a_list, "\"tags\" has to be a list of 1 to 3 items, not text"));
+
+    // The elements are held to their own type, named by position.
+    const bad_item = postSignUp(&h, &app, "/rate", json, "{\"score\":0.5,\"tags\":[\"a\",7]}");
+    try testing.expect(try Harness.saysFailure(bad_item, "\"tags[1]\" has to be text"));
+}
+
+test "a binding collects a bad real number and a bad count together" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/rate", rateBound);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = postSignUp(&h, &app, "/rate", "application/json", "{\"score\":2,\"tags\":[],\"title\":\"\"}");
+    try testing.expect(std.mem.startsWith(u8, answer, "HTTP/1.1 422"));
+    try testing.expect(try Harness.saysFailure(answer, "3 fields did not fit"));
+    try testing.expect(try Harness.saysFailure(answer, "\"score\" has to be a number from 0 to 1, not \"2\""));
+    try testing.expect(try Harness.saysFailure(answer, "\"tags\" has to be a list of 1 to 3 items, not a list of 0"));
+    try testing.expect(try Harness.saysFailure(answer, "\"title\" has to be text of 1 to 20 characters, not 0"));
+
+    const ok = postSignUp(&h, &app, "/rate", "application/json", "{\"score\":2.0e-1,\"tags\":[\"a\"]}");
+    try testing.expect(std.mem.endsWith(u8, ok, "ok"));
+}
+
+test "a list with a length counts the values a form sends under one name" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/plain", rateForm);
+    try app.post("/bound", rateFormBound);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const form = "application/x-www-form-urlencoded";
+    const ok = postSignUp(&h, &app, "/plain", form, "score=0.25&tags=a&tags=b");
+    try testing.expect(std.mem.endsWith(u8, ok, "2"));
+
+    const none = postSignUp(&h, &app, "/plain", form, "score=0.25");
+    try testing.expect(std.mem.startsWith(u8, none, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(none, "\"tags\" has to be a list of 1 to 3 items, not a list of 0"));
+
+    const long = postSignUp(&h, &app, "/plain", form, "score=0.25&tags=a&tags=b&tags=c&tags=d");
+    try testing.expect(try Harness.saysFailure(long, "\"tags\" has to be a list of 1 to 3 items, not a list of 4"));
+
+    const real = postSignUp(&h, &app, "/plain", form, "score=1.5&tags=a");
+    try testing.expect(try Harness.saysFailure(real, "\"score\" has to be a number from 0 to 1, not \"1.5\""));
+
+    const both = postSignUp(&h, &app, "/bound", form, "score=1.5");
+    try testing.expect(std.mem.startsWith(u8, both, "HTTP/1.1 422"));
+    try testing.expect(try Harness.saysFailure(both, "2 fields did not fit"));
+    try testing.expect(try Harness.saysFailure(both, "\"score\" has to be a number from 0 to 1, not \"1.5\""));
+    try testing.expect(try Harness.saysFailure(both, "\"tags\" has to be a list of 1 to 3 items, not a list of 0"));
+}
+
+test "the document says number, minimum, maximum, minItems and maxItems" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.post("/rate", rate);
+    const json = try docsFor(&app);
+    try testing.expect(std.mem.indexOf(u8, json, "\"score\":{\"type\":\"number\",\"minimum\":0,\"maximum\":1}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1,\"maxItems\":3}") != null);
+}
+
+const Spelled = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+    first_name: u32,
+    last_name: u32,
+};
+
+const Roster = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+    team_name: u32,
+    members: @import("many.zig").Many(Spelled, .{ .min = 1 }),
+};
+
+const roster_people = [_]Spelled{.{ .first_name = 1, .last_name = 2 }};
+
+fn roster() Roster {
+    return .{ .team_name = 7, .members = .{ .value = &roster_people } };
+}
+
+test "a Many in a response is written as its slice, with the renames inside applied" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.get("/roster", roster);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const got = h.send(&app, "GET /roster HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.endsWith(u8, got, "{\"teamName\":7,\"members\":[{\"firstName\":1,\"lastName\":2}]}"));
+
+    const json = try docsFor(&app);
+    try testing.expect(std.mem.indexOf(u8, json, "\"members\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/components/schemas/Spelled\"},\"minItems\":1}") != null);
+}
+
+// ---- Timestamp and Date, with no database in the build (ADR 057) ----
+
+const nilo = @import("http.zig");
+
+const Booking = struct { starts_at: nilo.Timestamp, on: nilo.Date, ends_at: ?nilo.Timestamp = null };
+
+fn book(body: Booking) Booking {
+    return body;
+}
+
+fn bookingOnDay(day: nilo.Date, q: typed.Query(struct { since: nilo.Timestamp })) !struct { day: nilo.Date, since: nilo.Timestamp } {
+    return .{ .day = day, .since = q.value.since };
+}
+
+fn bookingFromForm(f: form_mod.Form(struct { on: nilo.Date, at: nilo.Timestamp })) !struct { on: nilo.Date, at: nilo.Timestamp } {
+    return .{ .on = f.value.on, .at = f.value.at };
+}
+
+test "a Timestamp and a Date travel as text in a body, a path, a query and a form" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/bookings", book);
+    try app.get("/days/:day", bookingOnDay);
+    try app.post("/form", bookingFromForm);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // A body: an offset is normalised to UTC on the way in, and written back
+    // as RFC 3339 with six digits; a date is `YYYY-MM-DD`.
+    const body = "{\"starts_at\":\"2026-08-16T16:30:00+07:00\",\"on\":\"2026-09-17\"}";
+    var buf: [512]u8 = undefined;
+    const req = try std.fmt.bufPrint(&buf, "POST /bookings HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+    const ok = h.send(&app, req).response;
+    try testing.expect(std.mem.startsWith(u8, ok, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, ok, "{\"starts_at\":\"2026-08-16T09:30:00.000000Z\",\"on\":\"2026-09-17\",\"ends_at\":null}"));
+
+    // A body that does not fit is a 400 naming the field and the type.
+    const bad_body = "{\"starts_at\":\"2026-08-16T09:30:00\",\"on\":\"2026-09-17\"}";
+    const bad_req = try std.fmt.bufPrint(&buf, "POST /bookings HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ bad_body.len, bad_body });
+    const bad = h.send(&app, bad_req).response;
+    try testing.expect(std.mem.startsWith(u8, bad, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(bad, "\"starts_at\" has to be a Timestamp"));
+
+    // A path param and a query field.
+    const path = h.send(&app, "GET /days/2026-09-17?since=2026-08-16T09:30:00Z HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, path, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, path, "{\"day\":\"2026-09-17\",\"since\":\"2026-08-16T09:30:00.000000Z\"}"));
+    const wrong_day = h.send(&app, "GET /days/2026-02-30?since=2026-08-16T09:30:00Z HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, wrong_day, "HTTP/1.1 400"));
+    const wrong_query = h.send(&app, "GET /days/2026-09-17?since=yesterday HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.startsWith(u8, wrong_query, "HTTP/1.1 400"));
+    try testing.expect(try Harness.saysFailure(wrong_query, "?since has to be a Timestamp"));
+
+    // A form field.
+    const form_body = "on=2026-09-17&at=2026-08-16T09%3A30%3A00Z";
+    const form_req = try std.fmt.bufPrint(&buf, "POST /form HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {d}\r\n\r\n{s}", .{ form_body.len, form_body });
+    const form_ok = h.send(&app, form_req).response;
+    try testing.expect(std.mem.startsWith(u8, form_ok, "HTTP/1.1 200"));
+    try testing.expect(std.mem.endsWith(u8, form_ok, "{\"on\":\"2026-09-17\",\"at\":\"2026-08-16T09:30:00.000000Z\"}"));
+}
+
+test "the OpenAPI document describes a Timestamp as a date-time string and a Date as a date string" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/bookings", book);
+    try app.get("/days/:day", bookingOnDay);
+    app.docs(.{ .title = "t", .version = "1" });
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const doc = h.send(&app, "GET /openapi.json HTTP/1.1\r\nHost: t\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, doc, "\"type\":\"string\",\"format\":\"date-time\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc, "\"type\":\"string\",\"format\":\"date\"") != null);
+}
+
+const Defaulted = struct {
+    tags: @import("many.zig").Many(u32, .{ .min = 1 }) = .of(&.{9}),
+};
+
+fn defaultedJson(body: Defaulted) usize {
+    return body.tags.value[0];
+}
+
+fn defaultedForm(in: form_mod.Form(Defaulted)) usize {
+    return in.value.tags.value[0];
+}
+
+fn defaultedBound(b: bound_mod.Bound(form_mod.Form(Defaulted))) !usize {
+    const got = b.value() orelse return b.fail();
+    return got.tags.value[0];
+}
+
+test "a Many left out is its default in a JSON body, a form and a binding alike" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/json", defaultedJson);
+    try app.post("/form", defaultedForm);
+    try app.post("/bound", defaultedBound);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const form = "application/x-www-form-urlencoded";
+    const j = postSignUp(&h, &app, "/json", "application/json", "{}");
+    try testing.expect(std.mem.endsWith(u8, j, "9"));
+    const f = postSignUp(&h, &app, "/form", form, "other=1");
+    try testing.expect(std.mem.endsWith(u8, f, "9"));
+    const b = postSignUp(&h, &app, "/bound", form, "other=1");
+    try testing.expect(std.mem.endsWith(u8, b, "9"));
+
+    // Sent, it is what was sent.
+    const sent = postSignUp(&h, &app, "/form", form, "tags=4&tags=5");
+    try testing.expect(std.mem.endsWith(u8, sent, "4"));
 }

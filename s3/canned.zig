@@ -798,6 +798,46 @@ test "a range is signed as a header, and asks for the slice it was given" {
     }.run);
 }
 
+/// A Scope that carries a request's deadline, as a `Ctx` does: a `Run` for the
+/// memory, and the time left from `timeLeftMs` (ADR 105).
+const Spent = struct {
+    run: core.Run,
+
+    pub fn arena(self: *Spent) std.mem.Allocator {
+        return self.run.arena();
+    }
+
+    pub fn str(self: *Spent, bytes: []const u8) core.Str {
+        return self.run.str(bytes);
+    }
+
+    pub fn timeLeftMs(_: *const Spent) ?u32 {
+        return 0;
+    }
+};
+
+test "a get from a request whose deadline has passed is never sent" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            // Nobody serves: a call that dialled would wait here for as long
+            // as the store's own 30 seconds, and this test would say so.
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+
+            var files = try Files.open(&store);
+            defer files.deinit();
+
+            var scope: Spent = .{ .run = .init(testing.allocator) };
+            defer scope.run.deinit();
+
+            try testing.expectError(error.TimedOut, files.get(&scope, "photos/wati.png"));
+        }
+    }.run);
+}
+
 test "an object over the ceiling is refused before a byte of it is read" {
     try withIo(struct {
         fn run(io: std.Io) !void {

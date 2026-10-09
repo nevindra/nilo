@@ -42,6 +42,7 @@ allowance.with(.{ .per_window, .window_s, .ipv6_prefix })   allowance.keyed(keyF
 
 | ADR | What it decides |
 |---|---|
+| [264](../adr/264-a-deployment-fact-is-a-late-value.md) | the counts as `nilo.Late(u32)` (a literal or the address of a variable), and `RateLimit` headers on every answer |
 | [092](../adr/092-an-allowance-is-a-table-sized-while-compiling.md) | `allowance.with`: the compile-time table, the sliding window, eviction, the address key |
 | [104](../adr/104-a-key-the-application-knows-is-a-word-of-its-own.md) | `allowance.keyed`: counting against a key the application knows instead of an address |
 

@@ -99,6 +99,10 @@ PORT has to be a whole number, not "8080 # the port"
 
 rather than guessing which half you meant. **A report never quotes a value that came from the `.env`**, because a `.env` is where passwords live.
 
+## Settings that middleware reads
+
+**A rate limit and a Content-Security-Policy take the address of a settings field.** Keep the struct in a container-level `var`, fill it before `listen()`, and hand the field's address to the middleware, which reads it on each request: `nilo.allowance.with(.{ .per_window = &settings.api_rate, .window_s = 60 })` and `nilo.secure.pages(.{ .csp = &settings.csp })`. A number is a `u32` field and the policy a `[]const u8`. [Middleware](./middleware.md#limits-and-policy-from-the-environment) has the whole program.
+
 ## Using the settings in handlers
 
 **A settings struct is an ordinary struct, so it is an ordinary service:**

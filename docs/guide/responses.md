@@ -302,7 +302,9 @@ const Summary = struct {
 
 `.rename` on its own, with no case rule, is fine too. Each of these is a compile error where the marker is written: a name that is not a field, a spelling that is the field's own name, and an entry that lands on a key another field already uses.
 
-**Renaming only applies to output.** `std.json` picks the parser for a body and reads it into the field names as written. So a struct with `rename_all` or `.rename` used as a request body, a form or a query string is a compile error naming the route: that route would document `fullName` and answer 400 to a client that sent it. Give incoming data a struct of its own, spelled the way the wire spells it. One direction that works is better than two that can disagree about a field.
+**The spelling applies to a request body too.** The same Row you send can be posted: a body is matched against the renamed keys (`fullName`, not `full_name`), and a 400 about a key quotes the spelling the client sent or should have sent. A form and a query string read field names as written, so a struct with `rename_all`, `.rename` or `.skip` used as one of those is a compile error naming the route: give it a struct of its own.
+
+**A field can stay off the wire.** `.skip = &.{"password_hash"}` names fields that are never written in a response and never read from a body. A client sending the key gets the answer any unknown key gets, and the field is left out of the API description. Because nothing fills a skipped field when a body is read, it needs a default value (or a `?T`) if the struct is ever read; a struct that is only returned needs nothing.
 
 A renamed struct that nilo's own writer cannot handle is also refused. The writer is deliberately narrow: one shape it does not recognise (a tuple, an array of bytes, an untagged union, a type that writes its own JSON without describing it, anything more than eight levels deep) sends the whole value to `std.json`, which ignores the marker.
 
@@ -312,7 +314,7 @@ That also makes such a response faster whether or not it renames anything, by mo
 
 **The marker applies to one type and is not inherited.** A struct renames its own fields. A union renames its *variants* and leaves a payload struct's fields to that struct's own marker. A nested struct with no marker keeps its own spelling.
 
-**Why the `jsonParse` line is needed.** Writing does not need it: nilo makes the call, so it reads the marker itself. Reading does, because `std.json` picks the parser for a type and nothing can add a declaration to a type you wrote, so the type hands over a parser nilo supplies. Leave the line off if the type is only ever sent and never received; nilo tells you if you add it to a type whose JSON spelling was never changed.
+**Why the `jsonParse` line is needed.** For a struct it is not: nilo reads a body into a struct itself and reads the marker while it does. An enum or a union that is read back does need it, because `std.json` picks the parser for those and nothing can add a declaration to a type you wrote, so the type hands over a parser nilo supplies. Leave the line off if the type is only ever sent; nilo tells you if you add it to a struct, or to a type whose JSON spelling was never changed.
 
 The generated API description follows either encoding, so a client generated from it reads what the server actually sends ([the API description](./openapi.md)).
 

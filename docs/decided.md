@@ -38,9 +38,9 @@ A gap that is the rule. Each was looked at, priced, and kept as it is, and the e
 
 ### `nilo_jwt`
 
-**HS256 is absent on purpose, and that is not free.** A shared-secret token is what a service issues to itself, and a module verifying both algorithms has to be careful about the confusion attack that a module verifying one cannot commit. A caller who needs it writes four lines of `HmacSha256` beside this module and gets the constant-time compare right on their own, which is the shape of mistake this module exists to prevent.
+**HS256 is absent on purpose.** A shared-secret token is what a service issues to itself, and a module verifying both algorithms has to be careful about the confusion attack that a module verifying one cannot commit. A client that holds no cookie and needs a token its own server issued gets `nilo.Bearer(T)` ([ADR 265](adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md)): the session's encrypted, expiring seal in an `Authorization: Bearer` header, opened under the session secret and its fallbacks, with no `alg` and no compare to write. Hand-written HMAC is no longer the way round.
 
-**Reopened by:** a caller, brought with the reason a sealed cookie or an RS256 issuer will not do.
+**Reopened by:** a caller who must verify an HS256 token issued by somebody else, brought with the reason an RS256 issuer will not do.
 
 ### `nilo_job`
 

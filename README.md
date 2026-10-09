@@ -63,6 +63,8 @@ $ zig init                                                          # only if yo
 $ zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
 ```
 
+A `build.zig` is two lines with `nilo.app`, and [`template/`](./template/) is a working project to start from: [Getting started](./docs/guide/getting-started.md#start-a-project) has the four commands.
+
 **Keep the `#commit` part.** The tag is annotated, and `zig fetch` doesn't peel it (still true on 0.17), so `?ref=v0.7.0` on its own gives you whatever `main` is that day.
 
 ```zig
@@ -237,10 +239,10 @@ Mistakes come back as sentences that say what you did and what to do about it, a
 
 ```
 $ zig build
-error: nilo: route "/users/:user/pets/:pet" has 2 path params (:user, :pet), but its handler only takes 1.
-       Path params are matched by position, so the ones at the end would never be read.
-       Add the arguments (`id: u32`, `name: nilo.Str`, …), drop the unused `:` from the
-       pattern, or ask for a `*Ctx` if you would rather fetch them yourself with `c.param("…")`.
+error: nilo: route "/users/:user/pets/:pet" has 2 path params (:user, :pet); read them by name: nilo.Path(struct { user: u32, pet: nilo.Str })
+       Zig keeps no argument names, so a bare `u32` cannot say which `:name` it is, and a
+       swapped pair would compile and run with the wrong ids. A struct keeps its field
+       names: take it as one argument and read `p.value.<name>`.
 ```
 
 What a compiler can't see is caught at startup, before the first request:

@@ -125,7 +125,8 @@ The message is the sentence any other client would get. The code comes from the 
 **Turn on request ids to match a failed response to its log lines.** Behind the proxy nilo assumes is in front ([ADR 027](../adr/027-tls-is-terminated-in-front.md)), the thing you cannot work out afterwards is *which* log lines belong to the request that went wrong. With request ids on, the answer is on the response:
 
 ```zig
-try app.use(logger.with(.{ .format = .json, .request_id = true }));
+try app.use(logger.with(.{ .request_id = true }));
+// and in main, before listen(): try app.listen(.{ .log = .{ .format = .json } });
 ```
 
 ```
@@ -133,10 +134,10 @@ $ curl -i localhost:8787/users/99
 HTTP/1.1 404 Not Found
 X-Request-Id: 4f2ba81c9d3e7a05
 
-{"method":"GET","path":"/users/99","status":404,"us":59,"request_id":"4f2ba81c9d3e7a05"}
+{"time":"2026-10-09T14:02:11.314Z","level":"info","method":"GET","path":"/users/99","status":404,"us":59,"request_id":"4f2ba81c9d3e7a05"}
 ```
 
-Somebody reports "it failed around 14:02" and pastes the header, and you grep for it. [`c.requestId()`](../reference/ctx.md#reading) gives the same id inside a handler, so anything you log yourself can carry it too, whether or not the [logger](../reference/middleware.md#built-in-middleware) is installed. A call the handler makes through `nilo_fetch` sends it as `X-Request-Id` on the outbound request, so the service on the other end can grep for the same string ([ADR 158](../adr/158-a-request-id-goes-out-with-the-call.md)).
+Somebody reports "it failed around 14:02" and pastes the header, and you grep for it. [`c.requestId()`](../reference/ctx.md#reading) gives the same id inside a handler, and **a line your handler writes with `std.log` carries it without being asked**: with `nilo.logFn` installed, `std.log.warn("stock is low", .{})` inside a request is written with `request=4f2ba81c9d3e7a05` (text) or `"request":"4f2ba81c9d3e7a05"` (JSON), on HTTP/1.1 and HTTP/2, and outside a request with none ([ADR 262](../adr/262-a-log-line-has-one-sink.md)). A call the handler makes through `nilo_fetch` sends it as `X-Request-Id` on the outbound request, so the service on the other end can grep for the same string ([ADR 158](../adr/158-a-request-id-goes-out-with-the-call.md)).
 
 If the proxy already sent an `X-Request-Id`, that one is used, so the id is the same on both sides. **A client's id is checked, not trusted**: it may be up to 64 bytes of letters, digits, `.`, `_` and `-`, which every id generator in use produces. Anything else is ignored and nilo makes its own id. Otherwise a newline in a header could forge a log line and split a response.
 

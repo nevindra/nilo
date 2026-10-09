@@ -18,6 +18,7 @@ const typed = @import("typed.zig");
 const cached_mod = @import("cached.zig");
 const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
+const typedmw = @import("typedmw.zig");
 const static_mod = @import("static.zig");
 const proxies_mod = @import("proxies.zig");
 const openapi = @import("openapi.zig");
@@ -28,6 +29,7 @@ const metrics_mod = @import("metrics.zig");
 const serve = @import("serve.zig");
 const framing_mod = @import("framing.zig");
 const wiring = @import("wiring.zig");
+const log_mod = @import("log.zig");
 const health_mod = @import("health.zig");
 const failurebody = @import("failurebody.zig");
 const connect = @import("connect.zig");
@@ -112,6 +114,10 @@ pub const App = struct {
     /// The services handlers asked for, collected as routes are registered
     /// and checked once in `listen()` (ADR 005).
     requirements: std.ArrayList(service_mod.Requirement) = .empty,
+    /// What the typed middleware registered declare, so `listen()` can hold
+    /// their path params against the routes they cover (ADR 008). One entry a
+    /// middleware, however many registrations name it.
+    middleware_needs: std.ArrayList(typedmw.Needs) = .empty,
     /// Middleware registrations, in the order `use` was called.
     scoped: std.ArrayList(mw.Scoped) = .empty,
     /// Routes that said a middleware does not cover them, from `without`
@@ -344,6 +350,7 @@ pub const App = struct {
         self.body_limits.deinit(self.gpa);
         self.gpa.free(self.trusted_proxies);
         self.requirements.deinit(self.gpa);
+        self.middleware_needs.deinit(self.gpa);
         self.services.deinit();
         // After the services: the tracer is one, and its stop hook is what
         // sends the last of the spans.
@@ -386,6 +393,7 @@ pub const App = struct {
     /// order (ADR 008).
     pub fn use(self: *App, middleware: anytype) !void {
         try self.noteLimit(middleware);
+        try self.noteNeedsOf(middleware);
         try self.scoped.append(self.gpa, .{ .prefix = "", .middleware = mw.runOf(middleware) });
     }
 
@@ -397,6 +405,28 @@ pub const App = struct {
         try self.body_limits.append(self.gpa, middleware);
     }
 
+    fn noteNeedsOf(self: *App, middleware: anytype) !void {
+        comptime typedmw.refuseRuntimePointer(@TypeOf(middleware));
+        if (comptime typedmw.isTypedType(@TypeOf(middleware))) try self.noteNeeds(typedmw.needsOf(middleware));
+    }
+
+    /// Keep what a typed middleware declares for `listen()` to hold: the
+    /// services it needs join the ones handlers declare, and the path params
+    /// it reads are held against the routes it covers (ADR 008). Once per
+    /// middleware, whatever number of routes or groups name it.
+    fn noteNeeds(self: *App, comptime needs: []const typedmw.Needs) !void {
+        inline for (needs) |n| {
+            var known = false;
+            for (self.middleware_needs.items) |have| {
+                if (have.run == n.run) known = true;
+            }
+            if (!known) {
+                try self.middleware_needs.append(self.gpa, n);
+                try self.requirements.appendSlice(self.gpa, n.requirements);
+            }
+        }
+    }
+
     /// Add a middleware that runs only on routes under `prefix`.
     ///
     /// ```zig
@@ -405,6 +435,7 @@ pub const App = struct {
     pub fn useOn(self: *App, prefix: []const u8, middleware: anytype) !void {
         std.debug.assert(prefix.len > 0 and prefix[0] == '/');
         try self.noteLimit(middleware);
+        try self.noteNeedsOf(middleware);
         try self.scoped.append(self.gpa, .{ .prefix = prefix, .middleware = mw.runOf(middleware) });
     }
 
@@ -450,7 +481,7 @@ pub const App = struct {
     /// **It runs innermost**, after everything a `use` put in front of the same
     /// route, whatever order the two were written in — a group's session check
     /// has to run before the route's own check of what that session may do.
-    pub fn with(self: *App, comptime middleware: anytype) GroupWith("", &.{}, &.{mw.runOf(middleware)}, mw.limitsOf(middleware), null, router.every_listener) {
+    pub fn with(self: *App, comptime middleware: anytype) GroupWith("", &.{}, &.{mw.runOf(middleware)}, mw.limitsOf(middleware), typedmw.needsOf(middleware), null, router.every_listener) {
         return .{ .app = self };
     }
 
@@ -470,7 +501,7 @@ pub const App = struct {
     /// A route that is not bound is answered on every listener, as before.
     /// **A path is one route** whichever listener it is bound to: the same
     /// method and shape registered twice is still `DuplicateRoute`.
-    pub fn onListener(self: *App, comptime which: []const u8) GroupWith("", &.{}, &.{}, &.{}, null, router.listenerBits(which)) {
+    pub fn onListener(self: *App, comptime which: []const u8) GroupWith("", &.{}, &.{}, &.{}, &.{}, null, router.listenerBits(which)) {
         return .{ .app = self };
     }
 
@@ -526,7 +557,7 @@ pub const App = struct {
     /// Two routes with the same name stop the process at registration, for the
     /// reason a duplicate route does: the document would carry the same key
     /// twice and whichever consumer read it would see one of them.
-    pub fn named(self: *App, comptime name: []const u8) GroupWith("", &.{}, &.{}, &.{}, name, router.every_listener) {
+    pub fn named(self: *App, comptime name: []const u8) GroupWith("", &.{}, &.{}, &.{}, &.{}, name, router.every_listener) {
         return .{ .app = self };
     }
 
@@ -656,7 +687,19 @@ pub const App = struct {
     /// to route registration does not matter; all that matters is that it
     /// happens before `listen()`.
     pub fn provide(self: *App, ptr: anytype) !void {
-        try self.services.add(ptr);
+        self.services.add(ptr) catch |err| {
+            // The sentence, then the error for a caller that branches on it:
+            // `try app.provide(&db)` in `main` would otherwise print a bare
+            // error name and a trace.
+            if (err == error.ServiceAlreadyRegistered) {
+                const T = switch (@typeInfo(@TypeOf(ptr))) {
+                    .pointer => |p| p.child,
+                    else => unreachable,
+                };
+                std.log.err("{s}", .{service_mod.Registry.duplicateMessage(T)});
+            }
+            return err;
+        };
     }
 
     /// Run `func` in a fiber of its own, once the server is up.
@@ -1293,6 +1336,8 @@ pub const App = struct {
     // called as `wiring.name(app, …)`, which says which half of the App's
     // life the call belongs to.
     pub const checkServices = wiring.checkServices;
+    pub const checkMiddlewarePaths = wiring.checkMiddlewarePaths;
+    pub const middlewarePathGap = wiring.middlewarePathGap;
     pub const resolveChains = wiring.resolveChains;
     pub const missingService = wiring.missingService;
     pub const writeOpenApi = wiring.writeOpenApi;
@@ -1316,6 +1361,7 @@ pub const App = struct {
             // are `tryListen`'s own; the rest are the Engine's.
             if (bulkhead.explained(err) or
                 err == error.MissingService or
+                err == error.MiddlewarePathParam or
                 err == error.TrustedProxyNotAnAddress or
                 err == error.SessionSecretWrongLength or
                 err == error.SessionSecretMissing or
@@ -1331,13 +1377,16 @@ pub const App = struct {
     /// falls back to another port. The one-line explanations still go to
     /// the log; what changes is that the error comes back as a value.
     pub fn tryListen(self: *App, options_: bulkhead.Options) !void {
-        wiring.checkRootWiring();
+        log_mod.configure(options_.log);
+        wiring.checkRootWiring(options_.log.format);
+        wiring.warnLoopbackInContainer(options_.address, options_.also);
         try self.checkServices();
         // Before the chains are resolved, because that is when the
         // compressors are sized, and they are sized to the threads the
         // Engine is about to start (ADR 211).
         self.compress_slots = bulkhead.threadCount(options_);
         try self.resolveChains();
+        try self.checkMiddlewarePaths();
         wiring.countUndescribed(self);
         // Parsed here rather than per request, and before the port is taken:
         // a rule that is not an address is a deployment mistake, and the
@@ -1482,6 +1531,7 @@ pub const App = struct {
     pub fn start(self: *App, io: std.Io) !void {
         try self.checkServices();
         try self.resolveChains();
+        try self.checkMiddlewarePaths();
         try self.startServices(io, .{}, .start);
         // The same two phases `listen()` runs after the pool is open, on
         // the same `Io`: the work `before` registered, then what each
@@ -1948,7 +1998,7 @@ pub fn Group(comptime prefix: []const u8) type {
 /// is what puts something in it, and what comes back is a different type, so
 /// which routes carry an exception is decided while compiling.
 pub fn GroupOf(comptime prefix: []const u8, comptime excluded: []const mw.Middleware) type {
-    return GroupWith(prefix, excluded, &.{}, &.{}, null, router.every_listener);
+    return GroupWith(prefix, excluded, &.{}, &.{}, &.{}, null, router.every_listener);
 }
 
 /// The same, plus the middlewares the routes registered through it carry of
@@ -1965,6 +2015,7 @@ pub fn GroupWith(
     comptime excluded: []const mw.Middleware,
     comptime attached: []const mw.Middleware,
     comptime bounds: []const mw.Limited,
+    comptime needs: []const typedmw.Needs,
     comptime route_name: ?[]const u8,
     comptime only: u32,
 ) type {
@@ -1986,7 +2037,7 @@ pub fn GroupWith(
 
         /// A group inside this one. `app.group("/api").group("/v1")` and
         /// `app.group("/api/v1")` are the same thing.
-        pub fn group(self: Self, comptime sub: []const u8) GroupWith(prefix ++ sub, excluded, attached, bounds, route_name, only) {
+        pub fn group(self: Self, comptime sub: []const u8) GroupWith(prefix ++ sub, excluded, attached, bounds, needs, route_name, only) {
             return .{ .app = self.app };
         }
 
@@ -1998,6 +2049,7 @@ pub fn GroupWith(
             excluded ++ &[_]mw.Middleware{mw.runOf(middleware)},
             attached,
             bounds,
+            needs,
             route_name,
             only,
         ) {
@@ -2012,6 +2064,7 @@ pub fn GroupWith(
             excluded,
             attached ++ &[_]mw.Middleware{mw.runOf(middleware)},
             bounds ++ mw.limitsOf(middleware),
+            needs ++ typedmw.needsOf(middleware),
             route_name,
             only,
         ) {
@@ -2021,7 +2074,7 @@ pub fn GroupWith(
         /// This group, with the next route registered through what comes back
         /// carrying `name` as its `operationId` — see `App.named`, which is
         /// the same call at the top level (ADR 119).
-        pub fn named(self: Self, comptime name: []const u8) GroupWith(prefix, excluded, attached, bounds, name, only) {
+        pub fn named(self: Self, comptime name: []const u8) GroupWith(prefix, excluded, attached, bounds, needs, name, only) {
             return .{ .app = self.app };
         }
 
@@ -2031,7 +2084,7 @@ pub fn GroupWith(
         /// See `App.onListener`, which is the same call at the top level
         /// (ADR 252). Narrowing only: a group already bound to `{1}` and
         /// asked for `{1, 2}` is still bound to `{1}`.
-        pub fn onListener(self: Self, comptime which: []const u8) GroupWith(prefix, excluded, attached, bounds, route_name, only & router.listenerBits(which)) {
+        pub fn onListener(self: Self, comptime which: []const u8) GroupWith(prefix, excluded, attached, bounds, needs, route_name, only & router.listenerBits(which)) {
             return .{ .app = self.app };
         }
 
@@ -2081,6 +2134,7 @@ pub fn GroupWith(
             try self.app.exemptions.ensureUnusedCapacity(self.app.gpa, excluded.len);
             try self.app.attached.ensureUnusedCapacity(self.app.gpa, attached.len);
             inline for (bounds) |limited| try self.app.noteLimit(limited);
+            try self.app.noteNeeds(needs);
             if (stops) {
                 try self.app.routeNamed(route_name, method, comptime joined(prefix, pattern), handler);
             } else {

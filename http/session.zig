@@ -51,6 +51,7 @@
 
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
+const authorization_mod = @import("authorization.zig");
 const cookie_mod = @import("cookie.zig");
 const ctx_mod = @import("ctx.zig");
 const fail = @import("fail.zig");
@@ -392,6 +393,18 @@ fn decode(comptime T: type, in: []const u8) Unreadable!Decoded(T) {
 /// The buffer is the caller's, so this allocates nothing. `Sealed(T)` is the
 /// exact array to hand it.
 pub fn seal(comptime T: type, value: T, expires_at: i64, key: Key, out: []u8) ![]const u8 {
+    return sealFor(T, value, expires_at, key, out, cookie_purpose);
+}
+
+/// The associated data a seal is bound to: **the purpose of the value**
+/// (ADR 265). A cookie is sealed under the empty string, as it always was, so
+/// every session already out there keeps opening; a bearer token is sealed
+/// under `bearer_purpose`, so the same bytes do not open as the other. It is
+/// covered by the tag and not stored, which costs the token no byte.
+const cookie_purpose = "";
+const bearer_purpose = "nilo.bearer";
+
+fn sealFor(comptime T: type, value: T, expires_at: i64, key: Key, out: []u8, comptime purpose: []const u8) ![]const u8 {
     var plain: [plainSize(T)]u8 = undefined;
     plain[0] = format_version;
     std.mem.writeInt(u32, plain[1..5], comptime fingerprint(T), .little);
@@ -415,7 +428,7 @@ pub fn seal(comptime T: type, value: T, expires_at: i64, key: Key, out: []u8) ![
 
     const body = raw[Cipher.nonce_length..][0..plain.len];
     const tag = raw[Cipher.nonce_length + plain.len ..][0..Cipher.tag_length];
-    Cipher.encrypt(body, tag, &plain, "", nonce.*, key);
+    Cipher.encrypt(body, tag, &plain, purpose, nonce.*, key);
 
     return std.base64.standard.Encoder.encode(out, &raw);
 }
@@ -459,6 +472,10 @@ pub fn openAt(comptime T: type, text: []const u8, key: Key, now: i64) ?T {
 /// one under the current secret is: a fallback changes which key opens
 /// a cookie, never how long it lives.
 fn openAmong(comptime T: type, text: []const u8, key: Key, fallbacks: []const Key, now: i64) ?T {
+    return openFor(T, text, key, fallbacks, now, cookie_purpose);
+}
+
+fn openFor(comptime T: type, text: []const u8, key: Key, fallbacks: []const Key, now: i64, comptime purpose: []const u8) ?T {
     const sealed_len = std.base64.standard.Decoder.calcSizeForSlice(text) catch return null;
     if (sealed_len != plainSize(T) + overhead) return null;
 
@@ -470,9 +487,9 @@ fn openAmong(comptime T: type, text: []const u8, key: Key, fallbacks: []const Ke
     const body = raw[Cipher.nonce_length..][0..plain.len];
     const tag = raw[Cipher.nonce_length + plain.len ..][0..Cipher.tag_length];
     opened: {
-        Cipher.decrypt(&plain, body, tag.*, "", nonce.*, key) catch {
+        Cipher.decrypt(&plain, body, tag.*, purpose, nonce.*, key) catch {
             for (fallbacks) |fallback| {
-                Cipher.decrypt(&plain, body, tag.*, "", nonce.*, fallback) catch continue;
+                Cipher.decrypt(&plain, body, tag.*, purpose, nonce.*, fallback) catch continue;
                 break :opened;
             }
             return null;
@@ -499,6 +516,14 @@ fn openAmong(comptime T: type, text: []const u8, key: Key, fallbacks: []const Ke
 /// session cookie, and not at all by one that does not.
 fn nowSeconds() i64 {
     return @divFloor(core.nowMillis(), std.time.ms_per_s);
+}
+
+/// When a seal made now and good for `lives_for` seconds stops opening, or
+/// null if that is past what an `i64` holds. A `max_age` can come from request
+/// data, and `+` on it would panic in ReleaseSafe and be undefined in
+/// ReleaseFast, so the sum is checked and the caller refuses.
+fn expiryAfter(lives_for: i64) ?i64 {
+    return std.math.add(i64, nowSeconds(), lives_for) catch null;
 }
 
 /// A buffer big enough for the cookie value of a `T`. Handed to `seal`.
@@ -663,7 +688,12 @@ pub fn Session(comptime T: type) type {
             // moment whether the browser obliged or not (ADR 033).
             const lives_for = options.max_age orelse default_max_age;
             var buf: Sealed(T) = undefined;
-            const text = try seal(T, value, nowSeconds() + lives_for, key.*, &buf);
+            const expires_at = expiryAfter(lives_for) orelse return fail.internal(
+                "a Session was set with a max_age of {d}, which is past the last moment a " ++
+                    "clock can name. Give it a number of seconds the session should last.",
+                .{lives_for},
+            );
+            const text = try seal(T, value, expires_at, key.*, &buf);
             const name = nameFor(options.secure, options.path, options.domain);
             // A cookie this server will not read back is a sign-in that
             // works once and never again, so it is refused where it is made.
@@ -714,6 +744,180 @@ pub fn Session(comptime T: type) type {
                 .path = options.path,
                 .domain = options.domain,
             });
+        }
+    };
+}
+
+// ---- the bearer token ----
+
+/// The most a `Bearer(T)` may be once sealed and base64'd (ADR 265).
+///
+/// **A header, not a cookie, and the head is the limit.** The cookie's 3,800
+/// is a browser's; a bearer token travels in `Authorization`, whose limit is
+/// the request head the server reads (`read_buffer`, 16 KiB by default), with
+/// the other headers and the request line to share it. Half of the default is
+/// the ceiling, so a token that compiles fits a server left at its defaults
+/// and a head that does not fit is not a failure that looks like a client that
+/// never signs in.
+pub const max_bearer_bytes = 8000;
+
+/// How long a token lives when `IssueOptions.max_age` does not say. The same
+/// ceiling-on-a-copy reasoning as `default_max_age`.
+pub const default_bearer_max_age: i64 = default_max_age;
+
+/// A token a client keeps and sends back as `Authorization: Bearer …`, for a
+/// client that has no cookie jar: a native application, another service.
+///
+/// ```zig
+/// const Signed = struct { user: u32 };
+///
+/// fn signIn(c: *nilo.Ctx, login: Login) !Token {
+///     const id = try accounts.check(login);
+///     const t = try nilo.Bearer(Signed).issue(c, .{ .user = id }, .{ .max_age = 3600 });
+///     return .{ .token = t.text, .expires_in = t.expires_in };
+/// }
+///
+/// fn me(b: nilo.Bearer(Signed)) !Profile {
+///     const signed = try b.require();          // 401 with WWW-Authenticate
+///     return profiles.find(signed.user);
+/// }
+/// ```
+///
+/// **The seal a `Session(T)` is, carried in a header** (ADR 265): encrypted,
+/// expiring inside the seal, opened under the secret and the fallbacks
+/// `listen()` was given (ADR 225), with no `alg` to confuse and no signature
+/// to compare by hand. The token is opaque to the client, which is the point
+/// of preferring it to a JWT nilo would have to sign (ADR 111). It reads the
+/// same `session_secret`, so rotating one rotates both.
+///
+/// **A token does not open as a session cookie and a cookie does not open as
+/// a token.** The purpose is the seal's associated data, which the cookie
+/// leaves empty: no byte longer, and every cookie already out there opens as
+/// before.
+///
+/// A resolved value like `Session(T)`, read once per request, and one a
+/// `Cached` route may not take. Its shape is the session's, `value: ?T`, so
+/// absence is a null the compiler makes the handler handle.
+pub fn Bearer(comptime T: type) type {
+    comptime {
+        if (@typeInfo(T) != .@"struct") @compileError(
+            "nilo: the `Bearer(" ++ naming.of(T) ++ ")` is not a struct.\n" ++
+                "  A token is a struct of your own, one field per thing the client's requests " ++
+                "need to carry:\n" ++
+                "      const Signed = struct { user: u32 };",
+        );
+        if (@typeInfo(T).@"struct".field_names.len == 0) @compileError(
+            "nilo: the `Bearer(" ++ naming.of(T) ++ ")` has no fields, so it would carry " ++
+                "nothing.",
+        );
+        _ = sizeOf(T);
+        if (cookieSize(T) > max_bearer_bytes) @compileError(std.fmt.comptimePrint(
+            "nilo: a `Bearer(" ++ naming.of(T) ++ ")` would be {d} bytes in the Authorization " ++
+                "header, and the most that fits is {d}.\n" ++
+                "  A server reads a request head of 16 KiB by default, and a token that fills " ++
+                "it is refused before any handler runs.\n" ++
+                "  Keep an id in the token and look the rest up.",
+            .{ cookieSize(T), max_bearer_bytes },
+        ));
+    }
+
+    return struct {
+        const Self = @This();
+
+        pub const nilo_resolve = read;
+
+        /// Who the caller is, so a `Cached` route may not take it.
+        pub const nilo_reads_caller = true;
+
+        /// The bearer scheme, which `typed.operation` writes into the
+        /// document as `bearerAuth` on the route (ADR 153, ADR 265).
+        pub const nilo_bearer = true;
+
+        pub const nilo_type_name = "nilo.Bearer(" ++ naming.of(T) ++ ")";
+
+        /// What a 401 says when no token came.
+        pub const challenge: [:0]const u8 = "Bearer";
+        /// And when one came and did not open (RFC 6750 section 3.1).
+        pub const challenge_invalid: [:0]const u8 = "Bearer error=\"invalid_token\"";
+
+        /// What arrived, if a token that opens did.
+        value: ?T,
+
+        /// Whether the client sent a `Bearer` credential at all, opening or
+        /// not: what decides between the two challenges. Defaulted so a
+        /// handler taking a `Bearer` is still a function a test calls
+        /// (ADR 002).
+        sent: bool = false,
+
+        fn read(c: *Ctx) !Self {
+            const key = c._session_key orelse return fail.internal(
+                "a handler asked for a Bearer and no secret was set. Pass one to listen(): " ++
+                    "`.session_secret = my_secret` - {d} bytes, the same on every instance.",
+                .{key_len},
+            );
+            const raw = c.header("Authorization") orelse return .{ .value = null };
+            const found = authorization_mod.split(raw.view());
+            // Another scheme (Basic, say) is somebody else's header, and not
+            // a token that failed to open.
+            if (!std.ascii.eqlIgnoreCase(found.scheme, "Bearer") or found.credentials.len == 0)
+                return .{ .value = null };
+            return .{
+                .value = openFor(T, found.credentials, key.*, c._session_fallbacks.*, nowSeconds(), bearer_purpose),
+                .sent = true,
+            };
+        }
+
+        /// What the client sent, or null if it sent no token that opens.
+        pub fn get(self: Self) ?T {
+            return self.value;
+        }
+
+        /// The value, or the 401 that tells a client to sign in: with
+        /// `WWW-Authenticate: Bearer` when it sent nothing, and with
+        /// `error="invalid_token"` when it sent a token that did not open,
+        /// which is expired, forged, sealed under a retired secret or a
+        /// session cookie's value (RFC 6750 section 3.1).
+        pub fn require(self: Self) !T {
+            if (self.value) |v| return v;
+            if (self.sent) return fail.challenge(challenge_invalid, "that bearer token is not valid, or has expired", .{});
+            return fail.challenge(challenge, "this endpoint wants an Authorization header saying \"Bearer …\"", .{});
+        }
+
+        /// What `issue` hands back: the text to give the client, and how
+        /// many seconds it opens for.
+        pub const Issued = struct {
+            /// In the request's arena, so it is good until the response is
+            /// written, which is when a handler returning it needs it.
+            text: []const u8,
+            expires_in: i64,
+        };
+
+        pub const IssueOptions = struct {
+            /// Seconds the token opens for, inside the seal. Must be above zero.
+            max_age: i64 = default_bearer_max_age,
+        };
+
+        /// Seal `value` into a token. The key stays in the framework; what
+        /// leaves is text. Allocates the token's bytes from the arena, on the
+        /// routes that issue one and on no other.
+        pub fn issue(c: *Ctx, value: T, options: IssueOptions) !Issued {
+            const key = c._session_key orelse return fail.internal(
+                "a handler issued a Bearer and no secret was set. Pass one to listen(): " ++
+                    "`.session_secret = my_secret` - {d} bytes, the same on every instance.",
+                .{key_len},
+            );
+            if (options.max_age <= 0) return fail.internal(
+                "a Bearer was issued with a max_age of {d}, which is a token that never opens.",
+                .{options.max_age},
+            );
+            const buf = try c.arena().alloc(u8, cookieSize(T));
+            const expires_at = expiryAfter(options.max_age) orelse return fail.internal(
+                "a Bearer was issued with a max_age of {d}, which is past the last moment a " ++
+                    "clock can name. Give it a number of seconds the token should last.",
+                .{options.max_age},
+            );
+            const text = try sealFor(T, value, expires_at, key.*, buf, bearer_purpose);
+            return .{ .text = text, .expires_in = options.max_age };
         }
     };
 }
@@ -1331,7 +1535,7 @@ test "setting a session outside a request says so rather than doing nothing" {
     // handler is callable; a *write* with nowhere to write has to be an
     // error, or a test would watch it silently succeed and prove nothing.
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("POST", "/sign-in");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1382,4 +1586,318 @@ test "the session is not readable by whoever is holding it" {
     var plain: [8]u8 = undefined;
     std.mem.writeInt(u64, &plain, 123456789, .little);
     try testing.expect(std.mem.indexOf(u8, text, &plain) == null);
+}
+
+// ---- the bearer token (ADR 265) ----
+
+const csrf = @import("csrf.zig");
+const budget = @import("budget.zig");
+const app_mod = @import("app.zig");
+
+const Token = struct { token: []const u8, expires_in: i64 };
+
+fn mintHandler(c: *Ctx) !Token {
+    const t = try Bearer(Signed2).issue(c, .{ .user = 7, .admin = true }, .{ .max_age = 3600 });
+    return .{ .token = t.text, .expires_in = t.expires_in };
+}
+
+fn bearerWho(b: Bearer(Signed2)) !?Signed2 {
+    return b.get();
+}
+
+fn bearerNeeded(b: Bearer(Signed2)) !u32 {
+    return (try b.require()).user;
+}
+
+fn bearerWrite(b: Bearer(Signed2)) !u32 {
+    return (try b.require()).user;
+}
+
+fn bearerApp(gpa: std.mem.Allocator) App {
+    var app = App.init(gpa);
+    app.session_key = key_a;
+    return app;
+}
+
+/// `GET path` with an `Authorization` value, or none.
+fn getWith(client: *nilo_testing.Client, app: *App, path: []const u8, authorization: ?[]const u8) !nilo_testing.Answer {
+    var request: [16 * 1024]u8 = undefined;
+    return client.send(app, try std.fmt.bufPrint(
+        &request,
+        "GET {s} HTTP/1.1\r\nHost: test\r\n{s}{s}{s}\r\n",
+        .{ path, if (authorization != null) "Authorization: " else "", authorization orelse "", if (authorization != null) "\r\n" else "" },
+    ));
+}
+
+test "a token issued by a login route is read back by the next request" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.post("/token", mintHandler);
+    try app.get("/who", bearerWho);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const minted = try (try client.post(&app, "/token", "")).json(Token, arena.allocator());
+    try testing.expectEqual(@as(i64, 3600), minted.expires_in);
+    // No cookie is set: a token is for a client that has no jar.
+    try testing.expect((try client.post(&app, "/token", "")).setCookie(host_cookie_name) == null);
+
+    var header: [512]u8 = undefined;
+    const answer = try getWith(&client, &app, "/who", try std.fmt.bufPrint(&header, "Bearer {s}", .{minted.token}));
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    var body: [256]u8 = undefined;
+    try testing.expectEqualStrings("{\"user\":7,\"admin\":true}", try answer.text(&body));
+
+    // The scheme is case-insensitive (RFC 9110 section 11.1).
+    const lower = try getWith(&client, &app, "/who", try std.fmt.bufPrint(&header, "bearer   {s}", .{minted.token}));
+    try testing.expectEqual(@as(u16, 200), lower.status);
+}
+
+test "a token sealed under a fallback secret still opens after a rotation" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.session_key = key_b;
+    app.session_fallbacks = &.{key_a};
+    try app.get("/who", bearerWho);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var buf: Sealed(Signed2) = undefined;
+    const old = try sealFor(Signed2, .{ .user = 3 }, far_future, key_a, &buf, bearer_purpose);
+    var header: [512]u8 = undefined;
+    const answer = try getWith(&client, &app, "/who", try std.fmt.bufPrint(&header, "Bearer {s}", .{old}));
+    try testing.expectEqual(@as(u16, 200), answer.status);
+
+    var gone: Sealed(Signed2) = undefined;
+    const retired = try sealFor(Signed2, .{ .user = 3 }, far_future, key_a, &gone, bearer_purpose);
+    var bare = bearerApp(testing.allocator);
+    defer bare.deinit();
+    try bare.get("/who", bearerWho);
+    // A token under a secret that is neither current nor a fallback is no token.
+    bare.session_key = key_b;
+    const dropped = try getWith(&client, &bare, "/who", try std.fmt.bufPrint(&header, "Bearer {s}", .{retired}));
+    try testing.expectEqual(@as(u16, 404), dropped.status);
+}
+
+test "an expired token does not open" {
+    const issued_at: i64 = 1_800_000_000;
+    var buf: Sealed(Signed2) = undefined;
+    const text = try sealFor(Signed2, .{ .user = 7 }, issued_at + 60, key_a, &buf, bearer_purpose);
+    try testing.expect(openFor(Signed2, text, key_a, &.{}, issued_at + 59, bearer_purpose) != null);
+    try testing.expect(openFor(Signed2, text, key_a, &.{}, issued_at + 60, bearer_purpose) == null);
+}
+
+test "a session cookie's value is not a bearer token and a token is not a session cookie" {
+    var cookie_buf: Sealed(Signed2) = undefined;
+    const as_cookie = try seal(Signed2, .{ .user = 1, .admin = true }, far_future, key_a, &cookie_buf);
+    var token_buf: Sealed(Signed2) = undefined;
+    const as_token = try sealFor(Signed2, .{ .user = 1, .admin = true }, far_future, key_a, &token_buf, bearer_purpose);
+
+    // The pure halves, and then the App, so the wiring cannot disagree.
+    try testing.expect(openFor(Signed2, as_cookie, key_a, &.{}, 0, bearer_purpose) == null);
+    try testing.expect(open(Signed2, as_token, key_a) == null);
+    try testing.expect(open(Signed2, as_cookie, key_a) != null);
+
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", bearerWho);
+    try app.get("/cookie-who", whoHandler);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var header: [512]u8 = undefined;
+    const as_bearer = try getWith(&client, &app, "/who", try std.fmt.bufPrint(&header, "Bearer {s}", .{as_cookie}));
+    try testing.expectEqual(@as(u16, 404), as_bearer.status);
+
+    var request: [4096]u8 = undefined;
+    const as_session = try client.send(&app, try std.fmt.bufPrint(
+        &request,
+        "GET /cookie-who HTTP/1.1\r\nHost: test\r\nCookie: {s}={s}\r\n\r\n",
+        .{ host_cookie_name, as_token },
+    ));
+    try testing.expectEqual(@as(u16, 404), as_session.status);
+}
+
+test "a request with no Authorization header, or another scheme, has no token" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", bearerWho);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectEqual(@as(u16, 404), (try getWith(&client, &app, "/who", null)).status);
+    try testing.expectEqual(@as(u16, 404), (try getWith(&client, &app, "/who", "Basic dXNlcjpwdw==")).status);
+    try testing.expectEqual(@as(u16, 404), (try getWith(&client, &app, "/who", "Bearer")).status);
+}
+
+test "require answers 401 with a bare challenge when nothing came, and invalid_token when a token did not open" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.get("/needed", bearerNeeded);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    const none = try getWith(&client, &app, "/needed", null);
+    try testing.expectEqual(@as(u16, 401), none.status);
+    try testing.expectEqualStrings("Bearer", none.header("WWW-Authenticate").?);
+
+    const basic = try getWith(&client, &app, "/needed", "Basic dXNlcjpwdw==");
+    try testing.expectEqual(@as(u16, 401), basic.status);
+    try testing.expectEqualStrings("Bearer", basic.header("WWW-Authenticate").?);
+
+    const bad = try getWith(&client, &app, "/needed", "Bearer not-a-token");
+    try testing.expectEqual(@as(u16, 401), bad.status);
+    try testing.expectEqualStrings("Bearer error=\"invalid_token\"", bad.header("WWW-Authenticate").?);
+
+    var buf: Sealed(Signed2) = undefined;
+    const expired = try sealFor(Signed2, .{ .user = 7 }, 1, key_a, &buf, bearer_purpose);
+    var header: [512]u8 = undefined;
+    const late = try getWith(&client, &app, "/needed", try std.fmt.bufPrint(&header, "Bearer {s}", .{expired}));
+    try testing.expectEqual(@as(u16, 401), late.status);
+    try testing.expectEqualStrings("Bearer error=\"invalid_token\"", late.header("WWW-Authenticate").?);
+
+    const good = try sealFor(Signed2, .{ .user = 9 }, far_future, key_a, &buf, bearer_purpose);
+    const ok = try getWith(&client, &app, "/needed", try std.fmt.bufPrint(&header, "Bearer {s}", .{good}));
+    try testing.expectEqual(@as(u16, 200), ok.status);
+}
+
+test "issuing or reading a token with no secret set is a 500 that says how to set one" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/token", mintHandler);
+    try app.get("/who", bearerWho);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectEqual(@as(u16, 500), (try client.post(&app, "/token", "")).status);
+    try testing.expectEqual(@as(u16, 500), (try getWith(&client, &app, "/who", "Bearer x")).status);
+}
+
+test "csrf lets a client with only a bearer header change something and still refuses a browser carrying a cookie" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.use(csrf.sameOrigin);
+    try app.post("/write", bearerWrite);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    var buf: Sealed(Signed2) = undefined;
+    const good = try sealFor(Signed2, .{ .user = 9 }, far_future, key_a, &buf, bearer_purpose);
+
+    // A native client sends neither Origin nor Sec-Fetch-Site: rule 5.
+    var request: [4096]u8 = undefined;
+    const native = try client.send(&app, try std.fmt.bufPrint(
+        &request,
+        "POST /write HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {s}\r\nContent-Length: 0\r\n\r\n",
+        .{good},
+    ));
+    try testing.expectEqual(@as(u16, 200), native.status);
+
+    // A page on another site, with the visitor's cookie attached and a header
+    // of its own choosing: the header does not exempt it.
+    const cross = try client.send(&app, try std.fmt.bufPrint(
+        &request,
+        "POST /write HTTP/1.1\r\nHost: test\r\nOrigin: https://evil.example\r\n" ++
+            "Sec-Fetch-Site: cross-site\r\nCookie: {s}={s}\r\nAuthorization: Bearer {s}\r\n" ++
+            "Content-Length: 0\r\n\r\n",
+        .{ host_cookie_name, good, good },
+    ));
+    try testing.expectEqual(@as(u16, 403), cross.status);
+}
+
+test "a route that takes a Bearer is described with the bearer security scheme and others are not" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.get("/who", bearerWho);
+    try app.get("/open", struct {
+        fn run() u32 {
+            return 1;
+        }
+    }.run);
+    app.docs(.{ .title = "test" });
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .response_bytes = 64 * 1024 });
+    defer client.deinit();
+    const answer = try client.get(&app, "/openapi.json");
+    var body: [32 * 1024]u8 = undefined;
+    const text = try answer.text(&body);
+    try testing.expect(std.mem.indexOf(u8, text, "\"securitySchemes\":{\"bearerAuth\":{\"type\":\"http\",\"scheme\":\"bearer\"}}") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\"security\":[{\"bearerAuth\":[]}]"));
+}
+
+test "a Bearer is a resolved value a Cached route may not take" {
+    try testing.expect(@import("resolve.zig").isResolved(Bearer(Signed2)));
+    try testing.expect(Bearer(Signed2).nilo_reads_caller);
+}
+
+test "reading a token allocates what reading a session does, and no more" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.get("/with", bearerWho);
+    // The control: the same resolved-value machinery, reading a cookie.
+    try app.get("/without", whoHandler);
+    try app.resolveChains();
+
+    var buf: Sealed(Signed2) = undefined;
+    const good = try sealFor(Signed2, .{ .user = 7, .admin = true }, far_future, key_a, &buf, bearer_purpose);
+    var cookie_buf: Sealed(Signed2) = undefined;
+    const jar = try seal(Signed2, .{ .user = 7, .admin = true }, far_future, key_a, &cookie_buf);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = core.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var out_buf: [4096]u8 = undefined;
+    var request_buf: [1024]u8 = undefined;
+
+    var counts: [2]usize = undefined;
+    for ([_][]const u8{ "/with", "/without" }, 0..) |path, n| {
+        const request = try std.fmt.bufPrint(
+            &request_buf,
+            "GET {s} HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {s}\r\nCookie: {s}={s}\r\nConnection: keep-alive\r\n\r\n",
+            .{ path, good, host_cookie_name, jar },
+        );
+        for (0..3) |_| {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(&out_buf);
+            _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+            lifetime.end();
+            _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+        }
+        counting.reset();
+        var in = std.Io.Reader.fixed(request);
+        var out = std.Io.Writer.fixed(&out_buf);
+        _ = app.handleRequest(counting.allocator(), &lifetime, &in_flight, &in, &out, .off, .off, .{});
+        lifetime.end();
+        counts[n] = counting.allocs;
+        _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+    }
+    try testing.expectEqual(counts[1], counts[0]);
+}
+
+fn mintHuge(c: *Ctx) !Token {
+    const t = try Bearer(Signed2).issue(c, .{ .user = 1 }, .{ .max_age = std.math.maxInt(i64) });
+    return .{ .token = t.text, .expires_in = t.expires_in };
+}
+
+fn signInHuge(s: Session(Signed2)) !void {
+    try s.setWith(.{ .user = 1 }, .{ .max_age = std.math.maxInt(i64) });
+}
+
+test "a max_age too large to add to the clock is refused rather than overflowing" {
+    var app = bearerApp(testing.allocator);
+    defer app.deinit();
+    try app.post("/token", mintHuge);
+    try app.post("/sign-in", signInHuge);
+    var client = try nilo_testing.Client.init(testing.allocator, .{});
+    defer client.deinit();
+
+    try testing.expectEqual(@as(u16, 500), (try client.post(&app, "/token", "")).status);
+    const signed = try client.post(&app, "/sign-in", "");
+    try testing.expectEqual(@as(u16, 500), signed.status);
+    try testing.expect(signed.setCookie(host_cookie_name) == null);
 }

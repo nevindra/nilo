@@ -46,6 +46,10 @@ pub const AnyScope = struct {
 
 **So a value is resolved in the middleware that proves it, not at the bottom.** The natural first draft declares the type with `nilo_resolve` and lets the bus ask for it, and a type only the bus ever asks for is `NotGiven` behind the pointer, because nobody up the stack asked first. The line that holds the property is a `_ = try c.resolve(V);` before `next.run` in the middleware that authenticated the caller, and a test that reads the actor off an event written behind the seam is what fails without it.
 
+### A Scope may carry a deadline, and an erased one carries none
+
+The shape `check` reads has one more optional declaration, `timeLeftMs() ?u32`, beside `routeName`, `serial` and `requestId`: the milliseconds the Scope's work has left, `null` for none, `0` once gone. `Ctx` declares it (it already did, as `c.timeLeftMs()`); a `Run` does not. `core.within(scope, own_ms)` is the shorter of a call's own bound and that, `core.timeLeftOf(scope)` the bare answer, and both are resolved with `@hasDecl` while compiling ([ADR 105](105-a-route-can-say-how-long-it-has.md)). **`AnyScope` leaves it out of the table**: a reaction runs after the request that fired it has been answered, and a deadline that crossed the pointer would cut its queries off at a time that meant something else.
+
 ## What was rejected
 
 **Running the resolver through the erasure.** It would need the table to carry, per resolvable type, a function that finds that type's services on a `*Ctx`: a table entry per type the program declares, built where the erasure is made, for a call the erased side almost never makes. `NotGiven` is the honest answer, and it is loud rather than silent.

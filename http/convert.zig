@@ -58,6 +58,10 @@ pub const Reason = enum {
     /// query value and a form field all arrive as text, so there is no other
     /// kind for them to be.
     wrong_kind,
+    /// Several files arrived under a name whose field takes one. Only a
+    /// form produces it, and the fix is the field's type: `[]const Upload`
+    /// (ADR 132).
+    several_files,
 };
 
 /// Which of the three places a value arrived from.
@@ -367,7 +371,7 @@ pub fn sayWhy(
         ),
         .@"enum" => try w.print(
             label ++ " is not one of the known choices ({s}): \"{s}\"",
-            .{ comptime enumChoices(P), text },
+            .{ comptime if (slot == .body) wireChoices(P) else enumChoices(P), text },
         ),
         // A `Str` is the one type that cannot fail to convert, so there is
         // no sentence here for it and asking for one is a bug in nilo
@@ -522,6 +526,22 @@ pub fn enumChoices(comptime E: type) []const u8 {
     }
 }
 
+/// `enumChoices` for a JSON body: the spelling the body reader accepts
+/// (`rename_all`, ADR 148), the same as `enumChoices` for an enum that says
+/// nothing.
+fn wireChoices(comptime E: type) []const u8 {
+    comptime {
+        const names = @typeInfo(E).@"enum".field_names;
+        @setEvalBranchQuota(budget(names) + 4 * names.len);
+        const marked = @import("jsonmark.zig").of(E);
+        var out: []const u8 = "";
+        for (names, 0..) |name, i| {
+            out = out ++ (if (i == 0) "" else ", ") ++ @import("jsonmark.zig").wire(name, marked);
+        }
+        return out;
+    }
+}
+
 const testing = std.testing;
 const bulkhead = @import("bulkhead.zig");
 
@@ -565,7 +585,7 @@ test "a type that parses itself answering null is the same 400 a bad number is" 
 
 test "the sentence for a type that parses itself names the type and quotes the text" {
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("GET", "/x");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -581,7 +601,7 @@ test "the sentence for a type that parses itself names the type and quotes the t
 
 test "a type that says what it expects is asked for in those words rather than by its name" {
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("GET", "/x");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -717,7 +737,7 @@ test "a float whose exponent overflows is refused, not read as infinity" {
 
 test "text that does not fit fails with the label in it" {
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("GET", "/x");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -824,7 +844,7 @@ fn said(
 
 test "the sentence is the same whether it is failed with or handed back" {
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("GET", "/x");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -850,7 +870,7 @@ test "a message with braces in it survives being handed on" {
     // `convert` now prints the sentence through a `{s}`, so text that looks
     // like a format string reaches the client as itself.
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("GET", "/x");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 

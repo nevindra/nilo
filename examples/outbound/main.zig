@@ -70,9 +70,11 @@ fn card(repo: Repo) Card {
 }
 
 /// A pointer is a service; a value is request data. `owner` and `name` come
-/// from `:owner` and `:name` **by position**, because Zig does not keep
-/// argument names (ADR 002).
-fn getCard(github: *GitHub, c: *nilo.Ctx, owner: nilo.Str, name: nilo.Str) !Card {
+/// from `:owner` and `:name` **by name**, through `nilo.Path`, because a route
+/// with two params cannot tell two bare arguments apart (ADR 002).
+fn getCard(github: *GitHub, c: *nilo.Ctx, p: nilo.Path(struct { owner: nilo.Str, name: nilo.Str })) !Card {
+    const owner = p.value.owner;
+    const name = p.value.name;
     // Two segments of somebody else's text going into a URL. `%2e%2e%2f` in a
     // path param is how a caller reaches an endpoint this program never meant
     // to offer, so each `{}` is percent-encoded on the way in, with `/` as

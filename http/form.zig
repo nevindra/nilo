@@ -39,6 +39,7 @@ const ctx_mod = @import("ctx.zig");
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
 const filebody = @import("filebody.zig");
+const many_mod = @import("many.zig");
 const naming = @import("names.zig");
 const router = @import("router.zig");
 const str_mod = @import("nilo_core");
@@ -178,9 +179,44 @@ pub const Fields = struct {
         return n;
     }
 
+    /// The first file of this name, or null.
     pub fn file(self: Fields, name: []const u8) ?Part {
         for (self.files) |p| {
             if (std.mem.eql(u8, p.name, name)) return p;
+        }
+        return null;
+    }
+
+    /// How many files arrived under `name`: the size of the list an
+    /// `[]const Upload` field of that name becomes, and the number a single
+    /// `Upload` field is refused at when it is two or more (ADR 132). A file
+    /// input left empty never reaches `files`, so it counts for nothing.
+    pub fn fileCount(self: Fields, name: []const u8) usize {
+        var n: usize = 0;
+        for (self.files) |p| {
+            if (std.mem.eql(u8, p.name, name)) n += 1;
+        }
+        return n;
+    }
+
+    /// Every file of this name, in the order sent. Nothing is allocated:
+    /// the parts are already in `files`.
+    pub fn filesNamed(self: Fields, name: []const u8) FileIterator {
+        return .{ .files = self.files, .name = name };
+    }
+};
+
+/// Walks `Fields.files` for one name.
+pub const FileIterator = struct {
+    files: []const Part,
+    name: []const u8,
+    at: usize = 0,
+
+    pub fn next(self: *FileIterator) ?Part {
+        while (self.at < self.files.len) {
+            const p = self.files[self.at];
+            self.at += 1;
+            if (std.mem.eql(u8, p.name, self.name)) return p;
         }
         return null;
     }
@@ -329,11 +365,34 @@ fn fill(comptime T: type, arena: std.mem.Allocator, fields: Fields, lifetime: *c
         const rule = field_mod.FieldRule(f_type, f_attrs);
         const Inner = rule.Inner;
 
-        if (comptime convert.listElement(f_type)) |Item| {
+        if (comptime many_mod.itemOf(f_type)) |Item| {
+            // A list with a length is a list that is counted once it is
+            // read, and an empty one is a count of none (ADR 266). Nothing
+            // sent under the name is "absent", and a field with a default is
+            // then its default, as in a JSON body.
+            if ((comptime rule.may_be_absent) and fields.count(f_name) == 0) {
+                @field(out, f_name) = comptime rule.absent();
+            } else {
+                const list = try collectList(Item, arena, fields, f_name, lifetime, label);
+                @field(out, f_name) = f_type.nilo_wrap(list) orelse return fail.badRequest(
+                    label ++ " has to be " ++ comptime ctx_mod.expectedOf(f_type) ++ ", not a list of {d}",
+                    .{list.len},
+                );
+            }
+        } else if (comptime convert.listElement(f_type)) |Item| {
             // A list is never missing: a checkbox group with nothing ticked
             // sends nothing, and that is the empty list (ADR 132).
-            @field(out, f_name) = try collectList(Item, arena, fields, f_name, lifetime, label);
+            if (comptime Item == Upload) {
+                @field(out, f_name) = try collectFiles(arena, fields, f_name, lifetime, label);
+            } else {
+                @field(out, f_name) = try collectList(Item, arena, fields, f_name, lifetime, label);
+            }
         } else if (Inner == Upload) {
+            if (fields.fileCount(f_name) > 1) return fail.badRequest(
+                "several files arrived under " ++ label ++ ", which takes one: " ++
+                    "declare the field as `[]const nilo.Upload` to accept several",
+                .{},
+            );
             if (fields.file(f_name)) |part| {
                 @field(out, f_name) = Upload{
                     .filename = Str.fromRequest(part.filename, lifetime),
@@ -387,10 +446,35 @@ fn fillCollecting(
         const Inner = rule.Inner;
         outcomes[i] = .{};
 
-        if (comptime convert.listElement(f_type)) |Item| {
-            @field(out, f_name) = collectListCollecting(Item, arena, fields, f_name, lifetime, &outcomes[i]) catch &.{};
+        if (comptime many_mod.itemOf(f_type)) |Item| {
+            if ((comptime rule.may_be_absent) and fields.count(f_name) == 0) {
+                @field(out, f_name) = comptime rule.absent();
+            } else {
+                const list = collectListCollecting(Item, arena, fields, f_name, lifetime, &outcomes[i]) catch &.{};
+                if (f_type.nilo_wrap(list)) |counted| {
+                    @field(out, f_name) = counted;
+                } else {
+                    // A value that would not convert is the sentence already;
+                    // the count only speaks for a list that all converted
+                    // (ADR 266).
+                    if (outcomes[i].reason == null) {
+                        outcomes[i].reason = .wrong_kind;
+                        outcomes[i].kind = std.fmt.allocPrint(arena, "a list of {d}", .{list.len}) catch "a list";
+                    }
+                    @field(out, f_name) = .{ .value = list };
+                }
+            }
+        } else if (comptime convert.listElement(f_type)) |Item| {
+            if (comptime Item == Upload) {
+                @field(out, f_name) = collectFilesCollecting(arena, fields, f_name, lifetime);
+            } else {
+                @field(out, f_name) = collectListCollecting(Item, arena, fields, f_name, lifetime, &outcomes[i]) catch &.{};
+            }
         } else if (Inner == Upload) {
-            if (fields.file(f_name)) |part| {
+            if (fields.fileCount(f_name) > 1) {
+                outcomes[i].reason = .several_files;
+                @field(out, f_name) = undefined;
+            } else if (fields.file(f_name)) |part| {
                 @field(out, f_name) = Upload{
                     .filename = Str.fromRequest(part.filename, lifetime),
                     .content_type = Str.fromRequest(part.content_type, lifetime),
@@ -464,6 +548,56 @@ fn collectList(
     return out[0..at];
 }
 
+/// Every file that arrived under a name, as `Upload`s
+/// ([ADR 132](../docs/adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)).
+///
+/// The same shape as `collectList` and the same cost: the bytes, names and
+/// types are slices of the body, and what is allocated is the slice of
+/// `Upload`s, sized by `fileCount` and out of the request arena, once, for a
+/// form that declared a list of files and no other. How many and how big
+/// together are bounded by what already bounded the form: `max_parts` parts
+/// in a body of at most `max_body`.
+fn collectFiles(
+    arena: std.mem.Allocator,
+    fields: Fields,
+    comptime name: []const u8,
+    lifetime: *const str_mod.Lifetime,
+    comptime label: []const u8,
+) ![]const Upload {
+    const n = fields.fileCount(name);
+    if (n == 0) return &.{};
+    const out = arena.alloc(Upload, n) catch
+        return fail.internal("no room for the files of {s}", .{label});
+    return fillFiles(out, fields, name, lifetime);
+}
+
+/// `collectFiles` for a binding: nothing in it can fail but the allocation,
+/// and a list that could not be made is the empty one, as for text.
+fn collectFilesCollecting(
+    arena: std.mem.Allocator,
+    fields: Fields,
+    comptime name: []const u8,
+    lifetime: *const str_mod.Lifetime,
+) []const Upload {
+    const n = fields.fileCount(name);
+    if (n == 0) return &.{};
+    const out = arena.alloc(Upload, n) catch return &.{};
+    return fillFiles(out, fields, name, lifetime);
+}
+
+fn fillFiles(out: []Upload, fields: Fields, name: []const u8, lifetime: *const str_mod.Lifetime) []const Upload {
+    var it = fields.filesNamed(name);
+    var at: usize = 0;
+    while (it.next()) |part| : (at += 1) {
+        out[at] = .{
+            .filename = Str.fromRequest(part.filename, lifetime),
+            .content_type = Str.fromRequest(part.content_type, lifetime),
+            .bytes = Str.fromRequest(part.bytes, lifetime),
+        };
+    }
+    return out[0..at];
+}
+
 /// `collectList`, recording what would not convert instead of answering
 /// with it. The **first** bad value is the one the handler is told about,
 /// and the rest of the list is still read, the rule ADR 132 set: a group
@@ -526,18 +660,34 @@ pub fn checkFields(comptime T: type, comptime what: []const u8) void {
             };
             if (Inner == Upload) continue;
             if (convert.convertible(f_type)) continue;
-            // A list of anything a form value can become, filled from the
-            // repeated name a checkbox group or a `<select multiple>` sends
-            // (ADR 132). A list of files is not one: `Upload` is a part
-            // rather than a value, and a field takes one.
-            if (convert.listElement(f_type)) |Item| {
-                if (Item != Upload and convert.convertible(Item) and @typeInfo(Item) != .optional) continue;
+            // A list with a length, filled from the repeated name like any
+            // list, and counted (ADR 266).
+            if (many_mod.itemOf(f_type)) |Item| {
+                if (convert.convertible(Item) and @typeInfo(Item) != .optional) continue;
                 @compileError(
                     "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of " ++ what ++
                         " is a list of something a form value cannot become.\n" ++
                         "  A list field takes every value sent under its name, and each is a " ++
                         "`nilo.Str`, a number, a `bool`, an enum, or a type that parses itself " ++
-                        "with `nilo_parse` — not a file, and not an optional.",
+                        "with `nilo_parse`, and not an optional or a file.",
+                );
+            }
+            // A list of files: every file part sent under the name, in
+            // order (ADR 132).
+            if (convert.listElement(f_type)) |Item| {
+                if (Item == Upload) continue;
+            }
+            // A list of anything a form value can become, filled from the
+            // repeated name a checkbox group or a `<select multiple>` sends
+            // (ADR 132). A list of files was handled above.
+            if (convert.listElement(f_type)) |Item| {
+                if (convert.convertible(Item) and @typeInfo(Item) != .optional) continue;
+                @compileError(
+                    "nilo: the field `" ++ f_name ++ ": " ++ naming.of(f_type) ++ "` of " ++ what ++
+                        " is a list of something a form value cannot become.\n" ++
+                        "  A list field takes every value sent under its name, and each is a " ++
+                        "`nilo.Str`, a number, a `bool`, an enum, or a type that parses itself " ++
+                        "with `nilo_parse` — or a `nilo.Upload` for a file — and not an optional.",
                 );
             }
             @compileError(
@@ -563,6 +713,9 @@ pub fn holdsAFile(comptime T: type) bool {
                 else => f_type,
             };
             if (Inner == Upload) return true;
+            if (convert.listElement(f_type)) |Item| {
+                if (Item == Upload) return true;
+            }
         }
         return false;
     }
@@ -939,7 +1092,7 @@ test "a urlencoded form reads a plus as a space, the way a browser writes one" {
 
 fn expectFails(comptime T: type, arena: std.mem.Allocator, content_type: []const u8, body: []const u8, says: []const u8) !void {
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("POST", "/form");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1289,6 +1442,110 @@ test "an optional file that was not sent is null" {
     try testing.expect(filled.avatar == null);
 }
 
+const Gallery = struct { title: Str, photos: []const Upload = &.{} };
+
+fn photo(comptime name: []const u8, comptime file: []const u8) []const u8 {
+    return "Content-Disposition: form-data; name=\"photos\"; filename=\"" ++ name ++
+        "\"\r\nContent-Type: image/png\r\n\r\n" ++ file;
+}
+
+const title_part = "Content-Disposition: form-data; name=\"title\"\r\n\r\ntrip";
+
+test "five files under one name arrive as five, in the order sent" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const filled = try read(Gallery, arena.allocator(), multipart_type, comptime multipart(&.{
+        photo("a.png", "AAA"), title_part, photo("b.png", "BB"), photo("c.png", "C"),
+        photo("d.png", "DDDD"), photo("e.png", "E"),
+    }));
+    try testing.expectEqual(@as(usize, 5), filled.photos.len);
+    const names = [_][]const u8{ "a.png", "b.png", "c.png", "d.png", "e.png" };
+    for (filled.photos, names) |p, want| try testing.expectEqualStrings(want, p.filename.view());
+    try testing.expectEqualStrings("BB", filled.photos[1].bytes.view());
+    try testing.expectEqualStrings("image/png", filled.photos[4].content_type.view());
+    try testing.expectEqualStrings("trip", filled.title.view());
+}
+
+test "one file into a list field is a list of one, and none is the empty list" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const one = try read(Gallery, arena.allocator(), multipart_type, comptime multipart(&.{
+        title_part, photo("a.png", "AAA"),
+    }));
+    try testing.expectEqual(@as(usize, 1), one.photos.len);
+
+    const none = try read(Gallery, arena.allocator(), multipart_type, comptime multipart(&.{title_part}));
+    try testing.expectEqual(@as(usize, 0), none.photos.len);
+
+    // A browser's file input with nothing chosen contributes nothing.
+    const blank = try read(Gallery, arena.allocator(), multipart_type, comptime multipart(&.{
+        title_part, "Content-Disposition: form-data; name=\"photos\"; filename=\"\"\r\n" ++
+            "Content-Type: application/octet-stream\r\n\r\n",
+    }));
+    try testing.expectEqual(@as(usize, 0), blank.photos.len);
+}
+
+test "two files into a field that takes one is refused, naming the field and the fix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const Single = struct { photos: Upload };
+    try expectFails(Single, arena.allocator(), multipart_type, comptime multipart(&.{
+        photo("a.png", "A"), photo("b.png", "B"),
+    }), "several files arrived under \"photos\", which takes one: " ++
+        "declare the field as `[]const nilo.Upload` to accept several");
+}
+
+test "a list of files is bounded by the parts a form may hold" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    for (0..max_parts) |_| try body.appendSlice(testing.allocator, "--niloBoundary\r\n" ++ comptime photo("x.png", "X") ++ "\r\n");
+    try body.appendSlice(testing.allocator, "--niloBoundary--\r\n");
+
+    const Many = struct { photos: []const Upload };
+    const filled = try read(Many, arena.allocator(), multipart_type, body.items);
+    try testing.expectEqual(@as(usize, max_parts), filled.photos.len);
+
+    body.clearRetainingCapacity();
+    for (0..max_parts + 1) |_| try body.appendSlice(testing.allocator, "--niloBoundary\r\n" ++ comptime photo("x.png", "X") ++ "\r\n");
+    try body.appendSlice(testing.allocator, "--niloBoundary--\r\n");
+    try expectFails(Many, arena.allocator(), multipart_type, body.items, "this form has more parts than nilo reads from one, which is 256");
+}
+
+test "a binding records several files under a single-file field, and reads the list beside it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const Both = struct { one: Upload, many: []const Upload };
+    const body = comptime multipart(&.{
+        "Content-Disposition: form-data; name=\"one\"; filename=\"a\"\r\n\r\nA",
+        "Content-Disposition: form-data; name=\"one\"; filename=\"b\"\r\n\r\nB",
+        "Content-Disposition: form-data; name=\"many\"; filename=\"c\"\r\n\r\nC",
+        "Content-Disposition: form-data; name=\"many\"; filename=\"d\"\r\n\r\nD",
+    });
+    var outcomes: [2]convert.Outcome = undefined;
+    const filled = try readIntoCollecting(Both, arena.allocator(), &test_lifetime, multipart_type, body, &outcomes);
+    try testing.expectEqual(@as(?convert.Reason, .several_files), outcomes[0].reason);
+    try testing.expect(outcomes[1].reason == null);
+    try testing.expectEqual(@as(usize, 2), filled.many.len);
+}
+
+test "Fields walks every file of a name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const fields = try parse(arena.allocator(), kindOf(multipart_type), comptime multipart(&.{
+        photo("a.png", "A"), title_part, photo("b.png", "B"),
+    }));
+    try testing.expectEqual(@as(usize, 2), fields.fileCount("photos"));
+    var it = fields.filesNamed("photos");
+    try testing.expectEqualStrings("a.png", it.next().?.filename);
+    try testing.expectEqualStrings("b.png", it.next().?.filename);
+    try testing.expect(it.next() == null);
+}
+
 test "an endpoint wanting a file, sent a form that cannot carry one, says so" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1405,7 +1662,7 @@ test "a form past that bound is refused rather than quietly cut short" {
     defer body.deinit(testing.allocator);
 
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("POST", "/form");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1480,7 +1737,7 @@ test "a megabyte of ampersands is refused for its pair count, before an arena by
     @memset(body, '&');
 
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("POST", "/form");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
 
@@ -1507,7 +1764,7 @@ test "a urlencoded form of exactly max_pairs pairs is read, and one more is not"
 
     try body.appendSlice(testing.allocator, "&one=more");
     var in_flight = fail.InFlight{};
-    in_flight.startRequest("POST", "/form");
+    in_flight.startRequest();
     const previous = bulkhead.setFallbackSlot(&in_flight);
     defer _ = bulkhead.setFallbackSlot(previous);
     try testing.expectError(error.Failed, parse(arena.allocator(), .urlencoded, body.items));

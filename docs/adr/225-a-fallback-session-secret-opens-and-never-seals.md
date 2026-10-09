@@ -19,7 +19,7 @@ The four parts, answered:
 3. **Where from: the application, like the secret itself.** An environment variable, a mounted file, a secrets manager. `listen()` checks and copies them, so what was passed does not have to outlive the call.
 4. **A cookie under a dropped secret is no session**, the answer to every other failure to open. The person signs in again.
 
-The current secret is tried first and the fallbacks only when it fails, in the order given. A cookie that decrypts under a fallback secret is then held to the version, the shape and the expiry exactly as one under the current secret is.
+The current secret is tried first and the fallbacks only when it fails, in the order given. A `Bearer(T)` token ([ADR 265](./265-a-bearer-token-is-a-session-sealed-for-a-header.md)) is opened the same way, under the same secrets, so one rotation covers cookies and tokens. A cookie that decrypts under a fallback secret is then held to the version, the shape and the expiry exactly as one under the current secret is.
 
 `listen()` refuses to start on four mistakes, each in one line: a fallback secret of the wrong length, more than three, fallback secrets with no `session_secret`, and a fallback secret that is the current one or listed twice. Fallbacks with no current secret would open cookies nothing can seal any more. A repeated one is a rotation that did not happen: the configuration would work, and the person who wrote it would believe an old secret had stopped sealing when it had not.
 

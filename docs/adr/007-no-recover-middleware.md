@@ -40,4 +40,5 @@ Deliberately not done: reading the slot from a `threadlocal` instead. That would
 - v1 ships **three** built-in middlewares, not four: logger, CORS, static files.
 - The documentation has to say out loud that a panic kills the process, and that production deployments need a supervisor (systemd, Kubernetes) to restart it. Users coming from Go will assume otherwise, and that assumption is expensive.
 - `ReleaseSafe` becomes the recommended production build. In `ReleaseFast` an integer overflow is undefined behaviour instead of a panic, which trades a loud crash for a silent wrong answer. That trade is worth naming in the docs rather than leaving to the default.
+- `listen()` warns once, at warn level, when the root file declares no `panic` (`wiring.missingPanic`), with the line to add and the `ReleaseFast` caveat beside it, so the opt-in is not found out at three in the morning.
 - The Bulkhead gains no new obligation: the panic handler reuses the slot that ADR 006 already requires.

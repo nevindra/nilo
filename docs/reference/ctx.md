@@ -47,10 +47,10 @@ This page covers reading a request, answering it, its cookies, session and uploa
 | `c.clientIp()` | `Str`: the client, looking through `trusted_proxies` or `trusted_hops`. Empty on a unix socket with neither set |
 | `c.stopping()` | `bool`: the server has been told to stop and is draining. What the health page answers `stopping` on |
 | `c.overdue()` | whether the deadline `nilo.deadline(ms)` gave this route has passed. Always false without one |
-| `c.timeLeftMs()` | `?u32`: milliseconds left, `null` without a deadline, `0` once it has gone |
+| `c.timeLeftMs()` | `?u32`: milliseconds left, rounded up so any time left reads at least 1, `null` without a deadline, `0` once it has gone |
 | `c.giveDeadline(ms)` | set one by hand. `nilo.deadline(ms)` is what normally calls this |
 | `c.giveBodyLimit(bytes)` | how much body this request may read into the arena, over `listen()`'s `max_body`. `nilo.maxBody(bytes)` is what normally calls this; a body already read keeps the limit it was read under |
-| `c.service(*Db)` | `?*Db` |
+| `c.service(*Db)` | `?*Db`. A middleware that needs a service takes it as an argument instead, which `listen()` checks ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
 | `c.resolve(V)` | `!V`: a resolved value, worked out once per request |
 | `c.keepAlive()` | whether the connection will carry another request |
 | `c.io()` | `std.Io`: the server's loop, for a `std.Io.Queue`, `Event` or `Select`. Nothing is held per connection. With no server (a `testing.Client`) it is a process-wide `std.Io.Threaded` ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)) |
@@ -186,6 +186,18 @@ The cookie is named `__Host-session` (`nilo.session.host_cookie_name`) when it i
 
 **Every way a cookie can be unreadable gives the same answer: `null`.** That covers tampered, truncated, expired, sealed under another secret, or written by a build with a different shape of `T`. The secret comes from `listen(.{ .session_secret = … })` and must be exactly 32 bytes; a handler asking for a session when none is set answers 500. A cookie the secret does not open is tried under each of `session_fallback_secrets`, which open sessions but never seal them ([ADR 225](../adr/225-a-fallback-session-secret-opens-and-never-seals.md)).
 
+## `Bearer(T)`
+
+**The session's seal in an `Authorization: Bearer` header**, for a client with no cookie jar. `T` follows the rules of `Session(T)`, and the sealed token may be at most `nilo.session.max_bearer_bytes` (8,000) long, a Refusal while compiling otherwise. It opens under `session_secret` and `session_fallback_secrets`. See [Sessions](../guide/sessions.md#a-client-that-sends-a-bearer-token) and [ADR 265](../adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md).
+
+| | |
+|---|---|
+| `b.get()` | `?T`: the token's value, or null if none was sent or it did not open (expired, tampered, another secret, another shape, a session cookie's value) |
+| `b.require()` | `!T`: the value, or a 401 with `WWW-Authenticate: Bearer`, and `error="invalid_token"` when a token was sent and did not open |
+| `Bearer(T).issue(c, value, .{ .max_age = 3600 })` | `!Issued`: `.text` (a slice of the request arena) and `.expires_in` (seconds). `max_age` defaults to `nilo.session.default_bearer_max_age`, 24 hours, and must be above zero |
+
+The scheme word is matched without regard to case. A header with another scheme is no token. A handler that takes one, or issues one, with no `session_secret` set answers 500. A token is sealed with the purpose `nilo.bearer`, so a session cookie's value does not open as a token and a token does not open as a session. A route taking a `Bearer(T)` is described with the `bearerAuth` security scheme, and cannot be `Cached`.
+
 ## `Upload`
 
 **One file from a multipart form, as a `Form(T)` field type.**
@@ -197,6 +209,8 @@ The cookie is named `__Host-session` (`nilo.session.host_cookie_name`) when it i
 | `u.bytes` | `Str`: the file itself |
 | `u.len()` | its size |
 | `u.saveTo(dir, name)` | `!void`: writes it into a [`Dir`](./streaming.md#dir) under **a name you choose** |
+
+**`[]const Upload` collects every file under a name, in the order sent** (`<input type="file" multiple>`). Absent is the empty list. A single `Upload` that receives several is a 400 naming the field and the fix. `Fields.fileCount(name)` and `Fields.filesNamed(name)` read the same in the unbound reader ([ADR 132](../adr/132-a-query-parameter-or-a-form-field-that-is-a-list.md)).
 
 **A file input left empty in a browser is no `Upload`.** The part it sends (an empty filename and no bytes) is dropped, so `?Upload` is null and an `Upload` field is a 400 saying the form is missing the file. A chosen file with no bytes keeps its filename and is an `Upload` of length 0; a part with an empty filename but bytes in it is an `Upload` too.
 

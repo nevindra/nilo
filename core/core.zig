@@ -1,8 +1,8 @@
 //! nilo_core — what every layer of nilo agrees about (ADR 038).
 //!
-//! Four things live here. Text that belongs to a piece of work, the Scope
-//! that hands out the memory it lives in, what time it is, and percent
-//! encoding. Each is used by two layers, which is the rule for a fifth: **a
+//! Five things live here. Text that belongs to a piece of work, the Scope
+//! that hands out the memory it lives in, what time it is (and the `Timestamp`
+//! and `Date` that hold it), and percent encoding. Each is used by two layers, which is the rule for a fifth: **a
 //! file earns its place by being needed by two layers, not by having nowhere
 //! else to live.** The moment this is where things go because they fit
 //! nowhere, the layering has stopped meaning anything and only the directory
@@ -15,6 +15,9 @@
 //! `trace` is the second (ADR 247): the server reads `traceparent` on the
 //! way in and `nilo_fetch`, a Fitting that cannot name the server, writes it
 //! on the way out.
+//! `time` is the fourth (ADR 057): the App layer reads a `Timestamp` or a
+//! `Date` in a body, a query and a path, and `nilo_sql` stores them, so a
+//! service with a date in its body no longer turns on `-Dsql`.
 //! `tmp` is the third (ADR 250): a test under `http/` and a test under
 //! `sql/` both need the path of a directory of their own, and the second
 //! cannot reach `nilo.testing`. It is the one file here only a test calls.
@@ -55,6 +58,12 @@ pub const routeNameOf = scope_mod.routeNameOf;
 /// between calls and has to know it is still the same one (ADR 117).
 pub const serialOf = scope_mod.serialOf;
 
+/// The time a Scope has left and the shorter of that and a call's own bound,
+/// for a call that leaves the process
+/// ([ADR 105](../docs/adr/105-a-route-can-say-how-long-it-has.md)).
+pub const timeLeftOf = scope_mod.timeLeftOf;
+pub const within = scope_mod.within;
+
 /// W3C Trace Context, and the two Scope calls a call that leaves makes so it
 /// joins the request's trace
 /// ([ADR 247](../docs/adr/247-a-request-is-a-span-and-the-trace-leaves-as-otlp.md)).
@@ -67,6 +76,11 @@ pub const traceEndOf = scope_mod.traceEndOf;
 /// ([ADR 144](../docs/adr/144-a-scope-that-crosses-a-function-pointer.md)).
 /// The ordinary Scope is unchanged and still costs nothing.
 pub const AnyScope = scope_mod.AnyScope;
+
+/// A moment and a calendar day, with RFC 3339 and ISO 8601 text both ways
+/// (ADR 057). `nilo_sql` re-exports them; the framework root does too.
+pub const Timestamp = @import("time.zig").Timestamp;
+pub const Date = @import("time.zig").Date;
 
 pub const nowMicros = clock_mod.nowMicros;
 pub const nowMillis = clock_mod.nowMillis;
@@ -88,6 +102,7 @@ test {
     _ = @import("str.zig");
     _ = @import("scope.zig");
     _ = @import("clock.zig");
+    _ = @import("time.zig");
     _ = @import("percent.zig");
     _ = @import("limits.zig");
     _ = @import("trace.zig");

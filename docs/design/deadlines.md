@@ -4,7 +4,7 @@
 
 **Guide:** [Deadlines](../guide/deploying.md#deadlines) · **Reference:** [`listen` options](../reference/app.md#listen-options), [`Ctx`](../reference/ctx.md), [`nilo.deadline`](../reference/middleware.md#nilodeadline), [`nilo_fetch`](../reference/fetch.md), [What time it is](../reference/core.md#the-clock)
 
-The code is `http/bulkhead.zig` (`Options`, `Deadlines`), `http/ctx.zig` (`overdue`, `timeLeftMs`, `giveDeadline`, `giveDefaultDeadline`, `tookOver`, `armWriteLimit`), `http/deadline.zig` (the `nilo.deadline` middleware), `core/limits.zig` (`Limits`, `Bound`), `fetch/deadline.zig` and `fetch/fetch.zig` (`Exchange`, `timeout_ms`, `stall_ms`), and `sql/postgres.zig` (`Limits.waiting`/`waited` around a wire).
+The code is `http/bulkhead.zig` (`Options`, `Deadlines`), `http/ctx.zig` (`overdue`, `timeLeftMs`, `giveDeadline`, `giveDefaultDeadline`, `tookOver`, `armWriteLimit`), `http/deadline.zig` (the `nilo.deadline` middleware), `core/limits.zig` (`Limits`, `Bound`), `core/scope.zig` (`timeLeftOf`, `within`), `fetch/deadline.zig` and `fetch/fetch.zig` (`Exchange`, `timeout_ms`, `stall_ms`), and `sql/postgres.zig` (`Limits.waiting`/`waited` around a wire).
 
 ## Overview
 
@@ -44,6 +44,7 @@ a Service's own wait on its socket (pg.zig, a pool queue)
 14. **What happens at the deadline depends on what has already been sent.** If nothing was sent, the answer is a 503 naming the budget. If something was already sent, it is left alone, because a half-sent response cannot become a 503. A handler that finishes late without checking still answers, and a warning is logged instead of the answer being thrown away. [ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)
 15. **Taking over the connection drops a default deadline but keeps one the route asked for.** `c.stream()`, `c.events()`, `c.upgrade()` and `c.bodyStream()` all go through one function, `tookOver`, so a default meant for health checks cannot cut off an hour-long stream, while a route that called `nilo.deadline(ms)` and then streamed keeps what it asked for. [ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)
 16. **A Service waiting on its own socket counts as parked, and has to report it.** `Limits.waiting()`/`waited()` tell the watchdog a fiber is parked inside a Service's own `Io` (a Postgres round trip, a pool queue), one pair per statement rather than per row. `nilo_fetch` reports one pair per socket step instead (the head, each body read, the drain), because a body read in pieces hands the fiber back to the handler in between. Without this, every slow query and every slow outbound call was wrongly reported as a handler blocking its thread. [ADR 210](../adr/210-a-services-wait-on-its-own-socket-is-a-park.md)
+17. **A route's deadline reaches the calls it makes.** A Scope that declares `timeLeftMs()` (a `Ctx`) is read by `nilo_fetch`, `nilo_s3` (through fetch) and `nilo_sql`, and each call takes the shorter of its own bound and the time left through `core.within`; a request whose time has passed makes no call. SQL arms a `Bound` around the Wire call and sends nothing to the server. [ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)
 
 ## Decisions
 

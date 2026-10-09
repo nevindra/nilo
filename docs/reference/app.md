@@ -23,7 +23,7 @@ This page covers the App and its groups, the options `listen()` takes, the concu
 
 | | |
 |---|---|
-| `app.use(mw)` | middleware on every route. One that returns without answering and without calling `next.run(c)` is a 500 that names it (`middleware 2 of 3`) ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
+| `app.use(mw)` | middleware on every route. `mw` is `fn (*Ctx, Next) !void`, or the same with services and resolved values after `Next` ([typed middleware](middleware.md#typed-middleware)); `useOn`, a group's `use`, `with` and `without` take either too. One that returns without answering and without calling `next.run(c)` is a 500 that names it (`middleware 2 of 3`) ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
 | `app.useOn(prefix, mw)` | middleware under a path prefix. A route whose pattern has a `:param` or `*` where the prefix has a word (`GET /files/*` beside `useOn("/files/private", …)`) has its chain resolved per request from the real path |
 | `app.without(mw)` | the same App with `mw` turned off for the routes registered through the value it returns. This is how a sign-up route sits inside a guarded prefix ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)) |
 | `app.with(mw)` | the opposite: the same App with `mw` turned **on** for the routes registered through the value it returns, so one endpoint can be guarded while its neighbours are not ([ADR 099](../adr/099-a-route-can-say-what-covers-it.md)) |
@@ -98,7 +98,7 @@ try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
 
 | | Default |
 |---|---|
-| `address` | `"127.0.0.1"`: an address, not a host name. `"unix:/run/nilo.sock"` listens on a path ([ADR 103](../adr/103-a-path-is-an-address-to-listen-on.md)) |
+| `address` | `"127.0.0.1"`: an address, not a host name. `"unix:/run/nilo.sock"` listens on a path ([ADR 103](../adr/103-a-path-is-an-address-to-listen-on.md)). Loopback in a container is warned about at startup, since a published port cannot reach it ([Containers](../guide/deploying.md#containers)) |
 | `port` | `8787`. Not read when `address` names a unix socket |
 | `threads` | `0`: one per core, or one more than a container's CPU quota where there is one; at most 64 ([ADR 230](../adr/230-a-cpu-quota-sets-the-thread-count.md)) |
 | `read_buffer` | `16 * 1024`. Also the limit on a request head. Paid only while a connection is busy; an idle one gives the pages back ([ADR 196](../adr/196-a-head-is-mostly-cookies-and-sixteen-kilobytes-of-them.md)) |
@@ -126,6 +126,7 @@ try v1.without(requireOperator).with(rateLimitSignups).post("/sign-up", signUp);
 | `tls` | `null`. `.{ .cert = "…pem", .key = "…pem" }` serves HTTPS (TLS 1.3) on a build that passed `.tls = true` to the dependency (`-Dtls` in this repository); any other build refuses it at `listen()`. In a build that also passed `.http2 = true` the handshake offers `h2` and `http/1.1` by ALPN, `h2` first, and the connection is served as what was chosen; a client that sends no ALPN is served HTTP/1.1, one that offers ALPN with neither protocol gets RFC 7301's `no_application_protocol` alert, and without the flag only `http/1.1` is offered ([ADR 259](../adr/259-http2-is-a-framing-of-every-request.md)). Both files are read before the port is taken, and a key that does not belong to the certificate is refused there, instead of failing every handshake later ([ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md)). In that build it costs 560 KB of binary and a page per idle connection, about 300 µs of CPU per handshake with an ECDSA certificate and 2.6 ms with an RSA-2048 one, and it has not been audited; a proxy in front is still the recommendation ([ADR 212](../adr/212-tls-is-an-option-a-build-asks-for.md), [deploying](../guide/deploying.md#tls-without-a-proxy)) |
 | `also` | `&.{}`: more addresses to answer on, each `.{ .address, .port, .tls }` and nothing else. One server, one route table, one thread pool; a request is told its listener's number (`c.listener()`) and a route can be bound to some (`app.onListener`), and `max_connections` counts sockets across all of them. It is meant for a cleartext port next to a TLS one, or a gRPC port next to an HTTP one. Costs 82 KB of resident memory per extra listener on sixteen threads, and nothing per connection or per request ([ADR 213](../adr/213-a-server-answers-on-more-than-one-address.md), [ADR 252](../adr/252-a-request-knows-which-listener-it-came-in-on.md)) |
 | `block_warning_ms` | `250`: logs a warning when a handler holds its thread this long. `0` turns it off |
+| `log` | `.{ .format = .text, .level = std.log.default_level }`: how a log line is written and the lowest level written, **at run time**, so a deployment sets them from `nilo_config`. `.format = .json` writes one object a line (`time`, `level`, `scope`, `msg`, `request`) and wants `nilo.logFn` in the root `std_options`, which `listen()` says when it is missing. `std_options.log_level` stays the comptime ceiling and `.level` filters inside it ([ADR 262](../adr/262-a-log-line-has-one-sink.md)) |
 | `password_hashes_at_once` | `8`: password hashes run at once through `c.hashPassword` and `c.verifyPassword`. Past it, a sign-in waits its turn instead of failing. Limits concurrency, not the queue ([ADR 044](../adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md)) |
 
 **`arena_keep` is the option in this table with a cliff.** A response larger than it does not fit in what the arena keeps, so the block goes back to the operating system after every request, and the next request faults it back in one page at a time: 257 minor faults for a megabyte, with the kernel zeroing each page. A server that builds large responses in `c.arena()` should set this just above the largest of them, and no higher, because the memory is held **per connection**: a megabyte here across ten thousand connections is ten gigabytes ([ADR 075](../adr/075-a-response-larger-than-the-arena-keep-is-a-page-fault-per-page.md)). The default is right for a server whose responses fit in 16 KiB.
@@ -233,6 +234,27 @@ Both the length and the ETag of a file served from disk come from one look at th
 `app.embeddedWith(prefix, files, …)` takes `index`, `cache_control`, `cache_rules`, `spa_fallback`, `spa_fallback_for`, `compress` and `compress_min_bytes`, with the defaults above, and none of the others: nothing in the binary is served from disk, there is no total to exceed, every name was written by the caller, and there is no disk to reload from.
 
 **`embedDir(b, nilo_http, dir)` is a function of nilo's `build.zig`**, imported by a dependent as `@import("nilo").embedDir`. It walks `dir` (relative to the build root, or absolute) when the build is configured and returns a module exporting `files`, an array of `static.Embedded`, to hand to `app.embedded("/", &frontend.files)`. Regular files only, a `.` segment and symlinks left out, an empty directory stops the build ([ADR 009](../adr/009-static-files-are-held-in-memory-or-opened.md), [Static files](../guide/static-files.md#a-vue-or-react-build-in-the-binary)). A path listed twice, and a fallback that names no entry, are refused at startup ([ADR 009](../adr/009-static-files-are-held-in-memory-or-opened.md)).
+
+### `nilo.app`
+
+**`nilo.app(b, options)` is a function of nilo's `build.zig`**, imported by a dependent as `@import("nilo").app`, that writes the whole `build` of a server ([ADR 263](../adr/263-a-first-project-is-one-call-from-its-build-file.md), [Getting started](../guide/getting-started.md#add-it-to-a-project-you-already-have)).
+
+```zig
+const nilo = @import("nilo");
+pub fn build(b: *std.Build) void {
+    _ = nilo.app(b, .{ .name = "hello", .root = b.path("src/main.zig") });
+}
+```
+
+| `nilo.AppOptions` field | |
+|---|---|
+| `.name` | the executable's name |
+| `.root` | a `LazyPath` to the file with `main` |
+| `.target`, `.optimize` | read from `-Dtarget` and `-Doptimize` when null; the mode passes unchanged to the dependency, the executable and the test |
+| `.sql` | imports `nilo_sql` and fetches its drivers (`-Dsql`, [ADR 066](../adr/066-a-lazy-dependency-is-a-request.md)) |
+| `.tls`, `.http2`, `.libdeflate` | the dependency's flags of the same names, each off until set |
+
+It imports `nilo_http` into the root module, installs the executable, and adds the steps `run` (arguments after `--` reach the server), `dev` (the restart on every save of [ADR 190](../adr/190-a-restart-on-save-watches-the-binary-not-the-sources.md), where `-D` options and `--no-incremental` go after `--`) and `test` (the root module's tests). It returns `nilo.AppBuilt`: `.exe` and `.tests` (the compile steps), and `.dependency`, the `nilo` dependency it fetched, from which `module("nilo_id")` or any other module is taken without a second instance. Every field of `AppOptions` after `.root` has a default, so a field added later changes no project already written.
 
 **`reload = true` is the same as `max_file_bytes = 0`**: nothing is held, every file is opened per request, and edits show up without a restart. It is for development, since it gives up the in-memory and gzipped copies. A file that did not exist at startup still needs a restart, because the list of names comes from the directory walk at startup.
 

@@ -455,6 +455,23 @@ pub fn innerRead(
     }
 }
 
+/// Refuse, while compiling, a struct read from a body that skips a field it
+/// could not fill: a skipped field is never read, so it needs a default or a
+/// `?T` to stand in for it (ADR 148). Asked where a type is first read from a
+/// body and not where it is marked, because a type that is only ever written
+/// skips a password hash with no default and has no reader to refuse it.
+pub fn refuseUnreadableSkips(comptime T: type) void {
+    comptime mark.checkSkipsReadable(T, struct {
+        fn absent(comptime name: []const u8) bool {
+            const info = @typeInfo(T).@"struct";
+            for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+                if (std.mem.eql(u8, f_name, name)) return field_mod.FieldRule(f_type, f_attrs).may_be_absent;
+            }
+            unreachable;
+        }
+    }.absent);
+}
+
 /// The fields of an object whose `{` has been taken, read into `T`.
 ///
 /// **`tag` is a tagged union's discriminator that the caller has already read**
@@ -476,6 +493,7 @@ pub fn readFields(
 ) std.json.ParseError(@TypeOf(source.*))!T {
     const s = @typeInfo(T).@"struct";
     comptime @setEvalBranchQuota(convert.budget(s.field_names));
+    comptime refuseUnreadableSkips(T);
 
     var r: T = undefined;
     var seen = @as([s.field_names.len]bool, @splat(false));
@@ -490,7 +508,10 @@ pub fn readFields(
 
         inline for (s.field_names, s.field_types, s.field_attrs, 0..) |f_name, f_type, f_attrs, i| {
             if (f_attrs.@"comptime") @compileError("comptime fields are not supported: " ++ @typeName(T) ++ "." ++ f_name);
-            if (std.mem.eql(u8, f_name, name)) {
+            // The key a client sends is the wire spelling, settled while
+            // compiling like the writer's (ADR 148); a skipped field has no
+            // key, so a client sending its name meets the unknown-key path.
+            if (!(comptime mark.fieldSkipped(T, f_name)) and std.mem.eql(u8, (comptime mark.fieldWire(T, f_name)), name)) {
                 if (seen[i]) switch (options.duplicate_field_behavior) {
                     .use_first => {
                         // Read and dropped: the type check is the point.
@@ -584,16 +605,17 @@ pub fn readsItself(comptime T: type) bool {
     };
 }
 
-/// A struct that renames its fields cannot be written by `std.json`, which does
-/// not read the marker
+/// A struct that renames or skips its fields cannot be written by `std.json`,
+/// which does not read the marker
 /// ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
 ///
 /// **The fallback is the hole this closes.** `covers` errs narrow on purpose:
 /// one field it does not recognise — an array of bytes, an untagged union, a
 /// tuple, a type with its own `jsonStringify`, anything past eight deep — sends
 /// the whole value to `std.json`. A renamed struct anywhere in that value would
-/// then go out spelled the way it is written, while `openapi.schemaWithin`
-/// promised the renamed keys, and nothing would fail.
+/// then go out spelled the way it is written, and a skipped field would go out
+/// at all, while `openapi.schemaWithin` promised otherwise, and nothing would
+/// fail.
 ///
 /// So it is a compile error rather than a quiet disagreement, which is the same
 /// answer ADR 016 reached for a type that writes its own JSON and describes its
@@ -602,14 +624,14 @@ fn refuseRenameOnTheFallback(comptime T: type) void {
     comptime {
         const Renamed = mark.renamedFieldsWithin(T) orelse return;
         @compileError(
-            "nilo: `" ++ @import("names.zig").of(Renamed) ++ "` renames its fields, and this " ++
+            "nilo: `" ++ @import("names.zig").of(Renamed) ++ "` renames or skips its fields, and this " ++
                 "value goes to `std.json`, which does not read the marker (ADR 148).\n" ++
                 "  `covers` sends the whole value to `std.json` when one shape in it is not " ++
                 "nilo's to write: a tuple, an array of bytes, an untagged union, a type with " ++
                 "its own `jsonStringify`, or anything nested more than eight deep.\n" ++
-                "  The keys would go out spelled as they are written while the API description " ++
-                "promised the renamed ones. Take `rename_all` off, or take out the shape that " ++
-                "cannot be written here.",
+                "  The keys would go out spelled as they are written, and a skipped field would go " ++
+                "out at all, while the API description promised otherwise. Take `rename_all` " ++
+                "and `skip` off, or take out the shape that cannot be written here.",
         );
     }
 }
@@ -849,6 +871,7 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
                         const inner = comptime mark.of(Payload);
                         const payload_info = @typeInfo(Payload).@"struct";
                         inline for (payload_info.field_names, payload_info.field_types) |f_name, f_type| {
+                            if (comptime mark.skipped(inner, f_name)) continue;
                             try w.writeAll(comptime ",\"" ++ mark.wire(f_name, inner) ++ "\":");
                             try writeValue(f_type, w, @field(payload, f_name));
                         }
@@ -873,13 +896,19 @@ fn writeValue(comptime T: type, w: *std.Io.Writer, value: T) std.Io.Writer.Error
             // compiling either way, so a renamed struct writes exactly as much
             // as a plain one.
             const m = comptime mark.of(T);
-            inline for (s.field_names, s.field_types, 0..) |f_name, f_type, i| {
+            // A skipped field is not written, and which field opens the
+            // object is settled while compiling like the rest (ADR 148).
+            comptime var opened = false;
+            inline for (s.field_names, s.field_types) |f_name, f_type| {
+                if (comptime mark.skipped(m, f_name)) continue;
                 // The brace or comma, the quoted name and the colon are one
                 // string settled while compiling.
-                try w.writeAll(comptime (if (i == 0) "{\"" else ",\"") ++
+                try w.writeAll(comptime (if (!opened) "{\"" else ",\"") ++
                     mark.wire(f_name, m) ++ "\":");
+                opened = true;
                 try writeValue(f_type, w, @field(value, f_name));
             }
+            if (comptime !opened) return w.writeAll("{}");
             return w.writeByte('}');
         },
 
@@ -1950,6 +1979,57 @@ test "a struct of keys can say how its fields are spelled" {
             .partner_id = .{ .bytes = .{ 10, 11, 12, 13 } },
         },
     );
+}
+
+test "a skipped field is left out of the object, whichever place it sits in" {
+    const Account = struct {
+        pub const nilo_json = .{ .skip = &.{ "salt", "password_hash" } };
+
+        salt: []const u8,
+        id: u32,
+        password_hash: []const u8,
+        name: []const u8,
+    };
+    try expectJson("{\"id\":7,\"name\":\"wati\"}", Account{ .salt = "s", .id = 7, .password_hash = "h", .name = "wati" });
+
+    const Hidden = struct {
+        pub const nilo_json = .{ .skip = &.{"secret"} };
+        secret: u8,
+    };
+    try expectJson("{}", Hidden{ .secret = 1 });
+
+    // Inside a tagged variant the payload's own marker is the one that counts.
+    const Event = union(enum) {
+        pub const nilo_json = .{ .tag = "kind" };
+        login: struct {
+            pub const nilo_json = .{ .skip = &.{"token"} };
+            user: u32,
+            token: []const u8,
+        },
+    };
+    try expectJson("{\"kind\":\"login\",\"user\":3}", Event{ .login = .{ .user = 3, .token = "t" } });
+}
+
+test "a body is read by the wire spelling and a skipped key is an unknown one" {
+    const a = testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const Row = struct {
+        pub const nilo_json = .{ .rename_all = .camelCase, .rename = .{ .due_at = "due" }, .skip = &.{"password_hash"} };
+
+        full_name: []const u8,
+        due_at: u32,
+        password_hash: []const u8 = "",
+    };
+    const row = try parseLeaky(Row, arena.allocator(), "{\"fullName\":\"Wati\",\"due\":7}", .{});
+    try testing.expectEqualStrings("Wati", row.full_name);
+    try testing.expectEqual(@as(u32, 7), row.due_at);
+    try testing.expectEqualStrings("", row.password_hash);
+
+    try testing.expectError(error.UnknownField, parseLeaky(Row, arena.allocator(), "{\"full_name\":\"W\",\"due\":7}", .{}));
+    try testing.expectError(error.UnknownField, parseLeaky(Row, arena.allocator(), "{\"fullName\":\"W\",\"dueAt\":7}", .{}));
+    try testing.expectError(error.UnknownField, parseLeaky(Row, arena.allocator(), "{\"fullName\":\"W\",\"due\":7,\"password_hash\":\"x\"}", .{}));
+    try testing.expectError(error.MissingField, parseLeaky(Row, arena.allocator(), "{\"due\":7}", .{}));
 }
 
 test "one field can be spelled on its own, and the entry wins over the case" {

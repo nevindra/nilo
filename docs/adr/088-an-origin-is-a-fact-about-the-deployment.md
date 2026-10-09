@@ -28,6 +28,8 @@ pub fn main() !void {
 }
 ```
 
+**The idiom is not CORS's alone.** A rate limit's counts and a Content-Security-Policy are deployment facts too, and `nilo.Late(T)` (a value stated in the program or the address of one filled before `listen()`) is the shape they and `maxBody` share ([ADR 264](./264-a-deployment-fact-is-a-late-value.md)). `cors.reading` keeps its `Origins` because a list needs a type of its own.
+
 ## What stays comptime, and why that is not a compromise
 
 Everything except the list: the methods, the headers, the exposed headers, the

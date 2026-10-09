@@ -13,11 +13,13 @@ const app_mod = @import("app.zig");
 const router = @import("router.zig");
 const service_mod = @import("service.zig");
 const mw = @import("middleware.zig");
+const pathparams = @import("pathparams.zig");
 const static_mod = @import("static.zig");
 const proxies_mod = @import("proxies.zig");
 const openapi = @import("openapi.zig");
 const compress_mod = @import("compress.zig");
 const bulkhead = @import("bulkhead.zig");
+const log_mod = @import("log.zig");
 
 const App = app_mod.App;
 
@@ -112,6 +114,115 @@ pub fn checkServices(self: *const App) error{MissingService}!void {
         );
     }
     return error.MissingService;
+}
+
+/// A typed middleware reads a path param a route it covers does not have.
+pub const PathGap = struct {
+    /// "the middleware taking (…)".
+    who: []const u8,
+    param: []const u8,
+    /// The route's pattern, or for a static mount its prefix.
+    route: []const u8,
+    static: bool = false,
+};
+
+/// The first path param a typed middleware reads that a route in its chain
+/// lacks, or null. The predicate `checkMiddlewarePaths` reports through, and
+/// what a test reads, as `missingService` is for services (ADR 005).
+pub fn middlewarePathGap(self: *const App) ?PathGap {
+    return scanPaths(self, false);
+}
+
+fn scanPaths(self: *const App, report: bool) ?PathGap {
+    var first: ?PathGap = null;
+    for (self.middleware_needs.items) |need| {
+        if (need.paths.len == 0) continue;
+        for (self.router.routes.items) |r| {
+            if (!routeReached(self, need.run, r)) continue;
+            for (need.paths) |name| {
+                if (pathparams.captures(r.pattern, name)) continue;
+                const gap: PathGap = .{ .who = need.who, .param = name, .route = r.pattern };
+                if (first == null) first = gap;
+                if (!report) return first;
+                std.log.err(
+                    "{s} reads the path param :{s}, and route \"{s}\" has no such param, " ++
+                        "but the middleware covers it. Cover only routes that have it " ++
+                        "(`app.useOn(\"/orgs/:org\", …)` or `with`), or read the param " ++
+                        "from the `*Ctx` with `c.param(\"{s}\")` instead",
+                    .{ need.who, name, r.pattern, name },
+                );
+                break;
+            }
+        }
+        // A static file has no params at all, so a mount under the middleware
+        // would be served unguarded (ADR 008).
+        const mounts = [_]?*const static_mod.Set{
+            if (self.docs_set) |*set| set else null,
+        };
+        for (mounts) |maybe| if (maybe) |set| {
+            if (!mountReached(self, need.run, set.prefix)) continue;
+            const gap: PathGap = .{ .who = need.who, .param = need.paths[0], .route = set.prefix, .static = true };
+            if (first == null) first = gap;
+            if (!report) return first;
+            reportMount(gap);
+        };
+        for (self.static_sets.items) |*set| {
+            if (!mountReached(self, need.run, set.prefix)) continue;
+            const gap: PathGap = .{ .who = need.who, .param = need.paths[0], .route = set.prefix, .static = true };
+            if (first == null) first = gap;
+            if (!report) return first;
+            reportMount(gap);
+        }
+    }
+    return first;
+}
+
+fn reportMount(gap: PathGap) void {
+    std.log.err(
+        "{s} reads the path param :{s}, and the static mount \"{s}\" is under its prefix, " ++
+            "where a file has no path params: it would be served without the middleware's check. " ++
+            "Move the mount outside the middleware's prefix, or the middleware onto the routes " ++
+            "that have the param",
+        .{ gap.who, gap.param, gap.route },
+    );
+}
+
+/// Whether the middleware `run` is in front of `r`: in its chain, or on a
+/// prefix that only the real path can decide (`reach` says `.depends`, as for
+/// `useOn("/api", …)` beside `/:version/list`), taken as covered unless the
+/// route was excused from it. Conservative on purpose: a route that might be
+/// covered and lacks the param is refused, rather than 500 on a request.
+fn routeReached(self: *const App, run: mw.Middleware, r: router.Route) bool {
+    for (r.chain) |m| if (m == run) return true;
+    for (self.scoped.items) |s| {
+        if (s.middleware != run) continue;
+        if (mw.reach(s.prefix, r.pattern) != .depends) continue;
+        var excused = false;
+        for (self.exemptions.items) |e| {
+            if (e.middleware == run and e.method == r.method and std.mem.eql(u8, e.pattern, r.pattern)) excused = true;
+        }
+        if (!excused) return true;
+    }
+    return false;
+}
+
+/// Whether a static mount at `prefix` can hold a file the middleware `run`
+/// covers: its prefix and the mount's are nested either way round.
+fn mountReached(self: *const App, run: mw.Middleware, prefix: []const u8) bool {
+    for (self.scoped.items) |s| {
+        if (s.middleware != run) continue;
+        if (mw.reach(s.prefix, prefix) != .outside or mw.reach(prefix, s.prefix) != .outside) return true;
+    }
+    return false;
+}
+
+/// Hold the path params every typed middleware reads against each route its
+/// chain covers (ADR 008). Called by `listen()` once the chains exist: each
+/// route must have a `:name` for every field of a `Path(T)` the middleware
+/// takes, directly or through a resolver, or the first request to it would
+/// be a 500. Said for every middleware and route, naming both and the param.
+pub fn checkMiddlewarePaths(self: *const App) error{MiddlewarePathParam}!void {
+    if (scanPaths(self, true) != null) return error.MiddlewarePathParam;
 }
 
 /// Work out which middleware wraps each route, once. Called by
@@ -354,7 +465,7 @@ pub fn countUndescribed(self: *App) void {
 /// parks the whole event loop behind it; without `std_options`, the
 /// Engine's own debug lines bury yours. Neither can be set from a library,
 /// so the next best thing is to say so once, by name, at startup.
-pub fn checkRootWiring() void {
+pub fn checkRootWiring(log_format: log_mod.Format) void {
     if (comptime !@hasDecl(@import("root"), "std_options_debug_io")) std.log.warn(
         "std.log will block the event loop. Add to your root source file: " ++
             "pub const std_options_debug_io = nilo.debug_io;",
@@ -365,7 +476,30 @@ pub fn checkRootWiring() void {
             "root source file: pub const std_options = nilo.std_options;",
         .{},
     );
+    if (comptime missingPanic(@import("root"))) |line| std.log.warn("{s}", .{line});
+    // JSON is the format that needs the sink: behind std's default `logFn`
+    // every line starts `info: `, which no collector parses (ADR 262).
+    if (log_format == .json and comptime !log_mod.installed) std.log.warn(
+        "log lines will not be JSON: std's logFn puts `info: ` in front of each. Add to your " ++
+            "root source file: pub const std_options: std.Options = .{{ .logFn = nilo.logFn }};",
+        .{},
+    );
     warnIfBuiltDifferently();
+}
+
+/// The warning for a root file with no `pub const panic = nilo.panic`, or
+/// null when it has one (ADR 007). A panic ends the process, not the request
+/// (Go's net/http loses one request and carries on), and without this line
+/// the crash log does not name the request that did it. In `ReleaseFast` the
+/// same mistake is undefined behaviour rather than a panic, so the sentence
+/// says what to build with. A function of the root so a test can hand it
+/// roots that have the line and roots that do not.
+pub fn missingPanic(comptime Root: type) ?[]const u8 {
+    if (@hasDecl(Root, "panic")) return null;
+    return "a panic ends the whole process, not just the request, and the crash log will not " ++
+        "name the request that did it. Add to your root source file: " ++
+        "pub const panic = nilo.panic;  (build ReleaseSafe in production: in ReleaseFast " ++
+        "an overflow or out-of-bounds is undefined behaviour, not a panic)";
 }
 
 /// What the *program* was built at, which is not the same question as what
@@ -466,3 +600,98 @@ const RouteList = struct {
         }
     }
 };
+
+test "a root file without nilo.panic is warned about, with the line to add and the ReleaseFast caveat" {
+    const Without = struct {};
+    const With = struct {
+        pub const panic = 1;
+    };
+    const line = missingPanic(Without).?;
+    try std.testing.expect(std.mem.indexOf(u8, line, "pub const panic = nilo.panic;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "ReleaseFast") != null);
+    try std.testing.expect(missingPanic(With) == null);
+}
+
+/// Whether the process is inside a container, from three facts a caller
+/// reads once: `/.dockerenv` exists, `/run/.containerenv` exists (Podman), or
+/// PID 1's cgroup names a container runtime. A function of the facts so a
+/// test can feed it fake ones (ADR 103).
+pub fn inContainer(dockerenv: bool, containerenv: bool, cgroup: []const u8) bool {
+    if (dockerenv or containerenv) return true;
+    const runtimes = [_][]const u8{ "docker", "containerd", "kubepods", "libpod", "lxc" };
+    for (runtimes) |name| {
+        if (std.mem.indexOf(u8, cgroup, name) != null) return true;
+    }
+    return false;
+}
+
+/// Whether an `Options.address` can only be reached from this machine:
+/// `127.x.x.x`, `::1` and `localhost`. A unix socket path is not a network
+/// address and is never reported.
+pub fn isLoopbackAddress(address: []const u8) bool {
+    return std.mem.startsWith(u8, address, "127.") or
+        std.mem.eql(u8, address, "::1") or
+        std.mem.eql(u8, address, "localhost");
+}
+
+/// The warning for a loopback listener inside a container, or null (ADR 103).
+/// The default address is loopback because that is the safe one, and inside
+/// a container it is a server that is up and unreachable: the published port
+/// reaches the container's own interface, not its loopback.
+pub fn loopbackInContainer(address: []const u8, in_container: bool) ?[]const u8 {
+    if (!in_container or !isLoopbackAddress(address)) return null;
+    return "this process is in a container and listens on a loopback address, so nothing " ++
+        "outside the container can reach it, published port or not. Listen on every " ++
+        "interface with .address = \"0.0.0.0\" (or read the address from config)";
+}
+
+/// Read the container facts, Linux only, once at startup. Raw syscalls
+/// because `tryListen` has no `Io`, and nothing here survives the call: a
+/// stack buffer for the first 4 KiB of the cgroup file.
+fn readInContainer() bool {
+    if (comptime builtin.os.tag != .linux) return false;
+    const linux = std.os.linux;
+    const exists = struct {
+        fn at(path: [*:0]const u8) bool {
+            const r = linux.openat(linux.AT.FDCWD, path, .{ .CLOEXEC = true }, 0);
+            if (linux.errno(r) != .SUCCESS) return false;
+            _ = linux.close(@intCast(r));
+            return true;
+        }
+    }.at;
+    var buf: [4096]u8 = undefined;
+    var n: usize = 0;
+    const r = linux.openat(linux.AT.FDCWD, "/proc/1/cgroup", .{ .CLOEXEC = true }, 0);
+    if (linux.errno(r) == .SUCCESS) {
+        const got = linux.read(@intCast(r), &buf, buf.len);
+        if (linux.errno(got) == .SUCCESS) n = got;
+        _ = linux.close(@intCast(r));
+    }
+    return inContainer(exists("/.dockerenv"), exists("/run/.containerenv"), buf[0..n]);
+}
+
+/// Called by `tryListen` with the addresses about to be listened on. One
+/// line however many of them are loopback.
+pub fn warnLoopbackInContainer(primary: []const u8, also: []const bulkhead.Options.Listener) void {
+    var loopback = isLoopbackAddress(primary);
+    for (also) |l| loopback = loopback or isLoopbackAddress(l.address);
+    if (!loopback) return;
+    if (loopbackInContainer("127.0.0.1", readInContainer())) |line| std.log.warn("{s}", .{line});
+}
+
+test "a container is told apart by its marker files and by PID 1's cgroup" {
+    try std.testing.expect(inContainer(true, false, ""));
+    try std.testing.expect(inContainer(false, true, ""));
+    try std.testing.expect(inContainer(false, false, "12:cpu:/docker/abc123\n"));
+    try std.testing.expect(inContainer(false, false, "0::/kubepods/besteffort/pod1\n"));
+    try std.testing.expect(!inContainer(false, false, "0::/init.scope\n"));
+}
+
+test "a loopback address in a container is warned about and anything else is not" {
+    const line = loopbackInContainer("127.0.0.1", true).?;
+    try std.testing.expect(std.mem.indexOf(u8, line, ".address = \"0.0.0.0\"") != null);
+    try std.testing.expect(loopbackInContainer("::1", true) != null);
+    try std.testing.expect(loopbackInContainer("0.0.0.0", true) == null);
+    try std.testing.expect(loopbackInContainer("unix:/run/app.sock", true) == null);
+    try std.testing.expect(loopbackInContainer("127.0.0.1", false) == null);
+}

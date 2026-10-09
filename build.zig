@@ -12,9 +12,12 @@ const std = @import("std");
 /// shipped for a whole session with neither, and nothing noticed, because a
 /// list that does not name a directory cannot check it.
 ///
+/// `template` is not a module either: it is the project `nilo.app` is
+/// shown on, copied out of the package by a first project (ADR 263).
+///
 /// `dev` is not a module — nothing imports it — but a dependent builds
 /// `nilo.artifact("nilo-dev")` from it, so it ships the same way (ADR 190).
-const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "jwt", "proto", "fetch", "job", "http", "sql", "s3", "dev" };
+const shipped_roots = [_][]const u8{ "core", "id", "config", "pw", "cache", "jwt", "proto", "fetch", "job", "http", "sql", "s3", "dev", "template" };
 
 comptime {
     const manifest = @embedFile("build.zig.zon");
@@ -134,11 +137,11 @@ const layers = [_]Layer{
 ///
 /// Every row in `layers` above is a module with a boundary around it. Inside
 /// `http/` there is no such stack: `app`, `ctx`, `router`, `typed`, `serve`,
-/// `wiring` and eleven more form **one strongly connected component** — each
+/// `wiring` and twelve more form **one strongly connected component** — each
 /// reaches each, and Zig's lazy analysis lets them. Writing a tier table over
 /// that would be writing down a hierarchy that is not there.
 ///
-/// What *is* there is a boundary at its edge. Twenty-six files under `http/`
+/// What *is* there is a boundary at its edge. Twenty-five files under `http/`
 /// name nothing in the core, which is what lets them be read on their own and
 /// several of them be run with a plain `zig test http/<file>.zig`. This step
 /// refuses the import that would pull one of them in, because that import is
@@ -153,9 +156,10 @@ const layers = [_]Layer{
 /// naming nothing in the core. That is the whole of the work, and the list
 /// getting shorter is the point of writing it down.
 const http_core = [_][]const u8{
-    "app",      "bound",      "bytebody", "ctx",      "filebody", "form",
-    "metrics",  "middleware", "openapi",  "password", "resolve",  "router",
-    "sendfile", "serve",      "session",  "testing",  "typed",    "wiring",
+    "app",      "bound",      "bytebody", "ctx",        "filebody", "form",
+    "metrics",  "middleware", "openapi",  "password",   "pathparams", "resolve",
+    "router",   "sendfile",   "serve",    "session",    "testing",    "typed",
+    "typedmw",  "wiring",
 };
 
 /// Files that sit **above** the core rather than below it, and so may name it.
@@ -335,7 +339,7 @@ const sql_refusals = [_]Refusal{
     },
     .{
         .name = "list_column_of_a_timestamp",
-        .says = "list_column_of_a_timestamp.Slot reads `opens` as []const types.Timestamp, a list of types.Timestamp, which the driver cannot decode as an array element.",
+        .says = "list_column_of_a_timestamp.Slot reads `opens` as []const Timestamp, a list of Timestamp, which the driver cannot decode as an array element.",
     },
     .{
         .name = "across_on_one_column",
@@ -712,7 +716,7 @@ const sql_refusals = [_]Refusal{
     },
     .{
         .name = "children_max_read_as_not_optional",
-        .says = "children_max_read_as_not_optional.EpicCard reads `.latest_target`, the max of `target_date` over the rows pointing back, as types.Date.",
+        .says = "children_max_read_as_not_optional.EpicCard reads `.latest_target`, the max of `target_date` over the rows pointing back, as Date.",
     },
     .{
         .name = "children_max_naming_only_a_column",
@@ -1153,7 +1157,7 @@ const sql_refusals = [_]Refusal{
     // value of (ADR 181).
     .{
         .name = "today_on_a_timestamp",
-        .says = "`.set = .{ .seen_at = .today }` on today_on_a_timestamp.Card, whose `seen_at` is types.Timestamp.",
+        .says = "`.set = .{ .seen_at = .today }` on today_on_a_timestamp.Card, whose `seen_at` is Timestamp.",
     },
     .{
         .name = "today_on_a_timestamp_read_as_text",
@@ -1883,6 +1887,14 @@ const fetch_refusals = [_]Refusal{
 const refusals = [_]Refusal{
     // The three shapes `app.before` will not run (ADR 180).
     .{
+        .name = "bearer_not_a_struct",
+        .says = "the `Bearer(u32)` is not a struct.",
+    },
+    .{
+        .name = "bearer_too_big_for_a_header",
+        .says = "a `Bearer(bearer_too_big_for_a_header.Signed)` would be 11000 bytes in the Authorization header, and the most that fits is 8000.",
+    },
+    .{
         .name = "before_not_a_function",
         .says = "app.before() takes a function, not bool.",
     },
@@ -1951,6 +1963,30 @@ const refusals = [_]Refusal{
     },
     // A readiness hook of the wrong shape (ADR 154).
     .{
+        .name = "middleware_first_argument_not_ctx",
+        .says = "the first argument of the middleware fn (*middleware_first_argument_not_ctx.Keys, *nilo.Ctx, nilo.Next) has to be a `*Ctx`.",
+    },
+    .{
+        .name = "middleware_held_as_a_pointer",
+        .says = "a typed middleware has to be a function known while compiling, and this one is held in a variable.",
+    },
+    .{
+        .name = "middleware_returns_a_value",
+        .says = "the middleware fn (*nilo.Ctx, nilo.Next, *middleware_returns_a_value.Keys) returns a u32.",
+    },
+    .{
+        .name = "middleware_second_argument_not_next",
+        .says = "the second argument of the middleware fn (*nilo.Ctx, *middleware_second_argument_not_next.Keys) has to be a `Next`.",
+    },
+    .{
+        .name = "middleware_takes_a_body",
+        .says = "argument 3 of the middleware taking (middleware_takes_a_body.Login) is a middleware_takes_a_body.Login, which a middleware cannot be given.",
+    },
+    .{
+        .name = "middleware_takes_a_query",
+        .says = "argument 3 of the middleware taking (nilo.Query(middleware_takes_a_query.Page)) is a nilo.Query(middleware_takes_a_query.Page), which a middleware cannot be given.",
+    },
+    .{
         .name = "ready_hook_wrong_arity",
         .says = "ready_hook_wrong_arity.Mailer.nilo_ready takes 1 parameters, and it has to take 2.",
     },
@@ -1982,6 +2018,22 @@ const refusals = [_]Refusal{
     .{
         .name = "on_listener_past_thirty_one",
         .says = "a route can be bound to listeners 0 to 31, and `onListener` was given a larger number.",
+    },
+    .{
+        .name = "allowance_with_an_option_it_does_not_have",
+        .says = "the options of this call have no field `perwindow`.",
+    },
+    .{
+        .name = "allowance_name_too_long_for_its_header",
+        .says = "an allowance's `.name` is sent as the name of its RateLimit policy, and can be at most 24 characters: the line it is part of is built in 64 bytes of the Ctx so that no allocation is made.",
+    },
+    .{
+        .name = "allowance_keyed_above_what_a_slot_holds",
+        .says = "a keyed allowance above 16,777,215 requests a window is more than a slot's counters hold.",
+    },
+    .{
+        .name = "late_address_of_the_wrong_type",
+        .says = "this option takes a `u32` or the address of one, and was handed `*u16`.",
     },
     .{
         .name = "allowance_of_no_requests",
@@ -2198,8 +2250,8 @@ const refusals = [_]Refusal{
         .says = "the field `tags: []const u8` of the `Form(form_field_cannot_convert.SignUp)` on route \"/sign-up\" is not something a form value can become.",
     },
     .{
-        .name = "form_list_element_cannot_convert",
-        .says = "the field `photos: []const nilo.Upload` of the `Form(form_list_element_cannot_convert.Gallery)` on route \"/gallery\" is a list of something a form value cannot become.",
+        .name = "form_list_of_optional_cannot_convert",
+        .says = "the field `tags: []const ?nilo.Str` of the `Form(form_list_of_optional_cannot_convert.Tags)` on route \"/tags\" is a list of something a form value cannot become.",
     },
     .{
         .name = "verified_of_the_claims",
@@ -2388,6 +2440,39 @@ const refusals = [_]Refusal{
         .name = "within_default_outside_its_range",
         .says = "`Within(1, 200).of(500)` is outside its own range.",
     },
+    .{
+        .name = "within_bound_not_a_number",
+        .says = "`Within` takes numbers for its bounds: a bound has to be a number.",
+    },
+    .{
+        .name = "within_bound_not_finite",
+        .says = "`Within` has a bound that is not a finite number.",
+    },
+    .{
+        .name = "within_real_default_outside_its_range",
+        .says = "`Within(0, 1).of(1.5)` is outside its own range.",
+    },
+    // A list with a length (ADR 266).
+    .{
+        .name = "many_bounds_reversed",
+        .says = "`Many(nilo.Str, .{ .min = 5, .max = 1 })` has its bounds the wrong way round: nothing is at least 5 and at most 1 items.",
+    },
+    .{
+        .name = "many_with_no_bound",
+        .says = "`Many(nilo.Str, .{})` asks nothing of the count, so it is a `[]const nilo.Str` with a longer name.",
+    },
+    .{
+        .name = "many_of_bytes",
+        .says = "`Many(u8, …)` is a list of bytes, and bytes are text in a request.",
+    },
+    .{
+        .name = "many_default_outside_its_bound",
+        .says = "`nilo.Many(u32, .{ .min = 1, .max = 3 }).of(…)` is given 0 items, which is outside its own bound.",
+    },
+    .{
+        .name = "many_in_a_query",
+        .says = "the field `tags: nilo.Many(u32, .{ .max = 3 })` of the `Query(many_in_a_query.Search)` on route \"/users\" is a list with a length, which a query string does not carry.",
+    },
     // One field spelled on its own (ADR 168): the entry has to name a field,
     // has to change it, and must not land it on another field's spelling.
     .{
@@ -2411,12 +2496,20 @@ const refusals = [_]Refusal{
         .says = "the request body on route \"/lines\" holds a `body_field_that_parses_itself_without_a_reader.Sku`, which parses itself from text (`nilo_parse`) and has not told `std.json` so.",
     },
     .{
-        .name = "json_rename_all_on_a_request_body",
-        .says = "the request body on route \"/contacts\" is read into `json_rename_all_on_a_request_body.NewContact`, which renames its fields — and a renamed field name is a spelling for what goes out (ADR 148).",
+        .name = "json_rename_all_on_a_form",
+        .says = "the form on route \"/contacts\" is read into `json_rename_all_on_a_form.NewContact`, which renames or skips its fields — and `nilo_json` is a statement about JSON (ADR 148).",
+    },
+    .{
+        .name = "json_skip_without_a_default_on_a_body",
+        .says = "`json_skip_without_a_default_on_a_body.Account` skips `password_hash` (`.skip` in its `nilo_json`) and is read from a request body, where a skipped field is never read and has nothing to hold.",
+    },
+    .{
+        .name = "json_skip_of_a_field_it_does_not_have",
+        .says = "`json_skip_of_a_field_it_does_not_have.Account` skips a field `password_hash` it does not have.",
     },
     .{
         .name = "json_rename_all_on_a_shape_that_falls_back",
-        .says = "`json_rename_all_on_a_shape_that_falls_back.Contact` renames its fields, and this value goes to `std.json`, which does not read the marker (ADR 148).",
+        .says = "`json_rename_all_on_a_shape_that_falls_back.Contact` renames or skips its fields, and this value goes to `std.json`, which does not read the marker (ADR 148).",
     },
     .{
         .name = "json_rename_all_is_already_zig",
@@ -2505,6 +2598,46 @@ const refusals = [_]Refusal{
     .{
         .name = "parse_marker_wrong_return",
         .says = "`parse_marker_wrong_return.Sku`'s `nilo_parse` answers parse_marker_wrong_return.Sku rather than `?parse_marker_wrong_return.Sku`.",
+    },
+    .{
+        .name = "path_field_unknown",
+        .says = "the field `ident: u32` of the `nilo.Path(path_field_unknown.Params)` on route \"/orgs/:org/members/:id\" names no path param of route \"/orgs/:org/members/:id\", which has :org, :id.",
+    },
+    .{
+        .name = "path_field_not_a_param_type",
+        .says = "the field `id: path_field_not_a_param_type.Inner` of the `nilo.Path(path_field_not_a_param_type.Params)` on route \"/members/:id\" is not something a path param can become.",
+    },
+    .{
+        .name = "path_mixed_with_positional",
+        .says = "the handler for route \"/members/:id\" reads a path param by position and also asks for nilo.Path(path_mixed_with_positional.Params) (argument 2).",
+    },
+    .{
+        .name = "path_not_a_struct",
+        .says = "the `nilo.Path(u32)` on route \"/members/:id\" is read into u32, which is not a struct.",
+    },
+    .{
+        .name = "path_optional_field",
+        .says = "the field `id: ?u32` of the `nilo.Path(path_optional_field.Params)` on route \"/members/:id\" is optional.",
+    },
+    .{
+        .name = "path_param_without_field",
+        .says = "the route \"/orgs/:org/members/:id\" has the path param :id, and the `nilo.Path(path_param_without_field.Params)` on route \"/orgs/:org/members/:id\" has no field `id` for it.",
+    },
+    .{
+        .name = "path_params_none_read",
+        .says = "route \"/orgs/:org/members/:id\" has 2 path params (:org, :id), but its handler reads none of them; read them by name: nilo.Path(struct { org: nilo.Str, id: nilo.Str })",
+    },
+    .{
+        .name = "path_twice",
+        .says = "the handler for route \"/orgs/:org/members/:id\" asks for the path params twice, argument 1 and argument 2.",
+    },
+    .{
+        .name = "positional_path_params",
+        .says = "route \"/orgs/:org/members/:id\" has 2 path params (:org, :id); read them by name: nilo.Path(struct { org: u32, id: u32 })",
+    },
+    .{
+        .name = "resolver_path_unknown_field",
+        .says = "the field `team: u32` of the `nilo.Path(resolver_path_unknown_field.TeamParams)` of the resolver `resolver_path_unknown_field.InTeam` names no path param of route \"/orgs/:org\", which has :org.",
     },
     .{
         .name = "patch_as_an_argument",
@@ -2664,7 +2797,7 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "unused_pattern_params",
-        .says = "route \"/users/:user/pets/:pet\" has 2 path params (:user, :pet), but its handler only takes 1.",
+        .says = "route \"/users/:user/pets/:pet\" has 2 path params (:user, :pet); read them by name: nilo.Path(struct { user: u32, pet: nilo.Str })",
     },
     .{
         .name = "upload_as_an_argument",
@@ -3815,6 +3948,22 @@ const Checks = struct {
         named.dependOn(&check.step);
     }
 
+    /// `template/` builds and passes its own test against this working copy
+    /// (ADR 263). On `test`, because it needs nothing `test` does not: zio
+    /// is already in the global cache.
+    fn template(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step {
+        const named = b.step("template-check", "Build and test template/ against this working copy, the way a first project does");
+        const check = run(b, "template-check", "template-check");
+        check.addFileArg(.zig_exe);
+        check.addDirectoryArg2(.cache_root, .{ .make_absolute = true });
+        check.addArg(target.query.zigTriple(b.allocator) catch @panic("OOM"));
+        // Its inputs are files the Run step does not hash, and the child
+        // build keeps its own cache, so it runs when asked.
+        check.has_side_effects = true;
+        named.dependOn(&check.step);
+        return named;
+    }
+
     /// Say out loud that a step asserted nothing.
     ///
     /// **`error.SkipZigTest` is invisible through `zig build`.** The test runner
@@ -3934,6 +4083,104 @@ pub fn embedDir(b: *std.Build, nilo_http: *std.Build.Module, dir: []const u8) *s
         .root_source_file = copies.add("embedded.zig", source.written()),
         .imports = &.{.{ .name = "nilo_http", .module = nilo_http }},
     });
+}
+
+/// What `app` is asked for (ADR 263). Every field after `root` has a default,
+/// so a field added later changes no project that is already written, which
+/// is the property 1.0 freezes.
+pub const AppOptions = struct {
+    /// The executable's name, and what `zig build` installs it as.
+    name: []const u8,
+    /// The file with `pub fn main`.
+    root: std.Build.LazyPath,
+    /// Read from `-Dtarget` when left out, as `zig init` does.
+    target: ?std.Build.ResolvedTarget = null,
+    /// Read from `-Doptimize` when left out, and passed through unchanged to
+    /// the dependency, the executable and the test (ADR 069).
+    optimize: ?std.lang.Optimize = null,
+    /// The build flags of the dependency (ADR 066, 212, 259, 248), each off
+    /// until asked, so a project that sets none fetches zio and nothing else.
+    sql: bool = false,
+    tls: bool = false,
+    http2: bool = false,
+    libdeflate: bool = false,
+};
+
+/// What `app` made, for a project that wants to add to it.
+pub const AppBuilt = struct {
+    exe: *std.Build.Step.Compile,
+    /// The test of the same root module, so `zig build test` runs the tests
+    /// of `main.zig` and of everything it imports.
+    tests: *std.Build.Step.Compile,
+    /// The `nilo` dependency this was built against, to ask for a module the
+    /// options did not wire (`dependency.module("nilo_id")`) without a second
+    /// instance of it.
+    dependency: *std.Build.Dependency,
+};
+
+/// A whole project in one call from a dependent's `build.zig` (ADR 263):
+/// the executable with `nilo_http` imported (and `nilo_sql` when asked for),
+/// installed, and the steps `run`, `dev` and `test`.
+///
+/// ```zig
+/// const nilo = @import("nilo");
+/// pub fn build(b: *std.Build) void {
+///     _ = nilo.app(b, .{ .name = "hello", .root = b.path("src/main.zig") });
+/// }
+/// ```
+///
+/// `dev` is the restart on every save of ADR 190, wired as `dev-<example>`
+/// is in this file. Nothing here reads the repository, so it is the same
+/// function in a dependent and in this checkout.
+pub fn app(b: *std.Build, options: AppOptions) AppBuilt {
+    const target = options.target orelse b.standardTargetOptions(.{});
+    const optimize = options.optimize orelse b.standardOptimizeOption(.{});
+
+    const dependency = b.dependency("nilo", .{
+        .target = target,
+        .optimize = optimize,
+        .sql = options.sql,
+        .tls = options.tls,
+        .http2 = options.http2,
+        .libdeflate = options.libdeflate,
+    });
+
+    const root = b.createModule(.{
+        .root_source_file = options.root,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "nilo_http", .module = dependency.module("nilo_http") }},
+    });
+    if (options.sql) root.addImport("nilo_sql", dependency.module("nilo_sql"));
+
+    const exe = b.addExecutable(.{ .name = options.name, .root_module = root });
+    b.installArtifact(exe);
+
+    const run = b.addRunArtifact(exe);
+    run.addPassthruArgs();
+    b.step("run", "Run the server").dependOn(&run.step);
+
+    // The runner executes on the machine running the build, whatever the
+    // server is built for, so it comes from a second instance of the
+    // dependency asked for the host. Nothing of that instance is fetched or
+    // built beyond `nilo-dev`, which imports `std` alone.
+    const host = b.dependency("nilo", .{ .target = b.graph.host, .optimize = .safe });
+    const dev = b.addRunArtifact(host.artifact("nilo-dev"));
+    dev.addArg("--zig");
+    dev.addFileArg(.zig_exe);
+    dev.addPassthruArgs();
+    // A directory argument, because a file one would be an input the step
+    // hashes and this one is written by the build `nilo-dev` itself starts.
+    dev.addDirectoryArg2(
+        .{ .relative = .{ .base = .install_bin, .sub_path = exe.out_filename } },
+        .{ .make_absolute = true },
+    );
+    b.step("dev", "Rebuild and restart on every save").dependOn(&dev.step);
+
+    const tests = b.addTest(.{ .root_module = root });
+    b.step("test", "Run the tests").dependOn(&b.addRunArtifact(tests).step);
+
+    return .{ .exe = exe, .tests = tests, .dependency = dependency };
 }
 
 pub fn build(b: *std.Build) void {
@@ -4827,6 +5074,9 @@ pub fn build(b: *std.Build) void {
         // (ADR 221).
         test_step.dependOn(Checks.adrs(b));
 
+        // The project a first project is copied from builds (ADR 263).
+        test_step.dependOn(Checks.template(b, target));
+
         // Every doc page opens the same way, reads as one paragraph a line, and
         // links only what exists; the map and the reference's heading list keep
         // up with the pages (ADR 236).
@@ -5554,6 +5804,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "nilo_core", .module = core_mod },
                 .{ .name = "nilo_http", .module = framework },
                 .{ .name = "nilo_sql", .module = under_test },
+                .{ .name = "live_config", .module = under_test.import_table.get("live_config").? },
             },
         });
         const deadline_tests = b.addTest(.{ .root_module = deadline_root, .use_llvm = testBackend(target, mode) });

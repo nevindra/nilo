@@ -54,6 +54,10 @@ try app.use(nilo.secure.pages(.{ .csp = "default-src 'self'; img-src 'self' http
 
 **On by default.** A default CSP breaks every page that loads a script from a CDN, the day it upgrades. One line opts in.
 
+## A policy that is a fact about the deployment
+
+`.csp` is a `nilo.Late([]const u8)` ([ADR 264](./264-a-deployment-fact-is-a-late-value.md)): text settled while compiling, which is part of the one block as above, or the address of a `[]const u8` filled before `listen()`, which is set beside the block with `setStaticHeader` (one more header slot, no copy). The two refusals for a stated policy run on the first request for a held one.
+
 ## What it costs
 
 - **Allocations per request:** none, beside CORS with a named origin, held by the test above. A handler that overrides one line spends one arena allocation for the rest of the block.

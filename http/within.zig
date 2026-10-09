@@ -1,4 +1,4 @@
-//! A whole number inside a range, as a type
+//! A number inside a range, as a type, whole or real
 //! ([ADR 167](../docs/adr/167-a-whole-number-inside-a-range-is-a-type.md)).
 //!
 //! ```zig
@@ -13,6 +13,12 @@
 //! client generated from it refuses the same value before sending it. Both
 //! come from the type, which is the only place nilo reads a contract from.
 //!
+//! **A bound written with a point makes it a real number**: `Within(0.0, 1.0)`
+//! holds an `f64`, read the way a `f64` field is (no `nan`, no `inf`, no hex
+//! float), and the document says `type: number` with the same `minimum` and
+//! `maximum`. The kind is read off the bounds, so a real range needs no
+//! second name.
+//!
 //! **A type rather than a marker, because a bound is not a validation.**
 //! `convert.Reason`'s comment refuses a validation language on purpose:
 //! whether an age is plausible is the application's question. But a `u8`
@@ -22,8 +28,8 @@
 //! It is read everywhere a `u8` is read: a path param, a query value, a form
 //! field, and a JSON body (ADR 166), with one sentence for all four.
 //!
-//! **The value is read as `.value`**, which is the cost. The integer inside is
-//! the narrowest that holds the range, so `Within(1, 200)` is a `u8` and
+//! **The value is read as `.value`**, which is the cost. The number inside is
+//! the narrowest integer that holds a whole range, so `Within(1, 200)` is a `u8` and
 //! `Within(0, 100_000)` is a `u17`; handing it to a `LIMIT` is `q.limit.value`
 //! rather than `q.limit`. Zig has no way to give a struct the arithmetic of
 //! its one field, and a type that hid the wrapper would be one nilo could not
@@ -37,27 +43,36 @@ const std = @import("std");
 const convert = @import("convert.zig");
 const mark = @import("jsonmark.zig");
 
-/// A whole number from `min` to `max`, both inclusive.
-pub fn Within(comptime min: comptime_int, comptime max: comptime_int) type {
-    if (min > max) @compileError(std.fmt.comptimePrint(
-        "nilo: `Within({d}, {d})` has its bounds the wrong way round: nothing is at least {d} and at most {d}.\n" ++
-            "  The lower bound comes first: `Within({d}, {d})`.",
-        .{ min, max, min, max, max, min },
-    ));
+/// A number from `min` to `max`, both inclusive: whole when both bounds are
+/// whole (`Within(1, 200)`), real when either is written with a point
+/// (`Within(0.0, 1.0)`).
+///
+/// **The kind of number is read off the bounds**, which is what the author
+/// already wrote: `Within(1, 200)` is a `u8` and `Within(0.5, 2.0)` is an
+/// `f64`, so there is no second name and no third argument to get out of
+/// step with the bounds (ADR 167). A real one refuses `nan`, `inf` and a
+/// hex float the way a `f64` field does (ADR 084), and a value that
+/// overflows an `f64`.
+pub fn Within(comptime min: anytype, comptime max: anytype) type {
+    const real = comptime checkBounds(min, max);
     return struct {
         const Self = @This();
 
-        /// The narrowest integer that holds the range.
-        pub const Int = std.math.IntFittingRange(min, max);
+        /// The narrowest integer that holds a whole range, or `f64` for a
+        /// real one.
+        pub const Number = if (real) f64 else std.math.IntFittingRange(min, max);
 
-        pub const lowest: Int = min;
-        pub const highest: Int = max;
+        pub const lowest: Number = min;
+        pub const highest: Number = max;
 
         /// What a nilo compile error calls this type (ADR 074).
         pub const nilo_type_name = std.fmt.comptimePrint("nilo.Within({d}, {d})", .{ min, max });
 
         /// What a 400 asks for, in place of the type's name.
-        pub const nilo_expects = std.fmt.comptimePrint("a whole number from {d} to {d}", .{ min, max });
+        pub const nilo_expects = std.fmt.comptimePrint(
+            "a {s} from {d} to {d}",
+            .{ if (real) "number" else "whole number", min, max },
+        );
 
         /// The bounds, for the document to say (`openapi.zig` reads it by
         /// name).
@@ -65,26 +80,34 @@ pub fn Within(comptime min: comptime_int, comptime max: comptime_int) type {
 
         /// A number on the wire, and said so, so that a response carrying
         /// one is written by nilo's own writer around it (ADR 148).
-        pub const nilo_openapi = .{ .type = "integer" };
+        pub const nilo_openapi = .{ .type = if (real) "number" else "integer" };
 
-        value: Int,
+        value: Number,
 
-        /// A value known while compiling — the default a field falls back
-        /// to — checked against the range here rather than never.
-        pub fn of(comptime n: comptime_int) Self {
+        /// A value known while compiling, the default a field falls back
+        /// to, checked against the range here rather than never.
+        pub fn of(comptime n: anytype) Self {
             if (n < min or n > max) @compileError(std.fmt.comptimePrint(
                 "nilo: `Within({d}, {d}).of({d})` is outside its own range.\n" ++
                     "  A default is the one value a request never sends, so it is the one " ++
-                    "the bound would never catch — which is why it is checked here.",
+                    "the bound would never catch, which is why it is checked here.",
                 .{ min, max, n },
             ));
             return .{ .value = n };
         }
 
-        /// The digits, read the way a `u32` is read from request text —
-        /// `+7` and `1_0` are not numbers here either — and refused outside
-        /// the range with the same null a bad number gets (ADR 113).
+        /// The digits, read the way a `u32` (or an `f64`) is read from
+        /// request text (`+7`, `1_0`, `nan` and `0x1p3` are not numbers
+        /// here either), and refused outside the range with the same null a
+        /// bad number gets (ADR 113).
         pub fn nilo_parse(text: []const u8) ?Self {
+            if (comptime real) {
+                if (!convert.spelledAsNumber(text, true, true)) return null;
+                const x = std.fmt.parseFloat(f64, text) catch return null;
+                // `1e999` is well spelled and is infinity once read.
+                if (!std.math.isFinite(x) or x < min or x > max) return null;
+                return .{ .value = x };
+            }
             if (!convert.spelledAsNumber(text, min < 0, false)) return null;
             const n = std.fmt.parseInt(i128, text, 10) catch return null;
             if (n < min or n > max) return null;
@@ -101,15 +124,39 @@ pub fn Within(comptime min: comptime_int, comptime max: comptime_int) type {
     };
 }
 
+/// Whether the bounds are real numbers, and a sentence for anything else.
+fn checkBounds(comptime min: anytype, comptime max: anytype) bool {
+    comptime {
+        for (.{ min, max }) |bound| {
+            const B = @TypeOf(bound);
+            if (B != comptime_int and B != comptime_float) @compileError(
+                "nilo: `Within` takes numbers for its bounds: a bound has to be a number.\n" ++
+                    "  One of them is a " ++ @typeName(B) ++ ". Write them as literals: `Within(1, 200)` for whole numbers, " ++
+                    "`Within(0.0, 1.0)` for real ones.",
+            );
+            if (B == comptime_float and !std.math.isFinite(@as(f64, bound))) @compileError(
+                "nilo: `Within` has a bound that is not a finite number.\n" ++
+                    "  A range with no end is the type itself: write `f64`.",
+            );
+        }
+        if (min > max) @compileError(std.fmt.comptimePrint(
+            "nilo: `Within({d}, {d})` has its bounds the wrong way round: nothing is at least {d} and at most {d}.\n" ++
+                "  The lower bound comes first: `Within({d}, {d})`.",
+            .{ min, max, min, max, max, min },
+        ));
+        return @TypeOf(min) == comptime_float or @TypeOf(max) == comptime_float;
+    }
+}
+
 // ---- tests ----
 
 const testing = std.testing;
 
 test "the range decides the integer, and a value inside it is the number" {
     const Page = Within(1, 200);
-    try testing.expectEqual(u8, Page.Int);
-    try testing.expectEqual(u17, Within(0, 100_000).Int);
-    try testing.expectEqual(i4, Within(-5, 5).Int);
+    try testing.expectEqual(u8, Page.Number);
+    try testing.expectEqual(u17, Within(0, 100_000).Number);
+    try testing.expectEqual(i4, Within(-5, 5).Number);
 
     try testing.expectEqual(@as(u8, 50), Page.nilo_parse("50").?.value);
     try testing.expectEqual(@as(u8, 1), Page.nilo_parse("1").?.value);
@@ -162,4 +209,57 @@ test "in a JSON body it is the number, in and out" {
     defer out.deinit();
     try std.json.Stringify.value(Body{ .limit = .of(7) }, .{}, &out.writer);
     try testing.expectEqualStrings("{\"limit\":7}", out.written());
+}
+
+test "a range written with a point is a real number, inclusive at both ends" {
+    const Ratio = Within(0.0, 1.0);
+    try testing.expectEqual(f64, Ratio.Number);
+    try testing.expectEqual(@as(f64, 0.0), Ratio.nilo_parse("0").?.value);
+    try testing.expectEqual(@as(f64, 1.0), Ratio.nilo_parse("1").?.value);
+    try testing.expectEqual(@as(f64, 1.0), Ratio.nilo_parse("1.0").?.value);
+    try testing.expectEqual(@as(f64, 0.25), Ratio.nilo_parse("0.25").?.value);
+    try testing.expectEqual(@as(f64, 0.5), Ratio.nilo_parse("5e-1").?.value);
+    try testing.expectEqual(@as(?Ratio, null), Ratio.nilo_parse("1.0000001"));
+    try testing.expectEqual(@as(?Ratio, null), Ratio.nilo_parse("-0.0000001"));
+    try testing.expectEqual(@as(f64, 0.5), Ratio.of(0.5).value);
+
+    // One bound with a point is enough, and a whole number is a real one.
+    try testing.expectEqual(f64, Within(1, 2.5).Number);
+    try testing.expectEqual(@as(f64, 2.0), Within(1, 2.5).nilo_parse("2").?.value);
+    try testing.expectEqual(@as(f64, -1.5), Within(-2.0, 2.0).nilo_parse("-1.5").?.value);
+}
+
+test "a real range refuses nan, infinity, a hex float and what is not spelled as a number" {
+    const Ratio = Within(0.0, 1.0);
+    for ([_][]const u8{ "nan", "NaN", "inf", "-inf", "infinity", "1e999", "0x1p-1", "+0.5", "0_5", ".5", "5.", "half", "" }) |text| {
+        try testing.expectEqual(@as(?Ratio, null), Ratio.nilo_parse(text));
+    }
+}
+
+test "what a 400 asks for names a real range, and the document says number" {
+    try testing.expectEqualStrings("a number from 0.5 to 2", Within(0.5, 2.0).nilo_expects);
+    try testing.expectEqualStrings("a whole number from 1 to 200", Within(1, 200).nilo_expects);
+    try testing.expectEqualStrings("number", Within(0.0, 1.0).nilo_openapi.type);
+    try testing.expectEqualStrings("integer", Within(0, 1).nilo_openapi.type);
+}
+
+test "in a JSON body a real range reads a number or text, and refuses outside it" {
+    const Ratio = Within(0.0, 1.0);
+    const Body = struct { score: Ratio = .of(0.5) };
+
+    const parsed = try std.json.parseFromSlice(Body, testing.allocator, "{\"score\":0.75}", .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(f64, 0.75), parsed.value.score.value);
+
+    const whole = try std.json.parseFromSlice(Body, testing.allocator, "{\"score\":1}", .{});
+    defer whole.deinit();
+    try testing.expectEqual(@as(f64, 1.0), whole.value.score.value);
+
+    try testing.expectError(error.InvalidCharacter, std.json.parseFromSlice(Body, testing.allocator, "{\"score\":1.5}", .{}));
+    try testing.expectError(error.InvalidCharacter, std.json.parseFromSlice(Body, testing.allocator, "{\"score\":\"nan\"}", .{}));
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(Body{ .score = .of(0.25) }, .{}, &out.writer);
+    try testing.expectEqualStrings("{\"score\":0.25}", out.written());
 }

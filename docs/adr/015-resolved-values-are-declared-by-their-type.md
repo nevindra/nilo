@@ -43,9 +43,13 @@ Elysia's `resolve` is where the shape came from (ADR 014). Zig can do it better 
 
 ## What a resolver may ask for, and what it may not
 
-A resolver takes a `*Ctx`, a service, the request arena, and **other resolved values**. That last one is the composition case, and it is what makes `Admin` a thing worked out from `CurrentUser` rather than a second copy of the authentication code.
+A resolver takes a `*Ctx`, a service, the request arena, **other resolved values**, and **the path params by name, `Path(T)`** (ADR 002). The resolved-value case is the composition one, and it is what makes `Admin` a thing worked out from `CurrentUser` rather than a second copy of the authentication code.
 
-It may **not** take a path param, a query struct, or the body. A resolver belongs to the request, not to a route, and a route is the only thing that knows what `:id` means — the same `CurrentUser` is used by `/me` and by `/orders/:id`, and only one of those has an `:id` to hand over. A resolver that wants one takes a `*Ctx` and reads it. Asking for anything else is a compile error naming the argument and listing the four things it could have been.
+It may **not** take a bare path param, a query struct, or the body. A bare argument cannot say which `:name` it is, a resolver belongs to the request rather than to a route, and the same `CurrentUser` is used by `/me` and by `/orders/:id`, only one of which has an `:id`. A resolver that wants the query or the body takes a `*Ctx` and reads it. Asking for anything else is a compile error naming the argument and listing what it could have been.
+
+**A `Path(T)` on a resolver is held against a route in two ways, by who reached it.** Reached from a typed handler, the typed engine knows every resolver the handler needs, transitively, and checks each field name against that handler's route while compiling (a field the route lacks stops compilation, naming the route and the resolver). The fields need not cover the route's params: a resolver reads the ones it needs. Reached through `c.resolve(T)` from a bare middleware, there is no route at compile time, so the fields are read by name at run time from the matched route, and a name the route lacks answers `fail.internal` naming the resolver, the param and the route, never a panic. That is a real limit: such a mistake is found by the first request to a route lacking the param, not before. A **typed middleware** ([ADR 008](./008-middleware-is-an-onion-of-ctx-functions.md)) that takes a resolver (or a `Path(T)` itself) is held at `listen()` instead: each route its chain covers must have every param the resolver chain reads (`resolve.pathNames`, `pathparams.captures`), so the mistake is found before the first request. `readByName` stays as the last line for a request that matched no route and for `c.resolve(T)` in a bare middleware. A resolver is worked out once per request, so the lookup is paid once however many ask.
+
+What was rejected here: "a resolver may not take path params at all", the position this ADR started with. It held while a path param could only be positional, because a position means nothing outside a route. A name does, and the resolver that gathers the tenant out of `:org` is the case that wanted it.
 
 A loop — `A` resolved from `B` resolved from `A` — is also a compile error, and it has to be: left alone it is not a bad program but a compiler that never returns. The message prints the loop.
 
@@ -58,7 +62,7 @@ try app.useOn("/admin", requireAdmin);   // guards the whole prefix
 fn stats(user: CurrentUser) !Stats { … } // and the handler wants the user
 ```
 
-Middleware still cannot receive an argument, so a guard reaches the value through `c.resolve(CurrentUser)`. If that authenticated a second time, every guarded route would silently do twice the database work — the guard's lookup and the handler's. So the value is remembered on the `Ctx` for the rest of the request, and the second ask is a pointer compare over a list two entries long.
+A bare middleware cannot receive an argument, so it reaches the value through `c.resolve(CurrentUser)`; a typed one takes it directly, `fn (c: *Ctx, next: Next, user: CurrentUser) !void` ([ADR 008](./008-middleware-is-an-onion-of-ctx-functions.md)), and a resolver that fails ends the chain through the normal error path. If that authenticated a second time, every guarded route would silently do twice the database work — the guard's lookup and the handler's. So the value is remembered on the `Ctx` for the rest of the request, and the second ask is a pointer compare over a list two entries long.
 
 The memory is the request arena, which means a resolved value dies exactly when the request does, exactly as every `Str` inside it does (ADR 003). A test drives two different tokens down one keep-alive connection, because a cache that outlived its request would be the worst bug this feature could have.
 

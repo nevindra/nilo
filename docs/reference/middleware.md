@@ -9,8 +9,8 @@
 ```zig
 nilo.logger.standard                                    // one info line per request
 nilo.logger.with(.{ .level = .info, .slow_micros = 0,   // slower than this → .warn
-                     .format = .text,                    // or .json, one object per line
-                     .request_id = false })              // X-Request-Id out, and on the line
+                     .request_id = false,                // X-Request-Id out, and on the line
+                     .skip = &.{} })                     // exact paths never logged, e.g. "/healthz"
 
 nilo.cors.permissive                                    // origins &.{"*"}, no credentials
 nilo.cors.with(.{ .origins = &.{…}, .methods = …, .headers = …,
@@ -24,19 +24,38 @@ nilo.csrf.reading(&origins)                             // the list, from a cors
 
 nilo.secure.api(.{})                                    // the policy headers for an API
 nilo.secure.pages(.{ .csp = "…" })                      // …and for a server with pages
+nilo.secure.pages(.{ .csp = &settings.csp })            // …the policy read at run time
 
 nilo.allowance.with(.{ .per_window = 100, .window_s = 60,   // 429 past this
                         .slots = 16 * 1024,                  // addresses remembered
-                        .ipv6_prefix = 64, .name = "" })
+                        .ipv6_prefix = 64, .name = "",
+                        .headers = true })                   // RateLimit on every answer
+nilo.allowance.with(.{ .per_window = &settings.rate,        // …numbers read at run
+                        .window_s = &settings.window })      //   time, from `u32`s
 
 nilo.allowance.keyed(account, .{ .per_window = 1000,        // …counted against
                         .window_s = 60, .slots = 4 * 1024,   //   what `account`
-                        .on_null = .reject, .name = "" })    //   returns
+                        .on_null = .reject, .name = "",      //   returns
+                        .headers = true })
 
 nilo.deadline(2000)                                         // how long a route gets
 nilo.maxBody(50 << 20)                                      // how much body it takes
 nilo.maxBody(&limit)                                        // …read from a usize at run time
 ```
+
+**How the logger writes is not an option of the logger.** Text or JSON, and the lowest level written, are [`listen(.{ .log = .{ .format = .json, .level = .warn } })`](./app.md#listen-options), read at run time, and they apply to every line the process writes through [`nilo.logFn`](./README.md#declarations-in-the-root-file). In JSON the access line is one flat object: `time` and `level` beside `method`, `path`, `status`, `us`, and `request_id` and `error` when there are any. `skip` compares the request's path exactly and costs nothing when empty; a skipped request is still answered and still gets its `X-Request-Id` ([ADR 262](../adr/262-a-log-line-has-one-sink.md)).
+
+### `nilo.Late`
+
+**A value the program states, or one it fills before `listen()`** ([ADR 264](../adr/264-a-deployment-fact-is-a-late-value.md), [ADR 088](../adr/088-an-origin-is-a-fact-about-the-deployment.md)). `nilo.Late(T)` is `union(enum) { value: T, held: *const T }` with `read()` returning the `T` now. It is what `allowance`'s two counts, `secure`'s `.csp` and `maxBody`'s limit are, and you rarely write it out: a literal (`.per_window = 100`) is the `value` form, and the address of a variable (`.per_window = &settings.rate`) is the `held` form.
+
+| | |
+|---|---|
+| `nilo.Late(T)` | the type. `.value` is read by the compiler; `.held` is one load per request, with no lock |
+| `.read()` | the `T` now |
+| `.isHeld()` | whether it arrives after the program is compiled |
+
+The variable is a container-level `var` that outlives the App, because the address has to be known while compiling, and it is filled before `listen()`: changing it while the server runs is a race with every request in flight. What a held value cannot be checked for while compiling (zero, a character a header cannot hold) is checked on the first request, which answers 500 with a sentence naming the middleware until it is fixed, because a middleware has no hook at `listen()`. A field the options do not have, such as `.perwindow`, is a compile error.
 
 ### `nilo.cors`
 
@@ -99,6 +118,8 @@ Both take the same fields, with different defaults. `null` leaves a header out.
 
 The block adds 200 bytes to a response under `api` and 515 under `pages`, as shipped. Refused while compiling: an empty `.csp` or `.permissions_policy`, either one holding a control byte, `.preload` without `.include_subdomains` and a year, and a `max_age_s` of `0` beside either of those.
 
+**`.csp` is a [`nilo.Late`](#nilolate)**: text, or the address of a `[]const u8` filled before `listen()`, for a CDN or API host that is a fact about the deployment. The two refusals that apply to a stated policy (empty, a control byte) apply to a held one on the first request, as a 500. A held policy is set beside the block rather than inside it, which is one more header slot and no allocation; a stated one is still part of the one block.
+
 **A second `nilo.secure` replaces the first**, so a group of pages can carry `pages` under an App that carries `api`. **A handler that sets one of these headers replaces that line of the block** (one arena allocation for the rest), rather than sending two: a browser enforces every `Content-Security-Policy` it gets. `Strict-Transport-Security` is sent on plain HTTP too, where a browser ignores it (RFC 6797 §8.1).
 
 ### `nilo.allowance`
@@ -112,17 +133,28 @@ try app.useOn("/api", nilo.allowance.with(.{ .per_window = 100, .window_s = 60 }
 
 | | |
 |---|---|
-| `.per_window` | how many requests, 1 to 1023 |
-| `.window_s` | the window length in seconds. Also the value of `Retry-After` |
+| `.per_window` | how many requests, 1 to 1023: a number or the address of a `u32` (a [`nilo.Late`](#nilolate)) |
+| `.window_s` | the window length in seconds, a `u32` or the address of one. Also the value of `Retry-After` |
 | `.slots` | how many addresses are remembered at once. A power of two, at least 64. Eight bytes each |
 | `.ipv6_prefix` | how much of an IPv6 address counts as one client. 64 is one customer's allocation |
-| `.name` | tells this allowance apart from another with the same numbers |
+| `.name` | tells this allowance apart from another with the same numbers, and names its `RateLimit` policy. At most 24 characters |
+| `.headers` | `true` by default: `RateLimit-Policy` and `RateLimit` on every answer |
 
 **The table is sized while compiling and lives in `.bss`**: no allocation per request and none at startup, 131,072 bytes at the default, and nothing at all in a program that does not use it. The window **slides**: the previous window is weighted by how far into the current one the request arrived, so a hundred requests at 11:59:59 and a hundred at 12:00:00 do not add up to two hundred allowed.
 
 Two behaviours are deliberate ([ADR 092](../adr/092-an-allowance-is-a-table-sized-while-compiling.md)): a full bucket **forgets its stalest address** instead of letting two addresses share one allowance, and a slot under contention **lets the request through**. Both make the same trade: being loose for one window is better than refusing somebody who has made no requests at all.
 
 Two `with()` calls with the same options share one table. Give one a `.name` to count a sign-in route separately from a search route.
+
+**Every answer through an allowance carries `RateLimit-Policy` and `RateLimit`**, allowed or refused, following draft-ietf-httpapi-ratelimit-headers: `RateLimit-Policy: "default";q=100;w=60` is the quota and window, and `RateLimit: "default";r=37;t=21` is what is left in the window (`r`) and the seconds until the window being counted ends (`t`). The name is `.name`, or `default`. A refusal also keeps `Retry-After`, which is the whole window. The window slides, so `t` is when the previous window's weight starts to fall, not when the quota is whole again. A request the table could not decide (two racing for one slot) carries neither field. The `RateLimit` line is built in 64 bytes of the Ctx and costs no allocation; a held quota's policy line costs one arena allocation, a stated one none. Two allowances on one route both write the fields, and the later one wins. `.headers = false` sends neither.
+
+**A held `.per_window` or `.window_s` of zero, or a `.per_window` above 1023, answers 500** naming the allowance, until it is fixed. A million an hour does not fit an address's slot, which keeps its 28-bit fingerprint (ADR 092); key it with `allowance.keyed`, which takes up to 16,777,215.
+
+```zig
+var settings: Settings = .{};   // container-level, filled before listen()
+
+try app.useOn("/api", nilo.allowance.with(.{ .per_window = &settings.rate, .window_s = 60 }));
+```
 
 **Behind a proxy, set `.trusted_hops`** on `listen`, or every request looks like it came from the proxy and the whole table becomes one slot. A refusal that sees an `X-Forwarded-For` on a request counted against the socket's own address logs this once.
 
@@ -152,11 +184,12 @@ The first argument is a function of one `*Ctx` returning `?[]const u8` or `?nilo
 
 | | |
 |---|---|
-| `.per_window` | how many requests, 1 to 65,535: the whole range, unlike `with` |
+| `.per_window` | how many requests, 1 to 16,777,215, a number or the address of a `u32`: a million an hour is `1_000_000` over `3600` |
 | `.window_s` | as `with` |
 | `.slots` | how many keys are remembered at once. A power of two, at least 64. **Sixteen** bytes each; 4,096 by default |
 | `.on_null` | **required.** `.skip`: not counted, and allowed. `.reject`: a 403 |
 | `.name` | as `with` |
+| `.headers` | as `with` |
 
 **`on_null` has no default on purpose.** `keyed(signedInAccount, …)` on a sign-in route with a silent skip would leave every *failed* sign-in uncounted, which is exactly the attack the limit exists to stop. For that route, key on the *claimed* username with `.on_null = .reject`, and add an address-keyed `allowance.with` underneath it, which means calling `use` twice.
 
@@ -198,7 +231,7 @@ try app.with(nilo.maxBody(1024)).post("/sign-in", signIn);
 
 **It means the same on a gRPC route.** A call's message is collected under the route's `maxBody`, raised or lowered, rather than under `listen()`'s `max_body`, and one over it is `RESOURCE_EXHAUSTED` without the route running ([ADR 156](../adr/156-a-route-can-say-how-much-body-it-takes.md), [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md)). The route is found from the call's `:path` before the message arrives, so the limit is the last `maxBody` in the route's chain. A connection's total budget for messages is `max_body`, or the largest limit a `POST` route raised to, so a raised route costs a connection what its own limit says and no more. The limit applies before the middleware in front of the route has run, so a client with no session can send a guarded route a message up to its limit.
 
-**`nilo.maxBody` returns an `mw.Limited`**, the middleware together with the limit it gives, so that `use`, `useOn`, `with` and `without` can keep the number for the gRPC side. It goes wherever a middleware goes; a program that stored it in a `nilo.Middleware` variable uses its `.run` field.
+**`nilo.maxBody` returns an `mw.Limited`**, the middleware together with the limit it gives (a [`nilo.Late(usize)`](#nilolate)), so that `use`, `useOn`, `with` and `without` can keep the number for the gRPC side. It goes wherever a middleware goes; a program that stored it in a `nilo.Middleware` variable uses its `.run` field.
 
 **It does not affect `c.bodyStream()`**, which holds nothing in the arena and has its own `max_bytes` ([ADR 156](../adr/156-a-route-can-say-how-much-body-it-takes.md)). `maxBody(0)` is a compile error.
 
@@ -226,6 +259,27 @@ fn ingestRoutes(app: *nilo.App, max_body_bytes: usize) !void {
 | cost | one load and a compare on top of the compile-time form's one store. No allocation, nothing per idle connection |
 
 There is no lock: the number is written before the server starts and read while it runs, and changing it while the server is running is a race with every request in flight.
+
+## Typed middleware
+
+**A middleware function may take arguments after `*Ctx` and `Next`; it is wrapped while compiling into the bare `fn (*Ctx, Next) anyerror!void`, and `listen()` checks what it declares** ([ADR 008](../adr/008-middleware-is-an-onion-of-ctx-functions.md)).
+
+```zig
+fn requireKey(c: *nilo.Ctx, next: nilo.Next, keys: *KeyStore, user: CurrentUser) !void { … }
+
+try app.use(requireKey);
+```
+
+| Argument after `Next` | |
+|---|---|
+| `*T`, `*const T` | a service. Missing at `listen()` is a refusal naming the middleware (by what it takes, since Zig keeps no function names) and the type |
+| a type carrying `nilo_resolve` | a resolved value, worked out once per request and shared with the handler ([ADR 015](../adr/015-resolved-values-are-declared-by-their-type.md)). A resolver's failure answers through the error path and the handler never runs |
+| `nilo.Path(T)` | the path params by name. Held at `listen()` against every route the middleware covers, directly or through a resolver it takes: a route without a field's param is a refusal naming the middleware, the route and the param |
+| `std.mem.Allocator`, `std.Io` | the request arena, the server's loop |
+
+Refused while compiling, each with a sentence: a query, a header, a form, a body or a bare path param (a middleware covers many routes), an optional, a first argument that is not `*Ctx`, a second that is not `Next`, and a return type other than `void` or an error union of `void`. A function of exactly `(*Ctx, Next)` is the bare form and is registered unchanged. The cost of a typed middleware is what the same arguments cost a handler: no allocation of its own, one generated wrapper function.
+
+A static mount under a prefix such a middleware covers, and a route that only the real path decides it covers (`useOn("/api", …)` beside `/:version/list`) without the param, are refused at `listen()`. A function held as a pointer in a variable is refused too: pass the function itself. A request that matched neither a route nor a static file (a 404 or 405) has no params, so a middleware that reads some stands aside on it and hands on to `next`: the request gets the answer it would have got without it. One with no path needs still runs there. `use` is unchanged for a `Middleware` held in a variable; `use`, `useOn`, `with` and `without` all need the function itself, not a pointer in a runtime variable, to wrap a typed one.
 
 ## Holding the answer with `next.hold`
 

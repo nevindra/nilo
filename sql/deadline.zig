@@ -31,6 +31,7 @@
 const std = @import("std");
 const nilo = @import("nilo_http");
 const sql = @import("nilo_sql");
+const live_config = @import("live_config");
 
 const testing = std.testing;
 
@@ -96,6 +97,135 @@ const Attempt = struct {
         return if (n == 0) null else self.name[0..n];
     }
 };
+
+/// A Scope that carries a route's deadline, the way a `Ctx` does: a `Run` for
+/// the memory and the text, and the time left from `timeLeftMs`, which is the
+/// whole of what `core.timeLeftOf` reads (ADR 105).
+const Timed = struct {
+    run: nilo.Run,
+    left_ms: u32,
+
+    pub fn arena(self: *Timed) std.mem.Allocator {
+        return self.run.arena();
+    }
+
+    pub fn str(self: *Timed, bytes: []const u8) nilo.Str {
+        return self.run.str(bytes);
+    }
+
+    pub fn timeLeftMs(self: *const Timed) ?u32 {
+        return self.left_ms;
+    }
+};
+
+/// A request with `left_ms` to live, calling the database `D` while the
+/// pool's own bound is a minute. With `hold`, a transaction first takes the
+/// only writer (SQLite), so the call queues behind it; without, the call is
+/// `first` itself running long (Postgres). Either way it must time out at the
+/// route's time, and **the next call on the same `D` must be answered right**:
+/// a connection a cancelled statement left with protocol bytes unread must be
+/// replaced, not handed on (ADR 105).
+fn RoutedOn(comptime D: type, comptime hold: bool, comptime first: []const u8) type {
+    return struct {
+        const Self = @This();
+
+        db: *D,
+        left_ms: u32,
+        name: [32]u8 = @splat(0),
+        len: std.atomic.Value(usize) = .init(0),
+
+        fn run(self: *Self) void {
+            var scope: Timed = .{ .run = .init(std.heap.smp_allocator), .left_ms = self.left_ms };
+            defer scope.run.deinit();
+            var plain: nilo.Run = .init(std.heap.smp_allocator);
+            defer plain.deinit();
+
+            var tx = if (hold) (self.db.begin(&plain, .{}) catch |err| return self.say(@errorName(err))) else {};
+
+            const got = self.db.exec(&scope, first, .{});
+            if (hold) tx.rollback();
+            if (got) |_| return self.say("answered") else |err| if (err != error.TimedOut) return self.say(@errorName(err));
+
+            const sum = self.db.rawOne(i64, &plain, "SELECT 41 + 1", .{}) catch |err|
+                return self.say(@errorName(err));
+            self.say(if (sum == 42) "TimedOut then ok" else "wrong answer");
+        }
+
+        fn say(self: *Self, what: []const u8) void {
+            const n = @min(what.len, self.name.len);
+            @memcpy(self.name[0..n], what[0..n]);
+            self.len.store(n, .release);
+        }
+
+        fn answer(self: *const Self) ?[]const u8 {
+            const n = self.len.load(.acquire);
+            return if (n == 0) null else self.name[0..n];
+        }
+    };
+}
+
+fn waitForRouted(attempt: anytype) ![]const u8 {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    for (0..5_000) |_| {
+        if (attempt.answer()) |name| return name;
+        try std.Io.sleep(threaded.io(), .fromMilliseconds(1), .awake);
+    }
+    return error.TheQueueNeverGaveUp;
+}
+
+/// One run of `RoutedOn` against a server, and what it answered.
+fn askRouted(comptime D: type, comptime hold: bool, comptime first: []const u8, left_ms: u32, url: []const u8) ![]const u8 {
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var db: D = .init(gpa, url, .{
+        .size = if (hold) 2 else 1,
+        .unchecked = true,
+        // A minute: the pool's own bound cannot be what answers within the
+        // five seconds `waitForRouted` allows.
+        .timeout_ms = 60_000,
+    });
+    defer db.deinit();
+
+    const Attempt2 = RoutedOn(D, hold, first);
+    var attempt: Attempt2 = .{ .db = &db, .left_ms = left_ms };
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.spawn(Attempt2.run, .{&attempt});
+
+    var serving: Serving = .{ .app = &app };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    const got = try waitForRouted(&attempt);
+    return gpa.dupe(u8, got);
+}
+
+const create_held = "CREATE TABLE IF NOT EXISTS held (a INTEGER)";
+
+test "a request's deadline cuts short the wait for a connection the pool would have held it in for a minute" {
+    const got = try askRouted(Db, true, create_held, 300, "file:route-deadline-test?mode=memory&cache=shared");
+    defer std.heap.smp_allocator.free(got);
+    try testing.expectEqualStrings("TimedOut then ok", got);
+}
+
+test "a statement a route's deadline cut off leaves a Postgres pool whose next call is answered right" {
+    const url = live_config.database_url orelse return error.SkipZigTest;
+    const got = try askRouted(sql.Db, false, "DO $$ BEGIN PERFORM pg_sleep(4); END $$", 300, url);
+    defer std.heap.smp_allocator.free(got);
+    try testing.expectEqualStrings("TimedOut then ok", got);
+}
+
+test "a request whose deadline has passed is refused before it reaches the database" {
+    const got = try askRouted(Db, true, create_held, 0, "file:spent-deadline-test?mode=memory&cache=shared");
+    defer std.heap.smp_allocator.free(got);
+    try testing.expectEqualStrings("TimedOut then ok", got);
+}
 
 /// The server under test, on a thread of its own.
 ///

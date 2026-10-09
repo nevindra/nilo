@@ -209,6 +209,20 @@ pub const Limits = struct {
             _ = self.limits.vtable.fired(self.limits.target, &self.slot);
         }
 
+        /// `release`, answering whether the deadline fired before it was
+        /// taken off, and asked in that order so a fire between the question
+        /// and the release cannot be missed. For a caller that has to undo
+        /// what a cancellation left behind (`sql/db.zig`'s `armed`): `fired`
+        /// spends the Bound's own count and nothing else, so a `recancel`
+        /// made on the way out of the operation leaves a pending error that
+        /// no Bound owns any more.
+        pub fn finish(self: *Bound) bool {
+            if (!self.armed) return false;
+            self.armed = false;
+            self.limits.vtable.release(self.limits.target, &self.slot);
+            return self.limits.vtable.fired(self.limits.target, &self.slot);
+        }
+
         /// Whether *this* deadline is what cancelled the operation.
         ///
         /// Ask it at **any** failure, not only at `error.Canceled`: a

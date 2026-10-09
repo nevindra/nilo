@@ -142,7 +142,7 @@ The pin is two counters. A reader increments `crossing`, loads the pointer, incr
 
 **A refusal in `refusals/` for the missing field.** The compile error is Zig's own `missing struct field: audience`, which names the field and points at the declaration this ADR's doc comment sits on. `nilo_jwt` has no refusals table (there are nine, none of them this module's), and a table is a row in `build.zig` for a message that would say what Zig already says.
 
-**HS256, the EC families beyond P-256, JWE, and signing.** Signing is absent because a server issuing its own sessions has `Session(T)` sealed into a cookie and does not need a token at all. HS256 is one call to `std.crypto.auth.hmac.sha2.HmacSha256`, and it stays out because the shared-secret shape is what makes the `alg`-confusion attack possible: a module that verifies both a shared secret and a public key has to be careful about something a module that verifies only public keys cannot get wrong.
+**HS256, the EC families beyond P-256, JWE, and signing.** Signing is absent because a server issuing its own sessions has `Session(T)` sealed into a cookie, and a client that cannot hold a cookie has `Bearer(T)`, the same seal in an `Authorization` header ([ADR 265](./265-a-bearer-token-is-a-session-sealed-for-a-header.md)), and does not need a token it can read at all. HS256 is one call to `std.crypto.auth.hmac.sha2.HmacSha256`, and it stays out because the shared-secret shape is what makes the `alg`-confusion attack possible: a module that verifies both a shared secret and a public key has to be careful about something a module that verifies only public keys cannot get wrong.
 
 ## What it costs
 

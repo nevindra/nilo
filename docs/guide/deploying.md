@@ -106,6 +106,22 @@ They limit one wait for the network, not a request ([ADR 022](../adr/022-a-deadl
 
 If your clients upload from places where that is not generous, lower the rate instead of raising the timeout. `body_min_rate = 0` turns it off entirely and leaves the per-read limit on its own. A chunked body announces no length, so its deadline is calculated from `max_body`: the same worst case as a body that announced the largest size it may be. **`c.bodyStream()` is not affected by any of this.** Nothing is held on the client's behalf there, and a long upload through it is a request that lasts, not a request that stalls.
 
+**A route's deadline reaches the calls it makes.** `nilo.deadline(2000)` on a route is also the most that any `nilo_fetch` request, `nilo_s3` call or `nilo_sql` statement it makes can take, with nothing passed by hand, the way Go's `context.WithTimeout` carries into `QueryContext` and `NewRequestWithContext`:
+
+```zig
+try app.with(nilo.deadline(2000)).get("/report", buildReport);
+
+fn buildReport(db: *Db, rates: *fetch.Client, c: *nilo.Ctx) !Report {
+    // Both are cut off at the route's two seconds, whatever they would
+    // have waited on their own, with `error.TimedOut`.
+    const rows = try db.select(Sale, c, .{});
+    const rate = try rates.get(c, "https://rates.example/today", .{});
+    ...
+}
+```
+
+The call keeps its own bound too and the shorter wins, so a `timeout_ms = 500` stays 500. A request whose time has already passed makes no call at all. A `nilo.Run` has no deadline, so a call made with one keeps only its own ([ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)). The database is asked to give up on the client's side only: nothing is sent to Postgres to cancel the statement.
+
 `idle_timeout_ms` is really a memory setting: an idle connection costs 4,669 bytes, so a server with many visitors and few of them active wants it lower than the default.
 
 A WebSocket has no read limit once the handshake is done, because a chat tab with nobody typing is working correctly. Its writes keep their limit, which is how the server finds out the client is gone.
@@ -240,7 +256,7 @@ to your root file so the crash says which request caused it:
 thread 589880 panic: integer overflow (while handling GET /boom/50)
 ```
 
-That is the difference between a stack trace and a way to reproduce it.
+That is the difference between a stack trace and a way to reproduce it. `listen()` warns once at startup when the root file has no `panic` declaration, and the same mistake in `ReleaseFast` is worse than a missing name: an overflow or an out-of-bounds index is undefined behaviour there, not a panic, which is the reason for `ReleaseSafe` above.
 
 ## Stopping
 
@@ -270,6 +286,50 @@ fn quit(app: *nilo.App) []const u8 {
 try app.provide(&app);          // …or `*nilo.App was never registered` at startup
 try app.post("/admin/quit", quit);
 ```
+
+## Containers
+
+**A server in a container has to listen on every interface, and the default does not.** `Options.address` is `127.0.0.1`, the safe choice on a machine you own and a server that is up and unreachable in a container: a published port reaches the container's own interface, not its loopback. Set it, from config if the address differs between environments:
+
+```zig
+try app.listen(.{ .address = "0.0.0.0" });
+```
+
+When the address is a loopback one and the process is in a container (`/.dockerenv` or `/run/.containerenv` exists, or PID 1's cgroup names a container runtime), `listen()` says so in one warn line at startup. It reads those on Linux only, once, and keeps nothing.
+
+**A nilo binary built for musl is one static file**, so the image can be `FROM scratch`: no shell, no libc, no package manager, and 8 MB for the smallest example in `ReleaseSafe` with debug info kept. In your project:
+
+```
+zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+```
+
+```dockerfile
+FROM scratch
+COPY zig-out/bin/server /server
+EXPOSE 8787
+ENTRYPOINT ["/server"]
+```
+
+```
+docker build -t myapp .
+docker run -d -p 8787:8787 myapp
+curl localhost:8787/
+```
+
+This was built and run once with `examples/hello` (`zig build examples -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl`, with `.address = "0.0.0.0"` set), and the container answered `GET /greet/wati` through a published port. A `scratch` image has no CA certificates and no `/etc/passwd`, so a program that calls out over TLS copies a certificate bundle in, and one that wants to run as a non-root user adds a `USER` by number. Use `aarch64-linux-musl` for an Arm host. `docker stop` sends SIGTERM, which stops the server the way [Stopping](#stopping) describes.
+
+## Platforms
+
+**Linux is the platform nilo is run and measured on; the rest is built or compiled and not more.** What the workflows (`.github/workflows/`) run, and what they do not:
+
+| Platform | What CI runs | Status |
+|---|---|---|
+| Linux x86-64 | `zig build test-all`, `test -Dlibdeflate`, `examples`, the fuzzer, on `ubuntu-latest` | The supported one. Every benchmark is here. |
+| Linux aarch64 | nothing | Not run. The code has no x86-only path that this repository knows of, and the static build above targets it, but no test has run there. |
+| macOS | `zig build test` on `macos-latest` | The suite passes. `park-check` (memory per idle connection) and the benchmarks are Linux only. |
+| Windows | nothing | Not tested. The Engine and `listen()` have `.windows` branches, `config.Env` is POSIX only ([`decided.md`](../decided.md)), and nothing has been run. |
+
+Anything marked "not run" is untested, not unsupported: a report with a failing case is welcome.
 
 ## TLS and a reverse proxy
 

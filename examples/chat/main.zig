@@ -19,6 +19,7 @@ const nilo = @import("nilo_http");
 
 pub const std_options = nilo.std_options;
 pub const std_options_debug_io = nilo.debug_io;
+pub const panic = nilo.panic; // names the request that was in flight when the process goes down (ADR 007)
 
 /// One WebSocket connection, from a handler that looks like every other
 /// handler: it takes what it needs, answers the handshake, and says which

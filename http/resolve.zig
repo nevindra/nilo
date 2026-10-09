@@ -30,11 +30,16 @@
 //! by string at runtime.
 //!
 //! What a resolver may ask for is deliberately narrower than what a handler
-//! may: a `*Ctx`, a service, the request arena, and other resolved values.
-//! Not a path param, a query struct, or the body — a resolver belongs to the
-//! request, not to a route, and a route is the only thing that knows what
-//! `:id` means. A resolver that wants any of those takes a `*Ctx` and helps
-//! itself.
+//! may: a `*Ctx`, a service, the request arena, other resolved values, and
+//! the path params by name, `Path(T)`. Not a bare path param, a query struct,
+//! or the body: a bare argument cannot say which `:name` it is, and a
+//! resolver belongs to the request, not to a route. A `Path(T)` says which by
+//! its field names. Reached from a typed handler, those names are held
+//! against that handler's route while compiling; reached through
+//! `c.resolve(T)` from a bare middleware there is no route to hold them
+//! against, so they are read by name at run time and a name the matched route
+//! lacks is a 500 naming the resolver, the param and the route. A resolver
+//! that wants the query or the body takes a `*Ctx` and helps itself.
 //!
 //! Worked out **once per request** and shared by everyone who asks, so a
 //! middleware guarding a prefix and a handler taking the value do not
@@ -49,6 +54,7 @@ const fail = @import("fail.zig");
 const str_mod = @import("nilo_core");
 const http1 = @import("http1.zig");
 const bulkhead = @import("bulkhead.zig");
+const pathparams = @import("pathparams.zig");
 
 const Ctx = ctx_mod.Ctx;
 
@@ -89,6 +95,45 @@ pub fn check(comptime V: type) void {
     }
 }
 
+/// Hold every `Path(T)` the chain behind `V` takes against `pattern`, the
+/// route of the typed handler that asked for `V`: each field must name a param
+/// of that route (ADR 015). A resolver reached only from a bare middleware is
+/// not covered, and is checked by name at run time instead; one a typed
+/// middleware takes is held at `listen()` (`pathNames`, ADR 008).
+pub fn checkRoute(comptime V: type, comptime pattern: []const u8) void {
+    comptime {
+        const nothing: []const type = &.{};
+        checkRouteWithin(V, nothing, pattern);
+    }
+}
+
+fn checkRouteWithin(
+    comptime V: type,
+    comptime being_resolved: []const type,
+    comptime pattern: []const u8,
+) void {
+    comptime {
+        checkResolvable(V, being_resolved);
+        const Fn = fnTypeOf(V, @TypeOf(@field(V, marker)));
+        const params = @typeInfo(Fn).@"fn".param_types;
+        const roles = rolesOf(V, params);
+        const deeper = being_resolved ++ [_]type{V};
+        for (params, 0..) |param, i| {
+            switch (roles[i]) {
+                .path => pathparams.checkAgainst(
+                    param.?.nilo_path,
+                    pattern,
+                    "the `" ++ naming.of(param.?) ++ "` of the resolver `" ++ naming.of(V) ++
+                        "`",
+                    false,
+                ),
+                .resolved => checkRouteWithin(param.?, deeper, pattern),
+                else => {},
+            }
+        }
+    }
+}
+
 /// `value`, carrying the chain of resolvers already being worked out so a
 /// loop is a compile error rather than a compiler that never returns.
 fn valueWithin(comptime V: type, comptime being_resolved: []const type, c: *Ctx) !V {
@@ -114,6 +159,10 @@ fn valueWithin(comptime V: type, comptime being_resolved: []const type, c: *Ctx)
             .arena => args[i] = c._arena,
             .io => args[i] = c.io(),
             .resolved => args[i] = try valueWithin(P, deeper, c),
+            // By name, at run time: the resolver may be reached from a
+            // middleware, which has no route to be held against while
+            // compiling (ADR 015).
+            .path => args[i] = .{ .value = try pathparams.readByName(P.nilo_path, "the resolver `" ++ naming.of(V) ++ "`", c) },
         }
     }
 
@@ -162,9 +211,39 @@ fn requirementsWithin(
     }
 }
 
+/// The path param names the chain behind `V` reads, a resolver's own `Path(T)`
+/// fields and those of every resolver it takes. A typed middleware that takes
+/// `V` is held against each route it covers by these at `listen()` (ADR 008,
+/// ADR 015). Names may repeat.
+pub fn pathNames(comptime V: type) []const []const u8 {
+    comptime {
+        const nothing: []const type = &.{};
+        return pathNamesWithin(V, nothing);
+    }
+}
+
+fn pathNamesWithin(comptime V: type, comptime being_resolved: []const type) []const []const u8 {
+    comptime {
+        checkResolvable(V, being_resolved);
+        const Fn = fnTypeOf(V, @TypeOf(@field(V, marker)));
+        const params = @typeInfo(Fn).@"fn".param_types;
+        const roles = rolesOf(V, params);
+        const deeper = being_resolved ++ [_]type{V};
+        var out: []const []const u8 = &.{};
+        for (params, 0..) |param, i| {
+            switch (roles[i]) {
+                .path => out = out ++ @typeInfo(param.?.nilo_path).@"struct".field_names,
+                .resolved => out = out ++ pathNamesWithin(param.?, deeper),
+                else => {},
+            }
+        }
+        return out;
+    }
+}
+
 // ---- the compile-time side ----
 
-const Role = enum { ctx, service, arena, io, resolved };
+const Role = enum { ctx, service, arena, io, resolved, path };
 
 /// Everything that has to be true of `V` before it can be worked out, said
 /// while compiling. The check runs before anything else in both entry
@@ -225,17 +304,22 @@ fn roleOf(comptime V: type, comptime P: type, comptime i: usize) Role {
     if (P == std.mem.Allocator) return .arena;
     if (P == std.Io) return .io;
     if (isResolved(P)) return .resolved;
+    if (pathparams.isPath(P)) {
+        pathparams.checkShape(P.nilo_path, "the `" ++ naming.of(P) ++ "` of the resolver on `" ++ naming.of(V) ++ "`");
+        return .path;
+    }
     if (@typeInfo(P) == .pointer and @typeInfo(P).pointer.size == .one) return .service;
 
     @compileError(
         "nilo: argument " ++ num(i + 1) ++ " of the resolver on `" ++ naming.of(V) ++ "` is a " ++
             naming.of(P) ++ ", which a resolver cannot be given.\n" ++
-            "  A resolver belongs to the request, not to a route, so there is no `:id` for it to " ++
-            "be handed and no query struct to fill in.\n" ++
+            "  A resolver belongs to the request, not to a route, so a bare argument cannot say " ++
+            "which `:name` it is and there is no query struct to fill in.\n" ++
             "  What it can ask for: a `*Ctx`, a service (`*Db`), a `std.mem.Allocator` for the " ++
-            "request arena, a `std.Io`, or another resolved value.\n" ++
-            "  For anything else — a path param, the query string, the body — take a `*Ctx` and " ++
-            "read it: `c.param(\"id\")`, `c.query(\"page\")`, `c.json(T)`.",
+            "request arena, a `std.Io`, another resolved value, or the path params by name: " ++
+            "`nilo.Path(struct { org: u32 })`.\n" ++
+            "  For anything else, the query string or the body, take a `*Ctx` and " ++
+            "read it: `c.query(\"page\")`, `c.json(T)`.",
     );
 }
 
@@ -349,7 +433,7 @@ const Standin = struct {
     /// there is no fiber here — so the fallback slot stands in for one, the
     /// same way `App.handleRequest` sets it up for a test.
     fn start(self: *Standin) void {
-        self.in_flight.startRequest("GET", "/me");
+        self.in_flight.startRequest();
         self.restore_slot = bulkhead.setFallbackSlot(&self.in_flight);
     }
 

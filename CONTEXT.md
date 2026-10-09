@@ -77,8 +77,12 @@ A body field that can say three things rather than two: not sent, sent as null, 
 _Avoid_: tri-state optional, maybe, undefined, nullable wrapper
 
 **Query struct**:
-A struct of the caller's own, one field per query param, asked for as `Query(T)`. Field names are the param names, and a field's default is what "absent" means. The named counterpart to a positional path param.
+A struct of the caller's own, one field per query param, asked for as `Query(T)`. Field names are the param names, and a field's default is what "absent" means. The named counterpart to a Path struct.
 _Avoid_: query bag, params map, extractor
+
+**Path struct**:
+A struct of the caller's own, one field per `:name` in a route's pattern, asked for as `Path(T)`. The fields are held against the pattern while compiling, so a name the route lacks is an error rather than a swapped id. A route with one param may still take it as a bare argument; one with two or more may not.
+_Avoid_: params, route params, path bag, extractor
 
 **Form**:
 The request body when it came from an HTML form, read into a struct of the caller's own — one field per form field, asked for as `Form(T)`. The same slot a JSON body occupies and the same rules a Query struct follows. Whether it arrived urlencoded or as multipart is the browser's business, not the endpoint's.
@@ -99,6 +103,10 @@ _Avoid_: session store, session id, token, JWT, login
 **Fallback secret**:
 A secret a Session is opened under and never sealed under, so the secret can change without signing anybody out. Usually the old secret, kept for one `max_age` after the switch, because the expiry inside the seal means nothing sealed under it opens after that; on several instances, first the new one, staged a deploy ahead. Not what a leaked secret becomes: that one is dropped.
 _Avoid_: retired secret, secondary key, key ring
+
+**Bearer token**:
+A Session sealed for an `Authorization: Bearer` header instead of a Cookie, for a client with no cookie jar. The same secret and Fallback secrets, bound to its own purpose so neither opens as the other. Asked for as `Bearer(T)`, and opaque to the client, which reads its claims from a route.
+_Avoid_: JWT, access token, API key, auth token
 
 **Redirect**:
 An answer that is a status and a `Location` rather than a body, returned by the handler with its status in the type. `Redirect(303)` is the one a form POST wants, because it turns the follow-up into a GET.
@@ -154,6 +162,10 @@ _Avoid_: settings object, options, env, configuration file
 One field of a Config, and the one environment variable it is read from. Its type is the whole of what it may be — text, a number, a bool, an enum, or any of those wrapped in `?` — and nilo's opinion about it stops at whether the text converts.
 _Avoid_: option, flag, variable, key, parameter, knob
 
+**Late value**:
+A number or a text an option takes either as written in the program or as the address of one the program fills before `listen()`, usually from a Setting: `nilo.Late(T)`. How a deployment fact reaches an allowance, a CSP or a body limit without a rebuild.
+_Avoid_: dynamic option, runtime config, held setting
+
 **Source**:
 Where a Config's values come from — anything answering `get(name) ?[]const u8`, checked as a shape while compiling rather than through a vtable. Four are supplied (`Env`, `Map`, `Fixed`, `Dotenv`) and `layered` puts them in the order they win, first one with the name answering. A Source holds text somebody else read; none of them touches the filesystem.
 _Avoid_: provider, backend, loader, store
@@ -163,7 +175,7 @@ A `.env`'s text read as a Source — the file is the caller's to open, and the t
 _Avoid_: dotenv file, env file, envfile
 
 **Middleware**:
-A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler. Middleware enforces; a Resolved value provides.
+A piece of work that runs before and after a handler, operates at the Ctx layer, and produces no value for the handler. Middleware enforces; a Resolved value provides. After `*Ctx` and `Next` it may take the services and Resolved values it needs, which `listen()` checks.
 _Avoid_: filter, interceptor, hook, guard
 
 **Allowance**:

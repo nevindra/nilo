@@ -114,6 +114,10 @@ pub const Mark = struct {
     /// The names spelled one at a time, which win over `rename_all`
     /// ([ADR 168](../docs/adr/168-one-field-can-be-spelled-on-its-own.md)).
     renames: []const Rename = &.{},
+    /// The fields left out of the wire in both directions (`.skip`, ADR 148):
+    /// never written, never read, a key by that name from a client an unknown
+    /// key like any other. Only a struct has fields to leave out.
+    skips: []const []const u8 = &.{},
     /// Whether a struct reading a request body skips a key it has no field for
     /// instead of refusing it (`.unknown_fields = .ignore`, ADR 168). Per type:
     /// a struct nested inside this one still answers for its own keys.
@@ -127,6 +131,13 @@ pub const Mark = struct {
     /// Whether the marker changes how any field is spelled.
     pub fn renamesFields(self: Mark) bool {
         return self.rename_all != null or self.renames.len > 0;
+    }
+
+    /// Whether the marker spells any field differently or leaves one out, which
+    /// is what a reader that does not read the marker (a form, a query string,
+    /// `std.json` itself) cannot honour.
+    pub fn spellsFields(self: Mark) bool {
+        return self.renamesFields() or self.skips.len > 0;
     }
 };
 
@@ -213,6 +224,8 @@ pub fn of(comptime T: type) ?Mark {
                 mark.rename_all = caseOf(T, said.rename_all);
             } else if (std.mem.eql(u8, f_name, "rename")) {
                 mark.renames = renamesOf(T, said.rename);
+            } else if (std.mem.eql(u8, f_name, "skip")) {
+                mark.skips = skipsOf(T, said.skip);
             } else if (std.mem.eql(u8, f_name, "unknown_fields")) {
                 mark.ignores_unknown = unknownFieldsOf(T, said.unknown_fields);
             } else if (std.mem.eql(u8, f_name, "misfit")) {
@@ -220,9 +233,10 @@ pub fn of(comptime T: type) ?Mark {
             } else @compileError(
                 "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` has a field `" ++ f_name ++
                     "`, which is not something it can say.\n" ++
-                    "  A marker says five things: `tag`, the key the variant's name goes under; " ++
+                    "  A marker says six things: `tag`, the key the variant's name goes under; " ++
                     "`rename_all`, how every name is spelled on the wire; `rename`, the ones " ++
-                    "spelled on their own; `unknown_fields`, whether a body key the struct " ++
+                    "spelled on their own; `skip`, the fields left out of the wire; " ++
+                    "`unknown_fields`, whether a body key the struct " ++
                     "has no field for is skipped; and `misfit`, the status of a body that is " ++
                     "JSON and not this type's shape.\n" ++
                     "    pub const " ++ marker ++ " = .{ .tag = \"signal\", .rename_all = .camelCase, " ++
@@ -234,18 +248,19 @@ pub fn of(comptime T: type) ?Mark {
         // tag can come after the `misfit` that needs it.
         if (mark.misfit != null) misfitBelongs(T, mark);
 
-        if (mark.tag == null and !mark.renamesFields() and !mark.ignores_unknown and mark.misfit == null) @compileError(
+        if (mark.tag == null and !mark.spellsFields() and !mark.ignores_unknown and mark.misfit == null) @compileError(
             "nilo: `" ++ naming.of(T) ++ "`'s `" ++ marker ++ "` is empty, so it says nothing " ++
                 "about this type's JSON and nothing changes.\n" ++
                 "  Either say what it is for, or take the declaration off:\n" ++
                 "    pub const " ++ marker ++ " = .{ .tag = \"signal\" };        // a tagged union\n" ++
                 "    pub const " ++ marker ++ " = .{ .rename_all = .camelCase }; // a cased enum\n" ++
+                "    pub const " ++ marker ++ " = .{ .skip = &.{\"password_hash\"} }; // a struct that leaves a field out\n" ++
                 "    pub const " ++ marker ++ " = .{ .unknown_fields = .ignore }; // a body struct that skips unknown keys\n" ++
                 "    pub const " ++ marker ++ " = .{ .misfit = 422 };              // a body struct whose wrong shape is a 422",
         );
 
         if (mark.tag) |key| checkTag(T, key);
-        if (mark.renamesFields()) checkRenames(T, mark);
+        if (mark.spellsFields()) checkRenames(T, mark);
         return mark;
     }
 }
@@ -504,6 +519,96 @@ fn isText(comptime S: type) bool {
     };
 }
 
+/// `said.skip`: the fields a struct leaves out of the wire, as a list of
+/// their names (`&.{"password_hash"}`). Each has to be a field of the struct,
+/// named once, and text ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
+/// Whether a skipped field can be read at all (it needs a default) is asked
+/// where a body is read into the type, because a type that is only ever
+/// written has no one to read it.
+fn skipsOf(comptime T: type, comptime said: anytype) []const []const u8 {
+    comptime {
+        if (@typeInfo(T) != .@"struct") @compileError(
+            "nilo: `" ++ naming.of(T) ++ "` says `.skip`, and it is a " ++ @tagName(@typeInfo(T)) ++
+                ", which has no fields to leave out.\n" ++
+                "  `skip` names the fields of a struct that never go out and never come in.",
+        );
+        const list = switch (@typeInfo(@TypeOf(said))) {
+            .pointer => said.*,
+            else => said,
+        };
+        const List = @TypeOf(list);
+        const listed = @typeInfo(List) == .array or
+            (@typeInfo(List) == .@"struct" and @typeInfo(List).@"struct".is_tuple);
+        if (!listed) @compileError(
+            "nilo: `" ++ naming.of(T) ++ "`'s `.skip` is a " ++ naming.of(@TypeOf(said)) ++ ", and it " ++
+                "names the fields left out, so it is written as a list of them.\n" ++
+                "    pub const " ++ marker ++ " = .{ .skip = &.{\"password_hash\"} };",
+        );
+        var out: []const []const u8 = &.{};
+        for (0..list.len) |i| {
+            const name = list[i];
+            if (!isText(@TypeOf(name))) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "`'s `.skip` has a " ++ naming.of(@TypeOf(name)) ++
+                    " in it, and a field is named by text.\n" ++
+                    "    .skip = &.{\"password_hash\"}",
+            );
+            const field: []const u8 = name;
+            if (!@hasField(T, field)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` skips a field `" ++ field ++ "` it does not have.\n" ++
+                    "  `.skip` names this type's own fields, spelled as they are written: " ++
+                    "`.skip = &.{\"password_hash\"}`.",
+            );
+            for (out) |already| if (std.mem.eql(u8, already, field)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` skips `" ++ field ++ "` twice.",
+            );
+            out = out ++ [_][]const u8{field};
+        }
+        return out;
+    }
+}
+
+/// Whether `m` leaves the field `name` out of the wire.
+pub fn skipped(comptime m: ?Mark, comptime name: []const u8) bool {
+    comptime {
+        const said = m orelse return false;
+        for (said.skips) |s| if (std.mem.eql(u8, s, name)) return true;
+        return false;
+    }
+}
+
+/// The key a struct's field `name` goes under on the wire, **the one spelling
+/// both directions use**: the writer sends it, the reader matches it, the
+/// messages quote it and the API description lists it
+/// ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)). A comptime
+/// string, so reading costs what comparing with the field name always cost.
+pub fn fieldWire(comptime T: type, comptime name: []const u8) []const u8 {
+    comptime return wire(name, of(T));
+}
+
+/// Whether `T` leaves its field `name` out of the wire.
+pub fn fieldSkipped(comptime T: type, comptime name: []const u8) bool {
+    comptime return skipped(of(T), name);
+}
+
+/// Refuse, while compiling, a struct read from a body that leaves out a field
+/// the reader could not fill: a skipped field is never read, so it needs a
+/// value to stand in for it, a default or a `?T`
+/// ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
+pub fn checkSkipsReadable(comptime T: type, comptime absent: anytype) void {
+    comptime {
+        const m = of(T) orelse return;
+        for (m.skips) |name| {
+            if (!absent(name)) @compileError(
+                "nilo: `" ++ naming.of(T) ++ "` skips `" ++ name ++ "` (`.skip` in its `" ++ marker ++
+                    "`) and is read from a request body, where a skipped field is never read and " ++
+                    "has nothing to hold.\n" ++
+                    "  Give `" ++ name ++ "` a default value (`" ++ name ++ ": … = …`) or make it " ++
+                    "optional, or read the body into a struct of its own.",
+            );
+        }
+    }
+}
+
 /// A `tag` is a claim about a union, so it is checked against one.
 fn checkTag(comptime T: type, comptime key: []const u8) void {
     comptime {
@@ -612,7 +717,9 @@ fn checkRenames(comptime T: type, comptime m: Mark) void {
         var spelled: [names.len][]const u8 = undefined;
         for (names, 0..) |name, i| spelled[i] = wire(name, m);
         for (names, 0..) |a, i| {
+            if (skipped(m, a)) continue;
             for (names[i + 1 ..], i + 1..) |b, j| {
+                if (skipped(m, b)) continue;
                 if (!std.mem.eql(u8, spelled[i], spelled[j])) continue;
                 // Which of the two markers put them there decides the advice.
                 // A collision under `rename_all` alone is answered with the
@@ -710,19 +817,20 @@ pub fn wireNames(comptime T: type) []const []const u8 {
     }
 }
 
-/// The first struct at or inside `T` that renames its own fields, or null
-/// ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
+/// The first struct at or inside `T` that renames its own fields or leaves some
+/// out, or null ([ADR 148](../docs/adr/148-a-field-name-is-a-spelling-too.md)).
 ///
-/// **What it is for: refusing one on the way *in*.** `rename_all` on a struct
-/// is a write spelling — `json.write` sends the renamed keys and the API
-/// description promises them — and `std.json` reads a body into the field names
-/// as they are written. A type used for both would send `fullName` and refuse
-/// to read it back, and nothing would say so until a client built from the
-/// document got a 400 naming every field.
+/// **What it is for: refusing the readers that do not read the marker.** A
+/// request body is read by nilo's own walk (`json.readFields`), which matches
+/// the wire spelling, so a body asks nothing of this. A *form* and a *query
+/// string* are read by field name, and `std.json` is the writer of the shapes
+/// `json.covers` does not walk: a type used there would send `fullName` while
+/// the reader looked for `full_name`, and nothing would say so until a client
+/// built from the document got a 400 naming every field.
 ///
 /// A *union* is not this, and neither is an enum: both read back through
 /// `jsonParseFor`, which is the supported way in (ADR 016). Only a struct has
-/// no reader, and only a struct is answered here.
+/// fields to rename or to skip, and only a struct is answered here.
 ///
 /// Eight deep, the same ceiling `covers` and `schemaWithin` have and for the
 /// same reason — a type holding a list of its own type has no bottom.
@@ -744,7 +852,7 @@ fn renamedWithin(comptime T: type, comptime depth: usize) ?type {
         switch (@typeInfo(T)) {
             .@"struct" => |s| {
                 if (of(T)) |m| {
-                    if (m.renamesFields()) return T;
+                    if (m.spellsFields()) return T;
                 }
                 for (s.field_types) |f_type| {
                     if (renamedWithin(f_type, depth + 1)) |found| return found;
@@ -849,17 +957,15 @@ pub fn parseFor(comptime T: type) ParserFor(T) {
         // Checked here rather than where it is used, so it fires on the line
         // somebody wrote instead of on the first request that carries one.
         //
-        // A struct gets its own sentence, because since ADR 148 it is a thing
-        // somebody can reasonably have written — a response type with
-        // `rename_all` on it — and the answer is not "add a tag".
+        // A struct gets its own sentence: nilo's reader already reads its
+        // marker (ADR 148), so there is nothing to hand over and the answer is
+        // not "add a tag".
         if (m.tag == null and @typeInfo(T) == .@"struct") @compileError(
             "nilo: `" ++ naming.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
-                "` that only renames its fields, and renaming a struct's fields is a **write**" ++
-                " spelling (ADR 148, ADR 168).\n" ++
-                "  There is nothing for the reader to do differently: nilo writes the renamed" ++
-                " keys and `std.json` reads the body into the field names as they are written.\n" ++
-                "  Take the `jsonParse` line off, and keep this type for what goes out. A body" ++
-                " coming in is its own struct, spelled the way the wire spells it.",
+                "` that only spells its fields, and nilo reads a struct's marker without being " ++
+                "handed anything (ADR 148).\n" ++
+                "  Take the `jsonParse` line off: a body read into this struct matches the " ++
+                "renamed keys already.",
         );
         if (m.tag == null and @typeInfo(T) != .@"enum") @compileError(
             "nilo: `" ++ naming.of(T) ++ "` hands nilo's JSON reader a `" ++ marker ++
@@ -1209,7 +1315,7 @@ fn Reader(comptime T: type) type {
             gpa: std.mem.Allocator,
             held: std.json.Value,
             options: std.json.ParseOptions,
-        ) std.json.ParseFromValueError!T {
+        ) std.json.ParseError(std.json.Scanner)!T {
             const key = comptime of(T).?.tag.?;
             const object = switch (held) {
                 .object => |o| o,
@@ -1226,7 +1332,7 @@ fn Reader(comptime T: type) type {
             inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types, comptime wireNames(T)) |f_name, f_type, on_the_wire| {
                 if (std.mem.eql(u8, arm, on_the_wire)) {
                     if (f_type == void) return @unionInit(T, f_name, {});
-                    return @unionInit(T, f_name, try std.json.parseFromValueLeaky(f_type, gpa, held, inner));
+                    return @unionInit(T, f_name, try @import("json.zig").parseValueLeaky(f_type, gpa, held, inner));
                 }
             }
             return error.InvalidEnumTag;
@@ -1261,7 +1367,7 @@ fn Reader(comptime T: type) type {
                 var known = false;
                 if (comptime Payload != void) {
                     inline for (@typeInfo(Payload).@"struct".field_names) |f_name| {
-                        if (std.mem.eql(u8, name, f_name)) known = true;
+                        if (!(comptime fieldSkipped(Payload, f_name)) and std.mem.eql(u8, name, comptime fieldWire(Payload, f_name))) known = true;
                     }
                 }
                 if (!known) return error.UnknownField;

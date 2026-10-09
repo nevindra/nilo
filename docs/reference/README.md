@@ -47,10 +47,12 @@ const job = @import("nilo_job");      // only if some work runs later, or on a s
 These go at the top level of the file that holds `main`:
 
 ```zig
-pub const std_options = nilo.std_options;         // engine chatter → warnings
+pub const std_options = nilo.std_options;         // engine chatter → warnings, and nilo.logFn
 pub const std_options_debug_io = nilo.debug_io;   // std.log off the event loop
 pub const panic = nilo.panic;                     // optional: name the request in a crash
 ```
+
+`nilo.std_options` sets `.logFn = nilo.logFn`, the one sink for log lines: one line per call, text or JSON by `listen(.{ .log = … })`, with the id of the request it was written in. A program with `std_options` of its own adds `.logFn = nilo.logFn` ([ADR 262](../adr/262-a-log-line-has-one-sink.md)).
 
 ## Every heading
 
@@ -73,6 +75,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`trace` options](./app.md#trace-options)
 - [Concurrency](./app.md#concurrency)
 - [Static options](./app.md#static-options)
+  - [`nilo.app`](./app.md#niloapp)
 - [OpenAPI options](./app.md#openapi-options)
   - [The document without a server](./app.md#the-document-without-a-server)
 
@@ -82,7 +85,9 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [Types that parse themselves](./handlers.md#types-that-parse-themselves)
   - [`Within(min, max)`](./handlers.md#withinmin-max)
   - [`Text`, `Email` and `Url`](./handlers.md#text-email-and-url)
+  - [`Many(T, .{ .min, .max })`](./handlers.md#manyt--min-max-)
   - [`nilo_check`](./handlers.md#nilo_check)
+  - [`Path(T)`](./handlers.md#patht)
   - [`Form(T)`](./handlers.md#formt)
   - [`FromHeader(name, T)`](./handlers.md#fromheadername-t)
   - [`Authorization(scheme)`](./handlers.md#authorizationscheme)
@@ -132,10 +137,11 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [The cookie name](./ctx.md#the-cookie-name)
   - [Expiry](./ctx.md#expiry)
   - [The secret](./ctx.md#the-secret)
+- [`Bearer(T)`](./ctx.md#bearert)
 - [`Upload`](./ctx.md#upload)
 - [Failing](./ctx.md#failing)
 
-**[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding and the clock.
+**[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock and `Timestamp` and `Date`.
 
 - [`Str`](./core.md#str)
 - [`Run`](./core.md#run)
@@ -146,6 +152,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`AnyScope`](./core.md#anyscope)
 - [`nilo_core.percent`](./core.md#nilo_corepercent)
 - [The clock](./core.md#the-clock)
+- [`Timestamp` and `Date`](./core.md#timestamp-and-date)
 - [`nilo_core.tmpDir`](./core.md#nilo_coretmpdir)
 - [A handler that blocks its thread](./core.md#a-handler-that-blocks-its-thread)
 - [`nilo.spawn` and `app.spawn`](./core.md#nilospawn-and-appspawn)
@@ -167,6 +174,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
 **[Middleware](./middleware.md)**: nilo's built-in middleware (logging, CORS, CSRF, security headers, rate limits, per-route deadlines and body limits), and `nilo.accept` for reading an `Accept` header.
 
 - [Built-in middleware](./middleware.md#built-in-middleware)
+  - [`nilo.Late`](./middleware.md#nilolate)
   - [`nilo.cors`](./middleware.md#nilocors)
   - [`nilo.csrf`](./middleware.md#nilocsrf)
   - [`nilo.secure`](./middleware.md#nilosecure)
@@ -174,6 +182,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
     - [`allowance.keyed`](./middleware.md#allowancekeyed)
   - [`nilo.deadline`](./middleware.md#nilodeadline)
   - [`nilo.maxBody`](./middleware.md#nilomaxbody)
+- [Typed middleware](./middleware.md#typed-middleware)
 - [Holding the answer with `next.hold`](./middleware.md#holding-the-answer-with-nexthold)
 - [`nilo.accept`](./middleware.md#niloaccept)
 
@@ -243,6 +252,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
     - [`db.exactlyOne`](./sql.md#dbexactlyone)
   - [Streaming](./sql.md#streaming)
   - [`Tx`](./sql.md#tx)
+    - [A route's deadline](./sql.md#a-routes-deadline)
     - [`tx.deadline`](./sql.md#txdeadline)
     - [`.lock`: holding the rows a read matched](./sql.md#lock-holding-the-rows-a-read-matched)
     - [Savepoints](./sql.md#savepoints)

@@ -2,7 +2,7 @@
 
 **A cookie is read in place and never decoded, and a session is a cookie with policy on top: sealed into the cookie, never stored on the server.**
 
-**Guide:** [Cookies](../guide/cookies.md), [Sessions](../guide/sessions.md) · **Reference:** [`Cookie`](../reference/ctx.md#cookie), [`Session(T)`](../reference/ctx.md#sessiont)
+**Guide:** [Cookies](../guide/cookies.md), [Sessions](../guide/sessions.md) · **Reference:** [`Cookie`](../reference/ctx.md#cookie), [`Session(T)`](../reference/ctx.md#sessiont), [`Bearer(T)`](../reference/ctx.md#bearert)
 
 The code is `http/cookie.zig` and `http/session.zig`, plus `putHeader` in `http1.zig`, which every response header passes through.
 
@@ -36,6 +36,7 @@ Every response header passes through `putHeader`, cookie or not, so a check writ
 13. **`Session(T)` is a resolved value, decrypted once per request however many things ask for it, and reading and writing are separate calls** (`s.value` versus `s.set(...)`). Changing a by-value copy would compile cleanly and do nothing. [ADR 033](../adr/033-a-session-is-sealed-into-the-cookie.md)
 14. **A fallback secret can open a cookie but never seals one**, so the secret can change without signing anybody out. The current secret is tried first, then up to three fallbacks in order. The cookie carries no key id, because adding one would change the format and sign everybody out once. The sealed expiry limits how long the old secret matters: one `max_age` after the switch, nothing sealed with it opens anyway. With several instances, a rotation takes two deploys, the first adding the new secret as a fallback. A leaked secret is removed, never kept as a fallback. [ADR 225](../adr/225-a-fallback-session-secret-opens-and-never-seals.md)
 15. **The session cookie is named `__Host-session` wherever that prefix can apply, and the plain `session` is read only when the program says it writes one.** With `Secure`, `Path=/` and no `Domain`, a sibling subdomain cannot plant its own session under a path of this site, whether or not the visitor is signed in. `listen(.{ .session_plain_name = true })` reads the plain name after the prefixed one, for a session with a `domain`, another `path` or `secure = false`, and for a program upgrading from 0.6.0, whose next `set` moves each visitor to the new name. [ADR 033](../adr/033-a-session-is-sealed-into-the-cookie.md)
+16. **A client with no cookie jar gets the same seal in an `Authorization: Bearer` header.** `Bearer(T)` reads it (`get()`, or `require()` for the 401 with `WWW-Authenticate`), `Bearer(T).issue(c, value, .{ .max_age })` mints it, and the secret and fallbacks are the session's, so rotation covers both. The seal's associated data is `nilo.bearer` for a token and empty for a cookie, so neither opens as the other and the cookie format did not change. [ADR 265](../adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md)
 
 ## Decisions
 
@@ -44,6 +45,8 @@ Every response header passes through `putHeader`, cookie or not, so a check writ
 | [029](../adr/029-a-header-is-checked-once-and-two-of-them-repeat.md) | Cookies as a mechanism: reading, the single place headers are checked, and which headers repeat |
 | [033](../adr/033-a-session-is-sealed-into-the-cookie.md) | A session as policy on top of that mechanism: sealed, encrypted, expiring, not revocable |
 | [225](../adr/225-a-fallback-session-secret-opens-and-never-seals.md) | Rotating the secret: fallback secrets open and never seal, three at most, kept for one `max_age` |
+
+| [265](../adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md) | `Bearer(T)`: the same seal in an `Authorization` header for a client with no cookie jar, bound to its own purpose, issued by the framework |
 
 Related topics: a `Session(T)` is not a `Token`; see [jwt](jwt.md) for the credential nilo verifies but does not issue. The clock the sealed expiry is checked against is [ADR 041](../adr/041-core-knows-what-time-it-is.md), and the entropy the nonce comes from is [ADR 042](../adr/042-entropy-belongs-to-the-loop.md), both in [id-clock-entropy](id-clock-entropy.md).
 

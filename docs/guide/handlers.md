@@ -24,7 +24,8 @@ test "getUser" {
 |---|---|
 | `*Ctx` | the raw request, for when you need full control |
 | `*Db`, `*const Config` | a [service](./services.md), matched by its type |
-| `u32`, `f64`, `Str`, `bool`, an enum | a path param, in the order they appear in the pattern |
+| `u32`, `f64`, `Str`, `bool`, an enum | the path param, on a route with exactly one |
+| `Path(T)` | the [path params, read by name](./requests.md#path-params) into a struct of yours; required on a route with two or more |
 | `Query(T)` | the [query string](./requests.md#query-params), read into a struct of yours |
 | `FromHeader("X-Staff-Id", T)` | one request header, converted the way a path param is; `?T` when the client may not send it. `c.header` reads the same thing; this also adds a parameter to the [OpenAPI document](./openapi.md) |
 | `Authorization(.bearer)`, `Authorization(.{ .basic = "realm" })` | the `Authorization` header as one scheme: `.value` for a token, `.user` and `.password` for Basic. A missing header or another scheme is a 401 with `WWW-Authenticate`, before the handler runs, and a security scheme in the document. See [Checking somebody else's token](./jwt.md#the-signed-in-user-as-a-handler-argument) |
@@ -36,7 +37,7 @@ test "getUser" {
 | a type with `nilo_resolve` | a [resolved value](./middleware.md#resolved-values), usually the signed-in user |
 | any other struct | the [request body](./requests.md#json-bodies), parsed from JSON |
 
-Arguments can be in any order, except path params. Those are positional: the first scalar argument is the first `:param` in the pattern, the second is the second. Everything else is matched by type, so it can sit anywhere in the list.
+Arguments can be in any order. A route with one path param takes it as a bare argument; a route with two or more reads them by name through `Path(T)`, because Zig keeps no argument names and two bare `u32` would compile either way round. Everything is matched by type, so it can sit anywhere in the list.
 
 ```zig
 fn update(db: *Db, id: u32, arena: std.mem.Allocator, incoming: Patch) !User { … }

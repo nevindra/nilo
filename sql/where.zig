@@ -1788,7 +1788,7 @@ fn clockOf(
         if (today and day) return .day;
         @compileError(
             "nilo: " ++ said ++ " on " ++ @typeName(Row) ++ ", whose `" ++ column ++ "` is " ++
-                (if (text) |t| "a `" ++ t ++ "` column read as text" else @typeName(F)) ++ ".\n" ++
+                (if (text) |t| "a `" ++ t ++ "` column read as text" else types.nameOf(F)) ++ ".\n" ++
                 (if (now)
                     "  `.now` is the moment the statement runs, so it goes in a `sql.Timestamp` " ++
                         "or a `sql.AsText(\"timestamptz\")`." ++

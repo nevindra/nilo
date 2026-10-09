@@ -243,6 +243,30 @@ fn checkFromTheCommandLine(gpa: std.mem.Allocator, stored: []const u8, typed: []
 
 There is no matching `nilo.hashPassword`. Making a hash needs entropy, and `c.entropy` is where the wait for it happens. Outside a request, fill a `[pw.salt_len]u8` with `std.Io.randomSecure` and call `pw.hash`; that is all it takes.
 
+## A client that sends a bearer token
+
+**A native application has no cookie jar, and `Bearer(T)` is the session's seal in an `Authorization: Bearer` header** ([ADR 265](../adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md)). It is not a JWT: it is encrypted as well as signed, the client cannot read it, it has no `alg` to confuse, and there is no comparison for you to write. The sign-in route issues one; the client keeps it and sends it back.
+
+<!-- compiles -->
+```zig
+const Token = struct { token: []const u8, expires_in: i64 };
+
+// Whoever checked the password has a user id; a real route calls `pw` first.
+fn issueToken(c: *nilo.Ctx, user: u32) !Token {
+    const t = try nilo.Bearer(Signed).issue(c, .{ .user = user }, .{ .max_age = 3600 });
+    return .{ .token = t.text, .expires_in = t.expires_in };
+}
+
+// The token is opaque to the client, so a route like this is how it learns its claims.
+fn whoAmI(b: nilo.Bearer(Signed)) !Signed {
+    return try b.require();
+}
+```
+
+`require()` answers a 401 with `WWW-Authenticate: Bearer`, and with `error="invalid_token"` when a token was sent and did not open, which tells the client to sign in again (RFC 6750). `get()` returns `?T` for a route that works signed out. The token opens under `session_secret` and its fallbacks, so [rotating the secret](#rotating-the-secret) covers tokens too, and a token expires at its `max_age` inside the seal. A session cookie's value does not open as a token, and the reverse.
+
+Send the token as `Authorization: Bearer <token>`. A request that carries only that header has no cookie to borrow, so the CSRF middleware does not stop it; one that carries a session cookie is checked as before. Like a session, a token cannot be revoked before it expires: keep `max_age` short and put a version number of your own in `Signed` to sign everybody out. Give the sign-in response `Cache-Control: no-store` if anything between you and the client caches.
+
 ## Password reset tokens and API keys
 
 **[`pw.Token`](../reference/pw.md) is a random token for a reset link, an email verification or an API key, stored as a digest.** Every application needs all three, and the recipe is small enough that everybody writes it, yet easy enough to get wrong that most get one part wrong: storing the token as it was sent (so a copy of the table is a set of working links), comparing with `std.mem.eql`, or using a UUID as the token. `pw.Token` is the recipe written once ([ADR 044](../adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md)).

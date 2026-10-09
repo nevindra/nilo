@@ -1,0 +1,9 @@
+.{
+    .name = .hello,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x3610a6868d30c5f6,
+    // `zig fetch --save` fills this in with nilo, pinned to a commit.
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

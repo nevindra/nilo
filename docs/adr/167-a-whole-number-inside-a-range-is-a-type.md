@@ -66,6 +66,27 @@ exactly (ADR 084), so a number past 2^53 is not rounded. `Bounds` is an
 `i128`, so a `u128` states `minimum: 0` and no `maximum` rather than a wrong
 one.
 
+## A bound written with a point makes it a real number
+
+`Within(0.0, 1.0)` holds an `f64`. The kind of number is read off the
+bounds, which is what the author already wrote: both whole is an integer
+(`Within(1, 200)` is a `u8`), either with a point is real (`Within(0.5, 2)`
+too). So there is no second name and no third argument that could disagree
+with the bounds; a migrant looking for `validate:"min=0,max=1"` on a float
+finds the same word.
+
+A real one is read the way a `f64` field is (ADR 084): the digits, a
+fraction, an exponent, and nothing `std.fmt` would take from Zig source, so
+`nan`, `inf`, `1e999` and `0x1p-1` are all the same null a bad number gets.
+Both ends are inclusive, as for an integer. The 400 says `a number from 0 to
+1`, and the document says `{"type":"number","minimum":0,"maximum":1}`. The
+value is `Within.Number`, which replaces `Within.Int` (`Int` was the
+integer's name, and a `f64` is not one).
+
+Three more Refusals: a bound that is not a number, a bound that is not
+finite, and the existing two (reversed bounds, a default outside the range)
+for a real range too.
+
 ## What it costs the caller
 
 **`.value`.** The integer is inside a struct, so handing it to a `LIMIT` is
@@ -80,6 +101,12 @@ catch — `.of` checks it against the range while compiling, and a default
 outside it is a Refusal. `Within(200, 1)` is the other.
 
 ## What was not done
+
+**A second name for the real range** (`WithinF`, `Between`). The bounds say
+which it is, and a name per kind is the vocabulary a reader then has to
+carry for no gain in what the compiler can check. Writing `Within(0, 1)` and
+getting a `u1` where a ratio was meant is the cost, and the 400 saying "a
+whole number from 0 to 1" is how it is noticed.
 
 **`minimum`/`maximum` on `nilo_openapi`.** `Told`'s comment refuses it, and
 the refusal is right: a marker is a claim, and a type that *claimed* a range
@@ -107,6 +134,9 @@ no `Within`; one that does carries a `nilo_parse` per distinct range.
 - Every integer in every generated document carries its type's `minimum` and `maximum`.
   A test that compared the document byte for byte on such a field has one
   more key in it.
-- Two Refusals: bounds the wrong way round, and a default outside them.
+- Refusals: bounds the wrong way round, a default outside them, a bound
+  that is not a number, and a bound that is not finite.
+- `Within.Int` is `Within.Number`, an `f64` for a real range.
+- `openapi.Schema.ranged` for `type: number` with `minimum` and `maximum`.
 - The port's two lines go from every list handler, and the document says
   what the handler holds.

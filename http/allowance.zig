@@ -5,6 +5,20 @@
 //! try app.useOn("/api", allowance.with(.{ .per_window = 100, .window_s = 60 }));
 //! ```
 //!
+//! **A deployment can set the numbers.** `.per_window` and `.window_s` are a
+//! `nilo.Late(u32)`: a literal is settled while compiling, as it always was,
+//! and the address of a `u32` the program fills before `listen()` is read on
+//! each request, so one binary serves a staging limit and a production one
+//! (ADR 088, ADR 264). The table's `.slots` stays a constant because it sizes
+//! `.bss`. A held value of zero, or one past what a slot holds, answers 500
+//! with the sentence until it is fixed: no middleware has a hook at `listen()`.
+//!
+//! **Every answer through an allowance says where the client stands**, in the
+//! `RateLimit-Policy` and `RateLimit` fields of
+//! draft-ietf-httpapi-ratelimit-headers, written into a stack buffer and
+//! copied once into the request arena, and only on routes that carry an
+//! allowance. `.headers = false` turns them off.
+//!
 //! **One process's table.** Two instances keep two, so a limit of 100
 //! admits 200: it holds per instance, not per deployment, and a rolling
 //! deploy is two instances while it lasts (ADR 110).
@@ -50,16 +64,21 @@ const Ctx = @import("ctx.zig").Ctx;
 const Str = @import("nilo_core").Str;
 const fail = @import("fail.zig");
 const mw = @import("middleware.zig");
+const late = @import("late.zig");
+const Late = late.Late;
 
 /// How many ways share a bucket. Four `u64`s is 32 bytes, so a bucket and its
 /// neighbour fit in one 64-byte line and a lookup never touches two.
 const ways = 4;
 
 pub const Options = struct {
-    /// How many requests one address may make inside `window_s`.
-    per_window: u16 = 100,
-    /// How long the window is, in seconds. Also what `Retry-After` says.
-    window_s: u16 = 60,
+    /// How many requests one address may make inside `window_s`: a number, or
+    /// the address of a `u32` filled before `listen()`. At most 1023 either
+    /// way (see `address_bits`).
+    per_window: Late(u32) = .{ .value = 100 },
+    /// How long the window is, in seconds, a number or the address of a
+    /// `u32`. Also what `Retry-After` says.
+    window_s: Late(u32) = .{ .value = 60 },
     /// How many addresses this table remembers at once. A power of two.
     ///
     /// Eight bytes each, in `.bss`: 16,384 slots is 131,072 bytes, once, for
@@ -79,21 +98,32 @@ pub const Options = struct {
     /// is wrong when a sign-in route and a search route are meant to be
     /// counted apart. Give one of them a name.
     name: []const u8 = "",
+    /// Whether every answer through this allowance carries `RateLimit-Policy`
+    /// and `RateLimit`. Off for an API whose clients should not be told how
+    /// close they are.
+    headers: bool = true,
 };
 
-/// The middleware. Everything about it is settled while compiling, so a route
-/// it does not guard pays nothing at all and a program that never calls this
-/// links none of it.
-pub fn with(comptime options: Options) mw.Middleware {
+/// The middleware. Everything but a held number is settled while compiling,
+/// so a route it does not guard pays nothing at all and a program that never
+/// calls this links none of it. `given` is a struct literal of `Options`'
+/// fields; the two counts take a number or the address of a `u32`.
+pub fn with(comptime given: anytype) mw.Middleware {
+    return build(comptime late.fill(Options, given));
+}
+
+fn build(comptime options: Options) mw.Middleware {
     comptime check(options);
 
     const S = Slot(options);
     const buckets = options.slots / ways;
-    const window_ns: u64 = @as(u64, options.window_s) * std.time.ns_per_s;
-    const retry_after = std.fmt.comptimePrint("{d}", .{options.window_s});
-    const refusal = std.fmt.comptimePrint(
-        "too many requests: this address may make {d} every {d} seconds",
-        .{ options.per_window, options.window_s },
+    const held = comptime options.per_window.isHeld() or options.window_s.isHeld();
+    const item = comptime quotaItem(options.name);
+    // A stated allowance has every header settled while compiling.
+    const retry_after = comptime if (held) "" else std.fmt.comptimePrint("{d}", .{options.window_s.read()});
+    const policy: ?[]const u8 = comptime if (held) null else std.fmt.comptimePrint(
+        "{s};q={d};w={d}",
+        .{ item, options.per_window.read(), options.window_s.read() },
     );
 
     return struct {
@@ -104,6 +134,13 @@ pub fn with(comptime options: Options) mw.Middleware {
         var said: std.atomic.Value(bool) = .init(false);
 
         fn run(c: *Ctx, next: mw.Next) anyerror!void {
+            const per = options.per_window.read();
+            const win_s = options.window_s.read();
+            if (comptime held) {
+                if (per == 0 or per > address_max or win_s == 0) return misconfigured(c, options.name, per, win_s, address_max);
+            }
+            const window_ns: u64 = @as(u64, win_s) * std.time.ns_per_s;
+
             const now = bulkhead.coarseNanos();
             const window: u16 = @truncate(now / window_ns);
             const into = now % window_ns;
@@ -113,16 +150,18 @@ pub fn with(comptime options: Options) mw.Middleware {
             const h = std.hash.Wyhash.hash(hashSeed(), identity);
 
             const at = (h % buckets) * ways;
-            if (charge(S, options, window_ns, table[at..][0..ways], fingerprintOf(S, h), window, into)) {
-                return next.run(c);
+            const verdict = chargeWith(S, per, window_ns, table[at..][0..ways], fingerprintOf(S, h), window, into);
+            if (options.headers) {
+                if (verdict.remaining) |left| try announce(c, item, policy, per, win_s, left, window_ns - into);
             }
+            if (verdict.allowed) return next.run(c);
 
             // Before the failure on purpose: `sendFailure` writes the headers
-            // set on the Ctx, and this one is a compile-time constant, so
+            // set on the Ctx, and a stated one is a compile-time constant, so
             // there is nothing here to dangle once this frame is gone.
-            try c.setStaticHeader("Retry-After", retry_after);
+            try retryAfter(c, held, retry_after, win_s);
             sayIfEverybodyLooksTheSame(c);
-            return fail.tooManyRequests(refusal, .{});
+            return fail.tooManyRequests("too many requests: this address may make {d} every {d} seconds", .{ per, win_s });
         }
 
         /// The mistake this feature is most likely to be deployed with, said
@@ -160,6 +199,109 @@ pub fn with(comptime options: Options) mw.Middleware {
     }.run;
 }
 
+/// How many counts an address's slot holds: ten bits, which leaves the
+/// fingerprint 28 (ADR 092). A held `.per_window` is bounded by it because
+/// the slot's type is settled while compiling and the value is not.
+const address_bits = 10;
+const address_max: u32 = (1 << address_bits) - 1;
+/// A keyed slot's two counters, 24 bits each beside the 16 of the window:
+/// sixteen million a window, a million an hour with room to spare.
+const keyed_bits = 24;
+const keyed_max: u32 = (1 << keyed_bits) - 1;
+
+/// How many bits a slot gives each counter: what the number needs when it is
+/// stated, and the most the slot can hold when it will be filled later.
+fn countBits(comptime per_window: Late(u32), comptime most: u16) u16 {
+    return switch (per_window) {
+        .value => |v| std.math.log2_int_ceil(u32, v + 1),
+        .held => most,
+    };
+}
+
+/// The quota's name as a structured-field item: `"default"` or `"signin"`.
+/// A name that cannot sit between quotes, or is long, is a compile error.
+fn quotaItem(comptime name: []const u8) []const u8 {
+    comptime {
+        if (name.len > 24) @compileError(
+            "nilo: an allowance's `.name` is sent as the name of its RateLimit policy, and " ++
+                "can be at most 24 characters: the line it is part of is built in 64 bytes " ++
+                "of the Ctx so that no allocation is made.",
+        );
+        for (name) |ch| if (ch < 0x20 or ch > 0x7e or ch == '"' or ch == '\\') @compileError(
+            "nilo: an allowance's `.name` is sent as the name of its RateLimit policy, and " ++
+                "holds a character that cannot sit inside a quoted string.\n  Use letters, " ++
+                "digits and dashes: `.name = \"sign-in\"`.",
+        );
+        return "\"" ++ (if (name.len == 0) "default" else name) ++ "\"";
+    }
+}
+
+/// `Retry-After`, in seconds: a constant for a stated window, and copied into
+/// the arena for a held one.
+fn retryAfter(c: *Ctx, comptime held: bool, comptime stated: []const u8, win_s: u32) !void {
+    if (comptime !held) return c.setStaticHeader("Retry-After", stated);
+    var buf: [10]u8 = undefined;
+    var at: usize = 0;
+    late.putDecimal(&buf, &at, win_s);
+    return c.setHeader("Retry-After", buf[0..at]);
+}
+
+/// `RateLimit-Policy` and `RateLimit` (draft-ietf-httpapi-ratelimit-headers):
+/// the quota and where this client stands in it.
+///
+/// `r` is what is left in the window, and `t` the seconds until the window
+/// being counted ends. The count slides, so `t` is when the weight of the
+/// window before begins to fall rather than when the quota is whole again;
+/// `Retry-After` on a refusal is the conservative figure. Built on the stack
+/// without `std.fmt` (ADR 062) and copied into the arena by `setHeader`.
+fn announce(
+    c: *Ctx,
+    comptime item: []const u8,
+    comptime policy: ?[]const u8,
+    per: u32,
+    win_s: u32,
+    remaining: u32,
+    left_ns: u64,
+) !void {
+    if (policy) |stated| {
+        try c.setStaticHeader("RateLimit-Policy", stated);
+    } else {
+        // A held quota's policy line is worked out per request and has no
+        // buffer of its own, so it pays the one arena allocation (ADR 264).
+        var buf: [item.len + 32]u8 = undefined;
+        var at: usize = 0;
+        put(&buf, &at, item ++ ";q=");
+        late.putDecimal(&buf, &at, per);
+        put(&buf, &at, ";w=");
+        late.putDecimal(&buf, &at, win_s);
+        try c.setStaticHeader("RateLimit-Policy", try c.arena().dupe(u8, buf[0..at]));
+    }
+    const line = c.headerScratch();
+    var at: usize = 0;
+    put(line, &at, item ++ ";r=");
+    late.putDecimal(line, &at, remaining);
+    put(line, &at, ";t=");
+    late.putDecimal(line, &at, (left_ns + std.time.ns_per_s - 1) / std.time.ns_per_s);
+    try c.setStaticHeader("RateLimit", line[0..at]);
+}
+
+fn put(buf: []u8, at: *usize, text: []const u8) void {
+    @memcpy(buf[at.*..][0..text.len], text);
+    at.* += text.len;
+}
+
+/// A held count that cannot be used, answered as a 500 that says which and
+/// why, because nothing can refuse it at `listen()`.
+noinline fn misconfigured(c: *Ctx, name: []const u8, per: u32, win_s: u32, most: u32) anyerror {
+    _ = c;
+    return fail.internal(
+        "the allowance \"{s}\" was handed {d} requests every {d} seconds. A window and a count " ++
+            "must each be above zero, and the count at most {d}: the table's slots are settled " ++
+            "while compiling. Fill the numbers before listen(), or widen the window instead.",
+        .{ name, per, win_s, most },
+    );
+}
+
 /// What to do with a request the key function had no answer for.
 ///
 /// There is no default, and that is the point. `keyed(signedInAccount, …)` on
@@ -181,15 +323,18 @@ pub const Keyed = struct {
     /// What a nilo compile error calls this type (ADR 074).
     pub const nilo_type_name = "nilo.allowance.Keyed";
 
-    /// How many requests one key may make inside `window_s`.
+    /// How many requests one key may make inside `window_s`, a number or the
+    /// address of a `u32`.
     ///
-    /// The whole `u16` is available here, unlike `Options.per_window`, which
-    /// stops at 1023: an address's fingerprint shares its 64-bit word with the
+    /// Up to 16,777,215 here, unlike `Options.per_window`, which stops at
+    /// 1023: an address's fingerprint shares its 64-bit word with the
     /// counters, and a key's tag is a word of its own
     /// ([ADR 104](../docs/adr/104-a-key-the-application-knows-is-a-word-of-its-own.md)).
-    per_window: u16 = 100,
-    /// How long the window is, in seconds. Also what `Retry-After` says.
-    window_s: u16 = 60,
+    /// A million an hour is `.per_window = 1_000_000, .window_s = 3600`.
+    per_window: Late(u32) = .{ .value = 100 },
+    /// How long the window is, in seconds, a number or the address of a
+    /// `u32`. Also what `Retry-After` says.
+    window_s: Late(u32) = .{ .value = 60 },
     /// How many keys this table remembers at once. A power of two.
     ///
     /// **Sixteen bytes each**, not eight: a tag word beside the counters. The
@@ -203,6 +348,8 @@ pub const Keyed = struct {
     /// reason `Options.name` exists: two calls carrying identical options are
     /// one table.
     name: []const u8 = "",
+    /// `RateLimit-Policy` and `RateLimit` on every answer, as `Options.headers`.
+    headers: bool = true,
 };
 
 /// The same middleware, counting against whatever `key` returns — the account
@@ -227,17 +374,26 @@ pub const Keyed = struct {
 /// the next request; what goes in the table is a 64-bit tag computed from
 /// them, so there is no key-length policy to invent and no account id sitting
 /// in `.bss`.
-pub fn keyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
+pub fn keyed(comptime key: anytype, comptime given: anytype) mw.Middleware {
+    return buildKeyed(key, comptime late.fill(Keyed, given));
+}
+
+fn buildKeyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
     comptime checkKey(key);
     comptime checkCounts(options);
+    comptime if (options.per_window == .value and options.per_window.value > keyed_max) @compileError(
+        "nilo: a keyed allowance above 16,777,215 requests a window is more than a slot's counters " ++
+            "hold.\n  Widen the window instead: the same rate over a longer window fits.",
+    );
 
     const S = KeyedSlot(options);
     const buckets = options.slots / ways;
-    const window_ns: u64 = @as(u64, options.window_s) * std.time.ns_per_s;
-    const retry_after = std.fmt.comptimePrint("{d}", .{options.window_s});
-    const refusal = std.fmt.comptimePrint(
-        "too many requests: {d} every {d} seconds",
-        .{ options.per_window, options.window_s },
+    const held = comptime options.per_window.isHeld() or options.window_s.isHeld();
+    const item = comptime quotaItem(options.name);
+    const retry_after = comptime if (held) "" else std.fmt.comptimePrint("{d}", .{options.window_s.read()});
+    const policy: ?[]const u8 = comptime if (held) null else std.fmt.comptimePrint(
+        "{s};q={d};w={d}",
+        .{ item, options.per_window.read(), options.window_s.read() },
     );
 
     return struct {
@@ -248,6 +404,13 @@ pub fn keyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
         var state: [options.slots]std.atomic.Value(u64) align(64) = @splat(.init(0));
 
         fn run(c: *Ctx, next: mw.Next) anyerror!void {
+            const per = options.per_window.read();
+            const win_s = options.window_s.read();
+            if (comptime held) {
+                if (per == 0 or per > keyed_max or win_s == 0) return misconfigured(c, options.name, per, win_s, keyed_max);
+            }
+            const window_ns: u64 = @as(u64, win_s) * std.time.ns_per_s;
+
             const text = keyText(key, c) orelse switch (options.on_null) {
                 .skip => return next.run(c),
                 .reject => return fail.forbidden(
@@ -267,9 +430,9 @@ pub fn keyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
             // for a key an attacker chooses, like a username (ADR 104).
             const h = std.hash.Wyhash.hash(hashSeed(), text);
             const at = (h % buckets) * ways;
-            const allowed = chargeKeyed(
+            const verdict = chargeKeyedWith(
                 S,
-                options,
+                per,
                 window_ns,
                 tags[at..][0..ways],
                 state[at..][0..ways],
@@ -277,10 +440,13 @@ pub fn keyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
                 window,
                 into,
             );
-            if (allowed) return next.run(c);
+            if (options.headers) {
+                if (verdict.remaining) |left| try announce(c, item, policy, per, win_s, left, window_ns - into);
+            }
+            if (verdict.allowed) return next.run(c);
 
-            try c.setStaticHeader("Retry-After", retry_after);
-            return fail.tooManyRequests(refusal, .{});
+            try retryAfter(c, held, retry_after, win_s);
+            return fail.tooManyRequests("too many requests: {d} every {d} seconds", .{ per, win_s });
         }
     }.run;
 }
@@ -291,8 +457,8 @@ pub fn keyed(comptime key: anytype, comptime options: Keyed) mw.Middleware {
 /// same 48 here; what was the fingerprint is padding, because the owner is a
 /// word of its own. That is what lets `per_window` go to 65,535.
 fn KeyedSlot(comptime o: Keyed) type {
-    const count_bits = std.math.log2_int_ceil(u32, @as(u32, o.per_window) + 1);
-    const spare = 64 - 2 * @as(u16, count_bits) - 16;
+    const count_bits = countBits(o.per_window, keyed_bits);
+    const spare = 64 - 2 * count_bits - 16;
     return packed struct(u64) {
         cur: @Int(.unsigned, count_bits),
         prev: @Int(.unsigned, count_bits),
@@ -327,14 +493,28 @@ fn tagOf(text: []const u8) u64 {
 /// the way over is thrown away and tried again, rather than charged to them.
 fn chargeKeyed(
     comptime S: type,
-    comptime o: Keyed,
-    comptime window_ns: u64,
+    per_window: u32,
+    window_ns: u64,
     owners: []std.atomic.Value(u64),
     cells: []std.atomic.Value(u64),
     tag: u64,
     window: u16,
     into: u64,
 ) bool {
+    return chargeKeyedWith(S, per_window, window_ns, owners, cells, tag, window, into).allowed;
+}
+
+/// `chargeKeyed`, and what is left of the allowance when it says yes.
+fn chargeKeyedWith(
+    comptime S: type,
+    per_window: u32,
+    window_ns: u64,
+    owners: []std.atomic.Value(u64),
+    cells: []std.atomic.Value(u64),
+    tag: u64,
+    window: u16,
+    into: u64,
+) Verdict {
     // Whether this key was ever seen to own a way in this bucket. Once it has,
     // running out of tries is a refusal rather than a pass: the contention is
     // its own (ADR 092).
@@ -369,15 +549,15 @@ fn chargeKeyed(
             ours = true;
             const cell = &cells[i];
             const was: S = @bitCast(cell.load(.monotonic));
-            switch (take(S, o, window_ns, cell, was, window, into)) {
-                .allowed => {
+            switch (take(S, per_window, window_ns, cell, was, window, into)) {
+                .allowed => |left| {
                     // Still ours? A takeover between reading the tag and
                     // counting would have charged this request to whoever
                     // owns the way now.
-                    if (owners[i].load(.monotonic) == tag) return true;
+                    if (owners[i].load(.monotonic) == tag) return .{ .allowed = true, .remaining = left };
                     continue;
                 },
-                .refused => return false,
+                .refused => return .{ .allowed = false, .remaining = 0 },
                 .again => continue,
             }
         }
@@ -388,11 +568,11 @@ fn chargeKeyed(
         if (owner.cmpxchgWeak(was_tag, tag, .monotonic, .monotonic) == null) {
             const fresh: S = .{ .window = window, .cur = 1, .prev = 0 };
             cells[oldest].store(@bitCast(fresh), .monotonic);
-            return true;
+            return .{ .allowed = true, .remaining = per_window - 1 };
         }
     }
 
-    return !ours;
+    return .{ .allowed = !ours, .remaining = null };
 }
 
 /// Call the caller's key function, whichever of the two shapes it has.
@@ -430,8 +610,8 @@ fn checkKey(comptime key: anytype) void {
 /// the fingerprint fit in the same 64 bits — and about fifteen lines of
 /// arithmetic.
 fn Slot(comptime o: Options) type {
-    const count_bits = std.math.log2_int_ceil(u32, @as(u32, o.per_window) + 1);
-    const fp_bits = 64 - 2 * @as(u16, count_bits) - 16;
+    const count_bits = countBits(o.per_window, address_bits);
+    const fp_bits = 64 - 2 * count_bits - 16;
     return packed struct(u64) {
         /// Requests counted in `window`.
         cur: @Int(.unsigned, count_bits),
@@ -478,13 +658,31 @@ fn fingerprintOf(comptime S: type, h: u64) @FieldType(S, "fp") {
 /// the shipped design; see the entry in `docs/history.md`.
 fn charge(
     comptime S: type,
-    comptime o: anytype,
-    comptime window_ns: u64,
+    per_window: u32,
+    window_ns: u64,
     bucket: []std.atomic.Value(u64),
     fp: @FieldType(S, "fp"),
     window: u16,
     into: u64,
 ) bool {
+    return chargeWith(S, per_window, window_ns, bucket, fp, window, into).allowed;
+}
+
+/// What a charge decided, and how much of the allowance is left when it is
+/// known: `remaining` is null where the table could not tell (a lost race,
+/// which lets the request through or not by the rule above), and the
+/// `RateLimit` header is then left off rather than guessed.
+const Verdict = struct { allowed: bool, remaining: ?u32 };
+
+fn chargeWith(
+    comptime S: type,
+    per_window: u32,
+    window_ns: u64,
+    bucket: []std.atomic.Value(u64),
+    fp: @FieldType(S, "fp"),
+    window: u16,
+    into: u64,
+) Verdict {
     // Whether this address was ever seen to own a way in this bucket. Once it
     // has, running out of tries is a refusal rather than a pass: the
     // contention is its own.
@@ -517,9 +715,9 @@ fn charge(
             const cell = &bucket[i];
             const was: S = @bitCast(cell.load(.monotonic));
             if (was.fp != fp) continue; // taken over between the two loads
-            switch (take(S, o, window_ns, cell, was, window, into)) {
-                .allowed => return true,
-                .refused => return false,
+            switch (take(S, per_window, window_ns, cell, was, window, into)) {
+                .allowed => |left| return .{ .allowed = true, .remaining = left },
+                .refused => return .{ .allowed = false, .remaining = 0 },
                 .again => continue,
             }
         }
@@ -529,22 +727,23 @@ fn charge(
         if (was.fp == fp) continue; // somebody put us here; look again
         const fresh: S = .{ .fp = fp, .window = window, .cur = 1, .prev = 0 };
         if (cell.cmpxchgWeak(@bitCast(was), @bitCast(fresh), .monotonic, .monotonic) == null) {
-            return true;
+            return .{ .allowed = true, .remaining = per_window - 1 };
         }
     }
 
     // Out of tries. Whose contention it was decides which way to be wrong.
-    return !ours;
+    return .{ .allowed = !ours, .remaining = null };
 }
 
-const Outcome = enum { allowed, refused, again };
+/// `allowed` carries what is left of the allowance after this request.
+const Outcome = union(enum) { allowed: u32, refused, again };
 
 /// The arithmetic: roll the window forward, weigh what the previous one still
 /// counts for, and take one if there is room.
 fn take(
     comptime S: type,
-    comptime o: anytype,
-    comptime window_ns: u64,
+    per_window: u32,
+    window_ns: u64,
     cell: *std.atomic.Value(u64),
     was: S,
     window: u16,
@@ -556,8 +755,10 @@ fn take(
 
     // How much of the previous window still counts: all of it at the boundary,
     // none of it a whole window later.
-    const carried = (@as(u64, prev) * (window_ns - into)) / window_ns;
-    if (carried + cur >= o.per_window) return .refused;
+    // In 128 bits: a 24-bit count times a window of up to 4.3e18 ns passes
+    // what a u64 holds. The quotient is at most `prev`, so it narrows back.
+    const carried: u64 = @intCast((@as(u128, prev) * (window_ns - into)) / window_ns);
+    if (carried + cur >= per_window) return .refused;
 
     cur += 1;
     // A keyed slot's owner is a word of its own rather than a field in here,
@@ -574,7 +775,7 @@ fn take(
         .prev = @intCast(prev),
     };
     if (cell.cmpxchgWeak(@bitCast(was), @bitCast(fresh), .monotonic, .monotonic) == null) {
-        return .allowed;
+        return .{ .allowed = per_window -| @as(u32, @intCast(carried + cur)) };
     }
     return .again;
 }
@@ -783,7 +984,7 @@ fn parseIp6(text: []const u8) ?[16]u8 {
 fn check(comptime o: Options) void {
     comptime {
         checkCounts(o);
-        if (o.per_window > 1023) @compileError(
+        if (o.per_window == .value and o.per_window.value > address_max) @compileError(
             "nilo: an allowance above 1023 requests a window leaves too few bits for the " ++
                 "fingerprint that tells two addresses apart.\n  Widen the window instead: " ++
                 "`.per_window = 600, .window_s = 60` and `.per_window = 100, .window_s = 10` " ++
@@ -800,12 +1001,12 @@ fn check(comptime o: Options) void {
 /// The three that are true of any allowance, keyed on an address or not.
 fn checkCounts(comptime o: anytype) void {
     comptime {
-        if (o.per_window == 0) @compileError(
+        if (o.per_window == .value and o.per_window.value == 0) @compileError(
             "nilo: an allowance of 0 requests is not a limit, it is a closed door.\n" ++
                 "  A route nobody may reach is one that answers 403, or one that is not " ++
                 "registered.",
         );
-        if (o.window_s == 0) @compileError(
+        if (o.window_s == .value and o.window_s.value == 0) @compileError(
             "nilo: an allowance needs a window to count inside — `.window_s = 60`.",
         );
         if (o.slots < 64 or (o.slots & (o.slots - 1)) != 0) @compileError(
@@ -823,7 +1024,7 @@ const App = @import("app.zig").App;
 const nilo_testing = @import("testing.zig");
 
 test "the table's arithmetic: a window that slides rather than resetting" {
-    const o: Options = .{ .per_window = 4, .window_s = 60 };
+    const o = comptime late.fill(Options, .{ .per_window = 4, .window_s = 60 });
     const S = Slot(o);
     const window_ns: u64 = 60 * std.time.ns_per_s;
 
@@ -831,28 +1032,28 @@ test "the table's arithmetic: a window that slides rather than resetting" {
     const fp = fingerprintOf(S, 0x1234_5678_9abc_def0);
 
     // Four through, the fifth refused.
-    for (0..4) |_| try testing.expect(charge(S, o, window_ns, &bucket, fp, 7, 0));
-    try testing.expect(!charge(S, o, window_ns, &bucket, fp, 7, 0));
+    for (0..4) |_| try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, fp, 7, 0));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, fp, 7, 0));
 
     // The next window starts, and at its first instant the previous one still
     // counts for all of it — which is the whole point of a sliding window. A
     // fixed one would have let four more straight through here.
-    try testing.expect(!charge(S, o, window_ns, &bucket, fp, 8, 0));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, fp, 8, 0));
 
     // Halfway in, half of the previous window's four still counts, so two
     // more fit and the third does not.
     const half = window_ns / 2;
-    try testing.expect(charge(S, o, window_ns, &bucket, fp, 8, half));
-    try testing.expect(charge(S, o, window_ns, &bucket, fp, 8, half));
-    try testing.expect(!charge(S, o, window_ns, &bucket, fp, 8, half));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, fp, 8, half));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, fp, 8, half));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, fp, 8, half));
 
     // A whole window later nothing is carried and the allowance is whole.
-    for (0..4) |_| try testing.expect(charge(S, o, window_ns, &bucket, fp, 12, 0));
-    try testing.expect(!charge(S, o, window_ns, &bucket, fp, 12, 0));
+    for (0..4) |_| try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, fp, 12, 0));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, fp, 12, 0));
 }
 
 test "a full bucket forgets its stalest way rather than sharing an allowance" {
-    const o: Options = .{ .per_window = 2, .window_s = 60 };
+    const o = comptime late.fill(Options, .{ .per_window = 2, .window_s = 60 });
     const S = Slot(o);
     const window_ns: u64 = 60 * std.time.ns_per_s;
 
@@ -862,17 +1063,17 @@ test "a full bucket forgets its stalest way rather than sharing an allowance" {
     var fps: [ways]@FieldType(S, "fp") = undefined;
     for (0..ways) |i| {
         fps[i] = fingerprintOf(S, @as(u64, @intCast(i + 1)) << 40);
-        try testing.expect(charge(S, o, window_ns, &bucket, fps[i], 3, 0));
-        try testing.expect(charge(S, o, window_ns, &bucket, fps[i], 3, 0));
-        try testing.expect(!charge(S, o, window_ns, &bucket, fps[i], 3, 0));
+        try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, fps[i], 3, 0));
+        try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, fps[i], 3, 0));
+        try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, fps[i], 3, 0));
     }
 
     // A fifth arrives in a later window. Somebody is evicted — and what the
     // fifth gets is its own allowance, not a share of somebody else's.
     const newcomer = fingerprintOf(S, 0xaaaa_0000_0000_0000);
-    try testing.expect(charge(S, o, window_ns, &bucket, newcomer, 9, 0));
-    try testing.expect(charge(S, o, window_ns, &bucket, newcomer, 9, 0));
-    try testing.expect(!charge(S, o, window_ns, &bucket, newcomer, 9, 0));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, newcomer, 9, 0));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, newcomer, 9, 0));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, newcomer, 9, 0));
 }
 
 test "an address is the key, and an IPv6 client is a prefix rather than one number" {
@@ -952,7 +1153,7 @@ test "one address spelled three ways is one client" {
 }
 
 test "contention on a slot that is already yours does not let the request through" {
-    const o: Options = .{ .per_window = 2, .window_s = 60 };
+    const o = comptime late.fill(Options, .{ .per_window = 2, .window_s = 60 });
     const S = Slot(o);
     const window_ns: u64 = 60 * std.time.ns_per_s;
 
@@ -960,9 +1161,9 @@ test "contention on a slot that is already yours does not let the request throug
     const mine = fingerprintOf(S, 0x5555_0000_0000_0000);
 
     // Spend the allowance, so the slot is unambiguously this address's.
-    try testing.expect(charge(S, o, window_ns, &bucket, mine, 4, 0));
-    try testing.expect(charge(S, o, window_ns, &bucket, mine, 4, 0));
-    try testing.expect(!charge(S, o, window_ns, &bucket, mine, 4, 0));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, mine, 4, 0));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, mine, 4, 0));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, mine, 4, 0));
 
     // This is what the four-failed-CAS path used to do, and it is the whole
     // hole: it walked past a full allowance rather than refusing. There is no
@@ -974,13 +1175,13 @@ test "contention on a slot that is already yours does not let the request throug
     // A synchronised wave from one address is what reached it: every request
     // that lost four rounds was admitted uncounted, so the ceiling was the
     // server's concurrency rather than `per_window`.
-    try testing.expect(!charge(S, o, window_ns, &bucket, mine, 4, 0));
+    try testing.expect(!charge(S, o.per_window.read(), window_ns, &bucket, mine, 4, 0));
 
     // The other half of the same decision: an address with no slot yet is
     // still let through, because refusing there would refuse a stranger who
     // has made no requests at all.
     const stranger = fingerprintOf(S, 0x9999_0000_0000_0000);
-    try testing.expect(charge(S, o, window_ns, &bucket, stranger, 4, 0));
+    try testing.expect(charge(S, o.per_window.read(), window_ns, &bucket, stranger, 4, 0));
 }
 
 test "the table's mapping is not the same in two processes" {
@@ -1109,7 +1310,7 @@ test "a request with no key is skipped or refused, and the caller says which" {
 }
 
 test "a keyed slot's owner is a word of its own, so eviction is by age" {
-    const o: Keyed = .{ .per_window = 2, .window_s = 60, .on_null = .skip };
+    const o = comptime late.fill(Keyed, .{ .per_window = 2, .window_s = 60, .on_null = .skip });
     const S = KeyedSlot(o);
     const window_ns: u64 = 60 * std.time.ns_per_s;
 
@@ -1117,30 +1318,30 @@ test "a keyed slot's owner is a word of its own, so eviction is by age" {
     var cells: [ways]std.atomic.Value(u64) = @splat(.init(0));
 
     const mine = tagOf("acct-alice");
-    try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, mine, 7, 0));
-    try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, mine, 7, 0));
-    try testing.expect(!chargeKeyed(S, o, window_ns, &owners, &cells, mine, 7, 0));
+    try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, mine, 7, 0));
+    try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, mine, 7, 0));
+    try testing.expect(!chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, mine, 7, 0));
 
     // Three strangers fill the rest of the bucket, and none of them inherits
     // the spent allowance.
     for ([_][]const u8{ "acct-bob", "acct-carol", "acct-dan" }) |who| {
-        try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, tagOf(who), 7, 0));
+        try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, tagOf(who), 7, 0));
     }
 
     // Full, and the oldest way is taken. A key that arrives now displaces
     // somebody rather than sharing their count.
-    try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, tagOf("acct-eve"), 9, 0));
+    try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, tagOf("acct-eve"), 9, 0));
 
     // A window later the count has rolled forward rather than reset, which is
     // the same arithmetic the address table uses — one copy of it.
     var only: [ways]std.atomic.Value(u64) = @splat(.init(0));
     var only_state: [ways]std.atomic.Value(u64) = @splat(.init(0));
-    try testing.expect(chargeKeyed(S, o, window_ns, &only, &only_state, mine, 7, 0));
-    try testing.expect(chargeKeyed(S, o, window_ns, &only, &only_state, mine, 7, 0));
+    try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &only, &only_state, mine, 7, 0));
+    try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &only, &only_state, mine, 7, 0));
     // Right at the boundary the whole of the previous window still counts.
-    try testing.expect(!chargeKeyed(S, o, window_ns, &only, &only_state, mine, 8, 0));
+    try testing.expect(!chargeKeyed(S, o.per_window.read(), window_ns, &only, &only_state, mine, 8, 0));
     // Most of the way through it, it does not.
-    try testing.expect(chargeKeyed(S, o, window_ns, &only, &only_state, mine, 8, window_ns - 1));
+    try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &only, &only_state, mine, 8, window_ns - 1));
 }
 
 test "a keyed allowance may count far past what an address's slot holds" {
@@ -1148,7 +1349,7 @@ test "a keyed allowance may count far past what an address's slot holds" {
     // here, so `per_window` is the whole `u16` rather than stopping at 1023.
     // A per-account API quota is the case: 10,000 an hour is an ordinary
     // number and `.per_window = 10_000` is a compile error on the other one.
-    const o: Keyed = .{ .per_window = 5000, .window_s = 3600, .on_null = .reject };
+    const o = comptime late.fill(Keyed, .{ .per_window = 5000, .window_s = 3600, .on_null = .reject });
     const S = KeyedSlot(o);
     try testing.expectEqual(@as(usize, 64), @bitSizeOf(S));
 
@@ -1158,9 +1359,9 @@ test "a keyed allowance may count far past what an address's slot holds" {
     const mine = tagOf("acct-alice");
 
     for (0..5000) |_| {
-        try testing.expect(chargeKeyed(S, o, window_ns, &owners, &cells, mine, 1, 0));
+        try testing.expect(chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, mine, 1, 0));
     }
-    try testing.expect(!chargeKeyed(S, o, window_ns, &owners, &cells, mine, 1, 0));
+    try testing.expect(!chargeKeyed(S, o.per_window.read(), window_ns, &owners, &cells, mine, 1, 0));
 }
 
 test "a route the allowance does not cover is not counted" {
@@ -1181,4 +1382,216 @@ test "a route the allowance does not cover is not counted" {
     for (0..5) |_| {
         try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/health")).status);
     }
+}
+
+fn rateField(answer: anytype, name: []const u8, key: []const u8) !u64 {
+    const line = answer.header(name) orelse return error.NoSuchHeader;
+    const at = std.mem.indexOf(u8, line, key) orelse return error.NoSuchField;
+    const rest = line[at + key.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
+    return std.fmt.parseInt(u64, rest[0..end], 10);
+}
+
+test "every answer through an allowance says the policy and what is left of it" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(with(.{ .per_window = 3, .window_s = 60, .name = "test-hdr" }));
+    try app.get("/thing", allowanceOk);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.20" });
+    defer client.deinit();
+
+    // The remaining count falls by one an answer, and `t` is the seconds to
+    // the end of the window being counted, so between 1 and the window.
+    for ([_]u64{ 2, 1, 0 }) |left| {
+        const answer = try client.get(&app, "/thing");
+        try testing.expectEqual(@as(u16, 200), answer.status);
+        try testing.expectEqualStrings("\"test-hdr\";q=3;w=60", answer.header("RateLimit-Policy").?);
+        try testing.expectEqual(left, try rateField(answer, "RateLimit", ";r="));
+        const reset = try rateField(answer, "RateLimit", ";t=");
+        try testing.expect(reset >= 1 and reset <= 60);
+    }
+
+    // The refusal carries the same fields, with nothing left, and still the
+    // Retry-After it always had.
+    const refused = try client.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 429), refused.status);
+    try testing.expectEqual(@as(u64, 0), try rateField(refused, "RateLimit", ";r="));
+    try testing.expectEqualStrings("\"test-hdr\";q=3;w=60", refused.header("RateLimit-Policy").?);
+    try testing.expectEqualStrings("60", refused.header("Retry-After").?);
+}
+
+test "an allowance with its headers off sends neither field" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(with(.{ .per_window = 1, .window_s = 60, .name = "test-quiet", .headers = false }));
+    try app.get("/thing", allowanceOk);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.21" });
+    defer client.deinit();
+    const answer = try client.get(&app, "/thing");
+    try testing.expect(answer.header("RateLimit") == null);
+    try testing.expect(answer.header("RateLimit-Policy") == null);
+    const refused = try client.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 429), refused.status);
+    try testing.expect(refused.header("RateLimit") == null);
+    try testing.expectEqualStrings("60", refused.header("Retry-After").?);
+}
+
+var deployed_rate: u32 = 2;
+var deployed_window: u32 = 60;
+
+test "a held count and window are read on each request, and can be set before listen" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(with(.{ .per_window = &deployed_rate, .window_s = &deployed_window, .name = "test-held" }));
+    try app.get("/thing", allowanceOk);
+
+    // What the program's configuration said when it started, set after the
+    // middleware was registered and before anything was served.
+    deployed_rate = 4;
+    deployed_window = 120;
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.22" });
+    defer client.deinit();
+    const first = try client.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 200), first.status);
+    try testing.expectEqualStrings("\"test-held\";q=4;w=120", first.header("RateLimit-Policy").?);
+    try testing.expectEqual(@as(u64, 3), try rateField(first, "RateLimit", ";r="));
+    for (0..3) |_| try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/thing")).status);
+    const refused = try client.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 429), refused.status);
+    try testing.expectEqualStrings("120", refused.header("Retry-After").?);
+    try testing.expect(std.mem.indexOf(u8, refused.body, "4 every 120 seconds") != null);
+}
+
+var misconfigured_rate: u32 = 0;
+var misconfigured_window: u32 = 60;
+
+test "a held count of zero, or past what a slot holds, or a window of zero, answers 500 naming the allowance" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(with(.{ .per_window = &misconfigured_rate, .window_s = &misconfigured_window, .name = "test-bad" }));
+    try app.get("/thing", allowanceOk);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.23" });
+    defer client.deinit();
+
+    const zero = try client.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 500), zero.status);
+    try testing.expect(std.mem.indexOf(u8, zero.body, "test-bad") != null);
+
+    misconfigured_rate = address_max + 1;
+    try testing.expectEqual(@as(u16, 500), (try client.get(&app, "/thing")).status);
+
+    misconfigured_rate = 5;
+    misconfigured_window = 0;
+    try testing.expectEqual(@as(u16, 500), (try client.get(&app, "/thing")).status);
+
+    // Fixed, it is an allowance again.
+    misconfigured_window = 60;
+    try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/thing")).status);
+}
+
+test "a million an hour is writable on a keyed allowance, and says so in its headers" {
+    const previous = testing.log_level;
+    defer testing.log_level = previous;
+    testing.log_level = .err;
+
+    const o = comptime late.fill(Keyed, .{ .per_window = 1_000_000, .window_s = 3600, .on_null = .skip });
+    try testing.expectEqual(@as(usize, 64), @bitSizeOf(KeyedSlot(o)));
+
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(keyed(accountHeader, .{
+        .per_window = 1_000_000,
+        .window_s = 3600,
+        .on_null = .reject,
+        .name = "test-million",
+    }));
+    try app.get("/thing", allowanceOk);
+
+    var client = try nilo_testing.Client.init(testing.allocator, .{ .client_address = "203.0.113.24" });
+    defer client.deinit();
+    try client.setHeader("X-Account", "acct-million");
+    const answer = try client.get(&app, "/thing");
+    try testing.expectEqual(@as(u16, 200), answer.status);
+    try testing.expectEqualStrings("\"test-million\";q=1000000;w=3600", answer.header("RateLimit-Policy").?);
+    try testing.expectEqual(@as(u64, 999_999), try rateField(answer, "RateLimit", ";r="));
+}
+
+test "the arithmetic hands back what is left after each request" {
+    const o = comptime late.fill(Options, .{ .per_window = 3, .window_s = 60 });
+    const S = Slot(o);
+    const window_ns: u64 = 60 * std.time.ns_per_s;
+    var bucket: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    const fp = fingerprintOf(S, 0x1111_2222_3333_4444);
+
+    for ([_]u32{ 2, 1, 0 }) |left| {
+        const v = chargeWith(S, 3, window_ns, &bucket, fp, 5, 0);
+        try testing.expect(v.allowed);
+        try testing.expectEqual(left, v.remaining.?);
+    }
+    const spent = chargeWith(S, 3, window_ns, &bucket, fp, 5, 0);
+    try testing.expect(!spent.allowed);
+    try testing.expectEqual(@as(u32, 0), spent.remaining.?);
+
+    // Halfway into the next window half of the three still counts (one, the
+    // fraction rounded down), so this request makes two and one is left.
+    const half = chargeWith(S, 3, window_ns, &bucket, fp, 6, window_ns / 2);
+    try testing.expect(half.allowed);
+    try testing.expectEqual(@as(u32, 1), half.remaining.?);
+}
+
+test "the carried weight cannot overflow at the widest window and the widest count" {
+    const window_ns: u64 = @as(u64, std.math.maxInt(u32)) * std.time.ns_per_s;
+    const widest: u32 = keyed_max;
+
+    const o = comptime late.fill(Keyed, .{ .per_window = &deployed_rate, .on_null = .skip });
+    const S = KeyedSlot(o);
+    try testing.expectEqual(@as(usize, 64), @bitSizeOf(S));
+
+    // A previous window at the counter's maximum, a request at its first
+    // instant: all of it carries, and the answer is a refusal, not a panic.
+    var cell: std.atomic.Value(u64) = .init(@bitCast(S{ .window = 4, .cur = @intCast(widest), .prev = 0 }));
+    const was: S = @bitCast(cell.load(.monotonic));
+    try testing.expect(take(S, widest, window_ns, &cell, was, 5, 0) == .refused);
+
+    // Nearly at the end of that window, almost none of it carries.
+    const late_in = take(S, widest, window_ns, &cell, was, 5, window_ns - 1);
+    try testing.expect(late_in == .allowed);
+
+    // The same at the 1000-a-window, 31,536,000-second window that was
+    // reported: 1000 * 3.15e16 ns is far past u64 when multiplied by 1e9 more.
+    const o2 = comptime late.fill(Options, .{ .per_window = 1000, .window_s = 31_536_000 });
+    const S2 = Slot(o2);
+    var bucket: [ways]std.atomic.Value(u64) = @splat(.init(0));
+    const w2: u64 = 31_536_000 * std.time.ns_per_s;
+    const fp = fingerprintOf(S2, 0x7777_0000_0000_0000);
+    try testing.expect(charge(S2, 1000, w2, &bucket, fp, 3, 0));
+    try testing.expect(charge(S2, 1000, w2, &bucket, fp, 4, w2 / 2));
+    const v = chargeWith(S2, 1000, w2, &bucket, fp, 4, w2 - 1);
+    try testing.expect(v.allowed and v.remaining.? <= 1000);
+}
+
+test "the reset seconds of the widest window fit" {
+    const window_ns: u64 = @as(u64, std.math.maxInt(u32)) * std.time.ns_per_s;
+    const t = (window_ns + std.time.ns_per_s - 1) / std.time.ns_per_s;
+    try testing.expectEqual(@as(u64, std.math.maxInt(u32)), t);
 }
