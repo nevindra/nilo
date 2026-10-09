@@ -343,6 +343,12 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        // First, as `serverStopping` does: a follower's thread makes and
+        // frees chains through this App (ADR 277), and one still running
+        // while the rest is given back frees into an App half gone. Only a
+        // program that started following without `listen()`, which is a
+        // test, gets here with one running.
+        wiring.stopFollowing(self);
         for (self.background.items) |b| b.free(self.gpa, b.args);
         self.background.deinit(self.gpa);
         for (self.before_serving.items) |b| b.free(self.gpa, b.args);
