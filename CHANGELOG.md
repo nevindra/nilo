@@ -99,6 +99,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 - **`nilo_s3` retries `Throttled` and `Unavailable` when the Store says `.retry`**, for `get`, `getRange`, `getIf`, `put`, `head`, `list`, `delete` and `copy`, each try signed afresh under one budget for the Store. The default is none, so nothing changes until you ask. `stream`, `putStream` and the multipart upload are never retried. `Store.open` is `error.BadRetry` for numbers that cannot work.
 - **`Backoff` has a jitter: `.{ .exponential = .{ .from_ms = 1_000, .to_ms = 3_600_000, .jitter = .full } }`** (`.none`, the default, `.full` or `.equal`), so a hundred rows a downstream outage failed together do not all retry at the same instant. `Backoff` is `nilo_core`'s now and `job.Backoff` is the same type, so no kind changes a line; `job.Retry.delayMs` still answers the un-jittered ceiling.
 - **`fetch.testing.Canned.serveScript(script, count)`** answers a script of `fetch.testing.Reply` values, one connection each, and records when each request arrived and its head, for a test of your own about retrying.
+- **`testing.Client` and `testing.Wired` have `put`, `patch` and `delete`** beside `get` and `post`; `request` still sends any method with a body.
 
 ### Changed
 

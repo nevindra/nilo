@@ -85,7 +85,8 @@ It runs one request through the App with no server and no socket. Everything on 
 |---|---|
 | `client.get(&app, "/path")` | |
 | `client.post(&app, "/path", body)` | with `Content-Length` set |
-| `client.request(&app, "PUT", "/path", body)` | any method |
+| `client.put(&app, "/path", body)`, `patch` likewise, `client.delete(&app, "/path")` | the method named, `delete` with no body |
+| `client.request(&app, "OPTIONS", "/path", body)` | any method |
 | `client.sendRequest(&app, .{ … })` | any of the above plus headers, every field defaulted |
 | `client.send(&app, raw)` | the whole request written out, for a version the others don't cover |
 
@@ -161,7 +162,7 @@ const answer = try wired.post("/partners", "{\"name\":\"Wati\"}");
 try testing.expectEqual(@as(u16, 201), answer.status);
 ```
 
-`wired.app` is a plain `App`, so routes, services, groups and `docs()` are registered exactly as anywhere else. It is not a second API, and no database is assumed. Every `Client` method is on it without the `&app`: `wired.get`, `.post`, `.postWith`, `.request`, `.sendRequest`, `.send`, `.setHeader`, `.cookie`.
+`wired.app` is a plain `App`, so routes, services, groups and `docs()` are registered exactly as anywhere else. It is not a second API, and no database is assumed. Every `Client` method is on it without the `&app`: `wired.get`, `.post`, `.put`, `.patch`, `.delete`, `.postWith`, `.request`, `.sendRequest`, `.send`, `.setHeader`, `.cookie`.
 
 `Client` is still there for a test that needs two clients against one App: two addresses, two cookie jars.
 

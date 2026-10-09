@@ -13,7 +13,7 @@
 | `testing.Client.init(gpa, .{ .response_bytes = 64 * 1024 })` | an answer larger than this is `error.ResponseTooLarge` |
 | `.{ .client_address = "203.0.113.7" }` | what `c.peer()` and `c.clientIp()` return |
 | `.{ .cookies = true }` | keeps the cookies responses set and sends them back, like a browser's cookie jar. Off by default |
-| `client.get(&app, path)` / `post(&app, path, body)` | |
+| `client.get(&app, path)` / `post(&app, path, body)` / `put(&app, path, body)` / `patch(&app, path, body)` / `delete(&app, path)` | each sends its method, with `Content-Length` set when there is a body. `delete` carries none; `request` sends one under any method |
 | `client.postWith(&app, path, content_type, body)` | a POST that states its content type, which a form needs |
 | `client.request(&app, method, path, body)` | |
 | `client.sendRequest(&app, .{ .method, .path, .headers, .content_type, .body })` | the whole request, described field by field. Every field has a default |
@@ -59,7 +59,7 @@ const answer = try wired.post("/partners", body);
 | `Wired.init(gpa, options)` | the same `Options` a `Client` takes |
 | `wired.app` | a plain `App`: every registration call is the one documented in [The App](./app.md) |
 | `wired.app.limits.max_body = 4096` | what `listen(.{ .max_body = 4096 })` would have copied onto the App; `max_in_flight` and `request_deadline_ms` likewise |
-| `wired.get(path)` / `post(path, body)` / `postWith(…)` / `request(…)` | the `Client` calls, without the `&app` |
+| `wired.get(path)` / `post(path, body)` / `put(path, body)` / `patch(path, body)` / `delete(path)` / `postWith(…)` / `request(…)` | the `Client` calls, without the `&app` |
 | `wired.sendRequest(r)` / `send(raw)` / `setHeader(n, v)` / `cookie(n)` | likewise |
 | `wired.io()` | the `std.Io` a handler gets from `c.io()` or an `io: std.Io` argument in a test: a process-wide `std.Io.Threaded`. Start a writer fiber on it with `io.concurrent`; `Wired` cannot run `app.spawn` ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)) |
 | `wired.deinit()` | deinits the client, then the App |

@@ -507,6 +507,22 @@ pub const Client = struct {
         return self.sendRequest(app, .{ .method = "POST", .path = path, .body = body });
     }
 
+    /// A PUT, with a body like `post`.
+    pub fn put(self: *Client, app: *App, path: []const u8, body: []const u8) !Answer {
+        return self.sendRequest(app, .{ .method = "PUT", .path = path, .body = body });
+    }
+
+    /// A PATCH, with a body like `post`.
+    pub fn patch(self: *Client, app: *App, path: []const u8, body: []const u8) !Answer {
+        return self.sendRequest(app, .{ .method = "PATCH", .path = path, .body = body });
+    }
+
+    /// A DELETE, which carries no body. A test that needs one says
+    /// `request(&app, "DELETE", path, body)`.
+    pub fn delete(self: *Client, app: *App, path: []const u8) !Answer {
+        return self.sendRequest(app, .{ .method = "DELETE", .path = path });
+    }
+
     /// A POST that says what its body is — which a form has to, because
     /// `application/x-www-form-urlencoded` and `multipart/form-data` are told
     /// apart by nothing else (ADR 030).
@@ -748,6 +764,18 @@ pub const Wired = struct {
 
     pub fn post(self: *Wired, path: []const u8, body: []const u8) !Answer {
         return self.client.post(&self.app, path, body);
+    }
+
+    pub fn put(self: *Wired, path: []const u8, body: []const u8) !Answer {
+        return self.client.put(&self.app, path, body);
+    }
+
+    pub fn patch(self: *Wired, path: []const u8, body: []const u8) !Answer {
+        return self.client.patch(&self.app, path, body);
+    }
+
+    pub fn delete(self: *Wired, path: []const u8) !Answer {
+        return self.client.delete(&self.app, path);
     }
 
     /// A POST that says what its body is — what a form has to send (ADR 030).
@@ -2025,4 +2053,34 @@ test "a test directory hands the App a path it can serve files from" {
     const answer = try wired.get("/files/hello.txt");
     try testing.expectEqual(@as(u16, 200), answer.status);
     try testing.expectEqualStrings("hi there", answer.body);
+}
+
+fn echoBody(c: *@import("ctx.zig").Ctx) anyerror!void {
+    const b = try c.body();
+    try c.sendText(200, b.view());
+}
+
+test "put, patch and delete send their method, and the first two their body" {
+    var wired = try Wired.init(testing.allocator, .{});
+    defer wired.deinit();
+    try wired.app.put("/thing", echoBody);
+    try wired.app.patch("/thing", echoBody);
+    try wired.app.delete("/thing", plain);
+
+    const put = try wired.put("/thing", "replaced");
+    try testing.expectEqual(@as(u16, 200), put.status);
+    try testing.expectEqualStrings("replaced", put.body);
+
+    const patched = try wired.patch("/thing", "changed");
+    try testing.expectEqual(@as(u16, 200), patched.status);
+    try testing.expectEqualStrings("changed", patched.body);
+
+    const gone = try wired.delete("/thing");
+    try testing.expectEqual(@as(u16, 201), gone.status);
+
+    // The same calls on a bare Client.
+    var client = try Client.init(testing.allocator, .{});
+    defer client.deinit();
+    try testing.expectEqualStrings("again", (try client.put(&wired.app, "/thing", "again")).body);
+    try testing.expectEqual(@as(u16, 201), (try client.delete(&wired.app, "/thing")).status);
 }
