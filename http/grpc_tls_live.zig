@@ -300,7 +300,10 @@ test "a second TLS record that arrived with the first is answered, not waited fo
     // decrypted waited for bytes that were already in its buffer, until the
     // client spoke again: one HTTP/2 connection in a thousand over TLS, and
     // the question a WebSocket over TLS had open (`Wake.held`). Here the
-    // second record is made to be in the first read, every time.
+    // second record is made to be in the first read, every time: both leave
+    // in one socket write. So the loop is not a search for a rare race, only
+    // a margin against a kernel that delivered the write in two; it was
+    // twenty handshakes, two seconds of a Debug suite, for the same claim.
     hush();
     const gpa = std.heap.smp_allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -321,7 +324,7 @@ test "a second TLS record that arrived with the first is answered, not waited fo
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    for (0..20) |_| {
+    for (0..3) |_| {
         const c = try gpa.create(Client);
         defer gpa.destroy(c);
         try c.open(io, port, &.{"h2"});

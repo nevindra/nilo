@@ -957,7 +957,9 @@ test "a client with a window of one byte that answers each byte with two updates
     var given: usize = 0;
     var away = false;
     for (0..4000) |_| {
-        wire.pump(&reader.interface, w, fd, 50) catch |err| switch (err) {
+        // `pumpSome`: `pump` waits out 50ms of quiet after every byte, which
+        // made this one test 25 seconds of the suite.
+        wire.pumpSome(&reader.interface, w, fd, 50) catch |err| switch (err) {
             error.SentAway => {
                 away = true;
                 break;
@@ -1174,11 +1176,14 @@ test "an event stream handed to an HTTP/2 connection is sent comments while it i
         try wire.pump(&reader.interface, w, fd, 50);
     try testing.expectEqual("data: after\n\n".len, wire.seen[1].bytes);
 
-    // A comment a stretch after that, and another.
-    const quiet_until = bulkhead.monotonicNanos() + 2600 * std.time.ns_per_ms;
+    // A comment a stretch after that: the stream goes on being kept alive
+    // after its pages went back and a post went out. How often, and not
+    // before its time, is `h2conn`'s test of the keep-alive; this one waited
+    // 2.6 s to count a second and third comment that test already holds.
+    const quiet_until = bulkhead.monotonicNanos() + 1400 * std.time.ns_per_ms;
     while (bulkhead.monotonicNanos() < quiet_until) try wire.pump(&reader.interface, w, fd, 100);
     const comments = (wire.seen[1].bytes - "data: after\n\n".len) / ":\n\n".len;
-    try testing.expect(comments >= 2 and comments <= 3);
+    try testing.expect(comments >= 1 and comments <= 2);
 
     // The server stops: the stream is ended and the seat goes.
     app.shutdown();
