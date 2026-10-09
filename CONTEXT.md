@@ -466,8 +466,16 @@ A row that failed for the last time — every retry spent, or a payload this bin
 _Avoid_: dead letter queue, DLQ, failed, poison, discarded
 
 **Schedule**:
-When a job that nobody pushes runs: a cron expression or an interval, in UTC, parsed while compiling. The next tick is a row with a unique key, so a schedule on ten instances is one row. A schedule declares what an overlap and a missed tick mean, or it does not compile.
+When a job that nobody pushes runs: a cron expression or an interval, in UTC unless `.in` names a zone, parsed while compiling. The next tick is a row with a unique key, so a schedule on ten instances is one row. A schedule declares what an overlap and a missed tick mean, or it does not compile. Every stored time stays UTC; a zone only decides how the five fields are read.
 _Avoid_: cron job, timer, ticker, interval (for the whole — an interval is one kind of schedule), recurring task
+
+**Skipped hour**:
+The wall-clock time a zone's clocks jump over when they go forward, so that 02:30 does not exist that night. A fixed-time schedule in a zone that can meet one declares `skipped`: `.run_late` runs it once at the instant the next wall time does (02:30 at 03:30), `.skip` has no tick. A schedule whose hour field is exactly `*` is an interval and has no tick in it, declaring nothing.
+_Avoid_: DST gap, spring-forward bug, missing hour, nonexistent time
+
+**Repeated hour**:
+The wall-clock time a zone's clocks read twice when they go back, so that 02:30 happens on two passes. A fixed-time schedule in a zone that can meet one declares `repeated`: `.first`, `.second` or `.both`. An interval ticks on both passes.
+_Avoid_: DST overlap, fall-back bug, duplicate hour, ambiguous time
 
 **Tick**:
 One run of one row: the row's id, which attempt this is, when it was due, and whether `retry` allows another. What a `run` is handed when it asks for `job.Tick` beside its deps — by value, because after the job and the Run a pointer is a service and this is not one. Everything in it was in the worker's hand at the claim, so asking costs nothing. Under `drainAt` a test says what time the tick is.

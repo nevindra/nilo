@@ -374,10 +374,40 @@ const Nightly = struct {
 
 | | |
 |---|---|
-| `job.cron("0 3 * * *")` | `minute hour day month weekday`, UTC, parsed while compiling. `*`, lists, ranges and `*/n`; a date that never comes (`0 0 31 2 *`) is a compile error. When either day field starts with `*`, the day must match both |
+| `job.cron("0 3 * * *")` | `minute hour day month weekday`, UTC unless `.in` names a zone, parsed while compiling. `*`, lists, ranges and `*/n`; a date that never comes (`0 0 31 2 *`) is a compile error. When either day field starts with `*`, the day must match both |
 | `job.every(600_000)` | every ten minutes from whenever the worker started, for when it does not matter which ten. Milliseconds, read while compiling: `0` and a period over a hundred years are compile errors |
 
-A field out of range, a sixth field or a backwards range is a compile error naming the field. **UTC only**: a program in Jakarta writes `0 20 * * *` with a comment, and `docs/todo.md` records the gap.
+A field out of range, a sixth field or a backwards range is a compile error naming the field.
+
+**A schedule is UTC unless you name a zone.** `job.cron("0 3 * * *").in("Asia/Jakarta")` is three in the morning in Jakarta, whatever the server's clock says, and the row's `run_at` is still the UTC instant. The zone is spelled as the IANA database spells it (`Europe/Berlin`, `America/Argentina/Buenos_Aires`), and a name nobody has data for is a compile error that offers the right spelling when the case is the only difference. The data for the zones you name is compiled into the program (about 150 bytes each, none for a zone you do not name), and nothing is read from the machine it runs on, so it works the same in a scratch container. `job.every(...)` has no zone: ten minutes is ten minutes on any clock.
+
+A wall clock does two awkward things a year, and a schedule that names a time has to say what it wants:
+
+```zig
+const Report = struct {
+    pub const nilo_job = "berlin-report";
+    pub const retry: job.Retry = .none;
+    pub const schedule = job.cron("0 2 * * *").in("Europe/Berlin");
+    pub const overlap: job.Overlap = .skip;
+    pub const missed: job.Missed = .drop;
+    pub const skipped: job.Skipped = .run_late;
+    pub const repeated: job.Repeated = .first;
+
+    pub fn run(self: Report, scope: *nilo.Run, db: *Db) !void { … }
+};
+```
+
+| | |
+|---|---|
+| `skipped = .run_late` | on the night the clocks go forward and 02:00 does not exist, run once, late: the wall time is read with the offset from before the gap, so 02:30 runs at 03:30 |
+| `skipped = .skip` | no tick that night. A tick that never existed is not a `missed` one |
+| `repeated = .first` | on the night the clocks go back and 02:00 happens twice, run on the first pass only |
+| `repeated = .second` | on the second pass only |
+| `repeated = .both` | on both |
+
+You declare them **only when your schedule can land there**, and the compiler works that out from the zone's own data, not from a guess that it is always 02:00: `0 3 * * *` in Berlin, `0 9,17 * * *` and anything in Asia/Jakarta need nothing, `0 2 * * *` in Berlin needs both, and `0 0 * * *` in Cairo needs `skipped` because Cairo's clocks go forward at midnight. A schedule whose hour field is exactly `*` (`*/15 * * * *`, `30 * * * *`) is read as an interval, never asks, and does what "every quarter hour" says: nothing in the hour that does not exist, and both passes of the one that happens twice. Neither declaration has a default, for the reason `overlap` and `missed` have none.
+
+The zone data is IANA's, release `job.tzdata_version`. Governments change rules on short notice, so a dependent can build against a newer release without waiting for nilo: run `python3 -I job/tzdata/refresh.py --out /some/dir` from a nilo checkout and pass `-Dtzdata=/some/dir` (or `.tzdata = "/some/dir"` to `b.dependency("nilo", …)`).
 
 **`overlap`** decides what happens when the previous run is still going when the next tick is due:
 
@@ -550,7 +580,7 @@ Against [ADR 017](../adr/017-the-trade-budget-has-four-axes.md)'s axes, with the
 
 ## What it will not do
 
-**It is not a priority queue with numbers**: a kind says `.high`, `.normal` or `.low`, and among equals rows come out in `run_at` order ([ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)). It is not a workflow engine, not a rate limiter for a kind (`nilo.Gate` inside `run` does that), and not exactly once. It has no time zones. Each of those is in [`docs/todo.md`](../todo.md) under `nilo_job`, with what it is waiting for.
+**It is not a priority queue with numbers**: a kind says `.high`, `.normal` or `.low`, and among equals rows come out in `run_at` order ([ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)). It is not a workflow engine, not a rate limiter for a kind (`nilo.Gate` inside `run` does that), and not exactly once. Each of those is in [`docs/todo.md`](../todo.md) under `nilo_job`, with what it is waiting for.
 
 ## See also
 

@@ -90,3 +90,30 @@ only ever run against tables whose rows were all due.
    in the way, against `/health` beside it as a control — `bench/sql_server.zig`
    is the shape. Nothing above touches the request path, so the 1-allocation
    test in `http/app.zig` is what holds that number for now.
+
+## A schedule in a time zone
+
+What `.in("Europe/Berlin")` adds to a program and to a tick ([ADR 161](../../docs/adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
+
+**Machine and tree.** AMD Ryzen 7 9700X, 16 threads, Linux 7.2.5, Zig 0.17.0, `-OReleaseFast -fstrip -target x86_64-linux-gnu`. The before is `git archive 2622234` extracted to a scratch directory and built the same afternoon; the after is that commit plus the change, uncommitted. Release data is tzdata 2026e, compiled `zic -b slim -r @1767225600` (zic 2026c).
+
+**Binary size.** One program, `const r = schedule.nextWith(t, .{})` printed, with only the schedule changed.
+
+| program | bytes |
+|---|---|
+| UTC schedule, before | 227,064 |
+| UTC schedule, after | 227,080 (+16) |
+| `.in("Europe/Berlin")` | 233,320 (+6,256 over before) |
+| `.in("Asia/Jakarta")` | 233,320 |
+| Berlin, Santiago and Jakarta in one program | 234,136 (+816 over one zone) |
+| `bench/release` `job` program, before and after | 316,608 and 316,608 |
+
+`strings` over the Berlin program finds `Europe/Berlin` and no other zone name, so a zone nobody names is not in the binary. The first zone pays for the walk; each later one pays its file (about 150 bytes) and the calls that read it.
+
+**A tick.** 200,000 calls of `next` for `0 2 * * *`, the moment moved by a few seconds each call so the loop is not folded away: 907 ns in UTC and 2,569 ns in Berlin, a single run on an idle machine. A schedule is asked once a tick and once a minute at most per queue, so this is not a budget that anything spends.
+
+**Correctness against a second source.** Every segment of every one of the 344 zones from 2026-01-02 for five years (1,408 segments) was compared with Python's `zoneinfo` at three-hour steps, 5,033,408 moments. 9,178 differed, all in `America/Winnipeg` and `America/Inuvik`, whose rules changed in tzdata 2026e and 2026d (the host's tzdata is older). Nothing else.
+
+**Decision it moved.** A zone costs 6 KB once and 150 bytes after, so zones are compiled in for the names a program gives and not behind a build flag; and the data is a swappable module because the reason it goes stale is a government and not a bug.
+
+**Not measured.** Instructions a tick under cachegrind (no valgrind on this machine): `bench/release/job_zoned.zig` is the program `bench/release.py` will count it with, and its row reads n/a for any tag before this change.

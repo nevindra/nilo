@@ -90,6 +90,7 @@ MODULES = [
     ("fetch", "a GET on a pooled keep-alive connection to an upstream in the process", 1000, 5000),
     ("fetch_ws", "a 100-byte text message sent on an open WebSocket to an upstream in the process, and its echo received", 1000, 5000),
     ("job", "a job pushed onto `job.Memory`, claimed, run and marked done", 2000, 10000),
+    ("job_zoned", "the next tick of `0 2 * * *` in Europe/Berlin, asked the afternoon before the clocks go forward", 20000, 100000),
     ("sql", "a row found by key on SQLite, `.in_fiber`", 1000, 21000),
     ("s3", "a GetObject signed with SigV4 from a stub in the process", 1000, 5000),
 ]

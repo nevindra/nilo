@@ -4,7 +4,7 @@
 
 **Guide:** [Work that runs later](../guide/jobs.md) · **Reference:** [`nilo_job`](../reference/job.md)
 
-The code is `job/job.zig` (`Jobs`, `Tick`, the worker loop), `job/table.zig` and `job/memory.zig` (the two stores), `job/cron.zig` (the schedule parser) and `job/contract.zig` (what a store must provide).
+The code is `job/job.zig` (`Jobs`, `Tick`, the worker loop), `job/table.zig` and `job/memory.zig` (the two stores), `job/cron.zig` (the schedule parser and its walk), `job/tz.zig` (a time zone read while compiling), `job/tzdata/` (the vendored IANA data and the script that refreshes it) and `job/contract.zig` (what a store must provide).
 
 ## Overview
 
@@ -38,7 +38,9 @@ A push wakes one waiting worker through a futex counter. `poll_ms` only matters 
 7. **`retry` has no default**, for any kind, and it applies before `final` is checked. [ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)
 8. **`pub const final = error{...}` lists the failures that make a job dead on any attempt**, whatever `retry.times` says. A timeout is never final, because it means the run did not finish, not that it cannot succeed. [ADR 179](../adr/179-a-run-can-say-its-failure-is-final.md)
 9. **A scheduled kind must declare `overlap` and `missed`; neither has a default.** The next tick is a row pushed with `unique = "schedule"`, so several instances seeding the same schedule create one row, and whichever claims it runs it. There is no leader. Every worker seeds again once a minute (idempotent, so one insert per kind per minute), which is what brings back a schedule whose row was lost to a crash, a failed push or a `cancel`. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)
-10. **`job.cron(...)` is parsed while compiling, and only in UTC.** A field out of range, or a schedule without `overlap`/`missed`, is a Refusal that names what is missing, instead of a default nobody noticed. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)
+10. **`job.cron(...)` is parsed while compiling, in UTC unless `.in("Area/City")` names a zone.** A field out of range, an unknown zone, or a schedule without `overlap`/`missed`, is a Refusal that names what is missing, instead of a default nobody noticed. Stored times stay UTC; the zone only decides how the fields are read. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)
+    1. **A zone is IANA data compiled in for the names a program gives, read by our own code, with no file read at run time.** `job.tzdata_version` is the release, `zig build tzdata-check -Dnetwork` fails when a newer one exists, and `-Dtzdata=<dir>` builds against a newer `job/tzdata/refresh.py --out <dir>`. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)
+    2. **An hour field of exactly `*` is an interval and declares nothing; every other schedule in a zone is a fixed time, and declares `skipped` and `repeated` when its zone can meet a window the clock skips or repeats.** Neither has a default. A tick `.skip` drops is not a `missed` one. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)
 11. **`priority` belongs to the kind, not the call site.** There are three levels (`high` is 0, `normal` is the default), and a claim orders by `priority` then `run_at` ascending, using the same `(state, run_at)` index instead of a wider one that would stop `run_at` from being used as a range. [ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)
 12. **A worker only claims the kinds it knows** (`kind = ANY($3)` on Postgres, a list of placeholders on SQLite). A row of a kind this binary does not run stays `queued` for the binary that does, instead of being released and re-claimed in an endless retry loop. [ADR 215](../adr/215-a-worker-claims-only-what-it-can-run.md)
 13. **A run the shutdown cut off goes back to the queue, whatever the statement said.** The worker asks the fiber, not the error: a failure with a cancellation pending (nilo_sql answers a cut-off statement `QueryFailed`, ADR 223) releases the row with its attempt given back, and every store write after a run (`done`, `retry`, `dead`, `release`) runs with cancellation held off, as cleanup. [ADR 243](../adr/243-a-run-cut-off-by-a-shutdown-goes-back-whatever-the-statement-said.md)
@@ -49,7 +51,7 @@ A push wakes one waiting worker through a futex counter. `poll_ms` only matters 
 | ADR | What it decides |
 |---|---|
 | [160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) | What the queue is, how claiming, pushing and waking work, `.deps` as a function, `Tick`, `cancel`, and transactional completion |
-| [161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md) | `schedule`, `overlap` and `missed` as required declarations, cron parsed at compile time, UTC only |
+| [161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md) | `schedule`, `overlap` and `missed` as required declarations, cron parsed at compile time, a time zone as compiled-in IANA data with `skipped` and `repeated` declared where the zone can meet them |
 | [179](../adr/179-a-run-can-say-its-failure-is-final.md) | `final`, an error set listing the failures no retry can fix |
 | [214](../adr/214-a-job-says-how-urgent-it-is.md) | `priority`: three levels on the kind, and why the claim's index is not widened for it |
 | [215](../adr/215-a-worker-claims-only-what-it-can-run.md) | A claim is limited to the kinds this program declares, so other programs' rows are left alone |
@@ -61,7 +63,7 @@ Related topics: why `app.spawn`/`nilo.sleep` alone were rejected for recurring w
 
 - **Whether a job kind can limit how many of it run at once.** A per-kind limit enforced by the claim itself, instead of a `nilo.Gate` inside `run` that still ties up a worker while it waits. In [the todo list](../todo.md).
 - **Whether a job has a result.** `status(id)` says `done` and nothing about the outcome. A `pub const Result = T` plus a `result` column is sketched, not built. [The todo list](../todo.md).
-- **Schedules are UTC only.** Time zones would be a dependency this module has not taken on. [The todo list](../todo.md).
+- **How fresh the zone data is.** It is the release in `job.tzdata_version`, and a government can change a rule on a month's notice (Kazakhstan 2024: 29 days; Manitoba in tzdata 2026e: about 33). `zig build tzdata-check -Dnetwork` makes staleness loud for whoever cuts a release, and `-Dtzdata=<dir>` lets a dependent not wait for one; a dependent who does neither runs the data nilo shipped. [ADR 161](../adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md).
 - **A worker started with `app.start(io)` and never `listen()`ed has nothing to stop it.** This module installs no signal handler; a worker binary is expected to write the four lines that catch `SIGTERM` itself. [The todo list](../todo.md).
 - **`stats` is three numbers for the whole queue**, not the per-kind counts or queue age an operator's dashboard would want. [The todo list](../todo.md).
 - **`job.Memory` scans its slots under a spin lock**, 3 to 6 microseconds per claim. Fine for tests; not measured at a size anyone would notice. [The todo list](../todo.md).

@@ -109,7 +109,9 @@ const layers = [_]Layer{
     // root and no other file.
     .{
         .root = "job",
-        .may_import = &.{"nilo_core"},
+        // `nilo_tzdata` is the time zone data and nothing else: a module so
+        // that `-Dtzdata` can replace it, and it names only `std` (ADR 161).
+        .may_import = &.{ "nilo_core", "nilo_tzdata" },
         .in_tests = &.{ "nilo_sql", "nilo_cache", "live_config" },
     },
     .{
@@ -1815,6 +1817,37 @@ const job_refusals = [_]Refusal{
     .{
         .name = "job_final_with_no_retry",
         .says = "the job SendWelcome declares `final`, and its `retry` is `.none`.",
+    },
+    // A schedule in a time zone (ADR 161): the name is checked, an interval
+    // has no zone, and a fixed time a zone's clock can skip or repeat has to
+    // say what happens.
+    .{
+        .name = "job_zone_unknown",
+        .says = "the time zone \"Asia/Jakart\" is not one nilo_job has data for.",
+    },
+    .{
+        .name = "job_zone_wrong_case",
+        .says = "the time zone \"asia/jakarta\" is not one nilo_job has data for.",
+    },
+    .{
+        .name = "job_every_in_a_zone",
+        .says = "`job.every(...)` cannot be given a time zone with `.in(\"Asia/Jakarta\")`.",
+    },
+    .{
+        .name = "job_zone_given_twice",
+        .says = "the schedule \"0 3 * * *\" is already in Asia/Jakarta, and `.in(\"Europe/Berlin\")` cannot move it again.",
+    },
+    .{
+        .name = "job_zoned_without_skipped",
+        .says = "the scheduled job Nightly does not say what happens when its wall time falls in an hour the clock skips.",
+    },
+    .{
+        .name = "job_zoned_without_repeated",
+        .says = "the scheduled job Nightly does not say what happens when its wall time falls in an hour the clock reads twice.",
+    },
+    .{
+        .name = "job_zoned_skipped_is_a_number",
+        .says = "the scheduled job Nightly's `skipped` is not a `job.Skipped`.",
     },
     // A job that pushes the next one: `.deps` as a function of the queue
     // type (ADR 160). The second fires at `open` rather than at
@@ -3727,8 +3760,35 @@ fn jobFor(
         .root_source_file = b.path("job/job.zig"),
         .target = target,
         .optimize = mode,
-        .imports = &.{.{ .name = "nilo_core", .module = core_mod }},
+        .imports = &.{
+            .{ .name = "nilo_core", .module = core_mod },
+            .{ .name = "nilo_tzdata", .module = tzdataFor(b, target, mode) },
+        },
     });
+}
+
+/// `-Dtzdata=<dir>`, read once in `build`: a directory `job/tzdata/refresh.py
+/// --out <dir>` wrote, in place of the release vendored under `job/tzdata/`.
+var tzdata_dir: ?[]const u8 = null;
+
+/// The time zone data `nilo_job` embeds, as a module of its own (ADR 161).
+///
+/// A module and not a file `job.zig` imports, because a short-notice rule
+/// change (Kazakhstan 2024 gave 29 days, Manitoba 2026 about 33) must not wait
+/// for a nilo release, and the only seam a dependent can reach is the build:
+/// `-Dtzdata` swaps this root and nothing else, and `nilo_job` names no path
+/// into it. It imports only `std`, so it sits under `nilo_job` in the layers
+/// without a row of its own.
+fn tzdataFor(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    mode: std.lang.Optimize,
+) *std.Build.Module {
+    const root: std.Build.LazyPath = if (tzdata_dir) |dir|
+        b.graph.cwdRelativePath(b.pathJoin(&.{ dir, "tzdata.zig" }))
+    else
+        b.path("job/tzdata/tzdata.zig");
+    return b.createModule(.{ .root_source_file = root, .target = target, .optimize = mode });
 }
 
 /// A copy of `nilo_s3` for one optimize mode (ADR 063).
@@ -4076,6 +4136,23 @@ const Checks = struct {
         named.dependOn(&check.step);
     }
 
+    /// Whether IANA has published a release newer than the one vendored under
+    /// `job/tzdata/` (ADR 161). Off `test`, for the reason `fetch-check` is.
+    fn tzdata(b: *std.Build, network: bool) void {
+        const named = b.step(
+            "tzdata-check",
+            "Fail when IANA has published a newer time zone release than nilo_job's (needs -Dnetwork)",
+        );
+        if (!network) {
+            notice(b, named, false, "tzdata-check: skipped, because it asks data.iana.org. `zig build tzdata-check -Dnetwork` runs it.");
+            return;
+        }
+        const check = run(b, "tzdata-check", "tzdata-check");
+        check.addArg("job/tzdata/tzdata.zig");
+        check.has_side_effects = true;
+        named.dependOn(&check.step);
+    }
+
     /// `template/` builds and passes its own test against this working copy
     /// (ADR 263). On `test`, because it needs nothing `test` does not: zio
     /// is already in the global cache.
@@ -4346,6 +4423,14 @@ pub fn build(b: *std.Build) void {
         "Build nilo_sql and fetch its drivers — on for this repository, off for a dependent until it asks (see ADR 066)",
     ) orelse (b.pkg_hash.len == 0);
 
+    // The time zone data `nilo_job` embeds (ADR 161). Read before any module
+    // is made, because every copy of `nilo_job` takes it.
+    tzdata_dir = b.option(
+        []const u8,
+        "tzdata",
+        "A directory `job/tzdata/refresh.py --out <dir>` wrote, to build nilo_job against a newer IANA release than the one vendored (ADR 161)",
+    );
+
     const zio = zioFor(b, target, optimize);
 
     // Whether the published module speaks TLS (ADR 212). Off until asked,
@@ -4504,7 +4589,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("job/job.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "nilo_core", .module = nilo_core }},
+        .imports = &.{
+            .{ .name = "nilo_core", .module = nilo_core },
+            .{ .name = "nilo_tzdata", .module = tzdataFor(b, target, optimize) },
+        },
     });
 
     // The object store: a Service that dials, and the first module to import a
@@ -5211,6 +5299,7 @@ pub fn build(b: *std.Build) void {
     // it needs a route to the internet, and a gate that goes green because a
     // machine had none is worse than no gate.
     if (in_repo) Checks.fetch(b, network);
+    if (in_repo) Checks.tzdata(b, network);
 
     // A dependent that asks for nilo in two optimize modes, configured. The
     // module memo is shared by every instance in a configurer process, and a

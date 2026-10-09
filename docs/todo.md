@@ -65,12 +65,6 @@ Nothing is open at this tier.
 
 ### `nilo_job`
 
-**A schedule is UTC.** `0 3 * * *` is three in the morning in Greenwich, and a program in Jakarta writes `0 20 * * *` with a comment. A time zone is a table of rules that changes twice a year and a dependency to carry it. A zone with daylight saving also has an hour each year that never happens and one that happens twice, so `0 2 * * *` in `Europe/Berlin` needs an answer to both; Vixie cron runs a skipped tick right after the jump and a repeated one once. Go embeds the whole database with `time/tzdata` (about 450 KB), and Rust's `chrono-tz` compiles it in with a filter for the zones a program names.
-
-**Needs:** tzdata without a dependency: the rules for the zones a program names, embedded while compiling, priced on the binary axis; and the skipped and repeated hour answered by a declaration a kind in such a zone must make, the way `overlap` and `missed` are ([ADR 161](./adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
-
-**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
-
 **A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.** `workers` bounds the whole queue (`job.Settings`), and the reference's answer for a limit per kind is a `nilo.Gate` inside `run`, which waits while holding its worker: four rows of a kind gated to one leave three workers parked on the Gate and the other kinds unserved. river gives each queue its own `MaxWorkers`, and asynq weights its queues. The claim already names the kinds it takes (`kind IN (…)`, [ADR 215](./adr/215-a-worker-claims-only-what-it-can-run.md)), so a kind at its limit can be left out of the claim rather than taken and parked.
 
 **Needs:** `pub const max_running` on a kind, held per process by leaving a full kind out of the claim; on SQLite, where the kinds are one parameter each and their count is fixed while compiling, a full kind sent as a name no row has; and whether a limit across instances is wanted, which is a count inside the claim and costs every claim.

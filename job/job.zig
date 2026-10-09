@@ -46,6 +46,10 @@
 //! whether two runs may overlap and whether a missed run is caught up are
 //! declared on the job or it does not compile, which is the shape ADR 028
 //! said would be worth having and `every(ms, f)` was refused for lacking.
+//! A schedule is UTC unless `.in("Area/City")` reads it on a zone's wall clock
+//! (`tz.zig`, `job/tzdata/`): the zone is compiled in for the names a program
+//! gives, and a fixed time whose zone can skip or repeat it declares
+//! `skipped` and `repeated` too.
 //!
 //! **At least once.** A worker that dies mid-run leaves a row whose lease
 //! runs out, and another worker takes it. So `run` is written to be safe to
@@ -86,6 +90,7 @@ const core = @import("nilo_core");
 
 const contract = @import("contract.zig");
 const cron_mod = @import("cron.zig");
+const tzdata = @import("nilo_tzdata");
 
 pub const Memory = @import("memory.zig").Memory;
 pub const Table = @import("table.zig").Table;
@@ -149,15 +154,57 @@ pub const Missed = enum {
     catch_up,
 };
 
+/// What a fixed-time schedule in a time zone does with a wall time the clock
+/// skips (02:30 on the night 02:00 becomes 03:00): `.run_late` runs it once,
+/// read with the offset from before the gap, so at 03:30; `.skip` has no tick
+/// that night. A job whose zone can meet such an hour must declare it, with no
+/// default (ADR 161). A tick skipped this way never existed, so it is not a
+/// `missed` one.
+pub const Skipped = cron_mod.Skipped;
+
+/// What a fixed-time schedule in a time zone does with a wall time the clock
+/// reads twice (02:30 on the night 03:00 becomes 02:00): `.first`, `.second`
+/// or `.both` passes. A job whose zone can meet such an hour must declare it,
+/// with no default (ADR 161).
+pub const Repeated = cron_mod.Repeated;
+
+/// The IANA release the zone data was compiled from, such as `"2026e"`.
+/// `zig build tzdata-check -Dnetwork` fails when a newer one is out.
+pub const tzdata_version = tzdata.version;
+
 /// When a scheduled job runs.
 pub const Schedule = union(enum) {
     cron: cron_mod.Cron,
     every_ms: u64,
 
-    /// The first moment strictly after `after_micros`.
+    /// The first moment strictly after `after_micros`. A zoned fixed-time
+    /// schedule is read with the default policy here; a job's own
+    /// `skipped` and `repeated` reach it through `nextWith`.
     pub fn next(self: Schedule, after_micros: i64) i64 {
+        return self.nextWith(after_micros, .{});
+    }
+
+    /// The same schedule on the wall clock of an IANA zone:
+    /// `job.cron("0 3 * * *").in("Asia/Jakarta")`. Every stored time stays UTC
+    /// and only the reading of the fields moves. The zone is compiled in (the
+    /// one named, about 150 bytes), a name nobody has data for is a Refusal,
+    /// and so is `job.every(...)`, whose period is elapsed time that no clock
+    /// changes (ADR 161).
+    pub fn in(comptime self: Schedule, comptime zone: []const u8) Schedule {
         return switch (self) {
-            .cron => |c| c.next(after_micros),
+            .cron => |c| .{ .cron = c.in(zone) },
+            .every_ms => @compileError(
+                "nilo: `job.every(...)` cannot be given a time zone with `.in(\"" ++ zone ++ "\")`.\n" ++
+                    "  An interval is elapsed time, and no wall clock changes how long ten minutes is. " ++
+                    "Use `job.cron(...)` for a time of day (ADR 161).",
+            ),
+        };
+    }
+
+    /// `next`, with the policy a job declared for a skipped or repeated hour.
+    pub fn nextWith(self: Schedule, after_micros: i64, policy: cron_mod.Cron.Policy) i64 {
+        return switch (self) {
+            .cron => |c| c.nextWith(after_micros, policy),
             // Saturating, so a period built by hand past `max_every_ms`
             // (`every` refuses one) waits for ever rather than wrapping
             // round to a moment in the past.
@@ -166,8 +213,8 @@ pub const Schedule = union(enum) {
     }
 };
 
-/// `minute hour day month weekday`, UTC, parsed while compiling. See
-/// `cron.zig` for the grammar and the refusals.
+/// `minute hour day month weekday`, UTC unless `.in` names a zone, parsed
+/// while compiling. See `cron.zig` for the grammar and the refusals.
 pub fn cron(comptime text: []const u8) Schedule {
     return .{ .cron = comptime cron_mod.parse(text) };
 }
@@ -1043,7 +1090,7 @@ pub fn Jobs(comptime options: anytype) type {
 
             if (comptime scheduled(K)) {
                 // A tick later than its own successor is a missed one.
-                if (K.missed == .drop and K.schedule.next(claimed.run_at) <= now) {
+                if (K.missed == .drop and K.schedule.nextWith(claimed.run_at, policyOf(K)) <= now) {
                     if (!self.settled(claimed.id, "done", self.store.done(scope, claimed.id, claimed.attempts, now))) return;
                     self.note(claimed.id, .done, claimed.attempts);
                     self.pushNext(K, scope, now);
@@ -1428,7 +1475,7 @@ pub fn Jobs(comptime options: anytype) type {
         /// failure, a crash between the two statements or a `cancel` of the
         /// tick ([ADR 161](../docs/adr/161-a-schedule-is-a-type-that-makes-the-caller-choose.md)).
         fn pushNext(self: *Self, comptime K: type, scope: anytype, after: i64) void {
-            const at = K.schedule.next(after);
+            const at = K.schedule.nextWith(after, policyOf(K));
             const priority: contract.Priority = if (@hasDecl(K, "priority")) K.priority else .normal;
             _ = self.store.push(scope, K.nilo_job, "{}", .{ .run_at = at, .now = after, .unique = schedule_key, .priority = priority }) catch |err| {
                 std.log.scoped(.nilo_job).warn("queueing the next \"{s}\": {t}; the schedule is re-seeded within a minute", .{ K.nilo_job, err });
@@ -1467,6 +1514,16 @@ pub fn Jobs(comptime options: anytype) type {
 
 fn scheduled(comptime K: type) bool {
     return @hasDecl(K, "schedule");
+}
+
+/// What a scheduled kind declared for a skipped and a repeated hour. A kind
+/// that declared neither is one `checkSchedule` has found does not need to,
+/// and reads the default, which its schedule never consults.
+fn policyOf(comptime K: type) cron_mod.Cron.Policy {
+    return .{
+        .skipped = if (@hasDecl(K, "skipped")) K.skipped else .run_late,
+        .repeated = if (@hasDecl(K, "repeated")) K.repeated else .first,
+    };
 }
 
 /// What time a tick reads. A worker reads the wall clock, and reads it
@@ -1659,6 +1716,7 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type, comptime Store
                 "nilo: the scheduled job " ++ name ++ "'s `missed` is not a `job.Missed`.\n" ++
                     "  `pub const missed: job.Missed = .drop;` or `.catch_up`.",
             );
+            checkZoned(K, name);
             for (@typeInfo(K).@"struct".field_names, @typeInfo(K).@"struct".field_attrs) |fname, attrs| {
                 if (attrs.default_value_ptr == null) @compileError(
                     "nilo: the scheduled job " ++ name ++ " has a field `" ++ fname ++ "` with no default, and nobody pushes a scheduled job.\n" ++
@@ -1667,6 +1725,40 @@ fn checkKinds(comptime kinds: []const type, comptime Deps: ?type, comptime Store
             }
         }
     }
+}
+
+/// A fixed-time schedule in a zone has to say what happens on the two nights
+/// a year its wall time may not exist or may happen twice, if its zone can
+/// meet one: `Cron.needs` works that out from the zone's own transitions. A
+/// declaration that is not needed is accepted, because a later release of the
+/// data may need it (ADR 161).
+fn checkZoned(comptime K: type, comptime name: []const u8) void {
+    const c = switch (K.schedule) {
+        .cron => |c| c,
+        .every_ms => return,
+    };
+    if (c.zone == null) return;
+    if (@hasDecl(K, "skipped") and @TypeOf(K.skipped) != Skipped) @compileError(
+        "nilo: the scheduled job " ++ name ++ "'s `skipped` is not a `job.Skipped`.\n" ++
+            "  `pub const skipped: job.Skipped = .run_late;` or `.skip`.",
+    );
+    if (@hasDecl(K, "repeated") and @TypeOf(K.repeated) != Repeated) @compileError(
+        "nilo: the scheduled job " ++ name ++ "'s `repeated` is not a `job.Repeated`.\n" ++
+            "  `pub const repeated: job.Repeated = .first;`, `.second` or `.both`.",
+    );
+    const needs = comptime c.needs();
+    if (needs.skipped and !@hasDecl(K, "skipped")) @compileError(
+        "nilo: the scheduled job " ++ name ++ " does not say what happens when its wall time falls in an hour the clock skips.\n" ++
+            "  `" ++ c.text ++ "` in " ++ c.zone_name ++ " can land in the hour the clocks go forward. " ++
+            "`pub const skipped: job.Skipped = .run_late;` runs it once, late (02:30 runs at 03:30); `.skip` has no tick that night. " ++
+            "Neither is right for everybody, so neither is the default (ADR 161).",
+    );
+    if (needs.repeated and !@hasDecl(K, "repeated")) @compileError(
+        "nilo: the scheduled job " ++ name ++ " does not say what happens when its wall time falls in an hour the clock reads twice.\n" ++
+            "  `" ++ c.text ++ "` in " ++ c.zone_name ++ " can land in the hour the clocks go back. " ++
+            "`pub const repeated: job.Repeated = .first;` runs on the first pass, `.second` on the second, `.both` on both. " ++
+            "None is right for everybody, so none is the default (ADR 161).",
+    );
 }
 
 fn checkPayload(comptime T: type, comptime job_name: []const u8, comptime path: []const u8) void {
@@ -2656,6 +2748,122 @@ test "a cron schedule fires when the clock is moved to three in the morning" {
     try testing.expectEqual(@as(usize, 0), try jobs.drainAt(&run, three + 23 * 3600 * std.time.us_per_s));
     try testing.expectEqual(@as(usize, 1), try jobs.drainAt(&run, three + 24 * 3600 * std.time.us_per_s));
     try testing.expectEqual(@as(usize, 2), ledger.lines.items.len);
+}
+
+// -- a schedule in a time zone (ADR 161) -----------------------------------
+
+/// A report at 02:00 Berlin time, which the clocks skip on 2026-03-29 and
+/// read twice on 2026-10-25: it runs late and on both passes.
+const BerlinLate = struct {
+    pub const nilo_job = "berlin-late";
+    pub const retry: Retry = .none;
+    pub const schedule = cron("0 2 * * *").in("Europe/Berlin");
+    pub const overlap: Overlap = .skip;
+    pub const missed: Missed = .drop;
+    pub const skipped: Skipped = .run_late;
+    pub const repeated: Repeated = .both;
+
+    pub fn run(self: BerlinLate, scope: *core.Run, ledger: *Ledger) !void {
+        _ = self;
+        _ = scope;
+        try ledger.record("berlin-late");
+    }
+};
+
+/// The same hour with the other answers: nothing on the night it does not
+/// exist, and the first pass only.
+const BerlinSkip = struct {
+    pub const nilo_job = "berlin-skip";
+    pub const retry: Retry = .none;
+    pub const schedule = cron("0 2 * * *").in("Europe/Berlin");
+    pub const overlap: Overlap = .skip;
+    pub const missed: Missed = .drop;
+    pub const skipped: Skipped = .skip;
+    pub const repeated: Repeated = .first;
+
+    pub fn run(self: BerlinSkip, scope: *core.Run, ledger: *Ledger) !void {
+        _ = self;
+        _ = scope;
+        try ledger.record("berlin-skip");
+    }
+};
+
+/// Jakarta has no hour to skip, so it declares nothing.
+const JakartaMorning = struct {
+    pub const nilo_job = "jakarta-morning";
+    pub const retry: Retry = .none;
+    pub const schedule = cron("0 3 * * *").in("Asia/Jakarta");
+    pub const overlap: Overlap = .skip;
+    pub const missed: Missed = .drop;
+
+    pub fn run(self: JakartaMorning, scope: *core.Run, ledger: *Ledger) !void {
+        _ = self;
+        _ = scope;
+        try ledger.record("jakarta-morning");
+    }
+};
+
+fn utcAt(y: i64, mo: i64, d: i64, h: i64, mi: i64) i64 {
+    return (@import("tz.zig").daysFromCivil(y, mo, d) * 86_400 + h * 3600 + mi * 60) * std.time.us_per_s;
+}
+
+/// Seed `J` at `from`, then claim at `t - 1s` (nothing) and at `t` (one run),
+/// for each `t` in turn: the rows land exactly at those UTC instants.
+fn expectRowsAt(comptime J: type, from: i64, instants: []const i64) !void {
+    var store = try Memory.open(testing.allocator, .{ .bytes = 64 << 10 });
+    defer store.deinit();
+    var ledger: Ledger = .{ .gpa = testing.allocator };
+    defer ledger.deinit();
+    var jobs: J = .open(testing.allocator, &store, .{ .ledger = &ledger }, .{});
+    var run: core.Run = .init(testing.allocator);
+    defer run.deinit();
+
+    try jobs.seedAt(&run, from);
+    for (instants, 0..) |at, i| {
+        try testing.expectEqual(@as(usize, 0), try jobs.drainAt(&run, at - std.time.us_per_s));
+        try testing.expectEqual(@as(usize, 1), try jobs.drainAt(&run, at));
+        try testing.expectEqual(i + 1, ledger.lines.items.len);
+        // The successor is already queued, so the chain continues.
+        try testing.expectEqual(@as(u64, 1), (try jobs.stats(&run)).queued);
+    }
+}
+
+test "a zoned schedule's rows land at the UTC instants of its wall clock, run late through the skipped hour" {
+    const Jobs1 = Jobs(.{ .kinds = .{BerlinLate}, .store = Memory, .deps = struct { ledger: *Ledger } });
+    // 02:00 CET on the 28th, the 02:00 that does not exist on the 29th run at
+    // 03:00 CEST (01:00 UTC), then 02:00 CEST; the clocks go back on the 25th
+    // of October, and 02:00 happens at 00:00 and again at 01:00 UTC.
+    try expectRowsAt(Jobs1, utcAt(2026, 3, 27, 12, 0), &.{
+        utcAt(2026, 3, 28, 1, 0),
+        utcAt(2026, 3, 29, 1, 0),
+        utcAt(2026, 3, 30, 0, 0),
+    });
+    try expectRowsAt(Jobs1, utcAt(2026, 10, 24, 12, 0), &.{
+        utcAt(2026, 10, 25, 0, 0),
+        utcAt(2026, 10, 25, 1, 0),
+        utcAt(2026, 10, 26, 1, 0),
+    });
+}
+
+test "a zoned schedule that skips has no row for the night the hour does not exist" {
+    const Jobs2 = Jobs(.{ .kinds = .{BerlinSkip}, .store = Memory, .deps = struct { ledger: *Ledger } });
+    try expectRowsAt(Jobs2, utcAt(2026, 3, 27, 12, 0), &.{
+        utcAt(2026, 3, 28, 1, 0),
+        utcAt(2026, 3, 30, 0, 0),
+    });
+    // And only the first pass of the repeated one.
+    try expectRowsAt(Jobs2, utcAt(2026, 10, 24, 12, 0), &.{
+        utcAt(2026, 10, 25, 0, 0),
+        utcAt(2026, 10, 26, 1, 0),
+    });
+}
+
+test "a zone with no window to meet needs no declaration, and its rows are 20:00 UTC" {
+    const Jobs3 = Jobs(.{ .kinds = .{JakartaMorning}, .store = Memory, .deps = struct { ledger: *Ledger } });
+    try expectRowsAt(Jobs3, utcAt(2026, 10, 1, 0, 0), &.{
+        utcAt(2026, 10, 1, 20, 0),
+        utcAt(2026, 10, 2, 20, 0),
+    });
 }
 
 // -- a run that knows which tick it is (ADR 160) --------------------------

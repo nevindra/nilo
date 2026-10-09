@@ -29,6 +29,7 @@ pub const programs = [_]Program{
     .{ .name = "fetch", .imports = &.{ "nilo_fetch", "nilo_core" } },
     .{ .name = "fetch_ws", .imports = &.{ "nilo_fetch", "nilo_core" } },
     .{ .name = "job", .imports = &.{ "nilo_job", "nilo_core" } },
+    .{ .name = "job_zoned", .imports = &.{"nilo_job"} },
     .{ .name = "sql", .imports = &.{ "nilo_sql", "nilo_core" }, .sql = true },
     .{ .name = "s3", .imports = &.{ "nilo_s3", "nilo_core" } },
 };

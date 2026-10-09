@@ -62,7 +62,7 @@ A request: `readHead` → `parseHead` → the head is *borrowed* from the read b
 | `.http2 = true` (`-Dhttp2`) | nothing: HTTP/2 and gRPC are `http/h2.zig`, `hpack.zig`, `h2conn.zig` (the connection) and `grpc.zig` (the envelope). A call reaches the App as its fields and its message through `serve.serveRequest` (`Arrival.call`), held to every rule an HTTP/1.1 head is (RFC 9113 §8 for any method), so a gRPC method is an ordinary route and any other request is served as HTTP, on a plain listener by its first bytes and on a TLS one by ALPN. A WebSocket stays HTTP/1.1 | 220, 259 |
 | `.libdeflate = true` (`-Dlibdeflate`) | libdeflate's compressor, from its release tarball, compiled `ReleaseFast` and `FREESTANDING` by `libdeflateFor` in `build.zig`, never with `lib/utils.c` (whose weak `memcpy` would win the link for the whole program). `compress.backend` picks it for the pool and for static gzip | 248 |
 
-It is the flag, not `.lazy = true`, that keeps a dependency out: `b.lazyDependency` is a request, and called unconditionally it ran for every dependent. This repository's own http test root is built with TLS and gRPC whatever the flags say, and links libdeflate so `compress.zig`'s tests hold both pools; its App keeps the default backend, so `zig build test -Dlibdeflate` is the run of the App through libdeflate. `zig build fetch-check -Dnetwork` builds `bench/dependent/` against two cold caches and fails on anything but zio landing; it needs the internet, so it is not on `test`.
+It is the flag, not `.lazy = true`, that keeps a dependency out: `b.lazyDependency` is a request, and called unconditionally it ran for every dependent. This repository's own http test root is built with TLS and gRPC whatever the flags say, and links libdeflate so `compress.zig`'s tests hold both pools; its App keeps the default backend, so `zig build test -Dlibdeflate` is the run of the App through libdeflate. `zig build fetch-check -Dnetwork` builds `bench/dependent/` against two cold caches and fails on anything but zio landing; it needs the internet, so it is not on `test`. `zig build tzdata-check -Dnetwork` fails when IANA has published a time zone release newer than the one `nilo_job` carries (`job.tzdata_version`); also off `test`, and `-Dtzdata=<dir>` builds against the output of `job/tzdata/refresh.py --out <dir>` (ADR 161).
 
 ## Commands
 
@@ -93,6 +93,7 @@ zig build dev-{hello,…}  # an example restarted on a save to its Zig, and on n
 zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser; --frames for gRPC
 zig build fuzz-llhttp -Dllhttp -- --iterations 1000000   # the same heads read by llhttp too; fetches it, exits 1 on an undecided difference (ADR 231)
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint; not on test
+zig build tzdata-check -Dnetwork   # IANA has no newer time zone release than nilo_job carries; not on test
 mkdocs serve           # the guide as the website; `mkdocs build` is CI's strict check (ADR 219)
 ```
 
@@ -116,7 +117,7 @@ No `-Dtest-filter` is wired in, so build steps are all-or-nothing. What runs sta
 zig test http/range.zig --test-filter "a suffix range"   # also cookie, patch, names, json
 zig test core/core.zig                                   # and id/, config/, pw/, cache/, jwt/, proto/
 zig test --dep nilo_core -Mroot=fetch/fetch.zig -Mnilo_core=core/core.zig
-zig test --dep nilo_core -Mroot=job/job.zig -Mnilo_core=core/core.zig
+zig test --dep nilo_core --dep nilo_tzdata -Mroot=job/job.zig -Mnilo_core=core/core.zig -Mnilo_tzdata=job/tzdata/tzdata.zig
 ```
 
 Everything else under `http/` needs the module graph, so `zig build test-http` (the suite alone) or `zig build test` is the way. **Most of a `test` after an edit is not the refusals**: it is 33 s of single-threaded Sema compiling the `http/` suite and 25 s running it, mostly live tests waiting out the limits they test ([`bench/result/build.md`](bench/result/build.md#where-zig-build-test-waits-on-zig-017)). `-fincremental --watch` on `test-http` takes the first to under a second. **For the bottom two layers standalone is the entry condition, not a nicety**: if a change stops one of those lines working, the layering broke, not the test. That is why `fetch/deadline.zig`, which names `nilo_http`, is its own root (`test-fetch-engine`), and `job/live.zig`, which names `nilo_sql`, is `test-job-sql`. `nilo_s3` needs the module graph only because `s3/live.zig` names the generated `s3_config`.
