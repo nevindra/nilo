@@ -90,8 +90,9 @@ pub const Options = struct {
 
     /// How many S3 calls may be in flight across the whole process. The
     /// ceiling on live connections, and therefore on memory: each HTTPS one
-    /// holds 59,151 bytes of TLS and socket buffers, so this number times that
-    /// is what the store may cost.
+    /// allocates up to 59,151 bytes of TLS and socket buffers (about 12 KB
+    /// stay resident after a small answer and 45 KB after a large one), so
+    /// this number times that is the most the store may cost.
     max_in_flight: u32 = 32,
     /// How long one call may take, end to end. **`get`, `head`, `list`,
     /// `put` and `delete` only**: the two streaming calls have no whole-call
@@ -128,6 +129,19 @@ pub const Options = struct {
     /// that lives 200 s is refreshed 100 s before it ends, not on every
     /// request for the whole of its life (ADR 060).
     refresh_margin_s: i64 = 300,
+    /// What a `Throttled` or an `Unavailable` does to a call that can be sent
+    /// again: tried again by `nilo_fetch`'s mechanism, with the caller's
+    /// numbers (`times`, `backoff`, `budget`), the way an AWS SDK retries
+    /// ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+    /// Null, the default, is one try, as before. `get`, `getRange`, `getIf`,
+    /// `put`, `head`, `list`, `delete` and `copy` are retried; the calls with
+    /// a reader (`stream`, `putStream`, `putMultipart`) and the multipart
+    /// protocol are not, because a reader is spent by the first try. Only
+    /// `times`, `backoff` and `budget` are read here: S3's own answers are
+    /// the errors above, so `statuses` and `mint_key` mean nothing, and no
+    /// `Retry-After` is read. The budget is the Store's, shared by every
+    /// bucket over it.
+    retry: ?fetch.Retry = null,
 };
 
 /// How long after a failed `.fetch` the next attempt waits, while the
@@ -156,7 +170,22 @@ pub const OpenError = error{
     /// `max_streams` is more than `max_in_flight`: the streams are a share of
     /// the permits, not a second set.
     BadStreams,
+    /// `retry` has numbers that cannot work (`fetch.Retry.problem` says
+    /// which, in the log).
+    BadRetry,
     OutOfMemory,
+};
+
+/// One call's tries (ADR 271): whether a failure is one to wait out and go
+/// again on. Only the two answers S3 uses for "later" are.
+pub const Retrier = struct {
+    tries: ?fetch.retry.Tries,
+
+    pub fn should(self: *Retrier, c: anytype, err: anyerror) std.Io.Cancelable!bool {
+        const t = &(self.tries orelse return false);
+        if (err != error.Throttled and err != error.Unavailable) return false;
+        return t.again(c, null);
+    }
 };
 
 pub const Store = struct {
@@ -170,6 +199,9 @@ pub const Store = struct {
     limits: core.Limits = .none,
     source: Source,
     options: Options,
+    /// The retry budget's counts, for every bucket over this Store. Idle when
+    /// `options.retry` is null.
+    ledger: fetch.retry.Ledger = .empty,
 
     /// `http` or `https`, decided once. What it decides is the payload hash.
     scheme: Scheme,
@@ -225,6 +257,10 @@ pub const Store = struct {
         if (options.region.len == 0 or options.region.len > 64) return error.BadRegion;
         if (!plainText(options.region)) return error.BadRegion;
         if (options.max_streams > options.max_in_flight) return error.BadStreams;
+        if (options.retry) |r| if (r.problem()) |why| {
+            std.log.warn("nilo_s3: `retry` is refused: {s}", .{why});
+            return error.BadRetry;
+        };
         const kept_creds = try ownStatic(gpa, options.credentials);
         errdefer wipeAndFree(gpa, kept_creds.owned);
 
@@ -303,6 +339,13 @@ pub const Store = struct {
         // The first fetch, so that a credential source that is misconfigured
         // fails the server's startup rather than its first request.
         try self.refresh(io, @divFloor(core.nowMillis(), 1000));
+    }
+
+    /// The tries of one call, started: it goes in the budget's count. Null
+    /// tries when the Store retries nothing, and `should` then says no.
+    pub fn retrier(self: *Store) Retrier {
+        const policy: *const fetch.Retry = if (self.options.retry) |*r| r else return .{ .tries = null };
+        return .{ .tries = fetch.retry.Tries.start(policy, &self.ledger, self.client.inner.io) };
     }
 
     /// Take one of the stream slots, before the permit a call takes at the

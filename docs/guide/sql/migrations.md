@@ -335,6 +335,38 @@ const change = try sql.migrate.plan(gpa, sql.Db.Dialect, desired, before);
 
 A column that changed in three ways gets one problem naming all three, because what it needs is one rewrite.
 
+### A problem you handled yourself (`--accept`)
+
+**A problem is not a step, so the diff cannot write it; you write the step, and `--accept` tells the snapshot you did.** While one stands, `db generate` writes nothing, and it lists each problem with a name:
+
+```console
+$ db generate --name key_posts
+Nothing written. The diff will not write these:
+
+  posts.org_id
+    the foreign key posts_org_id_fkey is new or changed, and the table already exists. …
+    accept as: posts.org_id@1a2b3c4d
+
+Write the step for each yourself, as a step of your own in the `before` or `after` of the version this writes. …
+
+  db generate --name key_posts --accept posts.org_id@1a2b3c4d
+```
+
+Run the command it prints. It writes a version, with the step you did not get in `before` or `after` still to be written by you, and moves `snapshot.zon` past the problem, so the next `db generate` and `db check` do not raise it again. The file says which problems it was written for, above the generated block:
+
+```zig
+// Written with `--accept` for the problems below. The diff has no step for
+// any of them: the step is yours, in `before` or `after` above, and this
+// version is only right once it is there. Nothing checks that it is.
+//
+// posts.org_id@1a2b3c4d
+//   the foreign key posts_org_id_fkey is new or changed, …
+```
+
+**It cannot accept what you did not read.** The name is the table, the column and eight hex digits of a hash over what the problem said, so it names that problem as it was printed: when a change to your types makes the problem say something else (the key points at another table, say), it has a new name, and the old one is refused as naming nothing. Every standing problem has to be named in one run, because the snapshot becomes your types as they are now, and a problem left out would be one the diff then never raises. There is no `--accept-all`. The one problem that cannot be named is the snapshot having been written in another dialect, which a step cannot fix.
+
+Accepting is a promise, and nilo cannot check it: if the step is not in the version, the database does not have the change, and the types and the database disagree with a green `db check`. A `ForeignKeyViolated` or a startup check that refuses a Row is how that shows. On SQLite, where the answer to most of them is a table rebuild, the step is the four statements the problem spells out.
+
 ### Renaming a column (`.was`)
 
 **A renamed column is declared in the type, not answered at a prompt:**
@@ -369,7 +401,7 @@ const chain = try sql.migrate.chainOf(run.arena(), &.{});
 const ran = try sql.migrate.applyPending(&db, &run, chain);
 ```
 
-**`applyPending` runs each version that has not run yet, one transaction per version, under an advisory lock.** `nilo_migrations` is an ordinary Row, and `applyPending` creates it if it is not there. It reads this ledger once and skips any version already in it, so a start with nothing to do is one query. Each version that has not run is one transaction, begun `READ COMMITTED` on Postgres whatever the role's default is: take the advisory lock, check again whether the version is there, run every step, write the ledger row, commit. The second check is what matters when nine out of ten replicas start at the same time. **The lock is essential**, and it is the part a hand-written migration runner usually leaves out.
+**`applyPending` runs each version that has not run yet, one transaction per version, under an advisory lock.** `nilo_migrations` is an ordinary Row, and `applyPending` creates it if it is not there. It reads this ledger once and skips any version already in it, so a start with nothing to do is one query. Each version that has not run is one transaction, begun `READ COMMITTED` on Postgres whatever the role's default is: take the advisory lock, check again whether the version is there, run every step, write the ledger row, commit. The second check is what matters when nine out of ten replicas start at the same time. **The lock is essential**, and it is the part a hand-written migration runner usually leaves out. It is asked for and not waited for: a replica that finds it taken checks again every fifth of a second, because a statement that waits for it would deadlock with an index build running beside it ([ADR 269](../../adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
 
 **On Postgres, a step gives up after five seconds waiting for its table.** An `ALTER TABLE` needs a lock nothing else can share, and while it waits for one, every read and write to that table waits behind it. So a report or a forgotten `psql` session holding the table open would stall your whole app for as long as it stays open. After five seconds the version fails with `error.Locked`, the log names the step, and nothing is kept; start again once whatever held the table is done. A version that should wait longer says so in its file:
 
@@ -443,6 +475,8 @@ Add it to your `build.zig` as an executable and you have these commands:
 ```console
 $ db check                       # do the Rows, the migrations and the .sql twins agree?
 $ db generate --name add_nickname
+$ db generate --name add_index --concurrently orders_org_id_idx   # a big table: no write stops
+$ db generate --name key_orders --accept orders.org_id@1a2b3c4d   # a problem you wrote the step for
 $ db generate --name schema --baseline   # re-derive version 1, keeping your own steps
 $ db status                      # what this database has, and what is waiting
 $ db migrate                     # apply it
@@ -479,6 +513,32 @@ and it is a rename. The generated file in migrations/ says which names you gave.
 A column type change counts as a loss unless it widens: `i32` to `i64` goes through, but `i64` to `i32` has to be named, and so does anything that could round or reinterpret a value. The list is in [ADR 123](../../adr/123-a-migration-is-a-diff-against-a-snapshot.md#forward-only).
 
 The generated file is Zig you can read, and it is exactly what runs: those steps, in that order, in one transaction.
+
+### An index on a big table (`--concurrently`)
+
+**A new index on a table that already has rows stops every write to it until the build ends, and on a big table that is an outage.** A version is one transaction, and Postgres refuses `CREATE INDEX CONCURRENTLY` inside one, so the step `generate` writes takes the lock that makes inserts and updates wait. On a table of a few thousand rows that is milliseconds. On fifty million it is not. Whether yours is that big is a fact about your database, so you name the index:
+
+```console
+$ db generate --name index_readings --concurrently readings_sensor_idx
+Wrote migrations/0008_index_readings.zig, 1 step(s):
+
+  create_index  unique readings_tag_key; writes to readings wait while it builds. …
+
+And migrations/0009_index_readings_concurrently.zig, 1 step(s), which runs outside a transaction so that writes to the table carry on while each index is built:
+
+  create_index  index readings_sensor_idx; …
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS "readings_sensor_idx" ON "readings" ("sensor")
+```
+
+The named indexes go in a version of their own after the rest, marked `.transactional = false`: its steps run one at a time with no transaction around them, and the ledger row is written after the last. Every ordinary step's comment says how to ask for this, and the name is the one in it. Only an index on a table that exists can be named, and only on Postgres; on SQLite a write holds the whole file whatever it is, there is nothing to ask for, and a name given there is refused.
+
+**A build that fails halfway leaves an index behind that is invalid and does nothing.** A unique index over rows that repeat is the usual way: Postgres reports the duplicate, keeps the index in the catalog marked invalid, and refuses to make another of that name. nilo drops it before it builds again, with a line in the log saying so, and builds it again. It is dropped rather than refused, because there is nothing in an invalid index to keep, and refusing would make the next boot fail the same way until somebody connected by hand. A valid index of the same name is left alone.
+
+**A version outside a transaction is run whole again when it failed**, since it has no ledger row, so the steps in `before` and `after` that you add to it have to be safe to run twice. The generated ones are: `IF NOT EXISTS`, and the invalid index dropped first. The steps before the one that failed stay built. The version before it, in its transaction, is already committed, so after a failure the database is at one version behind the binary, and `db.expecting` keeps refusing to serve until the build has finished.
+
+**Run it from `db migrate` in your release step rather than at boot.** The build holds the migration lock for as long as it takes, so a replica that starts meanwhile waits for it. The lock is asked for and not waited for (a statement that waits for it and a `CONCURRENTLY` build deadlock, and Postgres ends one of them), so a replica waiting checks again every fifth of a second.
+
+The build waits for every transaction that began before it, so a long-running query delays it, and it is not given up on: the version runs without `lock_timeout` (writes and reads carry on meanwhile). Bound it with `statement_timeout` if you want it to fail instead. A redefined index (same name, different columns) is dropped in the first version and built in the second, so queries that used it go without it while the second runs. A key you add in the same run that points at a unique index you build this way would be applied before the index exists: leave that unique out of `--concurrently`.
 
 ### The version file and your own steps
 

@@ -298,6 +298,10 @@ const Live = struct {
 
     fn open(gpa: std.mem.Allocator) !?Live {
         const url = live_config.database_url orelse return null;
+        return try openAt(gpa, url);
+    }
+
+    fn openAt(gpa: std.mem.Allocator, url: []const u8) !Live {
 
         const threaded = try gpa.create(std.Io.Threaded);
         errdefer gpa.destroy(threaded);
@@ -686,7 +690,12 @@ const Stack = struct {
     client: nilo.testing.Client,
 
     fn open(gpa: std.mem.Allocator) !?*Stack {
-        const live = (try Live.open(gpa)) orelse return null;
+        const url = live_config.database_url orelse return null;
+        return try openAt(gpa, url);
+    }
+
+    fn openAt(gpa: std.mem.Allocator, url: []const u8) !*Stack {
+        const live = try Live.openAt(gpa, url);
         // Heap-allocated because the App holds a pointer to the Db and the
         // Client hands out a Ctx pointing at the App; moving any of them
         // after wiring would leave those pointing at the old copy.
@@ -2913,7 +2922,10 @@ test "a version waits for the advisory lock another process holds, so two replic
     // Another replica, part way through its own migration, holding the lock.
     var holder = try stack.db.begin(&run, .{});
     defer holder.deinit();
-    _ = try holder.exec(&run, comptime dialect.Postgres.advisoryLock(migrate.lock_key).?, .{});
+    // The lock is asked for, not waited for (`migrate.polled`), so a holder in this test asks until it has it.
+    while (!(try holder.rawOne(bool, &run, comptime dialect.Postgres.advisoryLock(migrate.lock_key).?, .{})).?) {
+        _ = try holder.exec(&run, "SELECT pg_sleep(0.05)", .{});
+    }
 
     const io = stack.live.threaded.io();
     var done: std.atomic.Value(bool) = .init(false);
@@ -7262,4 +7274,455 @@ test "the startup check's one query per schema answers what one query per table 
     try testing.expectEqual(@as(usize, 3), labels[0].len);
     try testing.expectEqualStrings("moderator", labels[0][2]);
     try testing.expectEqual(@as(usize, 0), labels[1].len);
+}
+
+// -- an index built outside a transaction (ADR 269) --------------------------
+//
+// Every table, index and version number below is this build's own, for the
+// reason the first fixture in this file is: both optimize modes run at once
+// against one database.
+
+fn versionFor(comptime base: i64) i64 {
+    return base + (if (builtin.mode == .debug) 0 else 1);
+}
+
+/// A database of its own for the tests that build an index `CONCURRENTLY`.
+///
+/// **Not a convenience for the tests, a fact about Postgres**: a
+/// `CREATE INDEX CONCURRENTLY` waits for every transaction in the whole
+/// database that is older than it (`WaitForOlderSnapshots` is per database),
+/// and those are lock waits, bounded by the `lock_timeout` this suite's URL
+/// carries (ADR 239). A `DROP INDEX CONCURRENTLY` does the same and can
+/// deadlock (`40P01`) with a build in the other optimize mode. In the shared
+/// database every other live test, in both modes, is such a transaction, so
+/// under load a build waited past ten seconds and failed. In a database that
+/// only this test, in this mode, uses, no transaction is older than the build
+/// but the build's own, which also makes a gate between the two modes
+/// unnecessary: they no longer share a database.
+///
+/// The database is created when absent and kept between runs. Where the role
+/// may not create one the test skips with a line saying why, and the shared
+/// database is not used instead, because a build there is the flaky thing.
+const OwnDatabase = struct {
+    buf: [512]u8 = undefined,
+    len: usize = 0,
+
+    const name = "nilo_live_concurrently_" ++ mode_suffix;
+
+    fn url(self: *const OwnDatabase) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn open(gpa: std.mem.Allocator) !?OwnDatabase {
+        const base = live_config.database_url orelse return null;
+        var self: OwnDatabase = .{};
+        // `scheme://authority/dbname?query`: the name is swapped, the rest kept.
+        const after_scheme = (std.mem.indexOf(u8, base, "://") orelse return error.TestUnexpectedResult) + 3;
+        const slash = std.mem.indexOfScalarPos(u8, base, after_scheme, '/') orelse return error.TestUnexpectedResult;
+        const query = std.mem.indexOfScalarPos(u8, base, slash, '?') orelse base.len;
+        self.len = (std.fmt.bufPrint(&self.buf, "{s}/{s}{s}", .{ base[0..slash], name, base[query..] }) catch return error.TestUnexpectedResult).len;
+
+        // Its lock wait is one second where the suite's is ten, so the test
+        // below can show a build outlasting it without a ten second sleep.
+        const long = "lock_timeout%3D10s";
+        if (std.mem.indexOf(u8, self.buf[0..self.len], long)) |at| {
+            var rest: [512]u8 = undefined;
+            const after = self.buf[at + long.len .. self.len];
+            @memcpy(rest[0..after.len], after);
+            const one = "lock_timeout%3D1s";
+            @memcpy(self.buf[at..][0..one.len], one);
+            @memcpy(self.buf[at + one.len ..][0..after.len], rest[0..after.len]);
+            self.len = at + one.len + after.len;
+        }
+
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        var admin = db_mod.Db.init(gpa, base, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+        defer admin.deinit();
+        try admin.nilo_start(threaded.io(), .off);
+        defer admin.nilo_stop();
+        var run: core.Run = .init(gpa);
+        defer run.deinit();
+        const there = (try admin.rawOne(bool, &run, "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", .{@as([]const u8, name)})).?;
+        if (!there) {
+            _ = admin.exec(&run, "CREATE DATABASE \"" ++ name ++ "\"", .{}) catch |err| {
+                std.log.warn("skipping: the role cannot CREATE DATABASE {s} ({s}), and a build CONCURRENTLY is not tried in the shared one", .{ name, @errorName(err) });
+                return null;
+            };
+        }
+        return self;
+    }
+};
+
+fn forgetVersion(db: *db_mod.Db, run: *core.Run, number: i64) void {
+    var buf: [96]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "DELETE FROM \"nilo_migrations\" WHERE \"version\" = {d}", .{number}) catch unreachable;
+    _ = db.exec(run, text, .{}) catch {};
+}
+
+fn indexIsValid(db: *db_mod.Db, run: *core.Run, comptime quoted: []const u8) !?bool {
+    return db.rawOne(bool, run, "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)", .{quoted});
+}
+
+/// `rows` rows into `table`, a text column `v` of distinct values and a column
+/// `grp` that repeats every `rows / 2`, so a unique index on it fails.
+fn fillBig(db: *db_mod.Db, run: *core.Run, comptime table_name: []const u8, rows: i64) !void {
+    _ = try db.exec(run, "DROP TABLE IF EXISTS \"" ++ table_name ++ "\"", .{});
+    _ = try db.exec(run, "CREATE TABLE \"" ++ table_name ++ "\" (\"id\" bigserial PRIMARY KEY, \"v\" text NOT NULL, \"grp\" int8 NOT NULL)", .{});
+    _ = try db.exec(
+        run,
+        "INSERT INTO \"" ++ table_name ++ "\" (\"v\", \"grp\") SELECT md5(g::text), g % ($1 / 2) FROM generate_series(1, $1) g",
+        .{rows},
+    );
+}
+
+const Writing = struct {
+    stop: std.atomic.Value(bool) = .init(false),
+    building: std.atomic.Value(bool) = .init(false),
+    during: std.atomic.Value(u32) = .init(0),
+    total: std.atomic.Value(u32) = .init(0),
+};
+
+/// Inserts a row at a time until told to stop, counting the ones that began
+/// and ended while a build was running.
+fn writeWhile(db: *db_mod.Db, gpa: std.mem.Allocator, sql_text: []const u8, w: *Writing) void {
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    while (!w.stop.load(.acquire)) {
+        const was = w.building.load(.acquire);
+        _ = db.exec(&run, sql_text, .{}) catch return;
+        _ = w.total.fetchAdd(1, .monotonic);
+        if (was and w.building.load(.acquire)) _ = w.during.fetchAdd(1, .monotonic);
+    }
+}
+
+const big_rows: i64 = 1_000_000;
+const big_table = "nilo_live_big_" ++ mode_suffix;
+const big_index = "nilo_live_big_v_idx_" ++ mode_suffix;
+const big_insert = "INSERT INTO \"" ++ big_table ++ "\" (\"v\", \"grp\") VALUES ('written meanwhile', 0)";
+
+/// The writes that got through while `v` ran, on a table `fillBig` made.
+fn writesDuring(stack: *Stack, gpa: std.mem.Allocator, run: *core.Run, v: migrate.Version, hash: []const u8) !struct { writes: u32, ms: i64 } {
+    const io = stack.live.threaded.io();
+    var w: Writing = .{};
+    var task = io.concurrent(writeWhile, .{ &stack.db, gpa, big_insert, &w }) catch return error.SkipZigTest;
+    // Let the writer be well under way before the build begins.
+    try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    const started = core.monotonicMicros();
+    w.building.store(true, .release);
+    const ran = migrate.apply(&stack.db, run, v, hash) catch |err| {
+        w.building.store(false, .release);
+        w.stop.store(true, .release);
+        task.await(io);
+        return err;
+    };
+    w.building.store(false, .release);
+    const ms = @divFloor(core.monotonicMicros() - started, std.time.us_per_ms);
+    w.stop.store(true, .release);
+    task.await(io);
+    try testing.expect(ran);
+    return .{ .writes = w.during.load(.acquire), .ms = ms };
+}
+
+test "an index built outside a transaction lets writes through, where the one in a transaction stops them" {
+    const gpa = testing.allocator;
+    const own = (try OwnDatabase.open(gpa)) orelse return error.SkipZigTest;
+    var stack = try Stack.openAt(gpa, own.url());
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    try migrate.ensureLedger(&stack.db, &run);
+
+    const number = versionFor(990_020);
+    const control = versionFor(990_022);
+    forgetVersion(&stack.db, &run, number);
+    forgetVersion(&stack.db, &run, control);
+    defer forgetVersion(&stack.db, &run, number);
+    defer forgetVersion(&stack.db, &run, control);
+    defer _ = stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ big_table ++ "\"", .{}) catch {};
+    try fillBig(&stack.db, &run, big_table, big_rows);
+
+    // The control: the same index in a version of the ordinary kind. Writes to
+    // the table wait for the build, so almost none get through while it runs.
+    const blocking = [_]migrate.Step{.{
+        .kind = .create_index,
+        .sql = "CREATE INDEX \"" ++ big_index ++ "_blocking\" ON \"" ++ big_table ++ "\" (\"v\")",
+        .why = "index, the control",
+    }};
+    var d1: [64]u8 = undefined;
+    const held = try writesDuring(stack, gpa, &run, .{ .number = control, .name = "blocking", .steps = &blocking }, migrate.hashOf("", &blocking, &d1));
+
+    const outside = [_]migrate.Step{.{
+        .kind = .create_index,
+        .sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"" ++ big_index ++ "\" ON \"" ++ big_table ++ "\" (\"v\")",
+        .why = "index, outside a transaction",
+        .index = "\"" ++ big_index ++ "\"",
+    }};
+    var d2: [64]u8 = undefined;
+    const free = try writesDuring(stack, gpa, &run, .{ .number = number, .name = "outside", .steps = &outside, .transactional = false }, migrate.hashOf("", &outside, &d2));
+
+
+    // The build took long enough for the comparison to mean something.
+    try testing.expect(held.ms > 100);
+    try testing.expect(free.ms > 100);
+    try testing.expect(held.writes <= 20);
+    try testing.expect(free.writes >= 100);
+
+    // And the index is whole, recorded, and was made with no transaction.
+    try testing.expectEqual(@as(?bool, true), try indexIsValid(&stack.db, &run, "\"" ++ big_index ++ "\""));
+    try testing.expect(try stack.db.find(migrate.Applied, &run, number) != null);
+    // Run again, it is already recorded and does nothing.
+    try testing.expect(!(try migrate.apply(&stack.db, &run, .{ .number = number, .name = "outside", .steps = &outside, .transactional = false }, migrate.hashOf("", &outside, &d2))));
+}
+
+const dup_table = "nilo_live_dups_" ++ mode_suffix;
+const dup_first = "nilo_live_dups_v_idx_" ++ mode_suffix;
+const dup_unique = "nilo_live_dups_grp_key_" ++ mode_suffix;
+
+test "a build that fails halfway leaves an invalid index, which the next run drops and builds again" {
+    const gpa = testing.allocator;
+    const own = (try OwnDatabase.open(gpa)) orelse return error.SkipZigTest;
+    var stack = try Stack.openAt(gpa, own.url());
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    try migrate.ensureLedger(&stack.db, &run);
+
+    const number = versionFor(990_024);
+    forgetVersion(&stack.db, &run, number);
+    defer forgetVersion(&stack.db, &run, number);
+    defer _ = stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ dup_table ++ "\"", .{}) catch {};
+    // Every `grp` appears twice, so a unique index over it cannot be built.
+    try fillBig(&stack.db, &run, dup_table, 2_000);
+
+    const steps = [_]migrate.Step{
+        .{
+            .kind = .create_index,
+            .sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"" ++ dup_first ++ "\" ON \"" ++ dup_table ++ "\" (\"v\")",
+            .why = "a plain index, which builds",
+            .index = "\"" ++ dup_first ++ "\"",
+        },
+        .{
+            .kind = .create_index,
+            .sql = "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS \"" ++ dup_unique ++ "\" ON \"" ++ dup_table ++ "\" (\"grp\")",
+            .why = "a unique index over duplicates, which cannot",
+            .index = "\"" ++ dup_unique ++ "\"",
+        },
+    };
+    const v: migrate.Version = .{ .number = number, .name = "dups", .steps = &steps, .transactional = false };
+    var digest: [64]u8 = undefined;
+    const hash = migrate.hashOf("", &steps, &digest);
+
+    // It fails, nothing is recorded, and what Postgres left is what it says
+    // it leaves: the first index whole, the second there and invalid.
+    try testing.expectError(error.AlreadyExists, migrate.apply(&stack.db, &run, v, hash));
+    try testing.expect(try stack.db.find(migrate.Applied, &run, number) == null);
+    try testing.expectEqual(@as(?bool, true), try indexIsValid(&stack.db, &run, "\"" ++ dup_first ++ "\""));
+    try testing.expectEqual(@as(?bool, false), try indexIsValid(&stack.db, &run, "\"" ++ dup_unique ++ "\""));
+
+    // Run again with the rows still wrong: the invalid one is dropped before
+    // the build, the build fails the same way, and the same state is left.
+    // `IF NOT EXISTS` alone would have passed over it and recorded the version.
+    try testing.expectError(error.AlreadyExists, migrate.apply(&stack.db, &run, v, hash));
+    try testing.expect(try stack.db.find(migrate.Applied, &run, number) == null);
+    try testing.expectEqual(@as(?bool, false), try indexIsValid(&stack.db, &run, "\"" ++ dup_unique ++ "\""));
+
+    // The rows are mended, and the same version, unchanged, now goes through.
+    _ = try stack.db.exec(&run, "UPDATE \"" ++ dup_table ++ "\" SET \"grp\" = \"id\"", .{});
+    try testing.expect(try migrate.apply(&stack.db, &run, v, hash));
+    try testing.expectEqual(@as(?bool, true), try indexIsValid(&stack.db, &run, "\"" ++ dup_first ++ "\""));
+    try testing.expectEqual(@as(?bool, true), try indexIsValid(&stack.db, &run, "\"" ++ dup_unique ++ "\""));
+    try testing.expect(try stack.db.find(migrate.Applied, &run, number) != null);
+
+    // Nothing is held: the lock was let go on every path out, so a version in
+    // a transaction takes it at once.
+    const after = [_]migrate.Step{.{ .kind = .data, .sql = "SELECT 1", .why = "" }};
+    var d2: [64]u8 = undefined;
+    try testing.expect(try migrate.apply(&stack.db, &run, .{ .number = versionFor(990_026), .name = "after", .steps = &after }, migrate.hashOf("", &after, &d2)));
+    forgetVersion(&stack.db, &run, versionFor(990_026));
+}
+
+fn sleepStatement(db: *db_mod.Db, gpa: std.mem.Allocator) void {
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    _ = db.exec(&run, "SELECT pg_sleep(3)", .{}) catch {};
+}
+
+test "a build waits out a transaction older than itself for longer than the connection's lock_timeout, and puts the setting back" {
+    const gpa = testing.allocator;
+    const own = (try OwnDatabase.open(gpa)) orelse return error.SkipZigTest;
+    var stack = try Stack.openAt(gpa, own.url());
+    defer stack.close(gpa);
+    const io = stack.live.threaded.io();
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    try migrate.ensureLedger(&stack.db, &run);
+    // The connection is given one second, so the setting under test is the
+    // one that matters: the sleeper below holds a snapshot for three.
+    try testing.expectEqualStrings("1s", (try stack.db.rawOne([]const u8, &run, "SELECT current_setting('lock_timeout')", .{})).?);
+
+    const number = versionFor(990_032);
+    const older = "nilo_live_older_" ++ mode_suffix;
+    forgetVersion(&stack.db, &run, number);
+    defer forgetVersion(&stack.db, &run, number);
+    defer _ = stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ older ++ "\"", .{}) catch {};
+    try fillBig(&stack.db, &run, older, 1_000);
+
+    const steps = [_]migrate.Step{.{
+        .kind = .create_index,
+        .sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"" ++ older ++ "_v\" ON \"" ++ older ++ "\" (\"v\")",
+        .why = "index",
+        .index = "\"" ++ older ++ "_v\"",
+    }};
+    const v: migrate.Version = .{ .number = number, .name = "older", .steps = &steps, .transactional = false };
+    var digest: [64]u8 = undefined;
+    const hash = migrate.hashOf("", &steps, &digest);
+
+    var sleeper = io.concurrent(sleepStatement, .{ &stack.db, gpa }) catch return error.SkipZigTest;
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
+    const started = core.monotonicMicros();
+    const ran = migrate.apply(&stack.db, &run, v, hash);
+    const ms = @divFloor(core.monotonicMicros() - started, std.time.us_per_ms);
+    sleeper.await(io);
+
+    try testing.expect(try ran);
+    try testing.expect(ms >= 2_000);
+    try testing.expectEqual(@as(?bool, true), try indexIsValid(&stack.db, &run, "\"" ++ older ++ "_v\""));
+    // Every connection of the pool has the setting it came with.
+    for (0..4) |_| try testing.expectEqualStrings("1s", (try stack.db.rawOne([]const u8, &run, "SELECT current_setting('lock_timeout')", .{})).?);
+}
+
+test "two replicas applying a version outside a transaction build it once, each on a pool of one" {
+    const gpa = testing.allocator;
+    const own = (try OwnDatabase.open(gpa)) orelse return error.SkipZigTest;
+    const url = own.url();
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var first = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer first.deinit();
+    try first.nilo_start(io, .off);
+    defer first.nilo_stop();
+    var second = db_mod.Db.init(gpa, url, .{ .size = 1, .connect_on_init = 1, .unchecked = true });
+    defer second.deinit();
+    try second.nilo_start(io, .off);
+    defer second.nilo_stop();
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    try migrate.ensureLedger(&first, &run);
+
+    const number = versionFor(990_028);
+    forgetVersion(&first, &run, number);
+    defer forgetVersion(&first, &run, number);
+    defer _ = first.exec(&run, "DROP TABLE IF EXISTS \"" ++ big_table ++ "_pair\"", .{}) catch {};
+    _ = try first.exec(&run, "DROP TABLE IF EXISTS \"" ++ big_table ++ "_pair\"", .{});
+    _ = try first.exec(&run, "CREATE TABLE \"" ++ big_table ++ "_pair\" (\"id\" bigserial PRIMARY KEY, \"v\" text NOT NULL)", .{});
+    _ = try first.exec(&run, "INSERT INTO \"" ++ big_table ++ "_pair\" (\"v\") SELECT md5(g::text) FROM generate_series(1, 400000) g", .{});
+
+    // The second creation, not the first, is what the lock exists to stop: a
+    // build under way looks like a failed one, and the replica that arrives
+    // would drop the other's index from under it.
+    const steps = [_]migrate.Step{.{
+        .kind = .create_index,
+        .sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"" ++ big_index ++ "_pair\" ON \"" ++ big_table ++ "_pair\" (\"v\")",
+        .why = "index",
+        .index = "\"" ++ big_index ++ "_pair\"",
+    }};
+    const v: migrate.Version = .{ .number = number, .name = "pair", .steps = &steps, .transactional = false };
+    var digest: [64]u8 = undefined;
+    const hash = migrate.hashOf("", &steps, &digest);
+
+    var one = io.concurrent(applyAs, .{ &first, gpa, v, hash }) catch return error.SkipZigTest;
+    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    var two = io.concurrent(applyAs, .{ &second, gpa, v, hash }) catch return error.SkipZigTest;
+
+    const a = one.await(io);
+    const b = two.await(io);
+    try testing.expectEqual(Applying.ran, a);
+    try testing.expectEqual(Applying.already, b);
+    try testing.expectEqual(@as(?bool, true), try indexIsValid(&first, &run, "\"" ++ big_index ++ "_pair\""));
+}
+
+// -- a Problem accepted by name (ADR 270), against a real database ------------
+
+const KeyedParent = struct {
+    pub const nilo_table = .{ .name = "nilo_live_keyed_parents_" ++ mode_suffix, .key = .id };
+    id: i64,
+};
+
+fn KeyedChild(comptime keyed: bool) type {
+    return struct {
+        pub const nilo_table = if (keyed) .{
+            .name = "nilo_live_keyed_children_" ++ mode_suffix,
+            .key = .id,
+            .references = .{ .parent_id = .{ KeyedParent, .id } },
+        } else .{
+            .name = "nilo_live_keyed_children_" ++ mode_suffix,
+            .key = .id,
+        };
+        id: i64,
+        parent_id: i64,
+    };
+}
+
+test "a key added to a column the table had is handled by a step of the person's, and the diff then stops raising it" {
+    const gpa = testing.allocator;
+    var stack = (try Stack.open(gpa)) orelse return error.SkipZigTest;
+    defer stack.close(gpa);
+
+    var run = nilo.Run.init(gpa);
+    defer run.deinit();
+    const a = run.arena();
+    try migrate.ensureLedger(&stack.db, &run);
+
+    const children = "nilo_live_keyed_children_" ++ mode_suffix;
+    const number = versionFor(990_030);
+    forgetVersion(&stack.db, &run, number);
+    defer forgetVersion(&stack.db, &run, number);
+    _ = try stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ children ++ "\"", .{});
+    _ = try stack.db.exec(&run, "DROP TABLE IF EXISTS \"nilo_live_keyed_parents_" ++ mode_suffix ++ "\"", .{});
+    defer _ = stack.db.exec(&run, "DROP TABLE IF EXISTS \"" ++ children ++ "\"", .{}) catch {};
+
+    const D = dialect.Postgres;
+    const before = comptime migrate.desiredOf(D, .{ .tables = &.{ KeyedParent, KeyedChild(false) } });
+    const after = comptime migrate.desiredOf(D, .{ .tables = &.{ KeyedParent, KeyedChild(true) } });
+
+    // The tables as the first version made them, with a row that has a parent.
+    const made = try migrate.plan(a, D, before, migrate.snapshot.empty(D));
+    for (made.steps) |s| _ = try stack.db.exec(&run, s.sql, .{});
+    _ = try stack.db.exec(&run, "INSERT INTO \"nilo_live_keyed_parents_" ++ mode_suffix ++ "\" (\"id\") VALUES (1)", .{});
+    _ = try stack.db.exec(&run, "INSERT INTO \"" ++ children ++ "\" (\"id\", \"parent_id\") VALUES (1, 1)", .{});
+
+    // The types gained a key on a column that is there. The diff has no step,
+    // and says so.
+    const was = try migrate.snapshotOf(a, D, 1, before);
+    const raised = try migrate.plan(a, D, after, was);
+    try testing.expectEqual(@as(usize, 0), raised.steps.len);
+    try testing.expectEqual(@as(usize, 1), raised.problems.len);
+    try testing.expect(raised.problems[0].acceptable());
+
+    // The person writes the step: the two-statement form the Problem names,
+    // which they may put in two versions on a big table.
+    const key = try raised.problems[0].key(a);
+    try testing.expectEqual(@as(usize, 0), (try raised.unaccepted(a, &.{key})).len);
+    const steps = [_]migrate.Step{
+        .{ .kind = .data, .sql = "ALTER TABLE \"" ++ children ++ "\" ADD CONSTRAINT \"" ++ children ++ "_parent_id_fkey\" FOREIGN KEY (\"parent_id\") REFERENCES \"nilo_live_keyed_parents_" ++ mode_suffix ++ "\" (\"id\") NOT VALID", .why = "the key, without the scan" },
+        .{ .kind = .data, .sql = "ALTER TABLE \"" ++ children ++ "\" VALIDATE CONSTRAINT \"" ++ children ++ "_parent_id_fkey\"", .why = "and the rows it covers" },
+    };
+    var digest: [64]u8 = undefined;
+    try testing.expect(try migrate.apply(&stack.db, &run, .{ .number = number, .name = "key", .steps = &steps }, migrate.hashOf("", &steps, &digest)));
+
+    // What `generate --accept` writes into the snapshot is the types as they
+    // are, and the diff against it finds nothing.
+    const accepted = try migrate.snapshotOf(a, D, 2, after);
+    try testing.expect((try migrate.plan(a, D, after, accepted)).isEmpty());
+
+    // The database now enforces the key the type declares.
+    try testing.expectError(error.ForeignKeyViolated, stack.db.exec(&run, "INSERT INTO \"" ++ children ++ "\" (\"id\", \"parent_id\") VALUES (2, 99)", .{}));
 }

@@ -226,6 +226,20 @@ const Example = struct {
 /// `test-sql` rather than `test` — the framework's loop does not pay for a
 /// module it does not import (ADR 036).
 const sql_refusals = [_]Refusal{
+    // The three ways to misuse the table `nilo.Idempotent` keeps answers in
+    // when instances share a database (ADR 268).
+    .{
+        .name = "replays_over_something_that_is_not_a_db",
+        .says = "`sql.Replays(u32, …)` was given something that is not a `nilo_sql` Db.",
+    },
+    .{
+        .name = "replays_without_a_name",
+        .says = "`sql.Replays` needs a `name`.",
+    },
+    .{
+        .name = "replays_that_keep_nothing",
+        .says = "the `sql.Replays` \"orders\" has a `max_bytes` of 0, so no answer could be kept in it.",
+    },
     .{
         .name = "a_second_database_with_no_name",
         .says = "`sql.Named(\"\")` has no name, so it is `sql.Db` with extra steps.",
@@ -1879,6 +1893,22 @@ const fetch_refusals = [_]Refusal{
         .name = "fetch_target_ready_not_absolute",
         .says = "fetch.Target(\"api\") has a ready path `status` that does not begin with `/`, and it hangs off the base like any other.",
     },
+    .{
+        .name = "fetch_target_retry_never_tries",
+        .says = "fetch.Target(\"api\")'s `.retry` is refused: `times` is 0, which is no retry at all; take `.retry` out.",
+    },
+    .{
+        .name = "fetch_target_retry_backoff_from_zero",
+        .says = "fetch.Target(\"api\")'s `.retry` is refused: the exponential backoff starts at `from_ms = 0`, and doubling zero is zero.",
+    },
+    .{
+        .name = "fetch_target_retry_status_not_an_error",
+        .says = "fetch.Target(\"api\")'s `.retry` is refused: `statuses` names a status that is not an error (400 to 599).",
+    },
+    .{
+        .name = "fetch_target_retry_key_not_a_header",
+        .says = "fetch.Target(\"api\")'s `.retry` is refused: `mint_key` is not a header name.",
+    },
 };
 
 /// One entry per file in `refusals/`: a program written wrong on purpose, and
@@ -1922,6 +1952,16 @@ const refusals = [_]Refusal{
     .{
         .name = "idempotent_handler_returns_a_file",
         .says = "the handler for route \"/receipts\" takes an `Idempotent(…)` and returns a nilo.FileBody, which is not an answer nilo can keep.",
+    },
+    // A store the instances share must be one `Idempotent` can release a
+    // claim on, and `Cached` does not take one (ADR 268).
+    .{
+        .name = "idempotent_store_with_no_del",
+        .says = "the `Idempotent(idempotent_store_with_no_del.Shared, …)` on route \"/orders\" names idempotent_store_with_no_del.Shared as where answers are kept, and it has no `del`, so it is not a Space that holds bytes.",
+    },
+    .{
+        .name = "cached_over_a_store_that_takes_a_scope",
+        .says = "the `Cached(cached_over_a_store_that_takes_a_scope.Shared, …)` on route \"/pages\" names cached_over_a_store_that_takes_a_scope.Shared as where answers are kept, and it is a store that takes the request's scope, the way `sql.Replays` does for `Idempotent`.",
     },
     // The nine ways to ask for an answer served again that nilo cannot
     // serve (ADR 188).
@@ -5621,7 +5661,8 @@ pub fn build(b: *std.Build) void {
     // server holds. Held by a step on `test` so a change to the connection
     // loop cannot cross it unseen (ADR 062, ADR 212). Built `ReleaseFast` with
     // the flags of this build, because Debug frames are not the frames being
-    // guarded and `-Dtls` moves the answer.
+    // guarded and `-Dtls` and `-Dhttp2` move the depth. Every build is pinned
+    // at one page.
     //
     // **Linux on x86-64 only, host and target both.** The program reads
     // `/proc/self/smaps` and the boundary is an x86-64 frame size. Anywhere
@@ -5632,9 +5673,6 @@ pub fn build(b: *std.Build) void {
     const park_here = b.graph.host.result.os.tag == .linux and b.graph.host.result.cpu.arch == .x86_64 and
         target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
     if (park_here) {
-        const park_options = b.addOptions();
-        park_options.addOption(bool, "tls", want_tls);
-        park_options.addOption(bool, "http2", want_http2);
         const park_check = b.addExecutable(.{
             .name = "nilo-park-check",
             .root_module = b.createModule(.{
@@ -5644,7 +5682,6 @@ pub fn build(b: *std.Build) void {
                 .strip = stripMeasured(strip, .fast),
                 .imports = &.{
                     .{ .name = "nilo_http", .module = bench_http },
-                    .{ .name = "park_options", .module = park_options.createModule() },
                 },
             }),
         });
@@ -6000,7 +6037,7 @@ pub fn build(b: *std.Build) void {
     // pass, and believe a `sql/refusals/` file had been checked.
     const refusals_step = b.step(
         "refusals",
-        "Check the framework's 116 compile errors — see refusals-sql, -s3, -config, -pw, -cache, -proto for the rest",
+        "Check the framework's 118 compile errors — see refusals-sql, -s3, -config, -pw, -cache, -proto for the rest",
     );
     for (refusals) |refusal| {
         const module = b.createModule(.{

@@ -256,13 +256,80 @@ pub fn fingerprintOf(method: []const u8, path: []const u8, query: []const u8, bo
     return h.final();
 }
 
-/// A Space that can keep an answer: bytes in, bytes out, and a claim. Said
+/// Whether a store wants the request's Scope as the first argument of each
+/// call. A `cache.Space` does not, a table does: it allocates the rows it
+/// reads and can fail the way a database does (ADR 268).
+pub fn isScoped(comptime Replays: type) bool {
+    return comptime @hasDecl(Replays, "takes_scope") and Replays.takes_scope;
+}
+
+/// What a store can fail with, as `Idempotent` sees it. `TooLarge` is a key
+/// or an answer the store cannot hold, which has an answer of its own at each
+/// call; `Unavailable` is every other failure of a store that can fail, a
+/// database that did not answer, said once in the log and not carried up as
+/// the driver's error set.
+pub const KeepError = error{ TooLarge, Unavailable };
+
+/// The claim, whichever shape the store has. A store that cannot say whether
+/// the key is free is `Unavailable`, and the request is refused before the
+/// handler runs: running it would be running it unclaimed.
+pub fn claim(replays: anytype, scope: anytype, slot: []const u8, value: []const u8, ttl_s: u32) KeepError!bool {
+    const R = @typeInfo(@TypeOf(replays)).pointer.child;
+    if (comptime !isScoped(R)) return replays.putIfAbsentFor(slot, value, ttl_s);
+    return replays.putIfAbsentFor(scope, slot, value, ttl_s) catch |err| return storeFailed(err, "claim");
+}
+
+/// Read what is kept under `slot` into `out`.
+pub fn read(replays: anytype, scope: anytype, slot: []const u8, out: []u8) error{Unavailable}!?[]const u8 {
+    const R = @typeInfo(@TypeOf(replays)).pointer.child;
+    if (comptime !isScoped(R)) return replays.getInto(slot, out);
+    return replays.getInto(scope, slot, out) catch |err| {
+        logFailure(err, "read");
+        return error.Unavailable;
+    };
+}
+
+/// Keep `value` over whatever is under `slot`: the answer, over the marker.
+pub fn keep(replays: anytype, scope: anytype, slot: []const u8, value: []const u8) KeepError!void {
+    const R = @typeInfo(@TypeOf(replays)).pointer.child;
+    if (comptime !isScoped(R)) return replays.put(slot, value);
+    replays.put(scope, slot, value) catch |err| return storeFailed(err, "write");
+}
+
+/// Free a key. A store that cannot be reached cannot be asked, and the
+/// marker is then left to its two minutes (`marker_ttl_s`): this is called on
+/// a path that is already failing, which has nothing better to do with the
+/// news.
+pub fn release(replays: anytype, scope: anytype, slot: []const u8) void {
+    const R = @typeInfo(@TypeOf(replays)).pointer.child;
+    if (comptime !isScoped(R)) {
+        _ = replays.del(slot);
+        return;
+    }
+    _ = replays.del(scope, slot) catch |err| {
+        logFailure(err, "release");
+    };
+}
+
+fn storeFailed(err: anyerror, comptime what: []const u8) KeepError {
+    if (err == error.TooLarge) return error.TooLarge;
+    logFailure(err, what);
+    return error.Unavailable;
+}
+
+fn logFailure(err: anyerror, comptime what: []const u8) void {
+    std.log.warn("the idempotency store failed to " ++ what ++ " a key ({s}); a marker it holds lasts " ++
+        "at most {d} seconds", .{ @errorName(err), marker_ttl_s });
+}
+
+/// A store that can keep an answer: bytes in, bytes out, and a claim. Said
 /// while compiling, in the words of what is missing.
 pub fn checkSpace(comptime Replays: type, comptime route: []const u8) void {
     comptime {
         const shape = "\n  Give it a `cache.Space` holding `[]const u8`: " ++
             "`const Replays = cache.Space(\"replay\", []const u8, .{ .ttl_s = 86_400, .max_bytes = 16 << 10 });`" ++
-            "\n  and `app.provide(&replays)` once it is opened.";
+            "\n  and `app.provide(&replays)` once it is opened. " ++
+            "To share the answers between instances, `sql.Replays(Db, .{ .name = \"replay\", … })`.";
         switch (@typeInfo(Replays)) {
             .@"struct" => {},
             else => @compileError(
@@ -270,16 +337,25 @@ pub fn checkSpace(comptime Replays: type, comptime route: []const u8) void {
                     "\" names " ++ naming.of(Replays) ++ " as where answers are kept, and it is not a Space." ++ shape,
             ),
         }
-        const needed = [_][]const u8{ "getInto", "putIfAbsentFor", "put", "del", "max_bytes", "Held" };
+        const needed = [_][]const u8{ "getInto", "putIfAbsentFor", "put", "del", "max_bytes" };
         for (needed) |decl| if (!@hasDecl(Replays, decl)) @compileError(
             "nilo: the `Idempotent(" ++ naming.of(Replays) ++ ", …)` on route \"" ++ route ++
                 "\" names " ++ naming.of(Replays) ++ " as where answers are kept, and it has no `" ++
                 decl ++ "`, so it is not a Space that holds bytes." ++ shape,
         );
-        if (Replays.Held == void) @compileError(
-            "nilo: the `Idempotent(" ++ naming.of(Replays) ++ ", …)` on route \"" ++ route ++
-                "\" names a Space that holds a flat value, and a kept answer is bytes." ++ shape,
-        );
+        // A store that takes the Scope reads into the buffer it is given and
+        // has no `Held`; a Space is read through one and must have it.
+        if (!isScoped(Replays)) {
+            if (!@hasDecl(Replays, "Held")) @compileError(
+                "nilo: the `Idempotent(" ++ naming.of(Replays) ++ ", …)` on route \"" ++ route ++
+                    "\" names " ++ naming.of(Replays) ++ " as where answers are kept, and it has no `Held`, " ++
+                    "so it is not a Space that holds bytes." ++ shape,
+            );
+            if (Replays.Held == void) @compileError(
+                "nilo: the `Idempotent(" ++ naming.of(Replays) ++ ", …)` on route \"" ++ route ++
+                    "\" names a Space that holds a flat value, and a kept answer is bytes." ++ shape,
+            );
+        }
         if (Replays.max_bytes < 256) @compileError(
             "nilo: the `Idempotent(" ++ naming.of(Replays) ++ ", …)` on route \"" ++ route ++
                 "\" names a Space whose `max_bytes` is " ++ std.fmt.comptimePrint("{d}", .{Replays.max_bytes}) ++

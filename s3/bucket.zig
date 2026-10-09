@@ -535,6 +535,24 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
             timeout_ms: ?u32,
             stall_ms: ?u32,
         ) Error!void {
+            var again = self.store.retrier();
+            while (true) {
+                self.putOnce(c, key, value, timeout_ms, stall_ms) catch |err| {
+                    if (try again.should(c, err)) continue;
+                    return err;
+                };
+                return;
+            }
+        }
+
+        fn putOnce(
+            self: *Self,
+            c: anytype,
+            key: []const u8,
+            value: anytype,
+            timeout_ms: ?u32,
+            stall_ms: ?u32,
+        ) Error!void {
             const bytes = viewOf(value.bytes);
 
             var url_buf: [url_max]u8 = undefined;
@@ -984,6 +1002,18 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// asked for: deleting something twice is not a failure.
         pub fn delete(self: *Self, c: anytype, key: []const u8) Error!void {
             comptime core.checkScope(@TypeOf(c), "bucket.delete");
+            var again = self.store.retrier();
+            while (true) {
+                self.deleteOnce(c, key) catch |err| {
+                    if (try again.should(c, err)) continue;
+                    return err;
+                };
+                return;
+            }
+        }
+
+        fn deleteOnce(self: *Self, c: anytype, key: []const u8) Error!void {
+            comptime core.checkScope(@TypeOf(c), "bucket.delete");
 
             var url_buf: [url_max]u8 = undefined;
             var token_buf: [settings.session_token_max]u8 = undefined;
@@ -1091,6 +1121,14 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// `x-amz-copy-source`. A copy's success is a document, so the body
         /// comes back, bounded and in the Scope, for the caller to read.
         fn copyRequest(self: *Self, c: anytype, key: []const u8, target: []const u8, query: []const u8, from: []const u8) Error![]const u8 {
+            var again = self.store.retrier();
+            while (true) return self.copyRequestOnce(c, key, target, query, from) catch |err| {
+                if (try again.should(c, err)) continue;
+                return err;
+            };
+        }
+
+        fn copyRequestOnce(self: *Self, c: anytype, key: []const u8, target: []const u8, query: []const u8, from: []const u8) Error![]const u8 {
             var token_buf: [settings.session_token_max]u8 = undefined;
             var sig: sign.Signature = .none;
             var headers: Headers = .{};
@@ -1147,6 +1185,15 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// What is known about an object without reading it: how long it is,
         /// what it claims to be, and its ETag.
         pub fn head(self: *Self, c: anytype, key: []const u8) Error!Meta {
+            comptime core.checkScope(@TypeOf(c), "bucket.head");
+            var again = self.store.retrier();
+            while (true) return self.headOnce(c, key) catch |err| {
+                if (try again.should(c, err)) continue;
+                return err;
+            };
+        }
+
+        fn headOnce(self: *Self, c: anytype, key: []const u8) Error!Meta {
             comptime core.checkScope(@TypeOf(c), "bucket.head");
 
             var url_buf: [url_max]u8 = undefined;
@@ -1230,6 +1277,15 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// a key arrives percent-encoded and an ETag with its quotes as
         /// entities, and each is decoded once into memory of its own size.
         pub fn list(self: *Self, c: anytype, listing: Listing) Error!Page {
+            comptime core.checkScope(@TypeOf(c), "bucket.list");
+            var again = self.store.retrier();
+            while (true) return self.listOnce(c, listing) catch |err| {
+                if (try again.should(c, err)) continue;
+                return err;
+            };
+        }
+
+        fn listOnce(self: *Self, c: anytype, listing: Listing) Error!Page {
             comptime core.checkScope(@TypeOf(c), "bucket.list");
 
             if (listing.max_keys == 0 or listing.max_keys > listing_mod.keys_max) {
@@ -1736,6 +1792,20 @@ pub fn Bucket(comptime name: []const u8, comptime opts: anytype) type {
         /// The whole of a bounded get, whichever of the three entry points
         /// asked for it.
         fn bounded(
+            self: *Self,
+            c: anytype,
+            key: []const u8,
+            range: ?[]const u8,
+            if_none_match: ?[]const u8,
+        ) Bounded!Object {
+            var again = self.store.retrier();
+            while (true) return self.boundedOnce(c, key, range, if_none_match) catch |err| {
+                if (try again.should(c, err)) continue;
+                return err;
+            };
+        }
+
+        fn boundedOnce(
             self: *Self,
             c: anytype,
             key: []const u8,

@@ -21,8 +21,10 @@
 //!
 //! - **A gate.** `std.http.Client`'s pool bounds *idle* connections
 //!   (`free_size`, 32 by default) and does not bound in-use ones at all. 500
-//!   concurrent handlers is 500 live connections, and an HTTPS one holds
-//!   59,151 bytes of buffers — 29.6 MB nobody asked for, plus 500 handshakes.
+//!   concurrent handlers is 500 live connections, and an HTTPS one allocates
+//!   up to 59,151 bytes of buffers (about 12 KB stay resident after a small
+//!   answer and 45 KB after a large one, `bench/result/fetch.md`) — up to
+//!   29.6 MB nobody asked for, plus 500 handshakes.
 //! - **A deadline.** An endpoint that accepts a connection and then says
 //!   nothing holds a handler until the process dies. `std.http.Client` has no
 //!   deadline field, so the bound is on the fiber
@@ -88,17 +90,30 @@
 //!
 //! ## What it is not
 //!
-//! Not a retry policy, not a circuit breaker, not a rate limiter. Those are
-//! decisions about somebody else's service — how many times, how long between,
-//! what counts as failure — and they belong to the caller who knows what that
-//! service promises. What is here is the part that is the same for everybody:
-//! do not hold a connection forever, do not hold more than you meant to, and
-//! do not read more than you asked for.
+//! Not a circuit breaker, not a rate limiter, and not a retry policy of
+//! its own: how many times, how long between and what counts as failure are
+//! decisions about somebody else's service, and they stay with the caller who
+//! knows what that service promises. What is here is the part that is the
+//! same for everybody: do not hold a connection forever, do not hold more
+//! than you meant to, do not read more than you asked for, and, for a
+//! `Target` that declares `.retry`, try again the way every careful client
+//! does and the loop each caller wrote does not: only a call that can be
+//! sent again, with jitter, `Retry-After`, a budget and the route's deadline
+//! ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+//! The numbers are the caller's, on the type; the mechanism is `retry.zig`.
+//! A call that is retried is a new `Exchange` each time, so the
+//! stale-connection replay below (transport hygiene, inside one try) and the
+//! retry (a decision, between tries) compose: a reaped socket is replaced
+//! inside the try and costs the retry nothing.
 
 const std = @import("std");
 const core = @import("nilo_core");
 
 const Str = core.Str;
+
+/// How a struct of params is encoded; internal, so that the module root names
+/// only what the reference lists.
+const encoding = @import("params.zig");
 
 /// A canned server for a suite of your own: `fetch.testing.Canned`, which
 /// answers what `reply` told it to over a real loopback socket on
@@ -113,6 +128,12 @@ pub const testing = @import("testing.zig");
 /// what `open` takes.
 pub const target = @import("target.zig");
 pub const Target = target.Target;
+
+/// A call tried again by a mechanism, with the caller's numbers: the policy,
+/// its budget and the helpers `nilo_s3` shares
+/// ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+pub const retry = @import("retry.zig");
+pub const Retry = retry.Retry;
 
 /// The header a request's id travels under (ADR 158). nilo's own spelling,
 /// the one `Ctx.requestId` reads on the way in and the logger writes on the
@@ -139,15 +160,22 @@ pub const Client = struct {
     limits: core.Limits = .none,
     settings: Settings,
     started: bool = false,
+    /// What `settings.proxy` became, built by `nilo_start` and read by std
+    /// through `inner.http_proxy` and `fresh.http_proxy`. On the heap, with
+    /// its host and its `Proxy-Authorization` value, so that std's pointer
+    /// to it does not depend on where this struct sits; `deinit` frees all
+    /// three.
+    proxy: ?*std.http.Client.Proxy = null,
 
     pub const Settings = struct {
         /// How many calls may be in flight at once, across every host.
         ///
         /// This is the one that is not a nicety. Without it the ceiling on
         /// live connections is however many handlers happen to be running,
-        /// and each HTTPS connection holds 59,151 bytes of TLS and socket
-        /// buffers. Past this a caller waits for a permit rather than opening
-        /// connection 501.
+        /// and each HTTPS connection allocates up to 59,151 bytes of TLS and
+        /// socket buffers (about 12 KB stay resident after a small answer and
+        /// 45 KB after a large one). Past this a caller waits for a permit
+        /// rather than opening connection 501.
         max_in_flight: u32 = 32,
 
         /// How long one call may take, end to end — connect, send, head and
@@ -213,6 +241,53 @@ pub const Client = struct {
         /// this says. A call that already carries an `X-Request-Id` of its
         /// own in `Call.headers` keeps it.
         forward_request_id: bool = true,
+
+        /// The egress proxy every `http://` call goes through, or null for
+        /// none. **Given here and never read from the environment**: a
+        /// process that finds `HTTP_PROXY` set by something it did not write
+        /// and routes its calls through it has a surprise to explain, and
+        /// the caller's own configuration (`nilo_config`) is where a
+        /// deployment says it ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+        proxy: ?Proxy = null,
+
+        /// The certificate authorities an `https://` call trusts, as a
+        /// bundle the caller loaded, or null for the system's (scanned on
+        /// the first `https://` call, as `std.http.Client` does). A private
+        /// authority is the system's plus one file:
+        ///
+        /// ```zig
+        /// var roots: std.crypto.Certificate.Bundle = .empty;
+        /// defer roots.deinit(gpa);
+        /// try roots.rescan(gpa, io, now);
+        /// try roots.addCertsFromFilePathAbsolute(gpa, io, now, "/etc/corp/ca.pem");
+        /// ```
+        ///
+        /// The bundle is the caller's: it must outlive the client and must
+        /// not change while the client lives, and the client never frees it.
+        /// Both of the client's std clients read the one copy
+        /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+        roots: ?*const std.crypto.Certificate.Bundle = null,
+    };
+
+    /// A forward proxy for `http://` calls
+    /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+    pub const Proxy = struct {
+        /// `http://[user:password@]host[:port]`, or `https://` for a proxy
+        /// that is itself reached over TLS. The user and password, when
+        /// there are any, go to the proxy as `Proxy-Authorization: Basic`
+        /// and to nobody else; percent-encode anything in them that a URL
+        /// would not carry. A scheme other than those two, no host, or a
+        /// credential over 255 bytes is `error.InvalidProxy` at start.
+        url: []const u8,
+        /// Hosts that skip the proxy and are dialled directly. std reads no
+        /// `NO_PROXY`, so the list is here. An entry matches the host it
+        /// names and every host under it, ignoring case: `corp.example`
+        /// skips `corp.example` and `api.corp.example`, a leading `.` or
+        /// `*.` is the same, `127.0.0.1` skips that address, and `*` skips
+        /// everything. There is no CIDR range, and the port is not part of
+        /// a match. **Nothing is skipped that is not listed, `localhost`
+        /// included.**
+        bypass: []const []const u8 = &.{},
     };
 
     /// Per-call overrides. Everything null takes the client's own setting, so
@@ -265,6 +340,12 @@ pub const Client = struct {
         /// (ADR 174). The connection buffers a head of several kilobytes;
         /// this is a request carrying more headers than that.
         HeadTooLong,
+        /// An `https://` call that `Settings.proxy` would carry. std has no
+        /// way to start TLS inside a tunnel, and the one it offers sends the
+        /// request in the clear, so the call is refused before anything is
+        /// dialled. Name the host in `Proxy.bypass` to call it directly
+        /// ([ADR 267](../docs/adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+        TlsThroughProxy,
         OutOfMemory,
     } || std.Uri.ParseError || std.http.Client.RequestError ||
         std.http.Client.Request.ReceiveHeadError ||
@@ -285,9 +366,23 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        // Read before std's `deinit`, which leaves `inner` undefined.
+        const gpa = self.inner.allocator;
         if (self.started) {
+            // The bundle is the caller's, shared by both std clients: leave
+            // each with an empty one so that neither frees it.
+            if (self.settings.roots != null and !std.http.Client.disable_tls) {
+                self.inner.ca_bundle = .empty;
+                self.fresh.ca_bundle = .empty;
+            }
             self.inner.deinit();
             self.fresh.deinit();
+        }
+        if (self.proxy) |p| {
+            gpa.free(@constCast(p.host.bytes));
+            if (p.authorization) |a| gpa.free(@constCast(a));
+            gpa.destroy(p);
+            self.proxy = null;
         }
     }
 
@@ -299,11 +394,87 @@ pub const Client = struct {
     /// `.none` for the limits is not "no deadline": it is "no Engine to arm
     /// one on", and the client then bounds the call itself, as a task of
     /// `io` it can cancel (ADR 056).
+    ///
+    /// A `Settings.proxy` is parsed here, so a bad URL stops the program
+    /// before it serves, as every other bad setting does: `error.InvalidProxy`.
+    /// The client must not move after this: std's two clients are handed
+    /// pointers into it.
     pub fn nilo_start(self: *Client, io: std.Io, limits: core.Limits) !void {
         self.inner.io = io;
         self.fresh.io = io;
+        if (self.settings.proxy) |p| try self.installProxy(p);
+        if (self.settings.roots) |bundle| {
+            if (!std.http.Client.disable_tls) {
+                // A bundle and a time that is not null is what stops std
+                // scanning the system on the first `https://` call, so this
+                // is the whole of "trust these". Shared by both clients, not
+                // copied: it is read-only from here, and `deinit` takes it
+                // back out before std frees anything.
+                const now = std.Io.Clock.real.now(io);
+                self.inner.ca_bundle = bundle.*;
+                self.inner.now = now;
+                self.fresh.ca_bundle = bundle.*;
+                self.fresh.now = now;
+            }
+        }
         self.limits = limits;
         self.started = true;
+    }
+
+    /// `p` as the `std.http.Client.Proxy` both std clients carry as their
+    /// `http_proxy`. Only `http_proxy`: an `https://` call is never sent
+    /// through it (`Exchange.pickConnection`), and `https_proxy` stays null
+    /// so that std cannot route one by itself. `supports_connect` is false,
+    /// so an `http://` call is sent to the proxy as std's forward-proxy form
+    /// (the full URL on the request line, `Proxy-Authorization` after the
+    /// headers) and never as a `CONNECT` to a port a proxy may refuse.
+    fn installProxy(self: *Client, p: Proxy) !void {
+        const gpa = self.inner.allocator;
+        const uri = std.Uri.parse(p.url) catch return error.InvalidProxy;
+        const protocol: std.http.Client.Protocol = if (std.ascii.eqlIgnoreCase(uri.scheme, "http"))
+            .plain
+        else if (std.ascii.eqlIgnoreCase(uri.scheme, "https"))
+            .tls
+        else
+            return error.InvalidProxy;
+        var name: [std.Io.net.HostName.max_len]u8 = undefined;
+        const host = std.Io.net.HostName.fromUri(uri, &name) catch return error.InvalidProxy;
+
+        const basic = std.http.Client.basic_authorization;
+        // `basic_authorization.write` formats into a buffer of 255 and 255
+        // bytes and trusts the caller; a longer credential is refused here
+        // rather than trusted.
+        const has_credential = uri.user != null or uri.password != null;
+        const auth_len = if (has_credential) basic.valueLengthFromUri(uri) else 0;
+        if (auth_len > basic.max_value_len) return error.InvalidProxy;
+
+        const bytes = try gpa.dupe(u8, host.bytes);
+        errdefer gpa.free(bytes);
+        const authorization: ?[]u8 = if (has_credential) try gpa.alloc(u8, auth_len) else null;
+        errdefer if (authorization) |a| gpa.free(a);
+        if (authorization) |a| std.debug.assert(basic.value(uri, a).len == a.len);
+        const proxy = try gpa.create(std.http.Client.Proxy);
+        proxy.* = .{
+            .protocol = protocol,
+            .host = .{ .bytes = bytes },
+            .authorization = authorization,
+            .port = uri.port orelse switch (protocol) {
+                .plain => 80,
+                .tls => 443,
+            },
+            .supports_connect = false,
+        };
+        self.proxy = proxy;
+        self.inner.http_proxy = proxy;
+        self.fresh.http_proxy = proxy;
+    }
+
+    /// Whether `host` is one `Settings.proxy.bypass` names, and so is dialled
+    /// directly.
+    fn skipsProxy(self: *const Client, host: []const u8) bool {
+        const p = self.settings.proxy orelse return false;
+        for (p.bypass) |entry| if (bypassMatches(entry, host)) return true;
+        return false;
     }
 
     pub fn get(self: *Client, c: anytype, url: []const u8, call: Call) Error!Response {
@@ -346,19 +517,19 @@ pub const Client = struct {
     /// `post`.
     pub fn postJson(self: *Client, c: anytype, url: []const u8, value: anytype, call: Call) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.postJson");
-        comptime refuseJsonText(@TypeOf(value), "fetch.postJson");
+        comptime encoding.refuseJsonText(@TypeOf(value), "fetch.postJson");
         return self.sendJson(c, .POST, url, value, call);
     }
 
     pub fn putJson(self: *Client, c: anytype, url: []const u8, value: anytype, call: Call) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.putJson");
-        comptime refuseJsonText(@TypeOf(value), "fetch.putJson");
+        comptime encoding.refuseJsonText(@TypeOf(value), "fetch.putJson");
         return self.sendJson(c, .PUT, url, value, call);
     }
 
     pub fn patchJson(self: *Client, c: anytype, url: []const u8, value: anytype, call: Call) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.patchJson");
-        comptime refuseJsonText(@TypeOf(value), "fetch.patchJson");
+        comptime encoding.refuseJsonText(@TypeOf(value), "fetch.patchJson");
         return self.sendJson(c, .PATCH, url, value, call);
     }
 
@@ -371,13 +542,13 @@ pub const Client = struct {
     /// field ([ADR 061](../docs/adr/061-a-fitting-borrows-the-loop.md)).
     pub fn postForm(self: *Client, c: anytype, url: []const u8, fields: anytype, call: Call) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.postForm");
-        comptime checkForm(@TypeOf(fields), "fetch.postForm");
+        comptime encoding.checkForm(@TypeOf(fields), "fetch.postForm");
         return self.sendForm(c, .POST, url, fields, call);
     }
 
     pub fn putForm(self: *Client, c: anytype, url: []const u8, fields: anytype, call: Call) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.putForm");
-        comptime checkForm(@TypeOf(fields), "fetch.putForm");
+        comptime encoding.checkForm(@TypeOf(fields), "fetch.putForm");
         return self.sendForm(c, .PUT, url, fields, call);
     }
 
@@ -391,9 +562,9 @@ pub const Client = struct {
         call: Call,
     ) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.sendForm");
-        comptime checkForm(@TypeOf(fields), "fetch.sendForm");
+        comptime encoding.checkForm(@TypeOf(fields), "fetch.sendForm");
         const bytes = try formBody(c, fields);
-        return self.sendAs(c, method, url, bytes, form_content_type, call, .{});
+        return self.sendAs(c, method, url, bytes, encoding.form_content_type, call, .{});
     }
 
     /// The whole of what the three above do, for a method they do not name
@@ -407,7 +578,7 @@ pub const Client = struct {
         call: Call,
     ) Error!Response {
         comptime core.checkScope(@TypeOf(c), "fetch.sendJson");
-        comptime refuseJsonText(@TypeOf(value), "fetch.sendJson");
+        comptime encoding.refuseJsonText(@TypeOf(value), "fetch.sendJson");
         const bytes = try std.json.Stringify.valueAlloc(c.arena(), value, .{});
         return self.sendAs(c, method, url, bytes, "application/json", call, .{});
     }
@@ -678,6 +849,19 @@ pub const Client = struct {
     }
 };
 
+/// Whether `entry`, one line of `Proxy.bypass`, names `host` or a host under
+/// it: the same name ignoring case, or a name that ends in a dot and the
+/// entry. A leading `.` or `*.` on the entry is the same as none, and `*`
+/// is every host.
+fn bypassMatches(entry: []const u8, host: []const u8) bool {
+    var e = entry;
+    if (std.mem.eql(u8, e, "*")) return true;
+    if (std.mem.startsWith(u8, e, "*.")) e = e[2..] else if (std.mem.startsWith(u8, e, ".")) e = e[1..];
+    if (e.len == 0 or host.len < e.len) return false;
+    if (!std.ascii.eqlIgnoreCase(host[host.len - e.len ..], e)) return false;
+    return host.len == e.len or host[host.len - e.len - 1] == '.';
+}
+
 /// One call, held open from the request line to the last byte of the body.
 ///
 /// `Client.get` and the three beside it are this with the middle left out:
@@ -753,6 +937,13 @@ pub const Exchange = struct {
     announced: ?u64 = null,
     permit: bool = false,
     open: bool = false,
+    /// Whether the attempt in hand is on a connection taken out of the pool,
+    /// one that had already carried a request, and not on one it dialled.
+    /// Set by `attempt`, read by `nothingCameBack` (ADR 058).
+    reused: bool = false,
+    /// Whether any of an answer reached this side during the attempt in
+    /// hand: set by `earlyAnswer` when a head arrived on a failed write.
+    heard: bool = false,
 
     /// Nothing held: no permit, no connection, no deadline.
     pub const idle: Exchange = .{};
@@ -1060,7 +1251,12 @@ pub const Exchange = struct {
         //   depending on a race nobody runs, and reading only the first spelling
         //   is what
         //   [ADR 058](../docs/adr/058-most-of-an-s3-client-is-not-s3.md)
-        //   fixed.
+        //   fixed. A third spelling is a request with a body: its head is
+        //   flushed first, the peer's RST comes back, and the body write is
+        //   what fails (`WriteFailed`). It counts only on a connection taken
+        //   out of the pool (`takePooled`), never on one this call dialled,
+        //   and only when no head came back; a `putForm` or `postJson` as the
+        //   call after a quiet spell failed every time before it did.
         // - **Only a body still where it was.** A `.stream` body has had its
         //   reader consumed, so re-sending it would put fewer bytes on the
         //   wire than the `content-length` promised — worse than the error.
@@ -1401,7 +1597,12 @@ pub const Exchange = struct {
         // out to be a corpse. Every other body keeps the pool, and the replay
         // in `begin` protects it.
         const std_client = if (opts.body == .stream) &client.fresh else &client.inner;
-        self.req = try std_client.request(opts.method, uri, .{
+        self.reused = false;
+        self.heard = false;
+        const picked = try pickConnection(client, std_client, uri);
+        const pooled = picked.conn;
+        self.req = std_client.request(opts.method, uri, .{
+            .connection = pooled,
             .extra_headers = opts.headers,
             // Always std's "pass it to the caller": a followed redirect is
             // `follow`'s, not std's (ADR 183).
@@ -1414,8 +1615,13 @@ pub const Exchange = struct {
                 .connection = slot(null, given.connection),
                 .accept_encoding = if (given.accept_encoding) .omit else .{ .override = "identity" },
             },
-        });
+        }) catch |err| {
+            // `request` never took it, so nobody else will give it back.
+            if (pooled) |conn| std_client.connection_pool.release(conn, std_client.io);
+            return err;
+        };
         self.open = true;
+        self.reused = picked.reused;
 
         // Ask for the body uncompressed. **Not a default worth inheriting**:
         // `std.http.Client` advertises `gzip, deflate` and then hands back the
@@ -1470,6 +1676,63 @@ pub const Exchange = struct {
         self.res = try self.req.receiveHead(&.{});
     }
 
+    /// The connection this attempt is to use when `pickConnection` has an
+    /// opinion, and whether it came out of the pool.
+    const Pick = struct {
+        conn: ?*std.http.Client.Connection = null,
+        reused: bool = false,
+    };
+
+    /// Where the attempt goes, and whether the connection it gets was
+    /// already carrying requests.
+    ///
+    /// **The pool is asked here and not inside `request`**, because `request`
+    /// hands a connection back and says nothing of where it came from, and
+    /// `nothingCameBack` must tell a write that failed on an idle socket from
+    /// one that failed on a socket just dialled. The criteria are
+    /// `std.http.Client.connectTcp`'s own, host and port and protocol, and
+    /// the connection is the one it would have returned; a miss costs one
+    /// lock of the pool that `connectTcp` would have taken anyway and
+    /// leaves `request` to dial.
+    ///
+    /// With `Settings.proxy`, three more things are decided here and nowhere
+    /// else (ADR 267). A call the proxy carries is `http://` only: an
+    /// `https://` one is `error.TlsThroughProxy`, because the tunnel std
+    /// builds for it never starts TLS and sends the request in the clear, so
+    /// it is refused before anything is dialled. A call to a host on the
+    /// bypass list is dialled directly, handed to `request` as a connection,
+    /// because std would otherwise route every `http://` call of a client
+    /// that has a proxy through it. And the pool is asked for the proxy's
+    /// connection, which is the one a proxied call reuses.
+    fn pickConnection(client: *const Client, std_client: *std.http.Client, uri: std.Uri) !Pick {
+        const protocol = std.http.Client.Protocol.fromUri(uri) orelse return .{};
+        var name: [std.Io.net.HostName.max_len]u8 = undefined;
+        const host = std.Io.net.HostName.fromUri(uri, &name) catch return .{};
+        const port = uri.port orelse switch (protocol) {
+            .plain => @as(u16, 80),
+            .tls => 443,
+        };
+        const pool = &std_client.connection_pool;
+        if (std_client.http_proxy) |proxy| {
+            if (!client.skipsProxy(host.bytes)) {
+                if (protocol == .tls) return error.TlsThroughProxy;
+                const found = try pool.findConnection(std_client.io, .{
+                    .host = proxy.host,
+                    .port = proxy.port,
+                    .protocol = proxy.protocol,
+                });
+                return .{ .conn = found, .reused = found != null };
+            }
+            if (protocol == .plain) {
+                const criteria: std.http.Client.ConnectionPool.Criteria = .{ .host = host, .port = port, .protocol = protocol };
+                if (try pool.findConnection(std_client.io, criteria)) |found| return .{ .conn = found, .reused = true };
+                return .{ .conn = try std_client.connectTcp(host, port, protocol) };
+            }
+        }
+        const found = try pool.findConnection(std_client.io, .{ .host = host, .port = port, .protocol = protocol });
+        return .{ .conn = found, .reused = found != null };
+    }
+
     /// The write fails with `WriteFailed` after a refusal that came back
     /// before the body was finished: the answer is already in the
     /// connection's receive buffer, and the error is all the caller gets.
@@ -1497,6 +1760,7 @@ pub const Exchange = struct {
     fn earlyAnswer(self: *Exchange, failed: error{WriteFailed}) error{WriteFailed}!void {
         self.req.keep_alive = false;
         const res = self.req.receiveHead(&.{}) catch return failed;
+        self.heard = true;
         const class = res.head.status.class();
         if (class == .success or class == .informational) {
             if (self.req.connection) |conn| conn.closing = true;
@@ -1616,15 +1880,34 @@ pub const Exchange = struct {
     /// unread. **The evidence that nothing was processed is stronger in this
     /// branch than in the one that was already trusted.**
     ///
+    /// **A write that fails on a reused connection is the third spelling.**
+    /// A request with a body flushes its head before it writes the body, and
+    /// when the peer had already closed the socket the kernel takes the head,
+    /// the peer's RST comes back, and the body write is what fails: `EPIPE`
+    /// (`SocketUnconnected` in std) or `ECONNRESET`
+    /// (`ConnectionResetByPeer`), arriving as `WriteFailed`. Measured: a
+    /// `putForm` and a `postJson` as the second call on one `Client` against
+    /// a server that closes after every answer failed every time, a `get`
+    /// never did (`fetch/live.zig`).
+    ///
+    /// It counts only when all four hold, and each closes something. The
+    /// connection came out of the pool (`reused`), because on one just dialled
+    /// the same error is a server that took the request and refused it, not a
+    /// socket nobody was using. No head came back on the failed write
+    /// (`heard`, and nothing buffered), because `earlyAnswer` reads one and
+    /// an answer is not something to send twice. The errno is one of the two
+    /// that mean the peer is gone: a write that failed with `Canceled` or
+    /// `SystemResources` says nothing about the peer. And the caller of this
+    /// asks `replayable` and the deadline as it does for the others.
+    ///
     /// Nothing else is added. A reset partway through a head is
     /// `ReadFailed` with bytes buffered and stays a failure, because
     /// something did come back and re-sending would be a retry policy. So is
-    /// a write that fails with `WriteFailed`: some of the request may have
-    /// reached the far side. That one is not retried; what it can do is
-    /// carry an answer the server sent early (`earlyAnswer`).
+    /// a write that fails on a connection this call dialled: some of the
+    /// request may have reached the far side. That one is not retried; what
+    /// it can do is carry an answer the server sent early (`earlyAnswer`).
     fn nothingCameBack(self: *Exchange, err: anyerror) bool {
         if (err == error.HttpConnectionClosing) return true;
-        if (err != error.ReadFailed) return false;
         // `open` is the one thing that says `req` was assigned at all. A
         // failure inside `client.inner.request` leaves it `undefined`, and
         // reaching into it for a connection would be reading a pointer that
@@ -1633,6 +1916,12 @@ pub const Exchange = struct {
         if (!self.open) return false;
         const conn = self.req.connection orelse return false;
         if (conn.stream_reader.interface.bufferedLen() != 0) return false;
+        if (err == error.WriteFailed) {
+            if (!self.reused or self.heard) return false;
+            const why = conn.stream_writer.err orelse return false;
+            return why == error.ConnectionResetByPeer or why == error.SocketUnconnected;
+        }
+        if (err != error.ReadFailed) return false;
         const why = conn.stream_reader.err orelse return false;
         return why == error.ConnectionResetByPeer;
     }
@@ -1682,9 +1971,29 @@ pub const Exchange = struct {
     /// `error.BodyTooLarge`: the ceiling is enforced while reading rather than
     /// checked after, so a server lying about `content-length` cannot get past
     /// it.
+    ///
+    /// **An answer that announced its length is read into exactly that many
+    /// bytes**, when they are within `max`: `allocRemaining` grows a writer by
+    /// doubling and shrinks it in place, which an arena cannot give back, so
+    /// a 1,008-byte body took 1,641 and the node it landed in was kept
+    /// resident by `arena_keep` for the life of the connection. Sized, the
+    /// same body holds 2,040 bytes less on every idle connection
+    /// ([ADR 061](../docs/adr/061-a-fitting-borrows-the-loop.md),
+    /// `bench/result/fetch.md`). A chunked body, or one announced past `max`,
+    /// takes the growing read, which is what enforces the ceiling on the
+    /// bytes that actually arrive; a body that ends short of what it
+    /// announced is `error.BodyTooShort`.
     pub fn take(self: *Exchange, c: anytype, max: usize) Client.Error!Str {
         comptime core.checkScope(@TypeOf(c), "exchange.take");
         const reader = self.reader orelse unreachable; // begin first, then take
+        if (self.announced) |len| if (len <= max) {
+            const buf = try c.arena().alloc(u8, @intCast(len));
+            self.bounded(std.Io.Reader.readSliceAll, .{ reader, buf }) catch |err| switch (err) {
+                error.EndOfStream => return error.BodyTooShort,
+                else => |e| return self.blame(e),
+            };
+            return c.str(buf);
+        };
         const bytes = self.bounded(std.Io.Reader.allocRemaining, .{ reader, c.arena(), std.Io.Limit.limited(max) }) catch |err| switch (err) {
             error.StreamTooLong => return error.BodyTooLarge,
             else => |e| return self.blame(e),
@@ -2098,20 +2407,17 @@ fn urlIn(arena: std.mem.Allocator, uri: std.Uri) error{OutOfMemory}![]const u8 {
 /// difference between a signed request that verifies and one that does not.
 pub fn withQuery(c: anytype, base: []const u8, params: anytype) error{OutOfMemory}![]const u8 {
     comptime core.checkScope(@TypeOf(c), "fetch.withQuery");
-    comptime checkQuery(@TypeOf(params), "fetch.withQuery", &.{});
+    comptime encoding.checkQuery(@TypeOf(params), "fetch.withQuery", &.{});
 
     // Measured, then written, into exactly that.
-    const first = querySeparator(base);
-    const out = try c.arena().alloc(u8, base.len + queryLen(params, first, &.{}));
+    const first = encoding.querySeparator(base);
+    const out = try c.arena().alloc(u8, base.len + encoding.queryLen(params, first, &.{}));
     var w: std.Io.Writer = .fixed(out);
     w.writeAll(base) catch unreachable; // measured above
-    queryWrite(&w, params, first, &.{});
+    encoding.queryWrite(&w, params, first, &.{});
     std.debug.assert(w.buffered().len == out.len);
     return w.buffered();
 }
-
-/// The `content-type` of a form body.
-pub const form_content_type = "application/x-www-form-urlencoded";
 
 /// `fields` as an `application/x-www-form-urlencoded` body in the Scope's
 /// memory: `grant_type=client_credentials&scope=a+b`, **one arena allocation,
@@ -2122,10 +2428,10 @@ pub const form_content_type = "application/x-www-form-urlencoded";
 /// `postForm` is this and the header said for you.
 pub fn formBody(c: anytype, fields: anytype) error{OutOfMemory}![]const u8 {
     comptime core.checkScope(@TypeOf(c), "fetch.formBody");
-    comptime checkForm(@TypeOf(fields), "fetch.formBody");
-    const out = try c.arena().alloc(u8, paramsLen(fields, null, &.{}, .form));
+    comptime encoding.checkForm(@TypeOf(fields), "fetch.formBody");
+    const out = try c.arena().alloc(u8, encoding.paramsLen(fields, null, &.{}, .form));
     var w: std.Io.Writer = .fixed(out);
-    paramsWrite(&w, fields, null, &.{}, .form);
+    encoding.paramsWrite(&w, fields, null, &.{}, .form);
     std.debug.assert(w.buffered().len == out.len);
     return w.buffered();
 }
@@ -2142,241 +2448,32 @@ pub fn formBody(c: anytype, fields: anytype) error{OutOfMemory}![]const u8 {
 pub fn basicAuth(c: anytype, id: []const u8, secret: []const u8) error{OutOfMemory}![]const u8 {
     comptime core.checkScope(@TypeOf(c), "fetch.basicAuth");
     const prefix = "Basic ";
-    const joined = textLen(id, .form) + 1 + textLen(secret, .form);
+    const joined = encoding.textLen(id, .form) + 1 + encoding.textLen(secret, .form);
     const encoder = std.base64.standard.Encoder;
     const b64 = encoder.calcSize(joined);
     const out = try c.arena().alloc(u8, prefix.len + b64 + joined);
     const tail = out[prefix.len + b64 ..];
     var w: std.Io.Writer = .fixed(tail);
-    textWrite(&w, id, .form) catch unreachable; // measured above
+    encoding.textWrite(&w, id, .form) catch unreachable; // measured above
     w.writeByte(':') catch unreachable;
-    textWrite(&w, secret, .form) catch unreachable;
+    encoding.textWrite(&w, secret, .form) catch unreachable;
     std.debug.assert(w.buffered().len == joined);
     @memcpy(out[0..prefix.len], prefix);
     _ = encoder.encode(out[prefix.len..][0..b64], tail);
     return out[0 .. prefix.len + b64];
 }
 
-/// The Refusal for params that are not a struct with one field per param,
-/// and for any field no query string can carry. `skip` names the fields
-/// that are not the query's — a target's path segments — so they are held
-/// to a segment's rules instead (ADR 061).
-pub fn checkQuery(comptime P: type, comptime called: []const u8, comptime skip: []const []const u8) void {
-    checkParams(P, called, skip, "query");
-}
-
-/// `checkQuery` for a form body: the same struct, the same field types, and
-/// a message that says "form" because that is what the caller wrote.
-pub fn checkForm(comptime P: type, comptime called: []const u8) void {
-    checkParams(P, called, &.{}, "form");
-}
-
-fn checkParams(comptime P: type, comptime called: []const u8, comptime skip: []const []const u8, comptime kind: []const u8) void {
-    const info = @typeInfo(P);
-    // A walk over every param, each asked whether it is skipped: a query of
-    // 400 params stopped at "evaluation exceeded 1000 backwards branches" at
-    // a line in this file, and a person reads that as a fault in the 400th
-    // ([ADR 126](../docs/adr/126-a-check-pays-for-its-own-branches.md)).
-    const width = switch (info) {
-        .@"struct" => |st| st.field_names.len,
-        else => 0,
-    };
-    @setEvalBranchQuota(1_000 + 20 * @as(u32, @intCast(width * (skip.len + 1))));
-    // `.{}` is the empty tuple to Zig and "no params" to a caller, so it
-    // passes; a tuple with something in it has no names to be params.
-    const named = switch (info) {
-        .@"struct" => |st| !st.is_tuple or st.field_names.len == 0,
-        else => false,
-    };
-    if (!named) @compileError("nilo: " ++ called ++ " was handed a " ++ @typeName(P) ++
-        " for its params, and a " ++ kind ++ " is a struct with one field per param.");
-    inline for (info.@"struct".field_names, info.@"struct".field_types) |name, FT| {
-        if (comptime !among(skip, name)) comptime checkParamField(name, FT, kind);
-    }
-}
-
-/// What goes between a base and the first param: nothing when the base
-/// already ends on a separator, `&` when it already has a query, `?`
-/// otherwise. Every param after the first gets `&`.
-pub fn querySeparator(base: []const u8) ?u8 {
-    if (base.len == 0) return '?';
-    if (base[base.len - 1] == '?' or base[base.len - 1] == '&') return null;
-    if (std.mem.indexOfScalar(u8, base, '?') != null) return '&';
-    return '?';
-}
-
-/// How many bytes `params` add after a base, with `first` the separator
-/// before the first of them. The measuring half of `withQuery`, shared with
-/// a target's URL so that one is also one allocation sized exactly.
-pub fn queryLen(params: anytype, first: ?u8, comptime skip: []const []const u8) usize {
-    return paramsLen(params, first, skip, .query);
-}
-
-/// How `params` are spelled: a query string writes a space `%20`, a form
-/// body writes it `+` and a literal `+` `%2B` (the
-/// `application/x-www-form-urlencoded` of RFC 6749 §4.1.3). Everything else
-/// is the same encoding, which is why the two share one walk
-/// ([ADR 061](../docs/adr/061-a-fitting-borrows-the-loop.md)).
-pub const Style = enum { query, form };
-
-/// `queryLen` in either style.
-pub fn paramsLen(params: anytype, first: ?u8, comptime skip: []const []const u8, comptime style: Style) usize {
-    var len: usize = 0;
-    var written: usize = 0;
-    inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |name| {
-        if (comptime among(skip, name)) continue;
-        if (queryValue(@field(params, name))) |v| {
-            if (written > 0 or first != null) len += 1;
-            len += textLen(name, style) + 1 + v.lenAs(style);
-            written += 1;
-        }
-    }
-    return len;
-}
-
-/// The writing half of `queryLen`, into a writer already sized by it.
-pub fn queryWrite(w: *std.Io.Writer, params: anytype, first: ?u8, comptime skip: []const []const u8) void {
-    paramsWrite(w, params, first, skip, .query);
-}
-
-/// `queryWrite` in either style.
-pub fn paramsWrite(w: *std.Io.Writer, params: anytype, first: ?u8, comptime skip: []const []const u8, comptime style: Style) void {
-    var sep = first;
-    inline for (@typeInfo(@TypeOf(params)).@"struct".field_names) |name| {
-        if (comptime among(skip, name)) continue;
-        if (queryValue(@field(params, name))) |v| {
-            if (sep) |ch| w.writeByte(ch) catch unreachable;
-            sep = '&';
-            textWrite(w, name, style) catch unreachable;
-            w.writeByte('=') catch unreachable;
-            v.writeAs(w, style) catch unreachable;
-        }
-    }
-}
-
-fn among(comptime names: []const []const u8, comptime name: []const u8) bool {
-    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
-    return false;
-}
-
-/// One query param's value, on its way out: digits and the two words go as
-/// they are, text is percent-encoded. A path segment of a target is written
-/// the same way, which is why the type is shared (ADR 061).
-pub const QueryValue = union(enum) {
-    /// An int, formatted. Forty bytes holds a 128-bit one with its sign.
-    number: struct { buf: [40]u8, len: usize },
-    /// `true` or `false`.
-    word: []const u8,
-    /// Text, encoded on the way out with `/` as data.
-    text: []const u8,
-
-    pub fn encodedLen(self: QueryValue) usize {
-        return self.lenAs(.query);
-    }
-
-    pub fn write(self: QueryValue, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        return self.writeAs(w, .query);
-    }
-
-    pub fn lenAs(self: QueryValue, comptime style: Style) usize {
-        return switch (self) {
-            .number => |n| n.len,
-            .word => |s| s.len,
-            .text => |s| textLen(s, style),
-        };
-    }
-
-    pub fn writeAs(self: QueryValue, w: *std.Io.Writer, comptime style: Style) std.Io.Writer.Error!void {
-        switch (self) {
-            .number => |n| try w.writeAll(n.buf[0..n.len]),
-            .word => |s| try w.writeAll(s),
-            .text => |s| try textWrite(w, s, style),
-        }
-    }
-};
-
-/// `raw` percent-encoded the way `style` spells it. The form style is the
-/// query style with each `%20` written `+`: `core.percent` has no `+` to give
-/// on purpose (its header says why, for signatures), so the one difference is
-/// made here, where the only caller that wants it is.
-fn textLen(raw: []const u8, comptime style: Style) usize {
-    const n = core.percent.encodedLen(raw, .unreserved);
-    if (style == .query) return n;
-    return n - 2 * std.mem.count(u8, raw, " ");
-}
-
-fn textWrite(w: *std.Io.Writer, raw: []const u8, comptime style: Style) std.Io.Writer.Error!void {
-    if (style == .query) return core.percent.encodeWrite(w, raw, .unreserved);
-    var rest = raw;
-    while (std.mem.indexOfScalar(u8, rest, ' ')) |at| {
-        try core.percent.encodeWrite(w, rest[0..at], .unreserved);
-        try w.writeByte('+');
-        rest = rest[at + 1 ..];
-    }
-    try core.percent.encodeWrite(w, rest, .unreserved);
-}
-
-/// The value of one field of a query struct as a `QueryValue`, or null for
-/// an optional that is null, which is the param left out.
-pub fn queryValue(v: anytype) ?QueryValue {
-    const T = @TypeOf(v);
-    switch (@typeInfo(T)) {
-        .null => return null,
-        .optional => return if (v) |inner| queryValue(inner) else null,
-        .int, .comptime_int => {
-            var out: QueryValue = .{ .number = .{ .buf = undefined, .len = 0 } };
-            const digits = std.fmt.bufPrint(&out.number.buf, "{d}", .{v}) catch unreachable; // 40 bytes holds any int here
-            out.number.len = digits.len;
-            return out;
-        },
-        .bool => return .{ .word = if (v) "true" else "false" },
-        else => return .{ .text = if (T == Str) v.view() else v },
-    }
-}
-
-/// Whether `T` is text this module reads as such: a `Str`, a slice of
-/// bytes, or a pointer to an array of them, which is what a string literal
-/// is.
-pub fn isText(comptime T: type) bool {
-    if (T == Str) return true;
-    return switch (@typeInfo(T)) {
-        .pointer => |p| switch (p.size) {
-            .slice => p.child == u8,
-            .one => switch (@typeInfo(p.child)) {
-                .array => |a| a.child == u8,
-                else => false,
-            },
-            else => false,
-        },
-        else => false,
-    };
-}
-
-/// The Refusal for a query field of a type no query string can carry: a
-/// struct, a float, an enum, a pointer to something that is not text. Named
-/// by the field, because the struct is anonymous and the field is what the
-/// caller wrote.
-pub fn checkQueryField(comptime field: []const u8, comptime T: type) void {
-    checkParamField(field, T, "query");
-}
-
-fn checkParamField(comptime field: []const u8, comptime T: type, comptime kind: []const u8) void {
-    const ok = switch (@typeInfo(T)) {
-        .int, .comptime_int, .bool, .null => true,
-        .optional => |o| return checkParamField(field, o.child, kind),
-        else => isText(T),
-    };
-    if (!ok) @compileError("nilo: the " ++ kind ++ " field `" ++ field ++ "` is a " ++ @typeName(T) ++
-        ", and a " ++ kind ++ " value is an int, a bool, text, or an optional of one.");
-}
-
-/// The Refusal for text handed to a JSON call. `std.json` would write it
-/// out as one JSON string — `"{\"amount\":500}"`, quotes and escapes and all
-/// — and the far end would answer 400 to a body that looked right in the
-/// editor. A body already encoded goes through `post`.
-pub fn refuseJsonText(comptime T: type, comptime called: []const u8) void {
-    if (isText(T)) @compileError("nilo: " ++ called ++ " was handed text, and would send it as one JSON string. " ++
-        "A body already encoded goes through post, put, patch or send.");
+test "a bypass entry names a host and everything under it, and nothing it is only a tail of" {
+    try std.testing.expect(bypassMatches("corp.example", "corp.example"));
+    try std.testing.expect(bypassMatches("corp.example", "API.Corp.Example"));
+    try std.testing.expect(bypassMatches(".corp.example", "api.corp.example"));
+    try std.testing.expect(bypassMatches("*.corp.example", "api.corp.example"));
+    try std.testing.expect(bypassMatches("127.0.0.1", "127.0.0.1"));
+    try std.testing.expect(bypassMatches("*", "anything.test"));
+    try std.testing.expect(!bypassMatches("corp.example", "notcorp.example"));
+    try std.testing.expect(!bypassMatches("corp.example", "example"));
+    try std.testing.expect(!bypassMatches("", "corp.example"));
+    try std.testing.expect(!bypassMatches("localhost", "127.0.0.1"));
 }
 
 test "a client that was never started refuses rather than dialling undefined" {
@@ -2594,16 +2691,6 @@ test "a response answers a header case-insensitively, and null for one it did no
     try std.testing.expect(bare.header("retry-after") == null);
 }
 
-test "text is read as text and a struct is not, which is what the two Refusals rest on" {
-    try std.testing.expect(isText([]const u8));
-    try std.testing.expect(isText([]u8));
-    try std.testing.expect(isText(*const [3:0]u8));
-    try std.testing.expect(isText(Str));
-    try std.testing.expect(!isText(u32));
-    try std.testing.expect(!isText(struct { a: u8 }));
-    try std.testing.expect(!isText([]const u32));
-}
-
 test "a change of scheme, host or port is another place, and https to http is a downgrade" {
     const judge = Exchange.judge;
     const from = try std.Uri.parse("https://api.example.com/v1/a");
@@ -2699,6 +2786,9 @@ test "basic auth form-encodes the id and the secret before it joins and encodes 
 test {
     _ = @import("live.zig");
     _ = @import("target.zig");
+    _ = @import("params.zig");
+    _ = @import("retry.zig");
+    _ = @import("retry_live.zig");
 }
 
 /// 400 params with 40-character names. Declared apart from the test, so the

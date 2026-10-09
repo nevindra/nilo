@@ -47,7 +47,7 @@ The first request runs the handler and **keeps what it returned**: the status, t
 
 ## Wiring it up
 
-**`Replays` is a [`nilo_cache`](./cache.md) Space holding bytes, opened on a Store and given to the App as a service:**
+**`Replays` is a [`nilo_cache`](./cache.md) Space holding bytes, opened on a Store and given to the App as a service** (for one instance; [across instances](#once-across-instances-sqlreplays) it is a table):
 
 <!-- compiles: body -->
 ```zig
@@ -60,9 +60,70 @@ Then `try app.post("/orders", placeOrder)`, like any other route.
 
 It is a cache Space rather than a table of nilo's own because a saved answer is exactly what a cache holds: bounded, forgotten after a while, and allowed to miss. A miss here is a retry that runs the handler again, which is what would have happened without the feature. `ttl_s` is how long a client may keep retrying with the same key. `max_bytes` is the largest answer kept; a larger one is sent but not kept, with a line in the log saying so.
 
-**nilo needs the Space's methods, not `nilo_cache` itself.** `nilo_http` names no cache. What it asks of `Replays` is `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held`, which a `nilo_cache` bytes Space has. `putIfAbsentFor(key, value, ttl_s)` is the claim with a lifetime of its own, which is how the in-flight marker expires after two minutes even when the Space keeps answers for a day. A type of your own over Redis could have them too, for a key that has to survive a restart or be shared between instances.
+**nilo needs the Space's methods, not `nilo_cache` itself.** `nilo_http` names no cache. What it asks of `Replays` is `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held`, which a `nilo_cache` bytes Space has. `putIfAbsentFor(key, value, ttl_s)` is the claim with a lifetime of its own, which is how the in-flight marker expires after two minutes even when the Space keeps answers for a day. A type of your own could have them too; one that can fail or needs the request's memory declares `pub const takes_scope = true`, is called with the Scope first (`put(scope, key, value)`), and has no `Held`. That is what [`sql.Replays`](#once-across-instances-sqlreplays) is.
 
-**A `cache.Space` belongs to one process, and so does the answer it keeps.** A retry that the balancer sends to a second instance finds nothing there and runs the handler again, and a rolling deploy is two instances while it lasts ([ADR 110](../adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). A route that must answer once across instances needs a `Replays` type whose store they share.
+**A `cache.Space` belongs to one process, and so does the answer it keeps.** A retry that the balancer sends to a second instance finds nothing there and runs the handler again, and a rolling deploy is two instances while it lasts ([ADR 110](../adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). That is fine for a webhook receiver with one instance and not for a payment API with two: the next section is the store they share.
+
+## Once across instances: `sql.Replays`
+
+**`sql.Replays(Db, options)` keeps the answers in a table in the database you already have, and every instance that shares the database answers once.** It is the same argument with a different type in it:
+
+<!-- compiles -->
+```zig
+const sql = @import("nilo_sql");
+
+const SharedReplays = sql.Replays(Db, .{
+    .name = "orders",         // keeps this store's keys out of another's in the table they share
+    .ttl_s = 86_400,
+    .max_bytes = 16 << 10,
+});
+
+comptime {
+    _ = SharedReplays.Row;
+}
+```
+
+<!-- compiles -->
+```zig
+fn placeOrderEverywhere(key: nilo.Idempotent(SharedReplays, .{ .by = account }), body: NewOrder) !nilo.Status(201, Placed) {
+    _ = key;
+    return .{ .value = .{ .id = 7, .sku = body.sku } };
+}
+```
+
+The handler does not change. The table is yours to create, the way the queue's is: `SharedReplays.Row` goes into `createMissing`, or a migration, beside your own rows, and into `db.checking` so the server refuses to start without it.
+
+<!-- compiles: body -->
+```zig
+try sql.migrate.createMissing(db, &run, .{ .tables = &.{SharedReplays.Row} });
+var shared = SharedReplays.open(db);
+try app.provide(&shared);
+```
+
+Then `try app.post("/orders", placeOrderEverywhere)`, like any other route.
+
+**Two instances receiving one key at once run the handler once.** The claim is two statements, each atomic in the database: `INSERT … ON CONFLICT DO NOTHING` takes a free key, and if the key was taken, an `UPDATE` takes a row that has run out. The loser is told 409 (still being answered) or gets the answer once it is kept. The in-flight marker lives two minutes, as with a Space, so an instance that dies mid-handler costs a retry two minutes.
+
+**What a database that does not answer does, so you know what to alert on:**
+
+| When | What happens |
+|---|---|
+| it cannot be asked at the claim | a **503** naming the header, and the handler does not run: running it unclaimed is the double charge the key exists to prevent. The client retries |
+| the handler fails | the key is released with a `DELETE`; if that fails too the marker is left, and the retry is told 409 for up to two minutes and then runs |
+| it cannot take the answer after the handler ran | the answer is sent, a `warn` says so, and the marker stays: a retry is told 409 for up to two minutes, then runs the handler again. It is not deleted, because a retry that runs at once is the double run |
+
+**What it cannot do is make the handler's own write and the answer commit together.** The marker, your writes and the answer are separate transactions, so a process that dies between your commit and the answer's leaves a marker and a handler that will run again after two minutes and find its own earlier write. Put a unique key on what the handler inserts, as you would for any at-least-once job ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)).
+
+**Nothing deletes a key that never comes back.** A read ignores an expired row and a retry writes over one, but a key used once stays in the table. Run `sweep` from a [scheduled job](./background.md), once an hour is plenty:
+
+<!-- compiles -->
+```zig
+fn sweepReplays(shared_replays: *SharedReplays, scope: *nilo.Run) !void {
+    _ = try shared_replays.sweep(scope);
+}
+```
+
+**What it costs, on the routes that ask and nowhere else.** A write waits for the database to flush its log. On Postgres 18 at defaults on one disk: a claim of a free key 1.0 ms, the put of the answer 1.6 ms, a claim of a key somebody holds 54 µs, a read 44 µs, so a fresh request pays about 2.6 to 3.3 ms before its handler and a replay or a 409 about 100 µs ([`bench/result/sql.md`](https://github.com/nevindra/nilo/blob/main/bench/result/sql.md) §27). The cost is the disk's: with `synchronous_commit = off` for the role that serves the table the same calls are tens of microseconds, at the price that a crash can lose the last few commits, which for a marker costs a retry and for an answer costs the handler running again. `expires_at` is written and compared in each instance's own clock, so keep the instances within seconds of each other (NTP does).
 
 ## Keys per caller (`.by`)
 
@@ -121,5 +182,6 @@ A handler with an `Idempotent` argument is still an ordinary function: call `pla
 
 - [The reference](../reference/handlers.md#idempotentreplays-options): every option, as a list.
 - [A cache in this process](./cache.md): the Space that keeps the answers, and how to size it.
+- [`sql.Replays`](../reference/sql.md#sqlreplays-the-answers-two-instances-share): the table, its options and its calls.
 - [Checking somebody else's token](./jwt.md): where `.by` usually gets its answer.
 - [ADR 155](../adr/155-a-request-answered-once-is-answered-the-same-way-again.md): why it is an argument and not a middleware, and what was rejected.

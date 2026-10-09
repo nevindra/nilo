@@ -131,6 +131,10 @@ pub const Wire = struct {
         /// connection take a statement again. A comptime plan name, so
         /// holding the slice costs nothing.
         stale: ?[]const u8 = null,
+        /// Begun with `.transaction = false`: a held connection and no
+        /// `BEGIN`, so `commit` and `rollback` send nothing and only give it
+        /// back (ADR 269).
+        plain: bool = false,
 
         /// Forget the last statement's server error before running the next.
         ///
@@ -347,7 +351,7 @@ pub const Wire = struct {
             // Sent, the COMMIT would come back tagged `ROLLBACK` with no
             // error, and the caller would be told that work it lost was kept
             // (`aborted`).
-            if (self.aborted) {
+            if (self.aborted and !self.plain) {
                 // A ROLLBACK that could not be sent means the socket is gone
                 // as well, and that is the nearer truth: the server rolls the
                 // transaction back when the connection drops.
@@ -357,6 +361,8 @@ pub const Wire = struct {
             }
             self.done = true;
             defer giveBack(self.wire.io, self.conn);
+            // Nothing was begun, so nothing is committed.
+            if (self.plain) return;
             const w = self.wire.limits.waiting();
             defer self.wire.limits.waited(w);
             // **Held off from cancellation, the way a rollback is** (ADR 223).
@@ -397,6 +403,8 @@ pub const Wire = struct {
             // usual reason anybody rolls back at all.
             self.settle();
             defer giveBack(self.wire.io, self.conn);
+            // Nothing was begun, so nothing is rolled back.
+            if (self.plain) return null;
             const w = self.wire.limits.waiting();
             defer self.wire.limits.waited(w);
             // Whether a cancellation is what ended the transaction: asked
@@ -447,8 +455,10 @@ pub const Wire = struct {
         defer self.limits.waited(w);
         var conn = try self.take();
         errdefer giveBack(self.io, conn);
-        _ = conn.exec(comptime beginText(opts), .{}) catch |err| return translate(self.io, conn, err);
-        return .{ .wire = self, .conn = conn };
+        if (comptime opts.transaction) {
+            _ = conn.exec(comptime beginText(opts), .{}) catch |err| return translate(self.io, conn, err);
+        }
+        return .{ .wire = self, .conn = conn, .plain = comptime !opts.transaction };
     }
 
     /// A connection from the pool, **asked whether it is still there before

@@ -827,6 +827,38 @@ pub fn dropIndex(
     return aw.toOwnedSlice();
 }
 
+/// An index's name as a catalog lookup reads it: quoted, and schema-qualified
+/// when the table is.
+pub fn qualifiedIndex(gpa: std.mem.Allocator, schema: ?[]const u8, name: []const u8) Error![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+    const w = &aw.writer;
+    if (schema) |s| {
+        try writeIdent(w, s);
+        try w.writeAll(".");
+    }
+    try writeIdent(w, name);
+    return aw.toOwnedSlice();
+}
+
+/// A `CREATE [UNIQUE] INDEX` in the form that does not stop writes to its
+/// table, or null for a statement that is not one
+/// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+///
+/// **`IF NOT EXISTS` is what makes the step safe to run again.** A version
+/// outside a transaction that fails after its first index was built is run
+/// whole the next time, and that index is then there. An invalid one a failed
+/// build left behind is dropped first (`migrate.applyOutside`), because
+/// `IF NOT EXISTS` would pass over it without a word.
+pub fn concurrently(gpa: std.mem.Allocator, sql: []const u8) Error!?[]const u8 {
+    inline for (.{ "CREATE UNIQUE INDEX ", "CREATE INDEX " }) |head| {
+        if (std.mem.startsWith(u8, sql, head)) {
+            return try std.fmt.allocPrint(gpa, "{s}CONCURRENTLY IF NOT EXISTS {s}", .{ head, sql[head.len..] });
+        }
+    }
+    return null;
+}
+
 /// `ALTER INDEX … RENAME TO`, for an index following a column `.was`
 /// renamed. Postgres only; SQLite has no statement that renames an index.
 pub fn renameIndex(

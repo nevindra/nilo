@@ -30,6 +30,7 @@
 //! program that never names `fetch.testing` links none of it.
 
 const std = @import("std");
+const core = @import("nilo_core");
 
 /// A body source that hands over one byte at a time, `gap_ms` apart: the
 /// upload that is slow and alive, which is the control for a stall bound
@@ -117,6 +118,8 @@ pub const Canned = struct {
     /// Set by `serveReapThenBody` once it has closed the first connection, so
     /// a test can wait for the reaping instead of sleeping and hoping.
     reaped: std.atomic.Value(bool) = .init(false),
+    /// What `serveScript` saw.
+    tried: Tried = .{},
 
     /// Port 0, and the kernel's answer read back.
     ///
@@ -686,7 +689,80 @@ pub const Canned = struct {
         }
     }
 
+    /// Answer `count` requests from `script`, one connection each: the
+    /// first gets `script[0]`, the second `script[1]`, and any past the end
+    /// of the script get its last. **Every answer says `Connection: close`**,
+    /// so the client keeps nothing and each try is a connection of its own,
+    /// which is what makes the tries countable. `tried` records each
+    /// request's head and when it arrived, for a test about retrying
+    /// ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+    pub fn serveScript(self: *Canned, script: []const Reply, count: usize) !void {
+        for (0..count) |i| {
+            var stream = try self.server.accept(self.io);
+            defer stream.close(self.io);
+            self.accepted += 1;
+
+            var in_buf: [4 << 10]u8 = undefined;
+            var reader = stream.reader(self.io, &in_buf);
+            const r = &reader.interface;
+
+            const at = @min(self.tried.count, Tried.max - 1);
+            var head_len: usize = 0;
+            var body_len: usize = 0;
+            while (true) {
+                const line = try r.takeDelimiterInclusive('\n');
+                const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+                if (trimmed.len == 0) break;
+                if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                    body_len = std.fmt.parseInt(usize, std.mem.trim(u8, trimmed["content-length:".len..], " \t"), 10) catch 0;
+                }
+                const room = self.tried.heads[at].len - head_len;
+                if (room < trimmed.len + 1) continue;
+                @memcpy(self.tried.heads[at][head_len..][0..trimmed.len], trimmed);
+                self.tried.heads[at][head_len + trimmed.len] = '\n';
+                head_len += trimmed.len + 1;
+            }
+            self.tried.head_lens[at] = head_len;
+            if (body_len > 0) _ = try r.discard(.limited(body_len));
+            self.tried.at_us[at] = core.monotonicMicros();
+            self.tried.count += 1;
+
+            const answer = script[@min(i, script.len - 1)];
+            var out_buf: [4 << 10]u8 = undefined;
+            var writer = stream.writer(self.io, &out_buf);
+            const w = &writer.interface;
+            try w.print("HTTP/1.1 {s}\r\nContent-Length: {d}\r\nConnection: close\r\n{s}\r\n{s}", .{
+                answer.status, answer.body.len, answer.headers, answer.body,
+            });
+            try w.flush();
+        }
+    }
+
+    /// The head of try number `n` (from 0), as `serveScript` read it.
+    pub fn headOfTry(self: *const Canned, n: usize) []const u8 {
+        return self.tried.heads[n][0..self.tried.head_lens[n]];
+    }
+
     pub fn close(self: *Canned) void {
         self.server.socket.close(self.io);
     }
+};
+
+/// One answer of a script (`Canned.serveScript`).
+pub const Reply = struct {
+    /// The status line after `HTTP/1.1 `.
+    status: []const u8 = "200 OK",
+    /// Headers beyond `Content-Length`, each ending in `\r\n`.
+    headers: []const u8 = "",
+    body: []const u8 = "",
+};
+
+/// What `serveScript` saw: how many requests came, when (Core's monotonic
+/// microseconds), and the head of each of the first eight.
+pub const Tried = struct {
+    pub const max = 8;
+    count: usize = 0,
+    at_us: [max]i64 = @splat(0),
+    heads: [max][512]u8 = undefined,
+    head_lens: [max]usize = @splat(0),
 };

@@ -46,7 +46,7 @@ pub const nilo_table = .{
 
 ### A version is a list of steps, and one Zig file holds it
 
-A data migration cannot be derived from a struct diff and is not attempted. So a version is a list, and a step written by hand sits in the list beside the generated ones, all applied in order inside one transaction. That is what makes expand and contract expressible, which `up`/`down` cannot: the data step sits **between** two DDL steps, and a pair has nowhere to put it.
+A data migration cannot be derived from a struct diff and is not attempted. So a version is a list, and a step written by hand sits in the list beside the generated ones, all applied in order inside one transaction. **The one exception is a version marked `.transactional = false`**, whose steps run with no transaction around them because Postgres refuses `CREATE INDEX CONCURRENTLY` inside one; `generate --concurrently` writes it as a version of its own after the rest, and it is recorded after its last step ([ADR 269](./269-an-index-on-a-big-table-is-built-outside-a-transaction.md)). That is what makes expand and contract expressible, which `up`/`down` cannot: the data step sits **between** two DDL steps, and a pair has nowhere to put it.
 
 A version file is four declarations, and `generate` writes one of them:
 
@@ -125,6 +125,10 @@ Every word the marker gains arrives as a snapshot field with a default, and `std
 **One mirror struct per shape that renamed a field, kept until 1.0.** That makes the bar visible: a rename costs a struct that lives for the life of the format, and a new field with a default costs nothing.
 
 A parse that fails anyway is printed as `std.zon`'s own sentence with the line and column, not `error.ParseZon` and a stack: the command line reads the directory a second time with a `Diagnostics` of its own.
+
+### A Problem is accepted by name
+
+While a Problem stands `generate` writes nothing. Once the step is written by hand, `generate --accept <name>` records the named Problems as handled, writes a version and moves the snapshot to the types as they are, so the Problem is not raised again. The name carries a hash of what the Problem said, nothing is accepted unnamed, and a plan with a Problem is never "empty" ([ADR 270](./270-a-problem-is-accepted-by-name.md)).
 
 ### Forward only
 

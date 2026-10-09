@@ -1310,6 +1310,12 @@ pub fn Wire(comptime opts_in: Options) type {
         pub fn begin(self: *Self, arena: std.mem.Allocator, comptime opts_: wire.Begin) wire.Error!Tx {
             _ = arena;
             comptime checkIsolation(opts_);
+            if (comptime !opts_.transaction) @compileError(
+                "nilo: `.transaction = false` is not available on the sqlite dialect.\n" ++
+                    "  It holds a connection with no BEGIN so that a statement Postgres refuses inside a " ++
+                    "transaction (`CREATE INDEX CONCURRENTLY`) can run. SQLite has no such statement: a " ++
+                    "write there is serialised by the file.",
+            );
 
             const begin_text = if (opts_.read_only) "BEGIN" else "BEGIN IMMEDIATE";
             const at = if (opts_.read_only) try self.takeReader(begin_text) else try self.takeWriter(begin_text);

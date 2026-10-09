@@ -13,7 +13,7 @@
   <a href="https://ziglang.org/"><img alt="Zig 0.17" src="https://img.shields.io/badge/zig-0.17-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
   <a href="./CHANGELOG.md"><img alt="version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference/"><img alt="12 modules" src="https://img.shields.io/badge/modules-12-8957e5?style=flat-square"></a>
-  <a href="./refusals/README.md"><img alt="532 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-532-e05d44?style=flat-square"></a>
+  <a href="./refusals/README.md"><img alt="597 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-597-e05d44?style=flat-square"></a>
   <a href="./docs/adr/"><img alt="252 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-252-6b7280?style=flat-square"></a>
   <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=flat-square"></a>
 </p>
@@ -51,7 +51,7 @@ Those three lines are a complete route. From them you get:
 - 🏁 **#2 of 79** on [HttpArena](https://www.http-arena.com/frameworks/nilo/)'s HTTP/1.1 board, and **#1 of 22** on WebSocket, among untuned entries.
 - 🪶 **1 allocation** per request. A test fails if it ever becomes 2.
 - 💾 **4,669 bytes** per idle connection.
-- 🧯 **532 mistakes caught while compiling**, each with a sentence that tells you the fix.
+- 🧯 **597 mistakes caught while compiling**, each with a sentence that tells you the fix.
 - 🔌 **Zero glue.** Routing, errors, OpenAPI and SQL all read the same struct.
 
 ## ⚡ Quickstart
@@ -283,7 +283,7 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 | **`nilo_http`** | Routing, typed handlers, middleware, cookies and sessions, static files, streaming, WebSocket, rooms that broadcast to sockets and event streams and reach one user by key, OpenAPI, metrics, OpenTelemetry tracing ([guide](./docs/guide/tracing.md)), rate limiting, CSRF, security headers, gzip (libdeflate behind `.libdeflate = true`, [guide](./docs/guide/responses.md#compression)), optional TLS 1.3, and optional HTTP/2 beside HTTP/1.1 for every route ([guide](./docs/guide/deploying.md#http2-for-a-browser)) with unary gRPC on it ([guide](./docs/guide/grpc.md)) | Templates, HTTP/2 in the default build, WebSocket over HTTP/2, streaming gRPC |
 | **`nilo_sql`** | Postgres and SQLite: reads, writes, transactions, streaming, schema and migrations. Window functions, CTEs and any other join go through `db.raw`, which still fills your struct, counts its columns while compiling and checks their types the first time it runs ([guide](./docs/guide/sql/raw.md)) | Window functions and CTEs written in Zig rather than SQL, `down` migrations |
 | **`nilo_s3`** | S3, MinIO and R2: get, put, multipart upload, copy and compose inside the store, range, stream, list, presigned URLs | A `list` that follows its own cursor |
-| **`nilo_fetch`** | Calling another HTTP API from inside a request | Retries, circuit breaker |
+| **`nilo_fetch`** | Calling another HTTP API from inside a request, tried again on a bad minute under a budget | Circuit breaker |
 | **`nilo_job`** | Background and scheduled work, queued in the database you already have, with three levels of urgency and cron schedules | Exactly-once, time zones |
 | **`nilo_cache`** | An expiring in-process cache on a fixed memory budget | Pointers in cached values |
 | **`nilo_jwt`** | Verifying tokens: RS256, ES256 and rotating JWKS | Signing tokens, HS256 |

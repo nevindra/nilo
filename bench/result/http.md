@@ -4391,3 +4391,24 @@ What the prototype leaves out, so the 700 to 770 bytes is a floor: an idle deadl
 **Prototype of the second, bounded and not built.** The head the App parses on HTTP/2 is built by `fieldHead` and parsed by `http1.parseHead`. `fieldHead` repeated 99 times a request in a scratch build added 2,010 ns to the routed `GET` row, 2,125 to the gRPC row and 1,495 to the `POST` (three rounds each: 19 to 21 ns for a call, 15 for a `POST`), and the parse of a 121-byte head is 73 ns in the HTTP/1.1 profile. **The most that decoded fields entering the App could save is about 90 to 95 ns of a request that costs 810 to 830 in process (11%), about 7% of the server's CPU at `-m 10` and 3.5% at `-m 1`.** Against that: `Ctx` borrows a text head (`findHeader`, the typed extractors, `Str` views into it) and `typed.zig` and `message.zig` read it, so a second representation touches the files the other two agents of this round were working in; and ADR 253's refusals would have to be one validation over a field list that the HTTP/1.1 parser also produces, a rewrite of `http1.zig` whose benefit to HTTP/1.1 is nil. Not recommended on this number; worth reopening only if a cheaper way to give `Ctx` its fields appears.
 
 **Can it be pushed further:** the first idea is the large one on this machine (2x on a gRPC server at 256 connections and above) and rests on one design decision (which calls may run where they might park), measured here only as a ceiling.
+
+## A TLS build's plain listener holds one page
+
+Run on 2026-10-09 at `1e583bc` plus the working tree (the fixed `park-check`, and `nilo_fetch` changes that touch no connection path), AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0, `-Dtarget=x86_64-linux-gnu -Dcpu=x86_64_v3 -Doptimize=ReleaseFast -Dstrip=true`. The question was why `zig build park-check -Dtls`, with the miscount fixed ([`build.md`](./build.md)), reported 0 of 48 plain connections on a second page while CLAUDE.md, ADR 062, ADR 212 and the design page said a `-Dtls` build pays a page on every listener.
+
+**`park-check`**, `-Dtls`: 0 of 48 hold more than one page and 0 more than two, in 4 runs of the built program pinned to cores 0 to 3 and 2 runs through `zig build`, all exit 0. `-Dtls -Dhttp2`, `-Dhttp2` and the default build read 0 and 0 as well. The same on a clean export of `1e583bc` with only the fixed `bench/park_check.zig` copied in, so the working tree's changes are not what moved it.
+
+**`bench/mem.py`**, `--steps 1000,5000,10000`, each server in its own network namespace (`unshare -rn`) on cores 4 to 7 and `mem.py` on cores 0 to 3 (physical cores, siblings idle), bytes a connection at 10,000 (the 1,000 column moves by about 600 bytes either way):
+
+| listener | build | bytes at 10,000 | marginal 5,000 to 10,000 | runs |
+|---|---|---|---|---|
+| plain | default | 4,678 | 4,672 | 1 |
+| plain | `-Dtls` | 4,692, 4,692, 4,692 (the last on the clean export of `1e583bc`) | 4,672 | 3 |
+| plain | `-Dtls -Dhttp2` | 4,699, 4,699 | 4,672 | 2 |
+| TLS | `-Dtls`, `nilo-bench-tls-server`, `--tls` | 8,843, 8,844 | 8,769 | 2 |
+
+Marginal meets average to within 25 bytes for the plain rows and 75 for TLS, so these are per-connection figures and not a fixed amount spread thin. The plain listener of a `-Dtls` build costs 14 bytes more than the default build's, not a page. A TLS connection costs 4,165 more than a plain one: a page and 69 bytes, which fits the 3,994 bytes it parks at (ADR 212), two pages. The recorded figures were 8,787 for the plain listener of a `-Dtls` build and 8,847 for TLS (`What a connection's task costs…`, above, at `514e8c1`), so the TLS row is unchanged and the plain row was stale.
+
+**So the record was stale, and `park-check` and `mem.py` agree.** Both read one page for a plain connection in every build. `park-check` never sees the TLS connection's second page because it speaks plain HTTP; its pin of two on `-Dtls` was left over from the plain listener's old page. Not known: which commit between `514e8c1` and `1e583bc` gave the page back (the connection loop and the Bridge were reorganised for the HTTP/2 stages in that range); no bisect was run.
+
+**The decision it moved:** `park-check` pins every build at one page, and CLAUDE.md, ADR 062, ADR 212, `docs/design/memory.md`, `docs/design/tls.md`, `docs/guide/deploying.md`, the roadmap and the todo entry now say a plain listener pays nothing and a TLS connection pays the page. **Can it be pushed further:** a TLS connection's second page is the handshake frames' high-water mark below the park (ADR 212); `park-check` does not cover it, so a TLS connection going from two pages to three is noticed only by `mem.py --tls`. Covering it needs a client that does a handshake, which the program does not carry. The default build's 288 bytes of headroom and `-Dhttp2`'s were not re-read here.

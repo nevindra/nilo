@@ -118,3 +118,40 @@ test "a body ceiling holds over TLS, where the bytes arrive in records" {
         }
     }.run);
 }
+
+test "a caller's roots replace the system's, and the system's plus one are the system's and one" {
+    if (!net_config.enabled) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const now = std.Io.Clock.real.now(io);
+
+    var scope: core.Run = .init(gpa);
+    defer scope.deinit();
+
+    // An empty bundle trusts nobody: example.com's chain ends at an
+    // authority it does not hold, which is the proof that the client read
+    // the caller's bundle and did not scan the system as well (ADR 267).
+    {
+        var none: std.crypto.Certificate.Bundle = .empty;
+        defer none.deinit(gpa);
+        var client: fetch.Client = .init(gpa, .{ .timeout_ms = 20_000, .roots = &none });
+        defer client.deinit();
+        try client.nilo_start(io, .none);
+        try testing.expectError(error.TlsInitializationFailed, client.get(&scope, "https://example.com/", .{}));
+    }
+
+    // The system's authorities, loaded by the caller, are the same trust the
+    // client has without the setting.
+    {
+        var system: std.crypto.Certificate.Bundle = .empty;
+        defer system.deinit(gpa);
+        try system.rescan(gpa, io, now);
+        var client: fetch.Client = .init(gpa, .{ .timeout_ms = 20_000, .roots = &system });
+        defer client.deinit();
+        try client.nilo_start(io, .none);
+        const res = try client.get(&scope, "https://example.com/", .{});
+        try testing.expect(res.ok());
+    }
+}

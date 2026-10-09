@@ -787,6 +787,13 @@ pub const Step = struct {
     /// It can fail on a table that already has rows, and the failure is loud.
     /// A `NOT NULL` column added to a populated table is the whole of this.
     needs_backfill: bool = false,
+    /// The index this step builds, quoted and qualified as a catalog lookup
+    /// reads it (`"schema"."name"`), or empty. **Set on a step that runs
+    /// outside a transaction** (`Version.transactional`), and it is what lets
+    /// `applyOutside` find the invalid index a failed build left behind before
+    /// it builds again. Empty on every step that runs in one, and not part of
+    /// the hash ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+    index: []const u8 = "",
 };
 
 /// Something the diff will not write, with the reason and what to do instead.
@@ -798,14 +805,55 @@ pub const Problem = struct {
     table: []const u8,
     column: []const u8 = "",
     text: []const u8,
+
+    /// Whether `generate --accept` may record it. **Every Problem but the one
+    /// about the snapshot's dialect**, which has no table: accepting it would
+    /// write a snapshot in a dialect the types are not read in, and every
+    /// column would then look changed. That one is fixed by the snapshot, not
+    /// by a step.
+    pub fn acceptable(self: Problem) bool {
+        return self.table.len > 0;
+    }
+
+    /// What `--accept` names it by: `orders.customer_id@1a2b3c4d`, or
+    /// `orders@1a2b3c4d` for one about the table. The eight hex digits are a
+    /// hash over the table, the column and the text, which spells out what the
+    /// diff found, so the name is only good for the Problem as it was read: a
+    /// change to the types that changes what the Problem says changes the name,
+    /// and an `--accept` copied from an older run is refused as naming nothing
+    /// ([ADR 270](../docs/adr/270-a-problem-is-accepted-by-name.md)).
+    pub fn key(self: Problem, gpa: std.mem.Allocator) ![]const u8 {
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        errdefer aw.deinit();
+        try self.writeKey(&aw.writer);
+        return aw.toOwnedSlice();
+    }
+
+    /// `key`, written where a caller already has a writer and no allocator.
+    pub fn writeKey(self: Problem, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        h.update(self.table);
+        h.update("\x00");
+        h.update(self.column);
+        h.update("\x00");
+        h.update(self.text);
+        var digest: [32]u8 = undefined;
+        h.final(&digest);
+        if (self.column.len > 0)
+            return w.print("{s}.{s}@{x}", .{ self.table, self.column, digest[0..4] });
+        return w.print("{s}@{x}", .{ self.table, digest[0..4] });
+    }
 };
 
 pub const Plan = struct {
     steps: []const Step,
     problems: []const Problem,
 
+    /// Nothing to write and nothing refused. **A Problem is not nothing**: a
+    /// plan with no step and one Problem said "nothing to do" and "up to date"
+    /// while the types and the snapshot disagreed.
     pub fn isEmpty(self: Plan) bool {
-        return self.steps.len == 0;
+        return self.steps.len == 0 and self.problems.len == 0;
     }
 
     /// Whether anything in it loses data. `generate` refuses to write a plan
@@ -847,12 +895,84 @@ pub const Plan = struct {
         return out.items;
     }
 
+    /// The Problems `named` does not accept, in plan order: the ones nothing
+    /// names, and the one that cannot be accepted at all. Empty is what lets
+    /// `generate` write over them.
+    pub fn unaccepted(self: Plan, gpa: std.mem.Allocator, named: []const []const u8) ![]const Problem {
+        var out: std.ArrayList(Problem) = .empty;
+        for (self.problems) |p| {
+            if (p.acceptable() and hasName(named, try p.key(gpa))) continue;
+            try out.append(gpa, p);
+        }
+        return out.items;
+    }
+
+    /// The names in `named` that no Problem has. Refused rather than ignored,
+    /// for the reason a `--drop` that names nothing is: it is usually the key
+    /// of a Problem that has since changed, and ignoring it writes a version
+    /// that looks accepted.
+    pub fn strayAccepts(self: Plan, gpa: std.mem.Allocator, named: []const []const u8) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (named) |n| {
+            const matched = for (self.problems) |p| {
+                if (p.acceptable() and std.mem.eql(u8, try p.key(gpa), n)) break true;
+            } else false;
+            if (!matched) try out.append(gpa, n);
+        }
+        return out.items;
+    }
+
     pub fn needsBackfill(self: Plan) bool {
         for (self.steps) |s| {
             if (s.needs_backfill) return true;
         }
         return false;
     }
+
+    /// The plan cut in two at the indexes `named` asks to build without
+    /// stopping writes: the steps that stay in the version's transaction, and
+    /// the `CREATE INDEX CONCURRENTLY` steps that go in a version of their own
+    /// after it ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+    ///
+    /// **Only an index on a table that already exists can be named**, and only
+    /// where the database has the statement: a step's `target` is the index's
+    /// name when the diff made it so, and nothing else has one. A name that
+    /// matches no such step comes back in `stray`, and the caller holds the
+    /// version back for it, as it does for a `--drop` that names nothing.
+    pub fn splitOutside(self: Plan, gpa: std.mem.Allocator, named: []const []const u8) !Split {
+        var inside: std.ArrayList(Step) = .empty;
+        var outside: std.ArrayList(Step) = .empty;
+        for (self.steps) |s| {
+            if (s.kind == .create_index and s.target.len > 0 and hasName(named, s.target)) {
+                if (try ddl.concurrently(gpa, s.sql)) |text| {
+                    var moved = s;
+                    moved.sql = text;
+                    try outside.append(gpa, moved);
+                    continue;
+                }
+            }
+            try inside.append(gpa, s);
+        }
+        var loose: std.ArrayList([]const u8) = .empty;
+        for (named) |n| {
+            const matched = for (outside.items) |s| {
+                if (std.mem.eql(u8, s.target, n)) break true;
+            } else false;
+            if (!matched) try loose.append(gpa, n);
+        }
+        return .{ .inside = inside.items, .outside = outside.items, .stray = loose.items };
+    }
+};
+
+/// What `Plan.splitOutside` made of a plan.
+pub const Split = struct {
+    /// Everything that stays in the transaction.
+    inside: []const Step,
+    /// The `CREATE INDEX CONCURRENTLY` steps, in plan order.
+    outside: []const Step,
+    /// The names that matched no index the diff is creating on a table that
+    /// exists.
+    stray: []const []const u8,
 };
 
 /// The difference between what the types say and what the snapshot says.
@@ -1693,7 +1813,9 @@ fn diffIndexes(
         try steps.append(gpa, .{
             .kind = .create_index,
             .sql = sqlFor(t, u.name),
-            .why = try std.fmt.allocPrint(gpa, "unique {s}; writes to {s} wait while it builds", .{ u.name, t.desc.table }),
+            .why = try buildsWhy(gpa, D, "unique", t, u.name),
+            .target = if (comptime D.can_build_concurrently) u.name else "",
+            .index = try indexOf(gpa, D, t, u.name),
         });
     }
     for (t.desc.indexes) |x| {
@@ -1710,11 +1832,33 @@ fn diffIndexes(
         try steps.append(gpa, .{
             .kind = .create_index,
             .sql = sqlFor(t, x.name),
-            // A version is one transaction, and `CONCURRENTLY` refuses one,
-            // so this build locks writes out; the roadmap has the way past.
-            .why = try std.fmt.allocPrint(gpa, "index {s}; writes to {s} wait while it builds", .{ x.name, t.desc.table }),
+            .why = try buildsWhy(gpa, D, "index", t, x.name),
+            .target = if (comptime D.can_build_concurrently) x.name else "",
+            .index = try indexOf(gpa, D, t, x.name),
         });
     }
+}
+
+/// What an index on a table that exists says about its build. **A version is
+/// one transaction and `CONCURRENTLY` refuses one**, so the step the diff
+/// writes stops every write to the table until the build ends, and the way
+/// past is a version of its own, which `--concurrently` asks for by name
+/// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+fn buildsWhy(gpa: std.mem.Allocator, comptime D: type, what: []const u8, t: Table, name: []const u8) ![]const u8 {
+    if (comptime !D.can_build_concurrently)
+        return std.fmt.allocPrint(gpa, "{s} {s}; writes to {s} wait while it builds", .{ what, name, t.desc.table });
+    return std.fmt.allocPrint(
+        gpa,
+        "{s} {s}; writes to {s} wait while it builds. `--concurrently {s}` builds it in a version of its own, without stopping them",
+        .{ what, name, t.desc.table, name },
+    );
+}
+
+/// The qualified name `applyOutside` looks the index up by, or empty where no
+/// step of this kind can run outside a transaction.
+fn indexOf(gpa: std.mem.Allocator, comptime D: type, t: Table, name: []const u8) ![]const u8 {
+    if (comptime !D.can_build_concurrently) return "";
+    return ddl.qualifiedIndex(gpa, t.desc.schema, name);
 }
 
 /// Dropped: in the snapshot and named by nothing the types declare (and not
@@ -2267,6 +2411,16 @@ pub const Version = struct {
     /// covers the statements alone, so moving it after a version ran is
     /// not drift ([ADR 240](../docs/adr/240-a-migration-waits-five-seconds-for-a-table.md)).
     lock_timeout_ms: u32 = default_lock_timeout_ms,
+    /// Whether the steps run in one transaction with the ledger row, as every
+    /// version has. **`false` runs them with none** (Postgres only): each step
+    /// is its own transaction, which is the one place `CREATE INDEX
+    /// CONCURRENTLY` is allowed, and the ledger row is written after the last
+    /// of them, so a version that failed halfway is run whole the next time.
+    /// Its steps have to be safe to run again; the ones `generate --concurrently`
+    /// writes are (`IF NOT EXISTS`, and the invalid index a failed build leaves
+    /// is dropped first). Not part of the hash
+    /// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+    transactional: bool = true,
 };
 
 /// Five seconds: a stall a request sits out well inside the thirty to sixty
@@ -2338,6 +2492,9 @@ pub const Error = error{
     /// steps were edited after it ran. Nothing was applied, including the
     /// versions after it, which were written against what it used to say.
     SchemaDrift,
+    /// A version with `.transactional = false` on a database that has no
+    /// statement to keep out of a transaction (SQLite). Nothing was applied.
+    NotTransactional,
 };
 
 /// The key `pg_advisory_xact_lock` takes.
@@ -2468,7 +2625,27 @@ fn schemaLevel(comptime D: type) ?wire_mod.Isolation {
 }
 
 fn takeAdvisory(comptime D: type, tx: anytype, scope: anytype) !void {
-    if (comptime D.advisoryLock(lock_key)) |held| _ = try tx.exec(scope, held, .{});
+    if (comptime D.advisoryLock(lock_key)) |held| try polled(D, tx, scope, held);
+}
+
+/// Take a lock by asking for it until it is granted, pausing in the database
+/// between asks (`Dialect.lock_pause`).
+///
+/// **Asked for rather than waited for, and the reason is a deadlock**
+/// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+/// `CREATE INDEX CONCURRENTLY` waits for every statement in the database that
+/// began before it and is still running. A replica that sits in
+/// `pg_advisory_lock` waiting for the one that is building is such a statement:
+/// the build waits for it, it waits for the build, and Postgres ends one of
+/// them with `40P01`, which can be the build. A statement that asks and is told
+/// no is over at once, and the pause between asks is a `pg_sleep`, which waits
+/// for nothing the build holds. Nothing changes when the lock is free: it is
+/// one statement, as it was.
+fn polled(comptime D: type, tx: anytype, scope: anytype, comptime ask: []const u8) !void {
+    while (true) {
+        if ((try tx.rawOne(bool, scope, ask, .{})).?) return;
+        _ = try tx.exec(scope, comptime D.lock_pause.?, .{});
+    }
 }
 
 /// Set for the transaction alone, and always, so a `0` also overrides a
@@ -2699,7 +2876,7 @@ pub fn ensureLedger(db: anytype, scope: anytype) !void {
 
     var tx = try db.begin(scope, .{ .isolation = comptime schemaLevel(D) });
     defer tx.deinit();
-    _ = try tx.exec(scope, lock.?, .{});
+    try polled(D, &tx, scope, lock.?);
     _ = try tx.exec(scope, create, .{});
     try tx.commit();
 }
@@ -2832,6 +3009,18 @@ pub fn apply(
 ) !bool {
     const D = comptime DialectOf(@TypeOf(db));
     comptime core.checkScope(@TypeOf(scope), "migrate.apply");
+    if (!v.transactional) {
+        if (comptime !D.can_build_concurrently) {
+            std.log.warn(
+                "nilo_sql: version {d} ({s}) is marked `.transactional = false`, and this " ++
+                    "database has no statement that needs to run outside a transaction. " ++
+                    "Nothing was applied.",
+                .{ v.number, v.name },
+            );
+            return Error.NotTransactional;
+        }
+        return applyOutside(db, scope, v, hash);
+    }
 
     // Core's monotonic clock rather than the wall one. A duration read off a
     // wall clock can come back negative when an operator moves it, and the
@@ -2887,6 +3076,120 @@ pub fn apply(
     });
     try tx.commit();
     return true;
+}
+
+/// Apply a version that runs outside a transaction
+/// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+///
+/// **One held connection and no `BEGIN`**: each step is its own transaction,
+/// which is what `CREATE INDEX CONCURRENTLY` needs, and what the lock and the
+/// ledger row travel down. In order:
+///
+/// 1. **The advisory lock, at session level**, the same key the transaction
+///    form takes, so a version in a transaction and one outside it wait for
+///    each other. A build that is running looks exactly like a failed one in
+///    the catalog (its index is invalid), so two replicas must never both be
+///    here: the second would drop the first's index from under it. The lock
+///    is let go on every way out, because it outlives the statement and the
+///    connection goes back to the pool.
+/// 2. **The ledger, after the lock**, as in `apply`.
+/// 3. **Each step; for an index, the leftover of a failed build first.** An
+///    index the catalog calls invalid is dropped and built again, with a line
+///    saying so; one that is valid is left, and the step's `IF NOT EXISTS`
+///    passes over it.
+/// 4. **The ledger row, last.** A version that failed halfway has no row and
+///    runs whole the next time, which its steps are written to allow.
+///
+/// **`lock_timeout` is 0 for the steps, and the connection's own value is put
+/// back after.** The bound `apply` sets is a setting of the transaction it
+/// opens (ADR 240), so this connection would otherwise carry whatever its URL
+/// or role gave it, ten seconds in the test suite and often a few in a
+/// production role. A build waits for every transaction in the database that is
+/// older than it, and that wait is a lock wait; the transaction it waits for is
+/// not blocked by it and nothing queues behind it, so giving up after a bound
+/// only turns a slow deploy into one that fails on every boot while the long
+/// transaction lasts. The backstop is the person's `statement_timeout`, and the
+/// process's own deploy deadline.
+fn applyOutside(
+    db: anytype,
+    scope: anytype,
+    v: Version,
+    hash: []const u8,
+) !bool {
+    const D = comptime DialectOf(@TypeOf(db));
+    const started = core.monotonicMicros();
+
+    var held = try db.begin(scope, .{ .transaction = false });
+    var locked = false;
+    var prior: ?[]const u8 = null;
+    errdefer {
+        if (locked) _ = held.exec(scope, comptime D.sessionUnlock(lock_key).?, .{}) catch {};
+        if (prior) |p| _ = held.exec(scope, comptime D.session_lock_timeout_set.?, .{p}) catch {};
+        held.deinit();
+    }
+
+    try polled(D, &held, scope, comptime D.sessionLock(lock_key).?);
+    locked = true;
+
+    if (try held.find(Applied, scope, v.number) != null) {
+        _ = try held.exec(scope, comptime D.sessionUnlock(lock_key).?, .{});
+        locked = false;
+        try held.commit();
+        return false;
+    }
+
+    // Read before it is changed, and kept in the arena, so every way out puts it back.
+    const was = (try held.rawOne([]const u8, scope, comptime D.session_lock_timeout_read.?, .{})).?;
+    _ = try held.exec(scope, comptime D.session_lock_timeout_set.?, .{@as([]const u8, "0")});
+    prior = was;
+
+    for (v.steps) |s| {
+        if (s.index.len > 0) try dropInvalid(D, &held, scope, s);
+        _ = held.exec(scope, s.sql, .{}) catch |err| {
+            std.log.warn(
+                "nilo_sql: version {d} ({s}) failed at the step \"{s}\" ({s}). It runs outside a " ++
+                    "transaction, so the steps before this one are kept and the version is not " ++
+                    "recorded: run it again, and an index this step left invalid is dropped first.",
+                .{ v.number, v.name, s.why, @errorName(err) },
+            );
+            return err;
+        };
+    }
+
+    _ = try held.insert(Applied, scope, .{
+        .version = v.number,
+        .name = v.name,
+        .hash = hash,
+        .applied_at = types.Timestamp.now(),
+        .ms = @divFloor(core.monotonicMicros() - started, std.time.us_per_ms),
+    });
+    _ = try held.exec(scope, comptime D.session_lock_timeout_set.?, .{was});
+    prior = null;
+    _ = try held.exec(scope, comptime D.sessionUnlock(lock_key).?, .{});
+    locked = false;
+    try held.commit();
+    return true;
+}
+
+/// Drop the index a step is about to build when an earlier attempt left it
+/// invalid.
+///
+/// **Dropped, not refused.** An invalid index is never used by a query and
+/// costs every write to the table its maintenance, so there is nothing in it
+/// to keep, and refusing would turn one failed deploy into a boot that fails
+/// the same way until somebody connects to the database by hand. The same name
+/// on a valid index is left alone: that is a build that finished before the
+/// ledger row was written.
+fn dropInvalid(comptime D: type, held: anytype, scope: anytype, s: Step) !void {
+    const state = try held.rawOne(bool, scope, comptime D.index_validity.?, .{s.index});
+    if (state == null or state.?) return;
+    std.log.warn(
+        "nilo_sql: the index {s} is invalid: an earlier build of it failed halfway and left it " ++
+            "behind. Dropping it before it is built again.",
+        .{s.index},
+    );
+    const drop = try std.fmt.allocPrint(scope.arena(), "DROP INDEX CONCURRENTLY IF EXISTS {s}", .{s.index});
+    _ = try held.exec(scope, drop, .{});
 }
 
 /// Every version the database has not got, in order. Answers how many ran.
@@ -4229,8 +4532,13 @@ test "a snapshot from the other dialect is one sentence, not a schema rewritten"
     const before = try snapshotFrom(a, Lite, &.{Org});
     const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{Org} }), before);
 
-    try testing.expect(change.isEmpty());
+    // No step, and not empty: a Problem standing is not "nothing to do".
+    try testing.expectEqual(@as(usize, 0), change.steps.len);
+    try testing.expect(!change.isEmpty());
     try testing.expectEqual(@as(usize, 1), change.problems.len);
+    // And the one Problem that cannot be accepted, since it is about the
+    // snapshot and not about a step anybody could write.
+    try testing.expect(!change.problems[0].acceptable());
     try testing.expect(std.mem.indexOf(u8, change.problems[0].text, "sqlite") != null);
     try testing.expect(std.mem.indexOf(u8, change.problems[0].text, "postgres") != null);
 }
@@ -4960,4 +5268,124 @@ test "a table this program only reads is not asked for its indexes" {
 
     const tables = comptime desiredOf(Pg, .{ .tables = &.{ Org, Borrowed } }).tables;
     try testing.expectEqual(@as(usize, 0), (try unindexedReferences(a, tables)).len);
+}
+
+// -- an index built outside a transaction, and a Problem accepted by name ----
+
+const Beforehand = struct {
+    pub const nilo_table = .{ .name = "readings", .key = .id };
+    id: i64,
+    sensor: i64,
+    tag: []const u8,
+};
+
+const Indexed = struct {
+    pub const nilo_table = .{
+        .name = "readings",
+        .key = .id,
+        .index = .{.sensor},
+        .unique = .{.{ .columns = .{.tag} }},
+    };
+    id: i64,
+    sensor: i64,
+    tag: []const u8,
+};
+
+test "an index on a table that exists carries the name it is asked for by and the name it is looked up by, on Postgres only" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    inline for (.{ Pg, Lite }) |D| {
+        const before = try snapshotFrom(a, D, &.{Beforehand});
+        const change = try plan(a, D, comptime desiredOf(D, .{ .tables = &.{Indexed} }), before);
+        try testing.expectEqual(@as(usize, 2), change.steps.len);
+        for (change.steps) |s| {
+            try testing.expectEqual(Kind.create_index, s.kind);
+            if (comptime D == Pg) {
+                try testing.expect(s.target.len > 0);
+                try testing.expectEqualStrings("\"", s.index[0..1]);
+                try testing.expect(std.mem.indexOf(u8, s.why, "--concurrently") != null);
+            } else {
+                try testing.expectEqualStrings("", s.target);
+                try testing.expectEqualStrings("", s.index);
+            }
+        }
+    }
+
+    // A table that is made in the same plan has no writers to stop.
+    const fresh = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{Indexed} }), snapshot.empty(Pg));
+    for (fresh.steps) |s| try testing.expectEqualStrings("", s.target);
+}
+
+test "splitting a plan moves the named index to the other side, rewritten so that it can be run again" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try snapshotFrom(a, Pg, &.{Beforehand});
+    const change = try plan(a, Pg, comptime desiredOf(Pg, .{ .tables = &.{Indexed} }), before);
+
+    const split = try change.splitOutside(a, &.{ "readings_sensor_idx", "nowhere" });
+    try testing.expectEqual(@as(usize, 1), split.inside.len);
+    try testing.expectEqual(@as(usize, 1), split.outside.len);
+    try testing.expectEqual(@as(usize, 1), split.stray.len);
+    try testing.expectEqualStrings("nowhere", split.stray[0]);
+    try testing.expect(std.mem.startsWith(u8, split.outside[0].sql, "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"readings_sensor_idx\""));
+    try testing.expectEqualStrings("\"readings_sensor_idx\"", split.outside[0].index);
+    try testing.expect(std.mem.startsWith(u8, split.inside[0].sql, "CREATE UNIQUE INDEX \"readings_tag_key\""));
+
+    // A unique index goes the same way, and the order of the rest is kept.
+    const both = try change.splitOutside(a, &.{ "readings_tag_key", "readings_sensor_idx" });
+    try testing.expectEqual(@as(usize, 0), both.inside.len);
+    try testing.expect(std.mem.startsWith(u8, both.outside[0].sql, "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS"));
+
+    // And naming nothing changes nothing.
+    const none = try change.splitOutside(a, &.{});
+    try testing.expectEqual(@as(usize, 2), none.inside.len);
+    try testing.expectEqual(@as(usize, 0), none.outside.len);
+}
+
+test "a name for a statement that is not a CREATE INDEX is not rewritten" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expect(try ddl.concurrently(arena.allocator(), "ALTER TABLE \"t\" ADD COLUMN \"a\" int8") == null);
+}
+
+test "the version outside a transaction is not part of the hash, and neither is the index it is looked up by" {
+    const loud: []const Step = &.{.{ .kind = .create_index, .sql = "x", .why = "", .index = "\"a\"" }};
+    const quiet: []const Step = &.{.{ .kind = .create_index, .sql = "x", .why = "" }};
+    var one: [64]u8 = undefined;
+    var two: [64]u8 = undefined;
+    try testing.expectEqualStrings(hashOf("", loud, &one), hashOf("", quiet, &two));
+}
+
+test "a Problem is named by its table, its column and a hash of what it says" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const one: Problem = .{ .table = "posts", .column = "org_id", .text = "the key is new" };
+    const same: Problem = .{ .table = "posts", .column = "org_id", .text = "the key is new" };
+    const moved: Problem = .{ .table = "posts", .column = "org_id", .text = "the key is new, and cascades" };
+    const table_wide: Problem = .{ .table = "posts", .text = "the check is new" };
+
+    const key = try one.key(a);
+    try testing.expect(std.mem.startsWith(u8, key, "posts.org_id@"));
+    try testing.expectEqual(@as(usize, "posts.org_id@".len + 8), key.len);
+    try testing.expectEqualStrings(key, try same.key(a));
+    // What the Problem says changing is a different Problem.
+    try testing.expect(!std.mem.eql(u8, key, try moved.key(a)));
+    try testing.expect(std.mem.startsWith(u8, try table_wide.key(a), "posts@"));
+
+    const p = Plan{ .steps = &.{}, .problems = &.{ one, table_wide, .{ .table = "", .text = "dialect" } } };
+    const left = try p.unaccepted(a, &.{key});
+    // The table-wide one is not named, and the dialect one never can be.
+    try testing.expectEqual(@as(usize, 2), left.len);
+    try testing.expectEqualStrings("posts", left[0].table);
+    try testing.expectEqualStrings("", left[1].table);
+    const stray = try p.strayAccepts(a, &.{ key, "posts.org_id@00000000" });
+    try testing.expectEqual(@as(usize, 1), stray.len);
+    try testing.expectEqualStrings("posts.org_id@00000000", stray[0]);
+    try testing.expect(!p.isEmpty());
 }

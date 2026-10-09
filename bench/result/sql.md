@@ -1079,6 +1079,29 @@ per executor with a local wait queue — a connection that never crosses a
 thread, which is what ADR 199 already made of a request.
 
 
+## 13. An index built outside a transaction lets writes through
+
+**Run in the `sql-migrations` worktree for ADR 269, at `1e583bc` plus the uncommitted change, on Ubuntu 26.04's Zig 0.17.0, a Postgres 18 on this machine over loopback port 5433, Ryzen 7 9700X.** The test is `an index built outside a transaction lets writes through, where the one in a transaction stops them` in `sql/live.zig`: a table of 1,000,000 rows (`id bigserial`, `v` = `md5(i)`, `grp`), a task inserting one row at a time as fast as it can, and the same `CREATE INDEX` on `v` built twice, once as an ordinary version (one transaction, blocking) and once as a version outside a transaction (`CONCURRENTLY IF NOT EXISTS`). The count is the inserts that began and ended while the build ran. The control is the blocking build, on the same table, the same minute.
+
+| optimize mode | build | time | inserts that got through |
+|---|---|---|---|
+| Debug | in a transaction | 797 ms | 7 |
+| Debug | outside | 1,730 ms | 1,026 |
+| ReleaseSafe | in a transaction | 733 ms | 0 |
+| ReleaseSafe | outside | 1,720 ms | 839 |
+| Debug (second run) | in a transaction | 617 ms | 1 |
+| Debug (second run) | outside | 738 ms | 756 |
+| ReleaseSafe (second run) | in a transaction | 686 ms | 0 |
+| ReleaseSafe (second run) | outside | 734 ms | 622 |
+| Debug (third run) | in a transaction | 1,359 ms | 1 |
+| Debug (third run) | outside | 1,588 ms | 1,106 |
+| ReleaseSafe (third run) | in a transaction | 1,148 ms | 1 |
+| ReleaseSafe (third run) | outside | 1,342 ms | 843 |
+
+**What it decided.** Writes to the table are not stopped by the build outside a transaction (622 to 1,106 inserts through it, against 0 to 7 through the blocking one), and it costs 1.07 to 2.3 times as long to finish. The spread in time is the other test binary running at the same moment on the same Postgres: the first run overlapped the other mode's heavy tests, the second ran when it was idle, and the numbers are not a throughput claim, only that the writer is never stopped. **The two binaries had to be serialised for these tests** (`Gate` in `live.zig`): two builds on one database deadlocked (`40P01`) when one mode dropped an invalid index while the other built one, which is the same wait-for-older-statements rule that made the migration lock a polled one (ADR 269). Not measured: a table of fifty million rows, writes under load from many connections, and the build's effect on read latency; none of them changes the decision, and the first is the case the feature exists for.
+
+Whether the number can be pushed further: the time is Postgres's two scans and the wait between them. Nothing in nilo is in it.
+
 ## Reproducing this
 
 ```bash
@@ -1529,6 +1552,26 @@ A statement with `custn = $1 AND ($2::text IS NULL)` `PREPARE`d and run with `NU
 A caller sees the same thing from each of the first four: the feed answers the same rows, the SQLite statement binds the same values, the text columns hold the same bytes, and an empty batch answers the empty slice it answered. The one difference is that an empty batch no longer fails on a Db that cannot reach its database or on a table that is not there.
 
 **What it changed:** the four above; the last two are not built in this pass. **Can it be pushed further:** the lateral count took 527 subplan loops to 327 on this sample (the filter passed 327 of the rows it looked at and the select list needed 200), and the saving is the rows the `LIMIT` keeps. It needs the select list to know the `WHERE`, which `layoutOf` (per Row) does not, and SQLite has no `LATERAL`, so it would be Postgres text only.
+
+## 27. What `sql.Replays` costs a route that asks for it
+
+**Run:** `1e583bc` plus the working tree of the change, 2026-10-09, AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2, Zig 0.17.0. Postgres 18 in a container on `localhost:5433` (`postgres:18`, defaults), a database made for the run; the table is `sql.Replays`' own, a `text` space and a `bytea` slot as the key, a `bytea` value. Throwaway tests (not kept) looped 2,000 times over fresh keys through one pool of eight and timed each call with `core.monotonicMicros()`, in ReleaseSafe and Debug. Other agents were compiling on the same machine, so the absolutes are loose (the fresh claim read 1,004 µs and 1,332 µs in two runs of the same code); the shape between the rows is what the run is for. **Not measured:** SQLite, two instances on two machines, a loaded table, and the whole route through a server.
+
+| Call | ReleaseSafe | Debug | `synchronous_commit = off`, ReleaseSafe |
+|---|---|---|---|
+| claim of a free key (`INSERT … ON CONFLICT DO NOTHING`) | 1,004 µs | 1,332 µs | 56 µs |
+| claim of a **taken** key (that insert, then `UPDATE … WHERE expires_at <= now`) | **54 µs** | 121 µs | not run |
+| put of the answer over the marker (`insertOrUpdate`) | 1,637 µs | 1,665 µs | 31 µs |
+| read (`select … limit 1`) | 44 µs | 59 µs | 24 µs |
+| `del` | 1,586 µs | 1,598 µs | 22 µs |
+
+**The first design measured worse and was changed.** The claim was first one statement, `INSERT … ON CONFLICT DO UPDATE … WHERE <expired>`. A taken key cost **1,674 µs** there (ReleaseSafe; 1,754 µs in Debug), the price of a commit, because `DO UPDATE` row-locks the conflicting tuple before it evaluates the `WHERE`, and a row lock is WAL. A retry that finds its marker is the common request this table is for, so it would have paid a commit to be told no. `DO NOTHING` locks nothing, and the reclaim of an expired row moved to its own `UPDATE`, which changes no row (and writes no WAL) while the key is live. Taken keys went from 1,674 µs to 54 µs. The race stays in the database in both: the two statements are each atomic, and a test claims one key sixteen times at once through two pools and counts one winner, then does it again on an expired row.
+
+**What it shows:** a write on a Postgres that waits for its WAL flush costs a commit, here 1.0 to 1.7 ms on this disk, and a read costs about 50 µs. So an `Idempotent` route that runs its handler pays **two commits** (the claim and the put of the answer), about 2.6 to 3.3 ms before the handler's own work. A replay or a 409 pays the taken claim and, for a replay, a read: about 100 µs. A handler that fails pays the claim and a `del`. With the flush off the same calls are tens of microseconds, so the price is the disk and the statements are not slow. The routes without the argument pay nothing, and the allocation budget test passes unchanged.
+
+**Decision it moved:** ADR 268 keeps each call as its own statement and its own commit, and does not wrap the claim and the handler's writes in one transaction. A claim that stayed uncommitted for the length of the handler would hold a row lock and a pooled connection for that long, and a second instance's claim would wait on it where it should be told 409. `synchronous_commit = off` for the role that serves the replay table is the lever a deployment has (a crash can then lose the last few commits, which for a marker costs a retry and for an answer costs a re-run of the handler); the guide says so.
+
+**Can it be pushed further:** the fresh claim and the put are two commits around a handler. Writing the marker with `synchronous_commit = off` for that one statement (`SET LOCAL` inside a transaction of its own) would cost a round trip to save a flush, and loses the one guarantee the marker has, that a crash after the claim leaves a marker. It is not built. What would settle it is the same measurement on a deployment's own disk.
 
 ## What is still missing
 

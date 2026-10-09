@@ -707,9 +707,20 @@ pub const Postgres = struct {
     /// is the part that matters exactly when it is hardest to reproduce: ten
     /// replicas rolling out at once, all of them reaching the same phase of
     /// their own startup within the same second.
+    ///
+    /// **A question that answers `true` or `false`, not a wait**
+    /// (`pg_try_advisory_xact_lock`), asked again after `lock_pause` until it
+    /// is `true` (`migrate.polled`). A statement that waits for this lock is
+    /// a statement a `CREATE INDEX CONCURRENTLY` on the same database waits
+    /// for, and the two deadlock
+    /// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
     pub fn advisoryLock(comptime key: i64) ?[]const u8 {
-        return "SELECT pg_advisory_xact_lock(" ++ std.fmt.comptimePrint("{d}", .{key}) ++ ")";
+        return "SELECT pg_try_advisory_xact_lock(" ++ std.fmt.comptimePrint("{d}", .{key}) ++ ")";
     }
+
+    /// What goes between two asks for a lock: a sleep the database keeps,
+    /// which waits for nothing and so cannot be part of a deadlock.
+    pub const lock_pause: ?[]const u8 = "SELECT pg_sleep(0.2)";
 
     /// The statement that bounds how long a migration waits for a table's
     /// lock, taking the milliseconds as `$1`, or `null` for a database whose
@@ -721,6 +732,45 @@ pub const Postgres = struct {
     /// does, so the connection goes back to the pool with the setting it
     /// came out with ([ADR 240](../docs/adr/240-a-migration-waits-five-seconds-for-a-table.md)).
     pub const lock_timeout: ?[]const u8 = "SELECT set_config('lock_timeout', $1, true)";
+
+    /// **Yes**: `CREATE INDEX CONCURRENTLY` builds an index while the table's
+    /// writes carry on, and is refused inside a transaction block, which is
+    /// why a version that holds one runs outside any transaction
+    /// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+    pub const can_build_concurrently = true;
+
+    /// The session-level form of the advisory lock above, for a version that
+    /// runs with no transaction to scope it to, and the statement that lets it
+    /// go. The same key, so a version in a transaction and one outside it
+    /// wait for each other. **The caller unlocks before the connection goes
+    /// back to the pool**, because a session lock outlives the statement
+    /// (`migrate.applyOutside`).
+    pub fn sessionLock(comptime key: i64) ?[]const u8 {
+        @setEvalBranchQuota(20_000);
+        return "SELECT pg_try_advisory_lock(" ++ std.fmt.comptimePrint("{d}", .{key}) ++ ")";
+    }
+
+    /// What a connection held outside a transaction reads and sets its
+    /// `lock_timeout` with, for the whole session (`set_config(…, false)`),
+    /// taking the new value as `$1`. `migrate.applyOutside` sets `'0'` and puts
+    /// back what it read, because the connection returns to the pool
+    /// ([ADR 269](../docs/adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
+    pub const session_lock_timeout_read: ?[]const u8 = "SELECT current_setting('lock_timeout')";
+    pub const session_lock_timeout_set: ?[]const u8 = "SELECT set_config('lock_timeout', $1, false)";
+
+    pub fn sessionUnlock(comptime key: i64) ?[]const u8 {
+        @setEvalBranchQuota(20_000);
+        return "SELECT pg_advisory_unlock(" ++ std.fmt.comptimePrint("{d}", .{key}) ++ ")";
+    }
+
+    /// Whether the index named in `$1` (quoted and schema-qualified as the
+    /// step wrote it, resolved as the `CREATE` resolved it) is usable: no row
+    /// when there is no such index, `false` when a build that failed halfway
+    /// left it behind. Postgres keeps a failed `CONCURRENTLY` build in the
+    /// catalog, invalid and never used, and refuses the next `CREATE` of its
+    /// name; `IF NOT EXISTS` would skip it without a word.
+    pub const index_validity: ?[]const u8 =
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)";
 
     /// **Yes**: a transaction can say `READ COMMITTED`, and a migration does.
     /// The advisory lock above is a `SELECT`, and under REPEATABLE READ (a
@@ -1416,9 +1466,31 @@ pub const SQLite = struct {
         return null;
     }
 
+    pub const lock_pause: ?[]const u8 = null;
+
     /// **None**: a write waits on the database's one write lock, and
     /// `busy_timeout` is what bounds that wait, per connection.
     pub const lock_timeout: ?[]const u8 = null;
+
+    /// **No**: a SQLite write holds the one write lock whatever it is, and
+    /// there is no `CONCURRENTLY` to ask for. An index build there is as long
+    /// as the table is big, and no other writer could have been running.
+    pub const can_build_concurrently = false;
+
+    pub fn sessionLock(comptime key: i64) ?[]const u8 {
+        _ = key;
+        return null;
+    }
+
+    pub fn sessionUnlock(comptime key: i64) ?[]const u8 {
+        _ = key;
+        return null;
+    }
+
+    pub const session_lock_timeout_read: ?[]const u8 = null;
+    pub const session_lock_timeout_set: ?[]const u8 = null;
+
+    pub const index_validity: ?[]const u8 = null;
 
     /// **No**: every transaction is a snapshot taken after the one writer has
     /// the file, so what the other level guards against cannot happen, and
@@ -1919,7 +1991,14 @@ pub fn assertDialect(comptime D: type) void {
             "foldedIndexColumn",
             "can_alter_column",
             "advisoryLock",
+            "lock_pause",
             "lock_timeout",
+            "can_build_concurrently",
+            "sessionLock",
+            "sessionUnlock",
+            "session_lock_timeout_read",
+            "session_lock_timeout_set",
+            "index_validity",
             "has_read_committed",
             "prefix_bound",
             "plan_may_go_generic",

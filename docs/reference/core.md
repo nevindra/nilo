@@ -1,6 +1,6 @@
 # Core
 
-**`nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock and `Timestamp` and `Date`.**
+**`nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, and `Backoff`.**
 
 **Guide:** [Handlers](../guide/handlers.md), [Work that is not a request](../guide/background.md), [Decoding a cookie](../guide/cookies.md#decoding-an-encoded-value) · **Design:** [Memory per request and per connection](../design/memory.md), [The clock, entropy, and a UUID](../design/id-clock-entropy.md)
 
@@ -143,6 +143,17 @@ It passes the Scope check, so `db.select(Row, &erased, …)` works: a callback c
 **It borrows.** The pointer inside is the Scope's own, so an `AnyScope` must not outlive the `Ctx` or `Run` it was made from; in practice it is a local variable next to the call. **The ordinary Scope is unchanged**: every call in nilo and in `nilo_sql` still takes `anytype` and still costs no indirect call. The vtable is paid for only where somebody erases a Scope.
 
 **A Scope can also be asked what it knows, through plain functions that take any Scope and answer `null` for one that does not know.** `nilo_core.requestIdOf(S, scope)` is the request id ([ADR 158](../adr/158-a-request-id-goes-out-with-the-call.md)); `routeNameOf(scope)` is the `operationId` of the route its request matched, which is what `nilo_sql` puts on a statement it reports ([ADR 108](../adr/108-a-statement-can-be-watched.md)); `serialOf(scope)` says which request or tick it is on, for a module that keeps something between calls and has to know it is still the same one ([ADR 117](../adr/117-a-statement-that-failed-says-what-the-database-said.md)); `traceBeginOf(scope)` and `traceEndOf(scope, begun, ended)` open and close the span of a call that is leaving, which `nilo_fetch` asks so its `traceparent` names the call ([ADR 247](../adr/247-a-request-is-a-span-and-the-trace-leaves-as-otlp.md)). `nilo_core.trace` holds the W3C Trace Context they speak.
+
+## `nilo_core.Backoff`
+
+**How long to wait before trying again, as a function of how many times it has been tried, with the jitter that keeps a herd of callers from coming back together.** It is in Core because `nilo_job` waits between a job's attempts and `nilo_fetch` between a call's, the two are siblings, and each needs the same arithmetic ([ADR 057](../adr/057-percent-is-needed-by-two-layers.md), [ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)). `job.Backoff` is this type.
+
+| | |
+|---|---|
+| `.{ .fixed_ms = 50 }` | the same wait every time; nothing random is added |
+| `.{ .exponential = .{ .from_ms, .to_ms, .jitter } }` | doubling from `from_ms`, never past `to_ms`; `.jitter` is `.none` (the default), `.full` (anywhere from none to the whole wait) or `.equal` (the top half) |
+| `b.ceilingMs(failed)` | the wait after the attempt numbered `failed` (1 for the first) before any jitter, in milliseconds |
+| `b.delayMs(failed, random)` | the same with the jitter spent, `random` being any 64 bits; a backoff without jitter ignores them. Core has no `Io`, so the caller draws the bits (`std.Io.random` is a per-executor generator, not a syscall) |
 
 ## `nilo_core.percent`
 

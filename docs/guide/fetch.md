@@ -210,6 +210,7 @@ try app.provide(&stripe);
 | `timeout_ms` | the client's | this service's own deadline; a `Call` still overrides it for one call |
 | `stall_ms` | the client's | the same, for silence |
 | `max_body` | the client's | the same, for the body |
+| `retry` | null | what happens when the service has a bad minute: [see Retrying](#retrying). Null is one try, and the target then holds and runs none of it |
 | `ready` | null | a path the [health route](./deploying.md#health-checks) GETs on every probe, with a 2xx meaning ready. Null means "started is ready", because a load balancer asks every second, and calling somebody else's API at that rate costs money and hits rate limits without checking much |
 
 | Passed to `open` | |
@@ -243,6 +244,50 @@ A name with no matching field, a tuple for a named segment, a struct for a posit
 
 **A target's own gate is taken before the client's.** With `max_in_flight` on the type, a call to a slow service waits at that service's own gate without holding a permit the others share; the client's limit on live connections still applies across all of them. The target starts the client underneath it, so a program that provides three targets and never the client works. One that provides all four starts the client four times, which sets the same `Io` four times.
 
+## Retrying
+
+**A call to a service that has a bad minute is tried again by a mechanism, with your numbers.** The loop each caller used to write had four traps in three lines: a POST sent again charges twice, a sleep with no jitter sends every caller back at the same instant, `Retry-After` is read by hand or not at all, and a loop with no budget turns a service's bad minute into three times its load. Declare `.retry` on the target and the numbers are yours while the rest is nilo's ([ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+
+<!-- compiles -->
+```zig
+const fetch = @import("nilo_fetch");
+
+const Payments = fetch.Target("payments", .{
+    .timeout_ms = 5_000,
+    .retry = .{
+        .times = 3, // up to four calls in all
+        .backoff = .{ .exponential = .{ .from_ms = 200, .to_ms = 3_000, .jitter = .full } },
+        .mint_key = "Idempotency-Key", // Stripe takes this header; nilo makes the key
+    },
+});
+
+fn chargeCard(payments: *Payments, c: *nilo.Ctx) !fetch.Response {
+    // A POST, retried under one key that every try carries.
+    return payments.postJson(c, "/v1/charges", .{}, .{ .amount = 500 }, .{});
+}
+```
+
+| In `.retry` | Default | |
+|---|---|---|
+| `times` | 2 | tries after the first |
+| `backoff` | exponential, 100 ms to 2 s, full jitter | the wait between tries; the same `Backoff` as [a job's](./jobs.md), `.jitter` being `.none`, `.full` (anywhere from none to the whole wait) or `.equal` (the top half) |
+| `statuses` | 429, 502, 503, 504 | the answers that mean "later". A 500 is not here by default, because it is as often a bug that will answer the same again |
+| `retry_after_max_ms` | 5,000 | the longest `Retry-After` is waited for. The header (seconds or an HTTP date) is a floor on the wait, and a service that says an hour is waited for this long |
+| `budget` | `percent = 20, min_per_sec = 10, window_s = 10` | retries allowed up to this share of the calls made in the window, plus a floor a second so a quiet service can still retry. There is no way to turn it off |
+| `mint_key` | null | the header a POST or PATCH with no key of its own is given one under. Naming it says the service honours it |
+
+**Only a call that can be sent again is.** GET, HEAD, PUT, DELETE and OPTIONS are. A POST or PATCH is retried only if it carries an `Idempotency-Key` header of yours (in `Call.headers` or the target's standing headers) or the type names `mint_key`; otherwise it is sent once, exactly as without `.retry`. A transport failure before any answer (a refused or reset connection, a name that did not resolve, this call's own `TimedOut`) is retried the same way a status is, and `error.Canceled` never is. When the tries run out the last answer comes back as itself: a 503 is still a `Response`.
+
+**A retry never outlives the route's deadline.** Before each wait nilo asks how much time the route has left, and a wait that would leave nothing to try with is not taken: you get the answer you have, at once. The wait itself is a sleep on the fiber the call already holds, with no permit held, so a service's bad minute does not become a queue for every other call through the gate.
+
+**The budget is what stops the herd.** When a service answers 503 to most calls, a budget of 20% means it sees the calls it was given plus a fifth more, where three tries each would have sent it three times as many. It is per target: one service's bad minute does not spend another's allowance. A caller who wants it wide says `percent = 1000`, and cannot say none.
+
+**A target that declares nothing pays nothing**: no state, no code on the call path, one try. A target that declares `.retry` holds 264 bytes once for the budget, and a call that succeeds first time asks the arena for what it did without ([the numbers](../../bench/result/fetch.md#a-sized-read-gives-back-the-arenas-second-page-and-what-a-retry-costs)). A call that is retried leaves each failed try's head and body in the request's arena, so a large body on a service that often says "later" is a reason for a lower `max_body`. A streamed body (`Exchange` with `.stream`) is not reachable through a target, and `nilo_s3`'s `putStream` and `stream` are never retried: a reader is spent by the first try.
+
+**A reaped connection is not a retry.** The replay `nilo_fetch` makes onto a fresh connection when the pooled one was closed by the peer while idle is transport hygiene inside one try; it costs no wait, no budget and none of `times`.
+
+`nilo_s3` takes the same `retry` on the Store, for `Throttled` and `Unavailable` ([the s3 guide](./s3.md)).
+
 ## Client settings
 
 **Passed to `init`, once:**
@@ -256,14 +301,36 @@ A name with no matching field, a tuple for a named segment, a struct for a posit
 | `max_drain` | 64 KiB | how much of an unread body is worth reading to keep a pooled connection. Past it the connection is dropped instead |
 | `read_buffer_size` | 8 KiB | the buffer each connection reads the socket through, so how much one read brings in. std's own default, passed through; one per connection, on the heap |
 | `forward_request_id` | true | a call made under a `*Ctx` carries the request's id as `X-Request-Id`, so the service you called can log the same id you did. Under a `nilo.Run` there is no request and nothing is sent; a call that sets its own `X-Request-Id` keeps it ([ADR 158](../adr/158-a-request-id-goes-out-with-the-call.md)) |
+| `proxy` | null | an egress proxy for `http://` calls, `.{ .url = "http://user:secret@proxy.corp:3128", .bypass = &.{"corp.example"} }` ([below](#going-out-through-a-proxy-and-trusting-a-private-authority)) |
+| `roots` | null | the certificate authorities an `https://` call trusts, as a bundle you loaded. Null is the system's |
 
 **On an App that traces, a call made under a `*Ctx` also sends `traceparent`**, so the service you called continues the same trace, and the call shows up as a span of its own under the request's ([Tracing](./tracing.md)).
 
-**`max_in_flight` is not optional in practice.** `std.http.Client`'s pool limits *idle* connections and does not limit connections in use at all, so without it the limit on live connections is however many handlers happen to be running, and an HTTPS connection holds 59,151 bytes of TLS and socket buffers. Five hundred concurrent handlers would be 29.6 MB nobody asked for, and five hundred handshakes. Thirty-two times that is the most this client will ever hold.
+**`max_in_flight` is not optional in practice.** `std.http.Client`'s pool limits *idle* connections and does not limit connections in use at all, so without it the limit on live connections is however many handlers happen to be running, and an HTTPS connection allocates 59,151 bytes of TLS and socket buffers, of which about 12 KB are resident after a small answer and 45 KB after one the size of a TLS record ([measured](../../bench/result/fetch.md#what-a-connection-in-the-pool-holds-over-tls-measured)). Five hundred concurrent handlers would be up to 22.5 MB nobody asked for, and five hundred handshakes. Thirty-two times that is the most this client will ever hold.
 
 **`timeout_ms` limits the whole call, not each read**, because a server sending one byte a second satisfies any per-read limit and never finishes. The server's own [deadlines](./deploying.md#deadlines) follow the same reasoning from the other side.
 
 **It fires with or without an Engine.** Under a server the deadline is set on the fiber ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)), and `app.provide` is what gives the client the Engine's `Limits`. A client started with `nilo_start(io, .none)` (a test, a CLI, a worker with no server around it) has no fiber to arm, so each step of the call runs as a task of that `Io`, and that task is what gets cancelled when time runs out ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)). The cost is one thread hop per step, paid only in that case. Until 0.5 such a client had `timeout_ms` configured but nothing to fire it, and the first CLI built on nilo wrote its own watchdog to work around that. `.off`, the older name for `.none`, is kept so that program still compiles.
+
+### Going out through a proxy and trusting a private authority
+
+**Two settings, both given by you and neither read from the environment.** A network whose only way out is a forward proxy, and a service whose certificate a company authority signed, are written like this:
+
+```zig
+var roots: std.crypto.Certificate.Bundle = .empty;
+defer roots.deinit(gpa);
+try roots.rescan(gpa, io, now); // the system's authorities...
+try roots.addCertsFromFilePathAbsolute(gpa, io, now, "/etc/corp/ca.pem"); // ...and one more
+
+var api: fetch.Client = .init(gpa, .{
+    .roots = &roots,
+    .proxy = .{ .url = "http://user:secret@proxy.corp:3128", .bypass = &.{ "corp.example", "127.0.0.1" } },
+});
+```
+
+**The proxy carries `http://` calls only.** An `https://` call it would carry is `error.TlsThroughProxy`, before anything is dialled, because std 0.17 cannot start TLS inside its tunnel and would send the request in the clear. A host in `bypass` (and every host under it) is dialled directly, and so is its `https://`; `localhost` is not skipped unless you list it. The user and password in the URL go to the proxy as `Proxy-Authorization` and to nobody else, a redirect to another origin never carries them, and a URL that is not `http://` or `https://` with a host stops the program at start with `error.InvalidProxy`. The pass-through you may have expected, `HTTP_PROXY` and `NO_PROXY` read from the environment, is one line of your own configuration away and is not done for you ([ADR 267](../adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+
+**`roots` is a bundle, and it is yours.** It must outlive the client and not change while the client lives; the client never frees it. Give it an empty bundle and an `https://` call trusts nobody, which is how you hold a program to one authority.
 
 ### Stall timeout (`stall_ms`)
 
@@ -308,6 +375,8 @@ Under a server it uses the Engine's timer, reset on every chunk; on a client wit
 | `error.InsecureRedirect` | a followed redirect led from `https` to `http`, so it was not followed: the next request would have crossed the network in the clear |
 | `error.BodyTooLarge` | the body went past `max_body`, and reading stopped there |
 | `error.BodyTooShort` | the body ended before the length its own head announced |
+| `error.TlsThroughProxy` | an `https://` call that `Settings.proxy` would carry; name its host in `bypass` to reach it directly |
+| `error.InvalidProxy` | `Settings.proxy.url` is not an `http://` or `https://` URL with a host; raised by the start, before the program serves |
 | `error.NotStarted` | a call made before `listen()`: the client is finished at startup like any other service |
 | the rest | `std.Uri.ParseError`, `std.http.Client`'s connect and receive errors, and the reader and writer errors, unchanged |
 
@@ -371,13 +440,13 @@ fn mirror(api: *fetch.Client, c: *nilo.Ctx) !void {
 
 ## What it costs
 
-**On the request path, nothing that was not already there.** One call is one permit and two arena allocations (the header block, then the body; [ADR 187](../adr/187-a-head-that-outlives-its-body.md)), plus the JSON written out or the URL built if you asked for either, and the parse if you asked for that. **The real cost is per idle connection, and it is stack**: a handler that has made one call holds 4,139 bytes more than one that has not, for the life of the connection, at the depth `std.http.Client` drives the fiber to ([ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md)). That is still the largest per-connection figure in the toolkit, and the remaining ways to reduce it are small: taking the 4 KiB transfer buffer out of `send` moved it by 14 bytes, because a buffer no byte ever touched was never a resident page.
+**On the request path, nothing that was not already there.** One call is one permit and two arena allocations (the header block, then the body; [ADR 187](../adr/187-a-head-that-outlives-its-body.md)), plus the JSON written out or the URL built if you asked for either, and the parse if you asked for that. **The real cost is per idle connection, and it is not stack**: a handler that has made one call holds about 2,130 bytes more than one that has not, for the life of the connection. The fiber's stack goes back when the handler returns ([ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md)), and what stays is a page of the request arena that the body was read into, kept by `arena_keep`, which any handler that puts a kilobyte in its arena holds. A body that announces its `content-length` is read into exactly that many bytes; it was 4,170 while it was read by growing a buffer ([measured](../../bench/result/fetch.md#a-sized-read-gives-back-the-arenas-second-page-and-what-a-retry-costs)). Taking the 4 KiB transfer buffer out of `send` moved it by 14 bytes, because a buffer no byte ever touched was never a resident page. A call that is still waiting for its answer holds about 17 KB of stack until it gets it.
 
 Everything measured is `http://`. [`bench/result/fetch.md`](../../bench/result/fetch.md) has the numbers on all four of [ADR 017](../adr/017-the-trade-budget-has-four-axes.md)'s axes, and says plainly that nothing has been measured through TLS yet.
 
 ## What it does not do
 
-**There is no retry policy, circuit breaker or rate limiter.** How many times to retry, how long to wait between attempts, and what counts as a failure are facts about somebody else's service, and a default that guessed them would turn one outage into a thundering herd. A caller who knows them writes three lines: a loop, a [`nilo.sleep`](./services.md#what-needs-wrapping) between attempts, and a `switch` on which errors are worth another try. What is here is the part that is the same for everybody: do not hold a connection forever, do not hold more than you meant to, and do not read more than you asked for.
+**There is no circuit breaker or rate limiter, and a retry happens only where you declared one.** A target with no `.retry` makes one try, because how many times to try and what counts as failure are facts about somebody else's service that a default would only guess. A breaker, which stops calling a service that is down instead of waiting out the timeout on every call, is not built ([the todo list](../todo.md)). A client (not a target) has no retry: wrap the call in a target, which is the sentence "this service is this URL and gets this many tries".
 
 ## Testing
 

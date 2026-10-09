@@ -37,31 +37,7 @@ Nothing is open at this tier.
 
 ## P1: a large cost, and a real one
 
-### `nilo_sql`
-
-**An index on a big live Postgres table cannot be built without blocking its writes.** Every version is one transaction, and Postgres refuses `CREATE INDEX CONCURRENTLY` inside one, so a generated `create_index` on an existing table takes a lock that makes every write to it wait until the build finishes. On a table of a few thousand rows that is milliseconds; on one of fifty million it is an outage. The step's `why` says so today, and that is a warning rather than a way out. The way out is a step that runs outside its version's transaction and is recorded in the ledger on its own, because a `CONCURRENTLY` build that fails halfway leaves an invalid index behind that has to be dropped before the next attempt.
-
-**Needs:** a decision on how a step outside the transaction is recorded when the version around it fails. A table that size to test it on is one the test generates.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
-**A Problem from the diff has no way out but editing `snapshot.zon` by hand.** While one stands, `generate` writes nothing, and the step it suggests does not move the snapshot, so the same Problem comes back (`migrations.zig:394`, `migrate.zig:1704`). The common case, a new column with a foreign key, is written by the diff now; what is left is a key added to a column the table had, a key of several columns on SQLite, a foreign key column with a default on SQLite, and every other Problem, where the user wrote the step by hand and the diff still refuses the types.
-
-**Needs:** a way for an accepted Problem to be recorded in the snapshot, so the step written by hand ends the Problem.
-
-**Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
-### `nilo_http`
-
-**`park-check` fails about one run in six on an unchanged tree, so `zig build test` is red that often for nothing a change did.** It reports "1 of 48 idle connections hold a second page of stack". Run alone on one machine, 10 of 60 runs failed with the stop's doorbell and 11 of 60 without it, interleaved ([`build.md`](../bench/result/build.md#where-zig-build-test-waits-on-zig-017)), so the flake is older than that change and not from it. The program counts every fiber stack above one page against a count taken before the connections opened, so a server fiber that is not a connection (an acceptor, the main fiber, a service) deepening during the window reads the same as a connection whose park crossed the boundary; which of the two it is has not been looked at, and the second would be a real 4,096 bytes on some connections.
-
-**What would settle it:** the failing run's stacks named by owner, from the smaps ranges against the fibers the server spawned, and then either the check counting connections only or the connection whose park crosses found and kept under the page.
-
-**`Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.** The store a route is given is a `cache.Space` in memory ([ADR 155](./adr/155-a-request-answered-once-is-answered-the-same-way-again.md)), and a payment retried during a rolling deploy is charged twice with nothing logged, which is the one thing the header exists to prevent. `Idempotent` asks its store for `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held` and nothing else (`http/idempotent.zig:268`), so a second store needs no change to it. A table in the database the program already has is the shape [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) chose for jobs, for the same reason.
-
-**Needs:** a store over a `Db` type the caller hands in, the way `job.Table(Db)` is, costing its round trip on `Idempotent` routes only, and [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)'s answer to which module it lives in.
-
-**Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
+Nothing is open at this tier.
 
 ---
 
@@ -69,7 +45,7 @@ Nothing is open at this tier.
 
 ### Every module
 
-**The public surface has not been read back against the reference.** 1.0 freezes what a dependent may write, and nothing yet checks that every `pub` in a module is on its page in `docs/reference/`, or that every name on a page is still `pub`. Found by reading, a name that should not be public is a break before 1.0 and a promise after it. `nilo_fetch` is a known case: `queryLen`, `queryWrite`, `QueryValue` and `checkQueryField` are `pub` so `target.zig` can reach them, and the form body added `paramsLen`, `paramsWrite`, `Style`, `checkForm` and `QueryValue.lenAs`/`writeAs` the same way, none of them on the reference page.
+**The public surface has not been read back against the reference, except for `nilo_fetch`'s.** 1.0 freezes what a dependent may write, and nothing yet checks that every `pub` in a module is on its page in `docs/reference/`, or that every name on a page is still `pub`. Found by reading, a name that should not be public is a break before 1.0 and a promise after it.
 
 **Needs:** the read-back, one module at a time, and a decision on each name the code and the page disagree about: document it, or take it out of the surface.
 
@@ -89,34 +65,11 @@ Nothing is open at this tier.
 
 ### `nilo_fetch`
 
-**A plain call costs 4,139 bytes on every idle connection**, still the largest per-connection figure in the framework. It is fiber stack rather than buffers, at the depth `std.http.Client` drives it to. [`bench/result/fetch.md`](../bench/result/fetch.md) ranks the levers: moving the buffers into the arena costs +4,096 bytes since the stack release, shrinking them is worth nothing because a stack buffer no byte touches is never a resident page ([ADR 186](./adr/186-the-transfer-buffer-serves-nothing-here.md)), and what is left is the frame `std.http.Client` waits in.
+**An `https://` call cannot go through an egress proxy, because `std.http.Client` cannot start TLS inside its tunnel.** `Settings.proxy` carries `http://` calls and refuses an `https://` one with `error.TlsThroughProxy` ([ADR 267](./adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)), and a network whose only way out is a proxy is mostly a network of HTTPS. Reading `std.http.Client.connect` and `connectProxied` at 0.17.0: the tunnel is a `CONNECT` on a connection created with the proxy's protocol, not the target's, so the request that follows is sent as text to a server expecting a handshake, and `Connection.Tls.create`, the one piece that would wrap the tunnel, is private. This is a reading, not a run: the fetch tests have no TLS server.
 
-**Needs:** the frame `std.http.Client` waits in measured frame by frame, which says whether anything short of a client of nilo's own can move it.
-
-**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
-
-**A call cannot go through an egress proxy or trust a private certificate authority, though `std.http.Client` does both.** std has `http_proxy`, `https_proxy` and `ca_bundle` on the client; `Client.Settings` names none of them, and the way round is to reach into `client.inner` and `client.fresh` by hand, which nothing documents. A service in a network whose only way out is a proxy, or calling an internal one whose certificate a company CA signed, cannot be written without it. std reads no `NO_PROXY`. reqwest has `Proxy` with a no-proxy list and `add_root_certificate`.
-
-**Needs:** `Settings.proxy`, given explicitly rather than read from the environment by default, with a list of hosts that skip it; `Settings.roots`, the system's or a bundle the caller loaded; both set on both std clients; and the binary cost in ADR 017's running total.
-
-**Whether a pooled connection the server has closed fails the next call with `WriteFailed` rather than being dialled again.** While writing the form-body tests in `fetch/live.zig`, a `putForm` sent as the third call on one `Client` failed with `WriteFailed` against the canned server, which closes its socket after every answer; split into a test of its own, it passed. A server that closes an idle keep-alive connection is ordinary (nginx after 75 s, most load balancers sooner), so if a pooled connection is reused without noticing, the first call after a quiet spell fails in production. It was seen at `8f45fe0` and not reproduced since, and whether `postJson` meets it the same way was not checked.
-
-**What would settle it:** a test that makes three calls on one `Client` against a server that closes after each answer, without `Connection: close`, at main; if it fails, the call retried once on a fresh connection when the write to a reused one fails before any byte of the request was accepted, which is the one case a retry cannot send twice.
-
-**A call worth retrying is retried by a loop each caller writes, and the loop the guide teaches retries a POST.** `nilo_fetch` refuses a retry policy because how many times and how long between are facts about the other service (`fetch/fetch.zig:83`), and the guide's answer is three lines: a loop, a `nilo.sleep`, and a `switch` on the errors worth another try (`docs/guide/fetch.md:361`). Those three lines are where the traps are. A POST sent again charges twice unless it carries an `Idempotency-Key`; a sleep with no jitter sends every caller back at the same instant; `Retry-After` is read and capped by hand or not at all; and a loop with no budget turns a service's bad minute into three times its load, the thundering herd the refusal names as its reason. The numbers are the caller's, and the mechanism is the same for everybody: tower's retry budget allows retries up to a fraction of recent calls (20% by default) and the AWS SDKs keep a retry quota for the same purpose, go-retryablehttp reads `Retry-After`, and Stripe's own clients put an `Idempotency-Key` on a POST before they retry it. `nilo_s3` has no retry either, so its `Throttled` reaches every caller where an AWS SDK tries three times. No ADR holds the refusal; it is in the module's header, the guide and the reference.
-
-**Needs:** a `.retry` on `fetch.Target`'s options with the caller's numbers (times, a backoff with jitter, a budget), only idempotent methods retried unless the call carries an `Idempotency-Key` or the type says how to make one, `Retry-After` read and capped, a `.stream` body under a `.retry` refused while compiling, an ADR saying which half is the caller's and which is the mechanism's, `nilo_s3`'s `Throttled` and `Unavailable` put through it, and one `Backoff` shared with `job.Retry`, which for two sibling modules means [ADR 057](./adr/057-percent-is-needed-by-two-layers.md)'s answer to whether it belongs in `nilo_core`.
-
-**Direction:** [A call to another service survives that service's bad minute](./roadmap.md#a-call-to-another-service-survives-that-services-bad-minute)
+**Needs:** a `CONNECT` proxy and a TLS server in the test suite to run it against (the proxy half is a few lines of the canned server); then either the fix upstream in std (a report, with the two functions above named), or `nilo_fetch` building the tunnel and the TLS client itself with `std.crypto.tls.Client` and handing std a connection it can read, which is a fork of the client and is weighed against ADR 017's size axis before it is written.
 
 ### `nilo_job`
-
-
-**A backoff has no jitter.** `Backoff.exponential` doubles from `from_ms` to `to_ms` with nothing random in it, so a downstream outage that fails a hundred rows at once retries all hundred at the same instant, again at the next doubling, and keeps the herd together for as long as the outage lasts. A jitter option on `Backoff` (the same one `nilo_fetch`'s retry needs) spreads them. It waits because `Backoff` lives in `nilo_job` and `nilo_fetch` may not import a sibling, so the shared one is either moved to `nilo_core` or written twice, which is the question the `nilo_fetch` retry entry above already carries, and settling it for one settles it for the other.
-
-**Needs:** the answer to whether `Backoff` belongs in `nilo_core` ([ADR 057](./adr/057-percent-is-needed-by-two-layers.md)), the `nilo_fetch` retry entry's decision; then a jitter field on it (full or equal, the caller's choice) and a source of randomness the Fitting layer already has.
-
-**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
 
 **A schedule is UTC.** `0 3 * * *` is three in the morning in Greenwich, and a program in Jakarta writes `0 20 * * *` with a comment. A time zone is a table of rules that changes twice a year and a dependency to carry it. A zone with daylight saving also has an hour each year that never happens and one that happens twice, so `0 2 * * *` in `Europe/Berlin` needs an answer to both; Vixie cron runs a skipped tick right after the jump and a repeated one once. Go embeds the whole database with `time/tzdata` (about 450 KB), and Rust's `chrono-tz` compiles it in with a filter for the zones a program names.
 
@@ -138,7 +91,7 @@ Nothing is open at this tier.
 
 **`within` remembers a push in one process, so the same push sent to two instances inside the window runs twice.** `.within` takes any value with `putIfAbsent` and `del` (`job/job.zig:481`), and the only one that exists is a `cache.Space`, which is per instance. `unique` still holds across instances while the first row is queued or running, because it is an index in the table; the window after it finishes is the part that does not, and a rolling deploy is two instances. river keeps that window in the table (`UniqueOpts.ByPeriod`), and asynq in Redis.
 
-**Needs:** the store the `Idempotent` entry builds over the caller's `Db`, which has the two calls `within` asks for, or the unique key kept past `done` in `nilo_jobs` for a kind that asks, whichever that store's design picks.
+**Needs:** `sql.Replays` ([ADR 268](./adr/268-an-answer-kept-for-a-retry-is-a-row-when-instances-share-a-database.md)) has the two calls `within` asks for, `putIfAbsentFor` and `del`, but takes the Scope first (`takes_scope`) and can fail, which `job/job.zig`'s window does not allow for; so either `.within` learns that shape the way `Idempotent` did and a failed claim runs the push (a window is a convenience, not a promise), or the unique key is kept past `done` in `nilo_jobs` for a kind that asks. Whichever is chosen, `job/` still names no `nilo_sql`.
 
 **Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
 
@@ -258,10 +211,6 @@ Nothing is open at this tier.
 
 **Needs:** an assertion that does not race the scheduler: the stop observed as the connection closing before any `Hang` handler returns, rather than a wall-clock figure, or a margin derived from the handlers' 4 s that a loaded machine cannot reach.
 
-**`park-check` failed once with "2 of 48 idle connections hold a second page of stack", and passed seven runs since on the same tree.** It was in a `zig build test` on the 16-core workstation on 2026-10-09, with no change to the connection path in the tree (the `http/` changes there were the OpenAPI writer, the JSON reader and comments). Either the measurement reads a page a parked connection touched once on its way to the park and gave back to nothing, which would make the step a flake, or two connections in 48 really do reach a second page on some schedule, which is the hard axis ADR 062 holds.
-
-**What would settle it:** `park-check` run a few hundred times on that machine, with the stack depth of each connection that fails printed, and the answer either a step that cannot fail on a schedule or a frame named in ADR 062.
-
 **A WebSocket over TLS has no test of its own for a second frame that arrived with the first.** `Wake.wait` answers `.readable` while the record layer holds ciphertext or decrypted bytes ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)), which a WebSocket's `park` waits in too, so the stall the HTTP/2 connection over TLS showed (one in a thousand) is closed for it by the same line. The test that holds it is HTTP/2's, `grpc_tls_live.zig`; `tls_live.zig` has no WebSocket test, so a change to how `park` waits could lose it unseen.
 
 **What would settle it:** a live test in `tls_live.zig` sending two WebSocket frames in one TLS write and timing the second.
@@ -332,13 +281,13 @@ Nothing is open at this tier.
 
 **What would settle it:** a test that places the stop: a handler that blocks on a flag until `app.shutdown()` has been requested, so the calls behind it are known to be queued when the stop lands, seen to fail with each of the three taken out; and a second review of `h2conn.zig`'s `runner`, `finishNext`, `rendezvous` and `spawnRunner`.
 
-**A `-Dtls` build parks 96 bytes past a page boundary, which costs 4,109 bytes on every idle connection of its plain listener, and a `-Dhttp2` build sits 64 bytes under it.** In the `park-check` program, read with a store-only probe that is not in the tree, the plain park is at 2,505 (288 under the 2,793 where a second page starts), 2,729 with `-Dhttp2`, 2,889 with `-Dtls` and 2,937 with both ([`http.md`](../bench/result/http.md#what-a-connections-task-costs-how-a-stack-buffer-costs-at-idle-and-how-close-the-park-sits-to-a-page), [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)). The `-Dtls` page is the inliner's, not TLS's: `Bridge.run` is a real call in the plain entry, and `always_inline` on it did not give the page back. The same pooling question is open beside it: arguments under zio's 384-byte pool size would take 115 bytes more off an HTTP/1.1 connection and cost an h2c one about 390, and why is not known.
+**The `-Dhttp2` build parked 64 bytes under a page boundary when it was last read, and which commit gave the `-Dtls` build its page back is not known.** The `-Dtls` plain listener held a second page (4,109 bytes a connection) at `514e8c1` and holds one at `1e583bc`, 4,692 bytes, with `park-check` pinning every build at one page ([`http.md`](../bench/result/http.md#a-tls-builds-plain-listener-holds-one-page), [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)). Nobody has bisected what moved it, so nothing says it will stay moved, and the depths (2,505 default, 2,729 with `-Dhttp2`, against a boundary at 2,793) were read before that change. The pooling question sits beside it: arguments under zio's 384-byte pool size would take 115 bytes more off an HTTP/1.1 connection and cost an h2c one about 390, and why is not known.
 
-**What would settle it:** the stack at the release printed with and without `Bridge.run` called through a function pointer or split in two, on `-Dtls`; and `gdb` on an h2c connection's task allocation under the pooled arguments. A day.
+**What would settle it:** the stack depth at the release printed again in the `park-check` program for each of the four builds, and the commit between `514e8c1` and `1e583bc` that moved the `-Dtls` one found by bisecting `park-check -Dtls`; `gdb` on an h2c connection's task allocation under the pooled arguments. A day.
 
 **Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
 
-**An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.** A connection past the idle peek ends its fiber and is a 512-byte record behind a poll; a reader fiber spawns it a fiber again when its socket is readable. 1,000 connections read 1,479 bytes, 10,000 read 892 and 843, and a busy connection and a wake after 300 ms of think time both measure level with the fiber build ([`http.md`](../bench/result/http.md#a-prototype-an-idle-http11-connection-with-no-fiber)); the first request after a quiet spell is 5 to 13 µs slower at the median. It reads that low only because the prototype sets zio's stack pool to shrink every second (at the default 60 s it reads 4,919 once the pool has decayed, 9,351 before), leaves out TLS, HTTP/2, the idle deadline and the shutdown of parked connections, and changes the Waker's table ([ADR 001](./adr/001-zio-as-the-engine-behind-the-bulkhead.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md), [ADR 017](./adr/017-the-trade-budget-has-four-axes.md)). It would close the `-Dtls` page above for a plain request/response connection and leave a WebSocket and a held stream exactly as ADR 062 describes them.
+**An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.** A connection past the idle peek ends its fiber and is a 512-byte record behind a poll; a reader fiber spawns it a fiber again when its socket is readable. 1,000 connections read 1,479 bytes, 10,000 read 892 and 843, and a busy connection and a wake after 300 ms of think time both measure level with the fiber build ([`http.md`](../bench/result/http.md#a-prototype-an-idle-http11-connection-with-no-fiber)); the first request after a quiet spell is 5 to 13 µs slower at the median. It reads that low only because the prototype sets zio's stack pool to shrink every second (at the default 60 s it reads 4,919 once the pool has decayed, 9,351 before), leaves out TLS, HTTP/2, the idle deadline and the shutdown of parked connections, and changes the Waker's table ([ADR 001](./adr/001-zio-as-the-engine-behind-the-bulkhead.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md), [ADR 017](./adr/017-the-trade-budget-has-four-axes.md)). It would close the TLS connection's second page for a plain request/response connection and leave a WebSocket and a held stream exactly as ADR 062 describes them.
 
 **What would settle it:** a decision on the design in [`spike/fiberless-idle/`](../spike/fiberless-idle/README.md) (its `design-note.md`); then a prototype with the idle deadline, the shutdown list, a reactor per executor and a TLS connection whose state is on the heap, read with `bench/mem.py --tls` and `bench/release.py`, and `zig build test-all` passing on it.
 
@@ -456,12 +405,6 @@ Nothing is open at this tier.
 
 ### `nilo_fetch`
 
-**What an outbound call costs through TLS is read off buffer sizes, not measured.** 59,151 bytes per HTTPS connection is std's number read out of its buffer sizes, 3.6× plain HTTP if it holds.
-
-**What would settle it:** the measurement beside `zig build smoke-tls -Dnetwork`, which already reaches a real endpoint. An afternoon.
-
-**Direction:** [Every byte an idle connection holds is on the record](./roadmap.md#every-byte-an-idle-connection-holds-is-on-the-record)
-
 **`nilo_fetch` speaks HTTP/1.1 only, so a service that answers gRPC cannot call one.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)); a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both halves.
 
 **What would settle it:** a caller of a gRPC service, and the idle bytes of an outbound HTTP/2 connection measured before it ships.
@@ -469,6 +412,10 @@ Nothing is open at this tier.
 **Whether a `Target` should stop calling a service that is failing, rather than wait out its timeout on every call.** A `Target`'s `max_in_flight` is a bulkhead: it bounds how many calls wait on a sick service, but each still waits its whole `timeout_ms`, and the handler behind it holds its fiber and its stack meanwhile ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)). A breaker answers at once while the service is down; sony/gobreaker and failsafe-go are what a Go migrant used. A retry budget takes away much of the reason for one, because it stops the load multiplying, so this stays open until the budget has met an outage.
 
 **What would settle it:** a service behind a `Target` timing out for a minute under load, with the retry budget built, measured for the fibers and bytes the waiting calls hold; and if that number is the problem, a breaker per `Target`, opt-in, its state in the type's value, answering `error.CircuitOpen` and shown by `nilo_ready`.
+
+**A streamed call cannot be made through a `Target`, and when one can, a `.stream` body under a `.retry` has to be a compile error.** `Exchange.begin` takes a client and a URL, so a target's standing headers, its gate and its `.retry` do not reach a streamed call ([ADR 061](./adr/061-a-fitting-borrows-the-loop.md)). [ADR 271](./adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md) decided that a reader is spent by the first try and so is never retried, and the Refusal that says it has nothing to refuse until a call can carry both: today the guard is that `nilo_s3` routes none of its reader-taking calls through the retry loop, held by a test.
+
+**Needs:** a caller who streams from a service that has standing headers; then the call on `Target`, with the Refusal beside it (a file in `fetch/refusals/` and a row in its table), written together.
 
 **Direction:** [A call to another service survives that service's bad minute](./roadmap.md#a-call-to-another-service-survives-that-services-bad-minute)
 

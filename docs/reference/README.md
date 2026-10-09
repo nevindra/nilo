@@ -141,7 +141,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
 - [`Upload`](./ctx.md#upload)
 - [Failing](./ctx.md#failing)
 
-**[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock and `Timestamp` and `Date`.
+**[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, and `Backoff`.
 
 - [`Str`](./core.md#str)
 - [`Run`](./core.md#run)
@@ -150,6 +150,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [Passing a value down: `give` and `resolve`](./core.md#passing-a-value-down-give-and-resolve)
 - [Scope](./core.md#scope)
   - [`AnyScope`](./core.md#anyscope)
+- [`nilo_core.Backoff`](./core.md#nilo_corebackoff)
 - [`nilo_core.percent`](./core.md#nilo_corepercent)
 - [The clock](./core.md#the-clock)
 - [`Timestamp` and `Date`](./core.md#timestamp-and-date)
@@ -263,6 +264,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [Errors](./sql.md#errors)
     - [`sql.problem`](./sql.md#sqlproblem)
     - [`sql.violated`](./sql.md#sqlviolated)
+  - [`sql.Replays`: the answers two instances share](./sql.md#sqlreplays-the-answers-two-instances-share)
   - [Migrations](./sql.md#migrations)
     - [The marker's schema words](./sql.md#the-markers-schema-words)
     - [Enum columns](./sql.md#enum-columns)
@@ -300,12 +302,14 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`Client.Settings`](./fetch.md#clientsettings)
   - [`Client.Call`](./fetch.md#clientcall)
   - [A call under a traced request](./fetch.md#a-call-under-a-traced-request)
+  - [A proxy and a private authority](./fetch.md#a-proxy-and-a-private-authority)
   - [Redirects](./fetch.md#redirects)
   - [Responses with no body](./fetch.md#responses-with-no-body)
   - [Errors](./fetch.md#errors)
   - [Compression](./fetch.md#compression)
   - [What it does not do](./fetch.md#what-it-does-not-do)
   - [`fetch.Target`](./fetch.md#fetchtarget)
+  - [`fetch.Retry`](./fetch.md#fetchretry)
   - [`fetch.Exchange`](./fetch.md#fetchexchange)
   - [`fetch.testing`](./fetch.md#fetchtesting)
 

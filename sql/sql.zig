@@ -86,6 +86,7 @@
 //! | **Wire** | `wire.zig` | the contract a driver meets |
 //! | **the drivers** | `postgres.zig`, `sqlite.zig` | pg.zig and zqlite, and the only two files that name either |
 //! | **Db** | `db.zig` | what a handler holds, and where `Str` stops |
+//! | **replays** | `replays.zig` | `nilo.Idempotent`'s answers, kept in a table every instance shares (ADR 268) |
 //! | **live tests** | `live.zig` | the half that needs a real Postgres |
 //!
 //! Two seams rather than one, because two different things get replaced
@@ -150,6 +151,16 @@ pub const cli = @import("cli.zig");
 /// constant in the binary. `migrate.plan(…)` is the diff a tool generates from,
 /// and it touches no database at all.
 pub const migrate = @import("migrate.zig");
+
+/// Where `nilo.Idempotent` keeps its answers when several instances have to
+/// agree on them: a table in this database, claimed with one statement
+/// ([ADR 268](../docs/adr/268-an-answer-kept-for-a-retry-is-a-row-when-instances-share-a-database.md)).
+///
+/// ```zig
+/// const Replays = sql.Replays(Db, .{ .name = "orders", .ttl_s = 86_400, .max_bytes = 16 << 10 });
+/// ```
+pub const Replays = replays.Replays;
+pub const replays = @import("replays.zig");
 
 /// What a handler holds. `*sql.Db` in a signature is a service like any
 /// other, so `listen()` checks it is registered before the first request
@@ -594,6 +605,7 @@ test {
     _ = ordering;
     _ = shape;
     _ = composed;
+    _ = replays;
     // Reached only through `db.zig` and `schema.zig`, which import it for its
     // checks and so never ran its own tests: 29 of them sat here unrun.
     _ = @import("rawcheck.zig");

@@ -54,13 +54,15 @@ Given to `init`:
 
 | Field | Default | |
 |---|---|---|
-| `max_in_flight` | 32 | calls at once, across every host. Past this, a caller waits for a permit instead of opening another connection. An HTTPS connection holds 59,151 bytes |
+| `max_in_flight` | 32 | calls at once, across every host. Past this, a caller waits for a permit instead of opening another connection. An HTTPS connection allocates 59,151 bytes, of which 12 KB are resident after a small answer and 45 KB after a large one |
 | `timeout_ms` | 30,000 | how long one whole call may take. `0` means no limit. **The shorter of this and the time the Scope's route has left**, if it has a [deadline](./middleware.md#nilodeadline): the call is `error.TimedOut` when either runs out, and a request whose time has already passed (including time spent queued for a permit) fails without dialling ([ADR 105](../adr/105-a-route-can-say-how-long-it-has.md)). A `nilo.Run` has no deadline. It works with or without an Engine: under `listen()` the Engine cancels the fiber; on a client started with `nilo_start(io, .none)`, each step of the call runs as a task of that `Io` and the task is cancelled, which costs one thread hop per step, only in that case ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)) |
 | `stall_ms` | 0 | how long the other side may send **nothing** before the call fails with `error.Stalled`: time since the last byte, not since the call began. `0` means no such limit. While a `.stream` body goes out, every chunk the source hands over counts as a byte, since nothing arrives from the peer meanwhile. Works together with `timeout_ms`; the Engine's timer is re-armed on every chunk, or without an Engine the wait is measured from the last byte ([ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md)) |
 | `max_body` | 8 MiB | a longer body fails with `error.BodyTooLarge`, checked while reading |
 | `max_drain` | 64 KiB | how much of an unread body to read in order to keep a pooled connection. Past this the connection is dropped |
 | `read_buffer_size` | 8 KiB | each connection's socket read buffer, and therefore how much one read brings in. std's default, passed through ([ADR 186](../adr/186-the-transfer-buffer-serves-nothing-here.md)) |
 | `forward_request_id` | true | a call made under a `*Ctx` sends the request's id as `X-Request-Id`, so the other side's logs line up with yours. A `Run` has no id and sends none; a call that sets its own `X-Request-Id` in `headers` keeps it ([ADR 158](../adr/158-a-request-id-goes-out-with-the-call.md)) |
+| `proxy` | null | an egress proxy for `http://` calls: `.{ .url = "http://user:password@host:3128", .bypass = &.{ "corp.example", "127.0.0.1" } }`. Never read from the environment. See [A proxy and a private authority](#a-proxy-and-a-private-authority) ([ADR 267](../adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)) |
+| `roots` | null | the certificate authorities an `https://` call trusts, as a `*const std.crypto.Certificate.Bundle` you loaded. Null is the system's, scanned on the first `https://` call. The bundle is yours: it must outlive the client and not change while it lives |
 
 ### `Client.Call`
 
@@ -69,6 +71,28 @@ Given per call: `headers`, and `timeout_ms` / `stall_ms` / `max_body` to overrid
 ### A call under a traced request
 
 **On an App that calls `app.trace`, a call made under a `*Ctx` is a client span, and it sends `traceparent`** naming that span, plus the `tracestate` the request arrived with. The span has the method, `server.address`, `server.port`, the status, and the error's name when the call failed. A call that sets its own `traceparent` in `headers` keeps it, and no span id is sent for it. A `Run` declares no trace and sends none. An `Exchange` sends only the headers it is given, as it does for the request id ([ADR 158](../adr/158-a-request-id-goes-out-with-the-call.md)), so a signed `nilo_s3` request is not traced. A Scope of your own joins by declaring `traceBegin(self) ?core.trace.Outbound` and `traceEnd(self, core.trace.Outbound, core.trace.Ended) void` ([ADR 247](../adr/247-a-request-is-a-span-and-the-trace-leaves-as-otlp.md), [Tracing](../guide/tracing.md)).
+
+### A proxy and a private authority
+
+**`Settings.proxy` sends every `http://` call to a forward proxy, and `Settings.roots` replaces the authorities an `https://` call trusts.** Both are applied to both of the client's std clients, the pooled one and the one a `.stream` body takes ([ADR 267](../adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+
+```zig
+var roots: std.crypto.Certificate.Bundle = .empty;
+defer roots.deinit(gpa);
+try roots.rescan(gpa, io, now); // the system's, then one more
+try roots.addCertsFromFilePathAbsolute(gpa, io, now, "/etc/corp/ca.pem");
+
+var api: fetch.Client = .init(gpa, .{
+    .roots = &roots,
+    .proxy = .{ .url = "http://user:secret@proxy.corp:3128", .bypass = &.{ "corp.example", "127.0.0.1" } },
+});
+```
+
+- **The proxy URL is `http://` or `https://` with an optional `user:password@`**, which becomes `Proxy-Authorization: Basic` and is sent to the proxy and nowhere else. A bad one is `error.InvalidProxy` from `nilo_start`, before the program serves. Nothing is read from `HTTP_PROXY` or `NO_PROXY`; pass what your configuration says.
+- **`bypass` lists hosts dialled directly.** An entry matches the host it names and every host under it, ignoring case (`corp.example` skips `api.corp.example`); a leading `.` or `*.` is the same, `*` is every host. No CIDR range, no port. **`localhost` and loopback are not skipped unless listed.**
+- **An `https://` call the proxy would carry is `error.TlsThroughProxy`, before anything is dialled.** std 0.17 cannot start TLS inside its tunnel and would send the request in the clear. List the host in `bypass` to reach it directly. HTTPS through a proxy waits on std or on a client of nilo's own ([`docs/todo.md`](../todo.md)).
+- **The proxy's credential never follows a redirect.** A followed redirect to a bypassed host goes direct without it; a `Proxy-Authorization` line you wrote yourself is dropped past a change of origin as before.
+- **`roots` is shared, not copied.** An empty bundle trusts nobody; "the system's plus one file" is the recipe above. `deinit` hands the bundle back untouched.
 
 ### Redirects
 
@@ -80,7 +104,7 @@ Given per call: `headers`, and `timeout_ms` / `stall_ms` / `max_body` to overrid
 
 ### Errors
 
-**Each error means one thing.** `error.TimedOut` is this call's own deadline. `error.Stalled` is `stall_ms` passing with nothing arriving while the other side keeps the socket open. `error.Canceled` is the server shutting down underneath the call. The three are kept distinct instead of guessed at. `error.RedirectRefused` is a 3xx with a `Location` under an `Exchange` that did not choose a redirect policy (`Client.get` and the other calls above do follow redirects). `error.InsecureRedirect` is a followed redirect that led from `https` to `http`: it is not followed. `error.NotStarted` is a call made before `listen()`; the client is finished at startup like any other service.
+**Each error means one thing.** `error.TimedOut` is this call's own deadline. `error.Stalled` is `stall_ms` passing with nothing arriving while the other side keeps the socket open. `error.Canceled` is the server shutting down underneath the call. The three are kept distinct instead of guessed at. `error.RedirectRefused` is a 3xx with a `Location` under an `Exchange` that did not choose a redirect policy (`Client.get` and the other calls above do follow redirects). `error.InsecureRedirect` is a followed redirect that led from `https` to `http`: it is not followed. `error.NotStarted` is a call made before `listen()`; the client is finished at startup like any other service. `error.TlsThroughProxy` is an `https://` call that `Settings.proxy` would carry, and `error.InvalidProxy` is a proxy URL the start refused.
 
 **A 4xx or 5xx is a `Response`, not an error.** The call worked and the service said no; only the caller knows which of those matters.
 
@@ -94,7 +118,7 @@ Given per call: `headers`, and `timeout_ms` / `stall_ms` / `max_body` to overrid
 
 **An answer sent before the body was finished is the answer.** When writing a large body fails because the server refused it on the head and closed, `begin` returns that refusal (a 4xx or 5xx) rather than `WriteFailed`, and the connection is not reused. A 2xx in that position is not taken, since the server never received the whole upload.
 
-**No retry policy, circuit breaker or rate limiter.** Those are decisions about somebody else's service, and belong to whoever knows what that service promises.
+**No circuit breaker or rate limiter, and no retry unless a `Target` declares one.** How many times and what counts as failure are decisions about somebody else's service, and belong to whoever knows what that service promises; the mechanism of trying again is `Target`'s `.retry` ([below](#fetchretry)).
 
 ### `fetch.Target`
 
@@ -120,11 +144,35 @@ fn charge(stripe: *Stripe, c: *nilo.Ctx, charge_id: nilo.Str) !fetch.Response {
 | `stripe.url(c, path, args)` | `[]const u8`: the URL alone, in the Scope, one allocation of exactly the right size, for an `Exchange` begun on the client |
 | `stripe.nilo_ready(scope)` | ready once started, unless the type names a `ready` path, which is then fetched with GET on every probe, and anything but a 2xx is reported |
 
-**`fetch.target.Options`**, on the type: `max_in_flight` (0 means no limit of its own; otherwise this service's own semaphore, taken before the client's and released after), `timeout_ms`, `stall_ms`, `max_body` (each null to use the client's, and a `Call` can still override them for one call), and `ready` (null, or a path starting with `/`).
+**`fetch.target.Options`**, on the type: `max_in_flight` (0 means no limit of its own; otherwise this service's own semaphore, taken before the client's and released after, per try), `timeout_ms`, `stall_ms`, `max_body` (each null to use the client's, and a `Call` can still override them for one call), `ready` (null, or a path starting with `/`) and `retry` (null, or a [`fetch.Retry`](#fetchretry)).
 
 **`path` is a template known at compile time.** `{}` is filled by position from a tuple (`"/repos/{}/{}", .{ owner, name }`), and the count is checked. `{name}` is filled from the struct field of that name, and **every field the template does not name becomes a query param** under `withQuery`'s rules: `"/v1/charges/{id}/refunds", .{ .id = id, .limit = 10, .cursor = cursor }`, with a null cursor left out. A segment may be an int, a bool or text, and `/` inside it is encoded as data. Each of these is a Refusal: a count that does not match, a name with no field, a tuple for a named segment, a struct for a positional one, a template mixing the two, a segment of another type, and a path that does not start with `/`.
 
 **Standing headers, and a call's headers over them.** `authorization` and `user_agent` use std's slot; a line in `Call.headers` naming either replaces it ([ADR 182](../adr/182-a-header-std-owns-goes-out-once.md)). A line naming any other standing header overrides it. There is no allocation unless a call with its own headers meets a target that also has some, and then there is one.
+
+### `fetch.Retry`
+
+**What a `Target` does when the service has a bad minute**: `fetch.Target("stripe", .{ .retry = .{ .times = 3, .mint_key = "Idempotency-Key" } })`. The numbers are the caller's, the mechanism is nilo's, and a target that declares nothing holds and runs none of it ([ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md), the [guide](../guide/fetch.md#retrying)).
+
+| Field | Default | |
+|---|---|---|
+| `times` | 2 | tries after the first; 0 is a Refusal |
+| `backoff` | exponential 100 ms to 2 s, `.jitter = .full` | a `nilo_core.Backoff` ([core](./core.md#nilo_corebackoff)); `from_ms = 0` and `to_ms < from_ms` are Refusals |
+| `statuses` | `&.{ 429, 502, 503, 504 }` | answers worth another try; each must be 400 to 599 |
+| `retry_after_max_ms` | 5,000 | `Retry-After`, in seconds or as an HTTP date, is a floor on the wait, capped here |
+| `budget` | `.{ .percent = 20, .min_per_sec = 10, .window_s = 10 }` | retries allowed up to `percent` of the calls made in the last `window_s` seconds (1 to 16), plus `min_per_sec` a second. Both 0 is a Refusal; there is no way to turn it off |
+| `mint_key` | null | the header name a POST or PATCH with no `Idempotency-Key` of its own is given a minted key under (32 hex digits, the same on every try). A Refusal for an empty name or one with a space or colon |
+
+**What is retried.** GET, HEAD, PUT, DELETE, OPTIONS, TRACE and QUERY always; POST and PATCH only with an `Idempotency-Key` in `Call.headers` or the target's standing headers, or with `mint_key`. A status in `statuses`, and a failure before an answer: `ConnectionRefused`, `ConnectionResetByPeer`, `ConnectionTimedOut`, `NetworkUnreachable`, `HttpConnectionClosing`, `UnknownHostName`, `TemporaryNameServerFailure`, `ReadFailed`, `WriteFailed`, `TimedOut` and `Stalled`. Never `Canceled`. When the tries run out the last `Response` is returned as itself, or the last error.
+
+**The wait** is the backoff's jittered delay, or the capped `Retry-After` if that is longer, slept on the fiber with no permit held. A wait not shorter than the route's time left (`core.timeLeftOf`) is not taken, and the answer in hand is returned; each try runs under the time left at that moment, so the whole sequence ends by the route's deadline.
+
+| | |
+|---|---|
+| `fetch.retry.Retry.problem()` | `?[]const u8`: what is wrong with the numbers, which is the text of the Refusal and of `s3.Store`'s `error.BadRetry` log line |
+| `fetch.retry.Ledger` | the budget's counts, 264 bytes, one per target that declares `.retry` and one per `s3.Store`; `fetch.retry.Tries` is one call's progress, on the stack, for a module that retries a round trip of its own (`nilo_s3` does) |
+| `fetch.retry.retryAfterMs(value, now_s)` | `?u64`, the header's wait in milliseconds, or null |
+| `fetch.testing.Canned.serveScript(script, count)` | answers `count` requests from `[]const fetch.testing.Reply`, one connection each and `Connection: close`; `canned.tried` has how many arrived, when, and `headOfTry(n)` the head of each |
 
 ### `fetch.Exchange`
 
@@ -143,7 +191,7 @@ _ = try ex.pipe(&body.writer);   // straight out, allocating nothing
 |---|---|
 | `ex.begin(client, .{…})` | `Head`: status, `content_length`, `content_type`, `header(name)` (case-insensitive), `ok()`, and `redirected` / `location(&buf)`: the `std.Uri` a followed redirect ended at, or null, and the same as one string. Its text lives in the `.follow` buffer the call was given ([ADR 183](../adr/183-a-redirect-is-a-decision-with-a-name.md)) |
 | `head.keep(c)` | the same `Head` copied into the Scope, valid after the body is read: one arena allocation the size of the header block ([ADR 187](../adr/187-a-head-that-outlives-its-body.md)) |
-| `ex.take(c, max)` | the rest of the body as a `Str` in the Scope, refusing anything over `max` |
+| `ex.take(c, max)` | the rest of the body as a `Str` in the Scope, refusing anything over `max`. A body that announced its length (and within `max`) is read into exactly that many bytes, and `error.BodyTooShort` if it ends short; a chunked one grows |
 | `ex.readInto(buf)` | exactly `buf.len` bytes, or `error.BodyTooShort` |
 | `ex.pipe(w)` | the rest of the body into a `*std.Io.Writer`, and how many bytes |
 | `ex.stream(w, limit)` | one chunk into `w`, at most `limit`, and how many bytes; `0` means the end. It is what one socket read delivered, and it runs inside both timeouts, which the same call on `ex.reader` does not |

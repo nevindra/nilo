@@ -88,6 +88,8 @@ declarations read by name so that `http/` need not import `nilo_id`
 Redis, which is what a key that has to survive a restart or be shared between
 instances wants, and the module graph is unchanged either way.
 
+**The store the instances share is `sql.Replays`**, a table in the database the program already has ([ADR 268](./268-an-answer-kept-for-a-retry-is-a-row-when-instances-share-a-database.md)), which is why the six declarations are a contract and not a description of one cache. A store that can fail and needs the request's memory declares `takes_scope`, is called with the Scope first, and has no `Held`; `Idempotent` maps every failure of it but `TooLarge` to a 503 before the handler runs (the claim could not be taken, and running unclaimed is the double run the key exists to prevent) and keeps the answer-put failure out of the way of the answer already made. The in-memory Space answers once per process, as above, and the guide says which to pick.
+
 ## What it costs
 
 Put against [ADR 017](./017-the-trade-budget-has-four-axes.md)'s four

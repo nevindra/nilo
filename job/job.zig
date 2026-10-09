@@ -89,13 +89,13 @@ pub const Enqueue = contract.Enqueue;
 pub const Priority = contract.Priority;
 
 /// How long to wait before trying again, as a function of how many times it
-/// has already been tried.
-pub const Backoff = union(enum) {
-    /// The same wait every time.
-    fixed_ms: u32,
-    /// Doubling from `from_ms`, and never past `to_ms`.
-    exponential: struct { from_ms: u32, to_ms: u32 },
-};
+/// has already been tried. `nilo_core`'s, because `nilo_fetch` waits between
+/// a call's attempts the same way and the two modules are siblings
+/// ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md));
+/// `.exponential` takes a `.jitter` (`.none`, `.full` or `.equal`) that
+/// spreads a hundred rows a downstream outage failed together.
+pub const Backoff = core.Backoff;
+pub const Jitter = core.Jitter;
 
 /// What happens when `run` fails. A job says this or it does not compile:
 /// the number of tries is a promise about somebody's email, and a default
@@ -108,17 +108,16 @@ pub const Retry = struct {
     /// One attempt, and a failure is final.
     pub const none: Retry = .{ .times = 0 };
 
-    /// The wait after the attempt numbered `failed` — `1` for the first.
+    /// The wait after the attempt numbered `failed` — `1` for the first —
+    /// before any jitter: the longest it will be.
     pub fn delayMs(self: Retry, failed: u32) u64 {
-        return switch (self.backoff) {
-            .fixed_ms => |ms| ms,
-            .exponential => |e| blk: {
-                var ms: u64 = e.from_ms;
-                var i: u32 = 1;
-                while (i < failed and ms < e.to_ms) : (i += 1) ms *= 2;
-                break :blk @min(ms, e.to_ms);
-            },
-        };
+        return self.backoff.ceilingMs(failed);
+    }
+
+    /// The wait after the attempt numbered `failed`, with `random` spent on
+    /// the backoff's jitter. What a worker schedules the next attempt by.
+    pub fn jitteredMs(self: Retry, failed: u32, random: u64) u64 {
+        return self.backoff.delayMs(failed, random);
     }
 };
 
@@ -1121,12 +1120,29 @@ pub fn Jobs(comptime options: anytype) type {
                 self.finishDead(scope, claimed.id, K, name, claimed.attempts, clock);
                 return;
             }
-            const again = clock.now() + @as(i64, @intCast(retry.delayMs(claimed.attempts))) * std.time.us_per_ms;
+            // The wait carries the kind's jitter, so a hundred rows a
+            // downstream outage failed together do not all come back at the
+            // instant the backoff names (ADR 271).
+            const wait_ms = retry.jitteredMs(claimed.attempts, self.randomBits());
+            const again = clock.now() + @as(i64, @intCast(wait_ms)) * std.time.us_per_ms;
             log.warn("\"{s}\" row {d} failed with {s} on attempt {d}; again in {d}ms", .{
-                K.nilo_job, claimed.id, name, claimed.attempts, retry.delayMs(claimed.attempts),
+                K.nilo_job, claimed.id, name, claimed.attempts, wait_ms,
             });
             if (!self.settled(claimed.id, "retry", self.store.retry(scope, claimed.id, claimed.attempts, again, name))) return;
             self.note(claimed.id, .queued, claimed.attempts);
+        }
+
+        /// 64 bits for a backoff's jitter: the loop's own generator
+        /// (`std.Io.random`, a per-executor state and not a syscall), or a
+        /// mix of the clock on a queue driven by hand before `start`, where
+        /// the bits only have to differ from one row to the next.
+        fn randomBits(self: *Self) u64 {
+            var bits: [8]u8 = undefined;
+            if (self.io) |io| {
+                io.random(&bits);
+                return std.mem.readInt(u64, &bits, .little);
+            }
+            return @as(u64, @bitCast(core.monotonicMicros())) *% 0x9E3779B97F4A7C15;
         }
 
         /// Whether this fiber has a cancellation pending, put back for the
@@ -2298,6 +2314,21 @@ const Stubborn = struct {
     }
 };
 
+/// Fails and waits a second at most, with full jitter: forty of them failing
+/// together are not due together.
+const Spread = struct {
+    pub const nilo_job = "spread";
+    pub const retry: Retry = .{ .times = 1, .backoff = .{ .exponential = .{ .from_ms = 1_000, .to_ms = 1_000, .jitter = .full } } };
+
+    pub fn run(self: Spread, scope: *core.Run, ledger: *Ledger) !void {
+        _ = self;
+        _ = scope;
+        ledger.seen += 1;
+        if (ledger.seen <= ledger.fail_first) return error.NotYet;
+        try ledger.record("spread ran");
+    }
+};
+
 const Nightly = struct {
     pub const nilo_job = "nightly";
     pub const retry: Retry = .none;
@@ -2313,7 +2344,7 @@ const Nightly = struct {
 };
 
 const ClockJobs = Jobs(.{
-    .kinds = .{ Greet, Stubborn, Nightly },
+    .kinds = .{ Greet, Stubborn, Spread, Nightly },
     .store = Memory,
     .deps = struct { ledger: *Ledger },
 });
@@ -2366,6 +2397,31 @@ test "an exponential backoff's third attempt waits the doubled time, on a moved 
     try testing.expectEqualStrings("stubborn ran", ledger.lines.items[0]);
     try testing.expectEqual(@as(u32, 4), ledger.seen);
     try testing.expectEqual(@as(u64, 0), (try jobs.stats(&run)).dead);
+}
+
+test "forty rows that failed together are not due together when the backoff has jitter" {
+    var store = try Memory.open(testing.allocator, .{ .bytes = 256 << 10 });
+    defer store.deinit();
+    var ledger: Ledger = .{ .gpa = testing.allocator, .fail_first = 40 };
+    defer ledger.deinit();
+    var jobs: ClockJobs = .open(testing.allocator, &store, .{ .ledger = &ledger }, .{});
+    var run: core.Run = .init(testing.allocator);
+    defer run.deinit();
+
+    const ms = std.time.us_per_ms;
+    const t: i64 = 1_800_000_000 * std.time.us_per_s;
+    for (0..40) |_| _ = try jobs.push(&run, Spread{}, .{ .at = t });
+
+    // All forty fail at `t`, each scheduling its retry by a wait drawn from
+    // zero to the second the backoff names.
+    try testing.expectEqual(@as(usize, 40), try jobs.drainAt(&run, t));
+    // Some are due within half of it and some are not: not one instant.
+    const early = try jobs.drainAt(&run, t + 500 * ms);
+    try testing.expect(early > 0);
+    try testing.expect(early < 40);
+    // And none waits past the second, which is the ceiling.
+    try testing.expectEqual(@as(usize, 40 - early), try jobs.drainAt(&run, t + 1_001 * ms));
+    try testing.expectEqual(@as(usize, 40), ledger.lines.items.len);
 }
 
 test "a cron schedule fires when the clock is moved to three in the morning" {

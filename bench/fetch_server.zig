@@ -25,6 +25,12 @@
 //! - `/warm` — a kilobyte out of the request arena and no client at all. The
 //!   control that decided the result.
 //! - `/call` — the same call through `nilo_fetch`.
+//! - `/exact` — `/bare` with the body read into a buffer sized by the head's
+//!   `content-length`: the lever behind the retained arena.
+//!
+//! `NILO_ARENA_KEEP=0` in the environment takes the retained request arena
+//! out of every route's number, which is how the 4,139 bytes a call holds
+//! turned out to be the arena's and not the stack's (`bench/result/fetch.md`).
 //!
 //! The upstream is inside this process, on a thread of its own with its own
 //! `std.Io.Threaded`, answering a fixed ~1 KB body. That is deliberate: an
@@ -163,6 +169,31 @@ fn warm(c: *nilo.Ctx) !nilo.Str {
     return c.str(bytes);
 }
 
+/// `/bare` with the body read into a buffer sized by the head's
+/// `content-length`, the way `Exchange.readInto` does, instead of grown by
+/// `allocRemaining` (which asks the arena for 1,641 bytes for a 1,008-byte
+/// body and shrinks it afterwards). The lever behind the retained arena, which
+/// is what the 4,139 an idle connection holds after a call turned out to be
+/// (`bench/result/fetch.md`, *The 4,139 was the arena*).
+fn exact(client: *Bare, c: *nilo.Ctx) !nilo.Str {
+    const uri = try std.Uri.parse(upstream_url);
+    var req = try client.inner.request(.GET, uri, .{});
+    defer req.deinit();
+    try req.sendBodiless();
+
+    var redirect_buffer: [2 << 10]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+
+    // The header block first, as `Exchange.begin` keeps it (ADR 187), so the
+    // arena sees the same two allocations in the same order as `/call`'s.
+    _ = try c.arena().dupe(u8, response.head.bytes);
+    const len: usize = @intCast(response.head.content_length orelse return error.NoContentLength);
+    const bytes = try c.arena().alloc(u8, len);
+    var transfer_buffer: [64]u8 = undefined;
+    try response.reader(&transfer_buffer).readSliceAll(bytes);
+    return c.str(bytes);
+}
+
 fn call(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
     const res = try api.get(c, upstream_url, .{});
     return res.body;
@@ -236,7 +267,7 @@ const Upstream = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.smp_allocator;
 
     var upstream: Upstream = .{};
@@ -273,6 +304,7 @@ pub fn main() !void {
     try app.get("/bare", bare);
     try app.get("/arena", arena);
     try app.get("/warm", warm);
+    try app.get("/exact", exact);
     try app.get("/call", call);
 
     // 8791 rather than 8789, which `bench/sql_server.zig`'s neighbour and any
@@ -280,7 +312,14 @@ pub fn main() !void {
     // generator pointed at a port somebody else is holding measures somebody
     // else's routes and reports them as non-2xx, which is how three runs of
     // this were thrown away before the port was the thing suspected.
-    try app.listen(.{ .port = 8791 });
+    // `NILO_ARENA_KEEP=0` takes the retained request arena out of the
+    // number, which is how the 4,139 was found to be the arena's and not the
+    // stack's (bench/result/fetch.md). Unset, it is the default.
+    const keep: usize = if (init.environ_map.get("NILO_ARENA_KEEP")) |v|
+        try std.fmt.parseInt(usize, v, 10)
+    else
+        (nilo.Options{}).arena_keep;
+    try app.listen(.{ .port = 8791, .arena_keep = keep });
 }
 
 /// `s` written `n` times over, at compile time: what `s ** n` said before

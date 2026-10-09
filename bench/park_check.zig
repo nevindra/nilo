@@ -24,12 +24,13 @@
 //! `/proc/self/smaps` for the 256 KiB fiber stacks and how many pages each
 //! holds.
 //!
-//! - A build under the boundary (the default, `-Dhttp2`) must hold one page
-//!   on every connection. Two or more is the failure.
-//! - A build already across it (`-Dtls`, the inliner's page, ADR 212) is
-//!   pinned at two pages on every connection. A third fails it. One means the
-//!   page has been given back, which is good news and is printed as a note:
-//!   the pin is stale and should come down in the same commit.
+//! Every build (the default, `-Dhttp2`, `-Dtls`, `-Dtls -Dhttp2`) must hold
+//! one page on every connection. Two or more is the failure. The `-Dtls`
+//! build used to be pinned at two (ADR 212, the inliner's page); it parks at
+//! one page since the run in `bench/result/http.md` ("A TLS
+//! build's plain listener holds one page"), and the pin came down with it. This program
+//! parks plain connections only: a connection that did the TLS handshake
+//! parks at 3,994 bytes, two pages, and is held by `bench/mem.py --tls`.
 //!
 //! **Where it runs.** It reads `/proc`, and a stack's depth is an x86-64
 //! property, so `build.zig` adds the run only when both the host and the
@@ -43,7 +44,6 @@
 
 const std = @import("std");
 const nilo = @import("nilo_http");
-const build_options = @import("park_options");
 
 /// Quiet: the step prints one line, and a build step that writes to stderr is
 /// reported as having failed even when it exits 0.
@@ -59,9 +59,9 @@ pub const panic = nilo.panic;
 /// stray to show, few enough that opening them is quick.
 const connections = 48;
 
-/// Pages a plain idle connection holds in this build: the known cost, and
+/// Pages a plain idle connection holds, in every build: the known cost, and
 /// the most it may take.
-const pinned_pages: u32 = if (build_options.tls) 2 else 1;
+const pinned_pages: u32 = 1;
 
 fn health() []const u8 {
     return "alive\n";
@@ -71,9 +71,16 @@ fn serve(app: *nilo.App) void {
     app.tryListen(.{ .port = 0, .threads = 2, .stop_on_signal = false }) catch {};
 }
 
-/// How many fiber stacks (256 KiB mappings) hold at least two, and at least
-/// three, pages, from `/proc/self/smaps`.
-const Held = struct { two: u32 = 0, three: u32 = 0 };
+/// How many fiber stacks hold at least two, and at least three, pages, and
+/// how many fiber stacks there are, from `/proc/self/smaps`.
+///
+/// **A fiber stack is a 256 KiB mapping with the `nh` flag**, which is how
+/// zio marks one (no huge pages). Size alone is not enough: the process also
+/// holds anonymous 256 KiB mappings that are not stacks (the allocator's),
+/// which appear and grow while the connections open, and which this program
+/// counted as "a connection holding a second page" in about one run in five
+/// (`bench/result/build.md`, "Why park-check failed one run in five").
+const Held = struct { stacks: u32 = 0, two: u32 = 0, three: u32 = 0 };
 
 fn heldStacks(gpa: std.mem.Allocator, io: std.Io) !Held {
     // Read to the end of the stream: `/proc` files claim a size of zero, which
@@ -87,12 +94,21 @@ fn heldStacks(gpa: std.mem.Allocator, io: std.Io) !Held {
 
     var held: Held = .{};
     var size_kb: usize = 0;
+    var rss_kb: usize = 0;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (std.mem.startsWith(u8, line, "Size:")) {
             size_kb = std.fmt.parseInt(usize, std.mem.trim(u8, line["Size:".len..], " kB"), 10) catch 0;
-        } else if (size_kb == 256 and std.mem.startsWith(u8, line, "Rss:")) {
-            const rss_kb = std.fmt.parseInt(usize, std.mem.trim(u8, line["Rss:".len..], " kB"), 10) catch 0;
+        } else if (std.mem.startsWith(u8, line, "Rss:")) {
+            rss_kb = std.fmt.parseInt(usize, std.mem.trim(u8, line["Rss:".len..], " kB"), 10) catch 0;
+        } else if (size_kb == 256 and std.mem.startsWith(u8, line, "VmFlags:")) {
+            // The last line of a mapping's block, so Size and Rss are its own.
+            var flags = std.mem.tokenizeScalar(u8, line["VmFlags:".len..], ' ');
+            const is_stack = while (flags.next()) |flag| {
+                if (std.mem.eql(u8, flag, "nh")) break true;
+            } else false;
+            if (!is_stack) continue;
+            held.stacks += 1;
             if (rss_kb > 4) held.two += 1;
             if (rss_kb > 8) held.three += 1;
         }
@@ -161,11 +177,13 @@ pub fn main() !u8 {
     // machine can be late. Bounded, and the last reading is the one judged.
     var two: u32 = 0;
     var three: u32 = 0;
+    var stacks: u32 = 0;
     var last_two: u32 = std.math.maxInt(u32);
     var steady: u32 = 0;
     for (0..100) |round| {
         std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
         const now = try heldStacks(gpa, io);
+        stacks = now.stacks;
         two = now.two -| before.two;
         three = now.three -| before.three;
         // Steady means the count of stacks above one page has stopped
@@ -181,13 +199,23 @@ pub fn main() !u8 {
     var out = std.Io.File.stdout().writer(io, &out_buf);
     try out.interface.print(
         "park-check: of {d} idle connections {d} hold more than one page of stack and {d} more than two " ++
-            "(this build is pinned at {d} page{s})\n",
-        .{ connections, two, three, pinned_pages, if (pinned_pages == 1) "" else "s" },
+            "(every build is pinned at one page)\n",
+        .{ connections, two, three },
     );
     try out.interface.flush();
 
     var failed = false;
-    if (pinned_pages == 1 and two != 0) {
+    // If the stacks can no longer be told from other mappings, "none above a
+    // page" would pass for the wrong reason.
+    if (stacks < connections) {
+        std.debug.print(
+            "park-check: found {d} fiber stacks for {d} connections, so the stacks are no longer the " ++
+                "256 KiB `nh` mappings this program counts; fix heldStacks before trusting the numbers.\n",
+            .{ stacks, connections },
+        );
+        failed = true;
+    }
+    if (two != 0) {
         std.debug.print(
             "park-check: {d} of {d} idle connections hold a second page of stack. The connection loop's " ++
                 "frames crossed the page boundary, and each of those connections costs 4,096 bytes more " ++
@@ -195,24 +223,6 @@ pub fn main() !u8 {
             .{ two, connections },
         );
         failed = true;
-    }
-    if (pinned_pages == 2) {
-        if (three != 0) {
-            std.debug.print(
-                "park-check: {d} of {d} idle connections hold a third page of stack, where this build is " ++
-                    "known to pay two (ADR 212). Each costs 4,096 bytes more than it did.\n",
-                .{ three, connections },
-            );
-            failed = true;
-        }
-        if (two < connections) {
-            std.debug.print(
-                "park-check: note: only {d} of {d} idle connections hold a second page, so this build has " ++
-                    "given the page back or the run was late; if it is the first, lower the pin " ++
-                    "in bench/park_check.zig and write the run in bench/result/http.md.\n",
-                .{ two, connections },
-            );
-        }
     }
     return if (failed) 1 else 0;
 }

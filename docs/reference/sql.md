@@ -905,6 +905,35 @@ else
 
 The columns are checked while compiling against the key and every `.unique` the marker declares, in any order, so renaming or dropping a unique is a build error wherever a handler branches on it. It accepts both databases' formats: Postgres reports the constraint's name, `staff_email_key`, and SQLite the columns, `staff.email`. A primary key nobody named is `<table>_pkey` on Postgres, with the table's part cut at a character so the whole is 63 bytes: a table of 62 bytes has a key called after its first 58. `Problem.constraint` on SQLite is the text after `constraint failed:` for the same reason. A foreign key is not accepted, because SQLite does not say which one failed.
 
+### `sql.Replays`: the answers two instances share
+
+**`sql.Replays(Db, options)` is the store `nilo.Idempotent` takes in place of a `cache.Space` when more than one instance has to answer a key once** ([ADR 268](../adr/268-an-answer-kept-for-a-retry-is-a-row-when-instances-share-a-database.md)). A type, whose instance is a service:
+
+<!-- compiles -->
+```zig
+const SharedReplays = sql.Replays(Db, .{ .name = "orders", .ttl_s = 86_400, .max_bytes = 16 << 10 });
+```
+
+| Option | |
+|---|---|
+| `.name` | which store this is, in the table it shares with others; required. Two stores with different names cannot read each other's keys |
+| `.ttl_s` | seconds an answer is kept; 0 is until `sweep` deletes it. The in-flight marker lives two minutes whatever this says |
+| `.max_bytes` | the largest answer kept, default 4,096; `Idempotent` refuses less than 256. A larger answer is sent and not kept |
+| `.table` | the table, default `nilo_replays` |
+
+| | |
+|---|---|
+| `SharedReplays.Row` | the table, for `migrate.createMissing`, a migration and `db.checking`. Nothing creates it: `space` (text) and `slot` (bytea) are the key, `value` is bytea, `expires_at` is microseconds since the epoch, indexed |
+| `SharedReplays.open(&db)` | the store, to `app.provide`. It holds a pointer to the `Db` and nothing else |
+| `putIfAbsentFor(scope, slot, value, ttl_s) !bool` | the claim: true when the key is now yours. A free key, or a row that has run out; false when somebody holds it. Atomic in the database, so two instances racing for one key get one `true` |
+| `put(scope, slot, value) !void`, `putFor(…, ttl_s)` | store over whatever is there, for the store's `ttl_s` or the one given |
+| `getInto(scope, slot, out) !?[]const u8` | the value, or null for a key nobody wrote, one that ran out, and a value longer than `out` |
+| `del(scope, slot) !bool` | forget a key; true when there was a row |
+| `sweep(scope) !usize` | delete this store's rows that have run out, and say how many. Nothing calls it: run it from a [scheduled job](../guide/background.md) |
+| `takes_scope` | `true`, which tells `Idempotent` to call every method with the Scope first and to treat a failure as a database's. A `cache.Space` does not have it |
+
+`slot` longer than 1,024 bytes or a value longer than `max_bytes` is `error.TooLarge`. Every other error is the `Db`'s, and `Idempotent` turns it into a 503 at the claim (the handler does not run) and a logged `warn` after the handler ran. A `Cached` over this type is a compile error: a page is read on every GET, which is a cache's job. Three more are refused while compiling: a type that is not a `Db`, an empty `name`, and a `max_bytes` of 0. The guide is [Once across instances](../guide/idempotency.md#once-across-instances-sqlreplays); the cost is in [`bench/result/sql.md`](https://github.com/nevindra/nilo/blob/main/bench/result/sql.md) §27.
+
 ### Migrations
 
 **Migrations read the schema words in the marker and turn them into SQL.** The API is `sql.migrate`, `sql.table`, `sql.ddl` and `sql.snapshot`, and a program that never names one links none of it: 0 bytes on `zig build size-sql`, both probes ([`bench/result/sql.md` §10](../../bench/result/sql.md)).
@@ -1082,6 +1111,8 @@ const change = try sql.migrate.plan(arena, Db.Dialect, desired, before);
 
 **A column that changed three ways gets one `Problem` naming all three**, because it needs one rewrite, not three.
 
+**A `Problem` is accepted by name.** `Problem.key(gpa)` is `table.column@xxxxxxxx` (or `table@xxxxxxxx`), eight hex digits of a SHA-256 over the table, the column and the text; `acceptable()` is false for the one about the snapshot's dialect. `Options.accept` (`db generate --accept a,b`) records the named Problems as handled by a step the person wrote: it writes a version, possibly with no steps, and the snapshot becomes the types as they are. All standing Problems must be named together, a name matching none holds the version back (`Outcome.stray_accept`), and `Outcome.unaccepted` lists what was not named. `Plan.isEmpty()` is no steps and no Problems. `Plan.unaccepted` and `Plan.strayAccepts` are the two lists ([ADR 270](../adr/270-a-problem-is-accepted-by-name.md)).
+
 `Plan.destructive()` and `Plan.needsBackfill()` are the two questions a command asks before writing a file. `Plan.unnamed(gpa, names)` is the targets of destructive steps that `names` leaves out, and `Plan.stray(gpa, names)` is the names that match no destructive step; `generate` writes only when both are empty. A destructive step's `target` is `orders`, `orders.note` or `extension:pgcrypto`. A `change_type` is destructive unless the type widens (`int4` to `int8`, `float4` to `float8`, an integer into `numeric`, `varchar` into `text`). A column added `NOT NULL` **with a `.default` needs no backfill**, which ADR 123 named as the one moment a default really matters.
 
 #### The ledger, and applying
@@ -1114,6 +1145,8 @@ The hash is **chained**: each one covers the version before it, so editing versi
 `migrate.drift(&db, &run, chain)` returns which applied versions have been edited since they ran: a `Drift` per version with what the ledger recorded and what the steps hash to now.
 
 **The lock matters.** `pg_advisory_xact_lock` is taken inside the transaction and released by the commit, so ten replicas starting at once run the migration once. SQLite has no advisory lock and needs none: it only ever has one writer.
+
+**A version may run outside a transaction.** `Version.transactional = false` runs its steps one at a time on one held connection (`db.begin(c, .{ .transaction = false })`, Postgres only) and writes the ledger row after the last; a failure leaves no row and the version runs whole again, so its steps must be repeatable. `Step.index` is the quoted, qualified name of the index a step builds: before the step, an index of that name that `pg_index` calls invalid is dropped (`DROP INDEX CONCURRENTLY IF EXISTS`) with a `warn` line. On SQLite the version is `error.NotTransactional`. `Options.concurrently` (`db generate --concurrently a_idx,b_key`) names indexes on tables that exist; `Plan.splitOutside` cuts the plan into `inside` and `outside` steps, `generate` writes the second as `<name>_concurrently` after the first, and `Outcome.outside_file`, `.inside`, `.outside` and `.loose` (names matching no index) report it. The steps run with `lock_timeout` at 0 (a build waits for older transactions without blocking them), and the connection's own value is put back after. The migration lock is asked for and polled on both paths (`Dialect.advisoryLock`, `sessionLock`, `lock_pause`) ([ADR 269](../adr/269-an-index-on-a-big-table-is-built-outside-a-transaction.md)).
 
 **A step waits at most `Version.lock_timeout_ms` for a table's lock**, 5,000 unless the version file says otherwise, on Postgres. `apply` sets it for the transaction after the advisory lock, so waiting for another replica is not bounded by it. A step that waits longer fails with `error.Locked`, one `warn` line names the version and the step, and nothing is kept. `.lock_timeout_ms = 0` waits for good, and the `.sql` twin writes `SET LOCAL lock_timeout = <ms>;` after its `BEGIN`. The number is not in the hash. A step that reads or rewrites every row while it holds the table (`SET NOT NULL`, a new `CHECK`, a type change such as `int4` to `int8`) says so in its `why` ([ADR 240](../adr/240-a-migration-waits-five-seconds-for-a-table.md)).
 

@@ -70,6 +70,12 @@ zig build bench-page-server -Dtls -Dhttp2  # a page with nineteen subresources o
 zig build autobahn-server      # the echo server `bash bench/autobahn/run.sh` drives wstest at
 ```
 
+## Clients
+
+```
+zig build-exe bench/fetch_tls_pool.zig -O ReleaseFast   # what a pooled outbound connection holds, plain and over TLS; the header has the commands
+```
+
 ## Scripts
 
 ```

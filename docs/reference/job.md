@@ -41,7 +41,7 @@ fn register(c: *nilo.Ctx, jobs: *Jobs, body: SignIn) !void {
 | | |
 |---|---|
 | `pub const nilo_job = "…"` | the name stored in the row. Required; at most 64 bytes; unique across the `kinds` |
-| `pub const retry: job.Retry` | required, no default: `.none`, or `.{ .times, .backoff }` with `.{ .fixed_ms }` or `.{ .exponential = .{ .from_ms, .to_ms } }` |
+| `pub const retry: job.Retry` | required, no default: `.none`, or `.{ .times, .backoff }` with `.{ .fixed_ms }` or `.{ .exponential = .{ .from_ms, .to_ms, .jitter } }`, `.jitter` being `.none` (the default), `.full` or `.equal`. `job.Backoff` and `job.Jitter` are `nilo_core`'s ([ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)); `job.Retry.delayMs(failed)` is the un-jittered ceiling and `jitteredMs(failed, random)` what a worker schedules by |
 | `pub fn run(self, scope: *nilo.Run, …) !void` | the work: the job by value, the Run, then any service by pointer, looked up in `.deps` by type, and `tick: job.Tick` by value if it wants to know which tick it is ([ADR 160](../adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)) |
 | `pub const final = error{ … }` | optional: the failures that are **final**. A `run` failing with one of these is dead on that attempt whatever `retry` says, and the row keeps the error's name; a timeout is never final. A Refusal on a kind whose `retry` is `.none` ([ADR 179](../adr/179-a-run-can-say-its-failure-is-final.md)) |
 | `pub const timeout_ms` | optional, overrides the queue's. Also the lease |

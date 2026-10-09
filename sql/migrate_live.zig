@@ -1616,3 +1616,78 @@ test "createMissing and addMissingColumns read the table through their own trans
     try testing.expectEqual(@as(usize, 0), try migrate.addMissingColumns(&fx.db, &fx.run, .{ .tables = &.{After} }));
     try testing.expectEqual(@as(usize, 3), (try fx.db.liveColumns(&fx.run, null, "downloads")).len);
 }
+
+// -- a Problem accepted by name (ADR 270) ------------------------------------
+
+/// `cards` before it had its key: the same four columns.
+const CardUnkeyed = struct {
+    pub const nilo_table = .{ .name = "cards", .key = .id };
+
+    id: i64,
+    org_id: i64,
+    board_id: i64,
+    label: []const u8,
+};
+
+test "a key of two columns added to a table SQLite has is rebuilt by hand, and accepting the Problem ends it" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "accept-composite");
+    defer fx.deinit(gpa);
+    const a = fx.run.arena();
+
+    const D = Db.Dialect;
+    const before = comptime migrate.desiredOf(D, .{ .tables = &.{ Board, CardUnkeyed } });
+    const after = comptime migrate.desiredOf(D, .{ .tables = &.{ Board, Card } });
+    try migrate.createMissing(&fx.db, &fx.run, .{ .tables = &.{ Board, CardUnkeyed } });
+    try migrate.ensureLedger(&fx.db, &fx.run);
+    _ = try fx.db.exec(&fx.run, "PRAGMA foreign_keys = ON", .{});
+    _ = try fx.db.insert(Board, &fx.run, .{ .org_id = 1, .id = 10, .title = "roadmap" });
+    _ = try fx.db.exec(&fx.run, "INSERT INTO \"cards\" (\"id\", \"org_id\", \"board_id\", \"label\") VALUES (1, 1, 10, 'kept')", .{});
+
+    // SQLite writes a key when it makes the table, so the diff says so and
+    // writes nothing; and, before this, said it again after the step.
+    const was = try migrate.snapshotOf(a, D, 1, before);
+    const raised = try migrate.plan(a, D, after, was);
+    try testing.expectEqual(@as(usize, 0), raised.steps.len);
+    try testing.expectEqual(@as(usize, 1), raised.problems.len);
+    try testing.expect(raised.problems[0].acceptable());
+
+    // The rebuild the Problem describes, as the person's own step.
+    const rebuild = [_]migrate.Step{
+        .{ .kind = .data, .why = "", .sql = "CREATE TABLE \"cards_new\" (\"id\" INTEGER PRIMARY KEY NOT NULL, \"org_id\" INTEGER NOT NULL, \"board_id\" INTEGER NOT NULL, \"label\" TEXT NOT NULL, CONSTRAINT \"cards_board_fkey\" FOREIGN KEY (\"org_id\", \"board_id\") REFERENCES \"boards\" (\"org_id\", \"id\") ON DELETE CASCADE)" },
+        .{ .kind = .data, .why = "", .sql = "INSERT INTO \"cards_new\" SELECT \"id\", \"org_id\", \"board_id\", \"label\" FROM \"cards\"" },
+        .{ .kind = .data, .why = "", .sql = "DROP TABLE \"cards\"" },
+        .{ .kind = .data, .why = "", .sql = "ALTER TABLE \"cards_new\" RENAME TO \"cards\"" },
+    };
+    var digest: [64]u8 = undefined;
+    const v, const hash = lone(1, "key_cards", &rebuild, &digest);
+    try testing.expect(try migrate.apply(&fx.db, &fx.run, v, hash));
+
+    // What `generate --accept` leaves in the snapshot is the types as they are,
+    // so the diff is quiet; and the database does what the type says.
+    const accepted = try migrate.snapshotOf(a, D, 2, after);
+    try testing.expect((try migrate.plan(a, D, after, accepted)).isEmpty());
+    try testing.expectEqual(@as(usize, 1), (try fx.db.select(Card, &fx.run, .{})).len);
+    try testing.expectError(error.ForeignKeyViolated, fx.db.insert(Card, &fx.run, .{
+        .org_id = 2,
+        .board_id = 10,
+        .label = "somebody else's board",
+    }));
+}
+
+test "a version marked as outside a transaction is refused on SQLite, which has nothing to build outside one" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, "outside-refused");
+    defer fx.deinit(gpa);
+    try migrate.ensureLedger(&fx.db, &fx.run);
+
+    const steps = [_]migrate.Step{.{ .kind = .create_index, .why = "", .sql = "CREATE INDEX \"i\" ON \"orgs\" (\"name\")" }};
+    var digest: [64]u8 = undefined;
+    try testing.expectError(error.NotTransactional, migrate.apply(&fx.db, &fx.run, .{
+        .number = 1,
+        .name = "outside",
+        .steps = &steps,
+        .transactional = false,
+    }, migrate.hashOf("", &steps, &digest)));
+    try testing.expectEqual(@as(i64, 0), try migrate.headVersion(&fx.db, &fx.run));
+}

@@ -1,8 +1,9 @@
 //! nilo_core — what every layer of nilo agrees about (ADR 038).
 //!
-//! Five things live here. Text that belongs to a piece of work, the Scope
+//! Six things live here. Text that belongs to a piece of work, the Scope
 //! that hands out the memory it lives in, what time it is (and the `Timestamp`
-//! and `Date` that hold it), and percent encoding. Each is used by two layers, which is the rule for a fifth: **a
+//! and `Date` that hold it), percent encoding, and how long to wait before
+//! trying again. Each is used by two layers, which is the rule for a seventh: **a
 //! file earns its place by being needed by two layers, not by having nowhere
 //! else to live.** The moment this is where things go because they fit
 //! nowhere, the layering has stopped meaning anything and only the directory
@@ -18,6 +19,9 @@
 //! `time` is the fourth (ADR 057): the App layer reads a `Timestamp` or a
 //! `Date` in a body, a query and a path, and `nilo_sql` stores them, so a
 //! service with a date in its body no longer turns on `-Dsql`.
+//! `backoff` is the fifth (ADR 271): `nilo_job` waits between a job's
+//! attempts and `nilo_fetch` between a call's, both with the same jitter, and
+//! the two are siblings.
 //! `tmp` is the third (ADR 250): a test under `http/` and a test under
 //! `sql/` both need the path of a directory of their own, and the second
 //! cannot reach `nilo.testing`. It is the one file here only a test calls.
@@ -92,6 +96,12 @@ pub const percent = @import("percent.zig");
 
 pub const Limits = @import("limits.zig").Limits;
 
+/// How long to wait before trying again, with the jitter that keeps a herd
+/// of callers from coming back together. `nilo_job` re-exports it as
+/// `job.Backoff` ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+pub const Backoff = @import("backoff.zig").Backoff;
+pub const Jitter = @import("backoff.zig").Jitter;
+
 /// A directory for one test, with the path to it that `std.testing.tmpDir`
 /// does not give ([ADR 250](../docs/adr/250-a-test-directory-hands-back-its-path.md)).
 /// `nilo.testing.tmpDir` is this one.
@@ -105,6 +115,7 @@ test {
     _ = @import("time.zig");
     _ = @import("percent.zig");
     _ = @import("limits.zig");
+    _ = @import("backoff.zig");
     _ = @import("trace.zig");
     _ = @import("tmp.zig");
 }

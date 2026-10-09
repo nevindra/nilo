@@ -69,6 +69,17 @@ pub const Request = struct {
     /// `--drop` with no names after it. It drops nothing, and the refusal
     /// says so beside the names it wanted.
     drop_bare: bool = false,
+    /// `--concurrently orders_org_id_idx`: the indexes to build without
+    /// stopping writes to their table, by name, comma-separated. Each goes in a
+    /// version of its own after this one, outside a transaction
+    /// (`migrations.Options.concurrently`, ADR 269).
+    concurrently: []const u8 = "",
+    concurrently_bare: bool = false,
+    /// `--accept orders.customer_id@1a2b3c4d`: the Problems the diff found
+    /// that this version records as handled by a step written by hand
+    /// (`migrations.Options.accept`, ADR 270).
+    accept: []const u8 = "",
+    accept_bare: bool = false,
     /// `--dir`, which almost nobody sets.
     dir: []const u8 = "migrations",
     /// `--sql`, for `status`: print the statements rather than a summary.
@@ -89,6 +100,8 @@ pub const ParseError = error{
     NoName,
     /// `--drop` twice. The names go in one, comma-separated.
     DropTwice,
+    /// `--concurrently` or `--accept` twice, for the same reason.
+    FlagTwice,
 };
 
 /// Read `argv[1..]`. The program name is not passed in.
@@ -112,6 +125,22 @@ pub fn parse(args: []const []const u8) ParseError!Request {
             } else {
                 i += 1;
                 req.drop = args[i];
+            }
+        } else if (std.mem.eql(u8, arg, "--concurrently")) {
+            if (req.concurrently.len > 0 or req.concurrently_bare) return ParseError.FlagTwice;
+            if (i + 1 == args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                req.concurrently_bare = true;
+            } else {
+                i += 1;
+                req.concurrently = args[i];
+            }
+        } else if (std.mem.eql(u8, arg, "--accept")) {
+            if (req.accept.len > 0 or req.accept_bare) return ParseError.FlagTwice;
+            if (i + 1 == args.len or std.mem.startsWith(u8, args[i + 1], "--")) {
+                req.accept_bare = true;
+            } else {
+                i += 1;
+                req.accept = args[i];
             }
         } else if (std.mem.eql(u8, arg, "--sql")) {
             req.sql_only = true;
@@ -145,6 +174,10 @@ pub fn explain(w: *std.Io.Writer, err: ParseError) !u8 {
             "db: `--drop` once, with every name in it comma-separated: " ++
                 "`--drop orders.note,extension:pgcrypto`.\n\n",
         ),
+        ParseError.FlagTwice => try w.writeAll(
+            "db: `--concurrently` and `--accept` once each, with every name in it " ++
+                "comma-separated.\n\n",
+        ),
     }
     try usage(w);
     return misused;
@@ -155,12 +188,24 @@ pub fn usage(w: *std.Io.Writer) !void {
         \\Migrations for this project. The schema is the Rows; these move a
         \\database to match them.
         \\
-        \\  generate --name <snake_case> [--drop <what>,…] [--baseline]
+        \\  generate --name <snake_case> [--drop <what>,…] [--concurrently <index>,…]
+        \\           [--accept <problem>,…] [--baseline]
         \\        Diff the Rows against migrations/snapshot.zon and write the
         \\        next version. Needs no database. Anything that loses data is
         \\        written only once `--drop` names it: `orders` for a table,
         \\        `orders.note` for a column or a type that may not fit, and
         \\        `extension:pgcrypto`. Without the names it says which.
+        \\
+        \\        `--concurrently` builds the named indexes of tables that already
+        \\        exist with `CREATE INDEX CONCURRENTLY`, which does not stop
+        \\        writes to the table, in a second version that runs outside a
+        \\        transaction (Postgres only). A table big enough to need it is
+        \\        a fact about your database, so you name the index.
+        \\
+        \\        `--accept` records a Problem the diff would not write as handled
+        \\        by a step you wrote yourself, so the snapshot moves past it.
+        \\        The name is the one printed beside the Problem, with a hash of
+        \\        what it said; a Problem whose text has changed has a new name.
         \\
         \\        `--baseline` ignores the snapshot, derives version 1 from
         \\        nothing and rewrites it in place. It keeps everything outside
@@ -280,6 +325,8 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
             const out = migrations.generate(a, io, dir, D, desired, .{
                 .name = req.name,
                 .drop = try dropList(a, req.drop),
+                .concurrently = try dropList(a, req.concurrently),
+                .accept = try dropList(a, req.accept),
                 .baseline = req.baseline,
                 .versions = versions,
             }) catch |err| switch (err) {
@@ -300,13 +347,33 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
                 return ok;
             }
             if (out.file) |file| {
-                try w.print("{s} {s}/{s}, {d} step(s):\n\n", .{
-                    if (out.rewrote) "Rewrote" else "Wrote",
-                    req.dir,
-                    file,
-                    out.plan.steps.len,
-                });
-                try writeSteps(w, out.plan.steps);
+                const first_is_outside = if (out.outside_file) |second| std.mem.eql(u8, second, file) else false;
+                // A baseline names no split, and then every step is the first's.
+                const first = if (out.inside.len > 0 or out.outside.len > 0) out.inside else out.plan.steps;
+                if (!first_is_outside) {
+                    try w.print("{s} {s}/{s}, {d} step(s):\n\n", .{
+                        if (out.rewrote) "Rewrote" else "Wrote",
+                        req.dir,
+                        file,
+                        first.len,
+                    });
+                    try writeSteps(w, first);
+                }
+                if (out.outside_file) |second| {
+                    try w.print(
+                        "{s}{s}/{s}, {d} step(s), which runs outside a transaction so that " ++
+                            "writes to the table carry on while each index is built:\n\n",
+                        .{ if (first_is_outside) "Wrote " else "\nAnd ", req.dir, second, out.outside.len },
+                    );
+                    try writeSteps(w, out.outside);
+                    try w.writeAll(
+                        "\nIf a build fails halfway, Postgres keeps the index, invalid and " ++
+                            "unused. Run `db migrate` again: the index is dropped and built " ++
+                            "again, and the version is recorded only once every step has " ++
+                            "finished.\n",
+                    );
+                }
+                try writeAccepted(w, out.accepted);
                 if (out.rewrote) {
                     try w.writeAll(
                         "\nThe generated block is new; everything else in the file is as " ++
@@ -438,6 +505,14 @@ pub fn Tool(comptime Db: type, comptime schema: migrate.Schema) type {
             );
             try writeSteps(w, change.steps);
             try writeProblems(w, change.problems);
+            if (change.problems.len > 0) {
+                try w.writeAll(
+                    "\n`db generate` writes nothing while one of those stands. Write its step " ++
+                        "yourself, then name it so the snapshot moves past it:\n",
+                );
+                try writeAcceptCommand(w, change.problems, "<what you changed>", &.{});
+                return acted;
+            }
             try w.writeAll("\n`db generate --name <what you changed>` writes them.\n");
             return acted;
         }
@@ -593,9 +668,45 @@ fn dropList(a: std.mem.Allocator, text: []const u8) ![]const []const u8 {
 /// `.was` shows up here as a column dropped, beside the one that was meant.
 fn writeHeld(w: *std.Io.Writer, out: migrations.Outcome, req: Request) !void {
     const change = out.plan;
-    if (change.problems.len > 0) {
+    if (out.stray_accept.len > 0) {
+        try w.writeAll("Nothing written. `--accept` names a problem the diff does not have:\n\n");
+        for (out.stray_accept) |name| try w.print("  {s}\n", .{name});
+        try w.writeAll(
+            "\nA name is good for the Problem as it was printed: when the types change so " ++
+                "that it says something else, it has a new name. The ones standing are:\n\n",
+        );
+        try writeProblems(w, change.problems);
+        return;
+    }
+
+    if (change.problems.len > 0 and out.unaccepted.len > 0) {
+        if (req.accept_bare) try w.writeAll(
+            "`--accept` names what it accepts, and on its own it names nothing.\n\n",
+        );
         try w.writeAll("Nothing written. The diff will not write these:\n\n");
         try writeProblems(w, change.problems);
+        try w.writeAll(
+            "\nWrite the step for each yourself, as a step of your own in the `before` or " ++
+                "`after` of the version this writes. Then name them, so the snapshot moves past " ++
+                "them and the diff stops raising them. Nothing is accepted that is not named, " ++
+                "all of them are named or none is, and nilo does not check the step is there:\n",
+        );
+        try writeAcceptCommand(w, change.problems, req.name, out.unnamed);
+        return;
+    }
+
+    if (out.loose.len > 0) {
+        try w.writeAll("Nothing written. `--concurrently` names something this version does not build:\n\n");
+        for (out.loose) |name| try w.print("  {s}\n", .{name});
+        try w.writeAll("\nWhat it builds on a table that exists is:\n\n");
+        var any = false;
+        for (change.steps) |s| {
+            if (s.kind != .create_index or s.target.len == 0) continue;
+            try w.print("  {s}\n", .{s.target});
+            any = true;
+        }
+        if (!any) try w.writeAll("  nothing, or this database has no CREATE INDEX CONCURRENTLY\n");
+        try w.writeAll("\nA name that matches nothing is usually a typo for the one that was meant.\n");
         return;
     }
 
@@ -808,7 +919,50 @@ fn writeProblems(w: *std.Io.Writer, problems: []const migrate.Problem) !void {
             try w.print("  {s}\n", .{p.table});
         }
         try w.print("    {s}\n", .{p.text});
+        if (p.acceptable()) {
+            try w.writeAll("    accept as: ");
+            try p.writeKey(w);
+            try w.writeAll("\n");
+        } else {
+            try w.writeAll("    This one cannot be accepted: it is about the snapshot, not a step.\n");
+        }
     }
+}
+
+/// The command that records every acceptable Problem of a plan, printed whole
+/// for the reason the `--drop` one is: the names are what the person has to
+/// read before typing them, and nothing is accepted that was not printed.
+fn writeAcceptCommand(w: *std.Io.Writer, problems: []const migrate.Problem, name: []const u8, drop: []const []const u8) !void {
+    var any = false;
+    for (problems) |p| {
+        if (!p.acceptable()) continue;
+        try w.writeAll(if (any) "," else "\n  db generate --name ");
+        if (!any) try w.print("{s} --accept ", .{name});
+        try p.writeKey(w);
+        any = true;
+    }
+    if (!any) return;
+    if (drop.len > 0) {
+        try w.writeAll(" --drop ");
+        for (drop, 0..) |d, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.writeAll(d);
+        }
+    }
+    try w.writeAll("\n");
+}
+
+/// What a version written with `--accept` leaves to the person. The diff has
+/// no step for a Problem; it is the reason it is one.
+fn writeAccepted(w: *std.Io.Writer, accepted: []const migrate.Problem) !void {
+    if (accepted.len == 0) return;
+    try w.print(
+        "\n{d} problem(s) accepted, and the snapshot has moved past them. The diff wrote no " ++
+            "step for any of them: the step is yours to write, in `before` or `after` of the " ++
+            "file above, and nothing checks that it is there. A change to the types that " ++
+            "alters what a Problem says raises it again.\n",
+        .{accepted.len},
+    );
 }
 
 /// The ways `generate` refuses before writing anything, each naming the file
@@ -1375,4 +1529,98 @@ test "a foreign key nothing indexes is a note with the marker that adds the inde
     // Several columns are one index over all of them, added to the list the
     // table already has.
     try testing.expect(std.mem.indexOf(u8, said, "shop.lines (order_id, sku) -> skus: add `.{ .order_id, .sku }` to the `.index` in app.Line") != null);
+}
+
+test "--concurrently and --accept take their names, once each, and a bare one is kept to be answered" {
+    const both = try parse(&.{ "generate", "--name", "x", "--concurrently", "a_idx,b_key", "--accept", "posts.org_id@1234abcd" });
+    try testing.expectEqualStrings("a_idx,b_key", both.concurrently);
+    try testing.expectEqualStrings("posts.org_id@1234abcd", both.accept);
+
+    const bare = try parse(&.{ "generate", "--name", "x", "--accept", "--concurrently" });
+    try testing.expect(bare.accept_bare and bare.concurrently_bare);
+
+    try testing.expectError(ParseError.FlagTwice, parse(&.{ "generate", "--name", "x", "--accept", "a", "--accept", "b" }));
+    try testing.expectError(ParseError.FlagTwice, parse(&.{ "generate", "--name", "x", "--concurrently", "a", "--concurrently", "b" }));
+}
+
+test "a held Problem is printed with the name that accepts it, and the whole command" {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    const problems = [_]migrate.Problem{
+        .{ .table = "posts", .column = "org_id", .text = "the key is new" },
+        .{ .table = "cards", .text = "a check changed" },
+    };
+    const out: migrations.Outcome = .{
+        .plan = .{ .steps = &.{}, .problems = &problems },
+        .unaccepted = &problems,
+    };
+    try writeHeld(&w, out, .{ .command = .generate, .name = "keys" });
+    const text = w.buffered();
+
+    var first: [64]u8 = undefined;
+    var fw = std.Io.Writer.fixed(&first);
+    try problems[0].writeKey(&fw);
+    var second: [64]u8 = undefined;
+    var sw = std.Io.Writer.fixed(&second);
+    try problems[1].writeKey(&sw);
+
+    try testing.expect(std.mem.indexOf(u8, text, "accept as: posts.org_id@") != null);
+    const command = try std.fmt.allocPrint(
+        testing.allocator,
+        "db generate --name keys --accept {s},{s}\n",
+        .{ fw.buffered(), sw.buffered() },
+    );
+    defer testing.allocator.free(command);
+    try testing.expect(std.mem.indexOf(u8, text, command) != null);
+    // What accepting means, said before the command that does it.
+    try testing.expect(std.mem.indexOf(u8, text, "nilo does not check the step is there") != null);
+}
+
+test "the Problem that cannot be accepted says so and is left out of the command" {
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    const problems = [_]migrate.Problem{.{ .table = "", .text = "wrong dialect" }};
+    try writeHeld(&w, .{
+        .plan = .{ .steps = &.{}, .problems = &problems },
+        .unaccepted = &problems,
+    }, .{ .command = .generate, .name = "x" });
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "cannot be accepted") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "db generate --name x --accept") == null);
+}
+
+test "a name --accept gave that matches no Problem is refused beside the ones standing" {
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    const problems = [_]migrate.Problem{.{ .table = "posts", .column = "org_id", .text = "the key is new" }};
+    try writeHeld(&w, .{
+        .plan = .{ .steps = &.{}, .problems = &problems },
+        .unaccepted = &problems,
+        .stray_accept = &.{"posts.org_id@00000000"},
+    }, .{ .command = .generate, .name = "x", .accept = "posts.org_id@00000000" });
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "does not have:\n\n  posts.org_id@00000000\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "accept as: posts.org_id@") != null);
+}
+
+test "a name --concurrently gave that matches no new index is refused beside the ones it could build" {
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    const steps = [_]migrate.Step{.{
+        .kind = .create_index,
+        .why = "index readings_sensor_idx",
+        .sql = "CREATE INDEX \"readings_sensor_idx\" ON \"readings\" (\"sensor\")",
+        .target = "readings_sensor_idx",
+    }};
+    try writeHeld(&w, .{
+        .plan = .{ .steps = &steps, .problems = &.{} },
+        .loose = &.{"readings_sensor"},
+    }, .{ .command = .generate, .name = "x", .concurrently = "readings_sensor" });
+    const text = w.buffered();
+    try testing.expect(std.mem.indexOf(u8, text, "does not build:\n\n  readings_sensor\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "What it builds on a table that exists is:\n\n  readings_sensor_idx\n") != null);
 }

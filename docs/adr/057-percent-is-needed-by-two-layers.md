@@ -65,6 +65,10 @@ Cost: allocations per request and memory per idle connection are unchanged (no n
 
 **Rejected: a `nilo_time` module**, which the layering row and the benchmark program would cost and the two files do not justify; and **leaving them in `nilo_sql` and importing it from `http/`**, which `zig build layering` refuses and which would put both drivers in every HTTP build.
 
+## Backoff is another file admitted this way
+
+`Backoff` lived in `nilo_job`, and `nilo_fetch` needs the same arithmetic for the same reason: a service that is down fails everything at once, and a wait that is the same for every caller sends every caller back together. The two are siblings and may not import each other, so by the test below it moved to `core/backoff.zig` ([ADR 271](./271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)). It needs no loop and holds no randomness (jitter takes 64 bits as an argument, the way `nilo_id` takes its entropy), so `zig test core/core.zig` runs it. `job.Backoff` and `job.Jitter` are re-exports and no kind changes a line.
+
 ## Why this is allowed, and what it does not decide
 
 The entry condition for the bottom layer is that its tests need no module graph

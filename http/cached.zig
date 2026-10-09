@@ -199,6 +199,12 @@ fn checkSpace(comptime Pages: type, comptime route: []const u8) void {
                     "\" names " ++ naming.of(Pages) ++ " as where answers are kept, and it is not a Space." ++ shape,
             ),
         }
+        if (@hasDecl(Pages, "takes_scope") and Pages.takes_scope) @compileError(
+            "nilo: the `Cached(" ++ naming.of(Pages) ++ ", …)` on route \"" ++ route ++
+                "\" names " ++ naming.of(Pages) ++ " as where answers are kept, and it is a store that takes the " ++
+                "request's scope, the way `sql.Replays` does for `Idempotent`." ++ shape ++
+                "\n  A page is read on every GET, which is a cache's job and not a round trip to a database.",
+        );
         const needed = [_][]const u8{ "getInto", "putIfAbsent", "putFor", "del", "max_bytes", "Held" };
         for (needed) |decl| if (!@hasDecl(Pages, decl)) @compileError(
             "nilo: the `Cached(" ++ naming.of(Pages) ++ ", …)` on route \"" ++ route ++

@@ -1212,6 +1212,7 @@ fn startedWith(io: std.Io, canned: *Canned, buf: []u8, extra: struct {
     stall_ms: u32 = 30_000,
     max_in_flight: u32 = 32,
     max_streams: u32 = 0,
+    retry: ?fetch.Retry = null,
 }) !Store {
     var store = try Store.open(testing.allocator, .{
         .endpoint = try canned.endpoint(buf),
@@ -1221,6 +1222,7 @@ fn startedWith(io: std.Io, canned: *Canned, buf: []u8, extra: struct {
         .stall_ms = extra.stall_ms,
         .max_in_flight = extra.max_in_flight,
         .max_streams = extra.max_streams,
+        .retry = extra.retry,
     });
     errdefer store.deinit();
     try store.nilo_start(io, .off);
@@ -3291,4 +3293,107 @@ test "a presigned URL asked to live for no time is refused" {
             _ = try files.presign(&scope, "a.bin", 1);
         }
     }.run);
+}
+
+// -- retry (ADR 271) ------------------------------------------------------
+
+const slow_down: Answer = .{
+    .status = "503 Slow Down",
+    .error_body = "<Error><Code>SlowDown</Code><Message>Reduce your request rate.</Message></Error>",
+};
+
+test "a throttled get is tried again, signed afresh, when the store says to" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{
+                slow_down,
+                .{ .body = "the bytes of a very small png" },
+            } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try startedWith(io, &canned, &buf, .{
+                .retry = .{ .times = 2, .backoff = .{ .fixed_ms = 2 } },
+            });
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const object = try files.get(&scope, "avatars/one.png");
+            try testing.expectEqualStrings("the bytes of a very small png", object.bytes.view());
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 2), canned.played_count);
+            // Both tries were signed, and the server checked each.
+            try testing.expect(canned.played[0].verified and canned.played[1].verified);
+        }
+    }.run);
+}
+
+test "a throttled get is the caller's to hear about when the store retries nothing" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{slow_down} });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try started(io, &canned, &buf);
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.Throttled, files.get(&scope, "avatars/one.png"));
+            served.await(io) catch {};
+            try testing.expectEqual(@as(usize, 1), canned.played_count);
+        }
+    }.run);
+}
+
+test "a streamed put is not tried again, because its reader is spent by the first try" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var served = try io.concurrent(Canned.serveScript, .{ &canned, &[_]Answer{ slow_down, .{} } });
+            defer served.cancel(io) catch {};
+
+            var buf: [64]u8 = undefined;
+            var store = try startedWith(io, &canned, &buf, .{
+                .retry = .{ .times = 2, .backoff = .{ .fixed_ms = 2 } },
+            });
+            defer store.deinit();
+            var files = try Files.open(&store);
+            defer files.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var source = std.Io.Reader.fixed("bytes arriving from somewhere else");
+            try testing.expectError(error.Throttled, files.putStream(&scope, "big/one.bin", .{
+                .reader = &source,
+                .len = @as(u64, 34),
+                .content_type = "application/octet-stream",
+            }));
+            try testing.expectEqual(@as(usize, 1), canned.played_count);
+        }
+    }.run);
+}
+
+test "a retry whose numbers cannot work is refused when the store opens" {
+    var buf: [64]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&buf, "http://127.0.0.1:{d}", .{9});
+    try testing.expectError(error.BadRetry, Store.open(testing.allocator, .{
+        .endpoint = endpoint,
+        .credentials = .{ .static = .{ .access_key_id = akid, .secret_access_key = secret } },
+        .retry = .{ .times = 0 },
+    }));
 }

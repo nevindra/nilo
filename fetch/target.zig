@@ -47,6 +47,8 @@
 const std = @import("std");
 const core = @import("nilo_core");
 const fetch = @import("fetch.zig");
+const encoding = @import("params.zig");
+const retry_mod = @import("retry.zig");
 
 const Client = fetch.Client;
 const Response = fetch.Response;
@@ -74,6 +76,14 @@ pub const Options = struct {
     /// API at that rate is a bill and a rate limit rather than a check. A
     /// service that publishes a status path is the one to name here.
     ready: ?[]const u8 = null,
+    /// What happens when the service has a bad minute: the caller's numbers
+    /// (how many times, how long between, which statuses, how much of the
+    /// recent traffic may be retries) and nilo's mechanism (jitter,
+    /// `Retry-After`, a budget, idempotent methods only, the route's
+    /// deadline) ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
+    /// Null, the default, is one try, and the target then holds and runs
+    /// none of it.
+    retry: ?retry_mod.Retry = null,
 };
 
 /// What `open` takes: the deployment's half.
@@ -128,6 +138,9 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
         /// Taken before the client's, so a call queued here holds no
         /// permit the other services could use, and given back after it.
         gate: std.Io.Semaphore,
+        /// The retry budget's counts, shared by every handler calling this
+        /// service. Nothing, for a target that declares no `.retry`.
+        ledger: if (opts.retry != null) retry_mod.Ledger else void,
 
         pub fn open(client: *Client, o: Open) OpenError!Self {
             const uri = std.Uri.parse(o.base) catch return error.BaseNotAbsolute;
@@ -141,6 +154,7 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
                 .user_agent = o.user_agent,
                 .headers = o.headers,
                 .gate = .{ .permits = opts.max_in_flight },
+                .ledger = if (comptime opts.retry != null) .empty else {},
             };
         }
 
@@ -205,26 +219,26 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
 
         pub fn postJson(self: *Self, c: anytype, comptime path: []const u8, args: anytype, value: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.postJson");
-            comptime fetch.refuseJsonText(@TypeOf(value), "target.postJson");
+            comptime encoding.refuseJsonText(@TypeOf(value), "target.postJson");
             return self.sendJson(c, .POST, path, args, value, call);
         }
 
         pub fn putJson(self: *Self, c: anytype, comptime path: []const u8, args: anytype, value: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.putJson");
-            comptime fetch.refuseJsonText(@TypeOf(value), "target.putJson");
+            comptime encoding.refuseJsonText(@TypeOf(value), "target.putJson");
             return self.sendJson(c, .PUT, path, args, value, call);
         }
 
         pub fn patchJson(self: *Self, c: anytype, comptime path: []const u8, args: anytype, value: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.patchJson");
-            comptime fetch.refuseJsonText(@TypeOf(value), "target.patchJson");
+            comptime encoding.refuseJsonText(@TypeOf(value), "target.patchJson");
             return self.sendJson(c, .PATCH, path, args, value, call);
         }
 
         /// `Client.sendJson` with a path.
         pub fn sendJson(self: *Self, c: anytype, method: std.http.Method, comptime path: []const u8, args: anytype, value: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.sendJson");
-            comptime fetch.refuseJsonText(@TypeOf(value), "target.sendJson");
+            comptime encoding.refuseJsonText(@TypeOf(value), "target.sendJson");
             const bytes = try std.json.Stringify.valueAlloc(c.arena(), value, .{});
             return self.through(c, method, path, args, bytes, "application/json", call);
         }
@@ -234,26 +248,26 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
         /// else (ADR 061).
         pub fn postForm(self: *Self, c: anytype, comptime path: []const u8, args: anytype, fields: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.postForm");
-            comptime fetch.checkForm(@TypeOf(fields), "target.postForm");
+            comptime encoding.checkForm(@TypeOf(fields), "target.postForm");
             return self.sendForm(c, .POST, path, args, fields, call);
         }
 
         pub fn putForm(self: *Self, c: anytype, comptime path: []const u8, args: anytype, fields: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.putForm");
-            comptime fetch.checkForm(@TypeOf(fields), "target.putForm");
+            comptime encoding.checkForm(@TypeOf(fields), "target.putForm");
             return self.sendForm(c, .PUT, path, args, fields, call);
         }
 
         /// `Client.sendForm` with a path.
         pub fn sendForm(self: *Self, c: anytype, method: std.http.Method, comptime path: []const u8, args: anytype, fields: anytype, call: Client.Call) Error!Response {
             comptime core.checkScope(@TypeOf(c), "target.sendForm");
-            comptime fetch.checkForm(@TypeOf(fields), "target.sendForm");
+            comptime encoding.checkForm(@TypeOf(fields), "target.sendForm");
             const bytes = try fetch.formBody(c, fields);
-            return self.through(c, method, path, args, bytes, fetch.form_content_type, call);
+            return self.through(c, method, path, args, bytes, encoding.form_content_type, call);
         }
 
-        /// The whole of the calls above: the URL, this target's permit, and
-        /// the client's ordinary call with the standing headers under it.
+        /// The whole of the calls above: the URL, then the call, tried again
+        /// when the target says it may be.
         fn through(
             self: *Self,
             c: anytype,
@@ -266,10 +280,26 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
         ) Error!Response {
             if (!self.client.started) return error.NotStarted;
             const at = try self.url(c, path, args);
+            if (comptime opts.retry == null) return self.once(c, method, at, body, content_type, call);
+            return self.retrying(c, method, at, body, content_type, call);
+        }
+
+        /// One try: this target's permit, and the client's ordinary call with
+        /// the standing headers under it.
+        fn once(
+            self: *Self,
+            c: anytype,
+            method: std.http.Method,
+            at: []const u8,
+            body: ?[]const u8,
+            content_type: ?[]const u8,
+            call: Client.Call,
+        ) Error!Response {
             // The permit is taken before the client's, in `begin`, so a call
             // queued for this service holds nothing the others share; and
             // it goes back after the client's, because this `defer` runs
-            // after `sendAs` has ended its Exchange.
+            // after `sendAs` has ended its Exchange. Being per try, it is
+            // given back while a retry waits.
             if (opts.max_in_flight != 0) try self.gate.wait(self.client.inner.io);
             defer if (opts.max_in_flight != 0) self.gate.post(self.client.inner.io);
             return self.client.sendAs(c, method, at, body, content_type, .{
@@ -282,6 +312,50 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
                 .user_agent = self.user_agent,
                 .headers = self.headers,
             });
+        }
+
+        /// The tries (ADR 271). A POST or PATCH with no key, on a type that
+        /// mints none, is one try: it is sent once because sending it again
+        /// might do it twice. Everything else goes round while the policy,
+        /// the budget and the route's time allow.
+        fn retrying(
+            self: *Self,
+            c: anytype,
+            method: std.http.Method,
+            at: []const u8,
+            body: ?[]const u8,
+            content_type: ?[]const u8,
+            call: Client.Call,
+        ) Error!Response {
+            const policy: *const retry_mod.Retry = &(comptime opts.retry.?);
+            const io = self.client.inner.io;
+            var now = call;
+            if (!method.idempotent() and !retry_mod.Retry.hasKey(call.headers) and !retry_mod.Retry.hasKey(self.headers)) {
+                const key_name = policy.mint_key orelse return self.once(c, method, at, body, content_type, call);
+                // One key for the call, on every try: the service answers a
+                // repeat of it with the first try's result.
+                const text = try c.arena().alloc(u8, 32);
+                retry_mod.mintKey(io, text[0..32]);
+                const lines = try c.arena().alloc(std.http.Header, call.headers.len + 1);
+                @memcpy(lines[0..call.headers.len], call.headers);
+                lines[call.headers.len] = .{ .name = key_name, .value = text };
+                now.headers = lines;
+            }
+            var tries = retry_mod.Tries.start(policy, &self.ledger, io);
+            while (true) {
+                const res = self.once(c, method, at, body, content_type, now) catch |err| {
+                    if (retry_mod.Retry.retriesError(err) and try tries.again(c, null)) continue;
+                    return err;
+                };
+                if (policy.retriesStatus(@backingInt(res.status))) {
+                    const after = if (res.header("retry-after")) |v|
+                        retry_mod.retryAfterMs(v, @divFloor(core.nowMicros(), std.time.us_per_s))
+                    else
+                        null;
+                    if (try tries.again(c, after)) continue;
+                }
+                return res;
+            }
         }
 
         /// The base, the path with its segments filled and encoded, and the
@@ -316,8 +390,8 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
                 },
                 .named => |field| len += segment(@field(args, field)).encodedLen(),
             };
-            const first = if (comptime shape == .named) fetch.querySeparator(path) else null;
-            if (comptime shape == .named) len += fetch.queryLen(args, first, named);
+            const first = if (comptime shape == .named) encoding.querySeparator(path) else null;
+            if (comptime shape == .named) len += encoding.queryLen(args, first, named);
 
             const out = try c.arena().alloc(u8, len);
             var w: std.Io.Writer = .fixed(out);
@@ -331,7 +405,7 @@ pub fn Target(comptime name: []const u8, comptime opts: Options) type {
                 },
                 .named => |field| segment(@field(args, field)).write(&w) catch unreachable,
             };
-            if (comptime shape == .named) fetch.queryWrite(&w, args, first, named);
+            if (comptime shape == .named) encoding.queryWrite(&w, args, first, named);
             std.debug.assert(w.buffered().len == len);
             return w.buffered();
         }
@@ -425,7 +499,7 @@ fn shapeOf(comptime path: []const u8, comptime pieces: []const Piece, comptime A
                 p.named ++ "`, and the struct it was given has no field `" ++ p.named ++ "`.");
             checkSegment(path, "`" ++ p.named ++ "`", @FieldType(A, p.named));
         };
-        fetch.checkQuery(A, "target.url", namedIn(pieces));
+        encoding.checkQuery(A, "target.url", namedIn(pieces));
         return .named;
     }
 }
@@ -445,7 +519,7 @@ fn count(comptime n: usize, comptime noun: []const u8) []const u8 {
 fn checkSegment(comptime path: []const u8, comptime which: []const u8, comptime T: type) void {
     const ok = switch (@typeInfo(T)) {
         .int, .comptime_int, .bool => true,
-        else => fetch.isText(T),
+        else => encoding.isText(T),
     };
     if (!ok) @compileError("nilo: segment " ++ which ++ " of the path `" ++ path ++ "` is a " ++ @typeName(T) ++
         ", and a segment is an int, a bool or text.");
@@ -453,14 +527,15 @@ fn checkSegment(comptime path: []const u8, comptime which: []const u8, comptime 
 
 /// A segment's value on its way out: the query's own encoding, with `/` as
 /// data, which is what makes `../` in an id a segment rather than a walk.
-fn segment(v: anytype) fetch.QueryValue {
-    return fetch.queryValue(v) orelse unreachable; // an optional is refused in checkSegment
+fn segment(v: anytype) encoding.QueryValue {
+    return encoding.queryValue(v) orelse unreachable; // an optional is refused in checkSegment
 }
 
 /// The Refusals for the type itself: a name with nothing in it, and a
 /// `ready` path that does not hang off the base.
 fn check(comptime name: []const u8, comptime opts: Options) void {
     if (name.len == 0) @compileError("nilo: fetch.Target was given an empty name, and the name is what the health route and a log line call it.");
+    if (opts.retry) |r| if (r.problem()) |why| @compileError("nilo: fetch.Target(\"" ++ name ++ "\")'s `.retry` is refused: " ++ why ++ ".");
     if (opts.ready) |path| {
         if (path.len == 0 or path[0] != '/') @compileError("nilo: fetch.Target(\"" ++ name ++ "\") has a ready path `" ++
             path ++ "` that does not begin with `/`, and it hangs off the base like any other.");

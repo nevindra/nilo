@@ -360,6 +360,19 @@ pub const Begin = struct {
     /// Postgres refuses it while compiling: `DROP TABLE` there refuses a table
     /// something points at rather than emptying it first.
     rebuilding: bool = false,
+    /// **No `BEGIN`: one connection held for several statements, each its own
+    /// transaction** (ADR 269). What Postgres refuses inside a transaction
+    /// block (`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`) runs on
+    /// such a connection, and so does the session-level advisory lock that
+    /// keeps two replicas from building the same index. `commit` and
+    /// `rollback` send nothing and give the connection back, so a session
+    /// lock or setting taken on it has to be undone before either: nothing
+    /// here does it for the caller.
+    ///
+    /// Postgres only. SQLite refuses it while compiling: a SQLite write is
+    /// serialised by the file, and there is no statement it keeps out of a
+    /// transaction.
+    transaction: bool = true,
 };
 
 /// What a `.rebuilding` commit that found a row pointing at nothing says

@@ -443,7 +443,7 @@ After both, the same afternoon, run after the befores rather than interleaved wi
 
 **What it changed:** the one-byte flood test uses `pumpSome`; `test` checks the profile and the fuzzer rather than building them; `test-http` exists for the incremental loop, and ADR 138 says `-fincremental` is the loop on 0.17.
 
-**Can it go further:** yes, and each lever is named with what it would cost. The run's 36 s is timers: a `-Dtest-filter` on `test-http` would make the incremental loop seconds for the file being worked on, and splitting the live tests into a binary of their own would run them beside the rest at the price of a second 33 s analysis of the whole framework. The 33 s of Sema is the real floor of a cold `test`, and nobody has looked inside it: `--time-report` against the suite, read through its web UI, is the run that would say which comptime is spending it. One `park-check` failed in four runs, "1 of 48 idle connections hold a second page of stack", on an unchanged loop; the other three and both `test-all` runs passed.
+**Can it go further:** yes, and each lever is named with what it would cost. The run's 36 s is timers: a `-Dtest-filter` on `test-http` would make the incremental loop seconds for the file being worked on, and splitting the live tests into a binary of their own would run them beside the rest at the price of a second 33 s analysis of the whole framework. The 33 s of Sema is the real floor of a cold `test`, and nobody has looked inside it: `--time-report` against the suite, read through its web UI, is the run that would say which comptime is spending it.
 
 ### The run, test by test
 
@@ -462,4 +462,24 @@ The same machine, the next day, at `d0b1f8e` plus the changes above; the suite's
 | `test`, one edit under `http/` | 69 s (75 s and 77 s the day before) |
 | `test-all`, one edit under `http/` | 76 s (88 s and 97 s the day before) |
 
-**`park-check` fails about one run in six, before this change and after it**: 10 of 60 with the doorbell and 11 of 60 without, interleaved, the program run alone. That `test` run was one of them. The entry is in `docs/todo.md`.
+**`park-check` failed about one run in six, before this change and after it**: 10 of 60 with the doorbell and 11 of 60 without, interleaved, the program run alone. It was a miscount and is fixed, in the section below.
+
+## Why `park-check` failed one run in five
+
+Same machine, `1e583bc`, Zig 0.17.0, `-Dtarget=x86_64-linux-gnu`, the program `zig build park-check` builds (`ReleaseFast`) run by hand in a loop. It failed 11 of 60 runs, then 13 of 60 with the dump added: "1 of 48 idle connections hold a second page of stack", always exactly one, and every time "more than two" pages as well.
+
+**It was never a connection.** The program was made to print every 256 KiB mapping in `/proc/self/smaps` with its resident size and `VmFlags`, and a failing run was read against a passing one. In all six failing runs read, every fiber stack (52 to 54 mappings, each `nh`, each 4 kB resident, the connections' and the two the server holds before any connection) held one page. The mapping counted was one or two other 256 KiB anonymous mappings with no `nh` flag, 32 to 72 kB resident, which are not fiber stacks (the allocator's, by their alignment and flags; their owner was not pursued further). The program counted every 256 KiB mapping above one page against the same count taken before the connections opened, and in a passing run that mapping was already there and resident before (28 to 32 kB), while in a failing run it was created or first touched while the connections opened, so the difference was one. The park was at one page on all 48 connections in every run, so the 4,096 bytes a connection would cost were not being paid.
+
+**The change:** `bench/park_check.zig` counts a mapping as a fiber stack only when it is 256 KiB and carries `nh`, and fails when it finds fewer stacks than connections, so a change in how zio marks a stack cannot turn the check into one that passes because it counts nothing.
+
+| | runs | failures |
+|---|---|---|
+| before | 60 | 11 |
+| before, with the dump | 60 | 13 |
+| after | 100 | 0 |
+
+**The check still catches a crossing.** With a 3,500-byte local held across the last `fillMore` in `waitForRequest`, `zig build park-check` failed with "48 of 48 idle connections hold a second page of stack", and passed again, to the same binary hash, with the local removed.
+
+**Not looked at:** the `-Dtls` build is pinned at two pages, and on this tree it prints the note "only 0 of 48 idle connections hold a second page" (before the change it printed 1 of 48, the same miscount). The pin looks stale, but the run that would lower it, with the numbers in `http.md` (`bench/mem.py` on a `-Dtls` build), was not made here.
+
+**Can it go further:** the owner of the unflagged mapping was not named; it does not matter to the check now, which no longer looks at it.

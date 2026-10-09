@@ -4,7 +4,7 @@
 
 **Guide:** [Calling somebody else's API](../guide/fetch.md) · **Reference:** [`nilo_fetch`](../reference/fetch.md)
 
-The code is `fetch/fetch.zig` (`Client`, `Exchange`, `withQuery`), `fetch/target.zig` (`Target`), `fetch/testing.zig` (`Canned`) and `fetch/deadline.zig`.
+The code is `fetch/fetch.zig` (`Client`, `Exchange`, `withQuery`), `fetch/target.zig` (`Target`), `fetch/params.zig` (the encoding of a query, a form and a path segment, internal: the module root re-exports none of it), `fetch/retry.zig` (`Retry`, its budget `Ledger`, `Tries`, `Retry-After`), `fetch/testing.zig` (`Canned`) and `fetch/deadline.zig`.
 
 ## Overview
 
@@ -14,7 +14,7 @@ The code is `fetch/fetch.zig` (`Client`, `Exchange`, `withQuery`), `fetch/target
         fetch.Client: one connection pool, one cert bundle, per program
                                 │
         fetch.Target(name, opts): a type per outbound service
-        (max_in_flight, timeout_ms, ready path; base URL and
+        (max_in_flight, timeout_ms, ready path, retry; base URL and
         credential given to open(), not compiled in)
                                 │
               ┌─────────────────┴──────────────────┐
@@ -44,6 +44,10 @@ The code is `fetch/fetch.zig` (`Client`, `Exchange`, `withQuery`), `fetch/target
 12. **A head stays readable after its body only if it is kept.** `head.keep(c)` copies the header block, the content type and a followed redirect's URL into the Scope, once, for the calls that ask. A whole-body call (`get`, `postJson`, …) makes the same copy automatically before reading the body over it, so `res.header("etag")` and `res.header("retry-after")` still work after the body is read. [ADR 187](../adr/187-a-head-that-outlives-its-body.md)
 13. **A `.stream` body goes on a connection no pool held**, because a reader cannot be sent twice and so cannot take the replay that protects a slice body from a connection the server closed while it idled. It costs a handshake per call and nothing until the first one. [ADR 058](../adr/058-most-of-an-s3-client-is-not-s3.md)
 14. **An answer sent before the body was finished is the answer.** A failed write is not retried, but the head the server already sent is read once, under the call's own deadline; a refusal (4xx, 5xx) is returned and the connection is not reused, while a 2xx or nothing readable stays `WriteFailed`. [ADR 058](../adr/058-most-of-an-s3-client-is-not-s3.md)
+15. **A proxy and a private authority are settings, and the proxy carries `http://` only.** `Settings.proxy` (a URL, given explicitly and never read from the environment, with a `bypass` list of hosts dialled directly) and `Settings.roots` (a certificate bundle the caller loaded) are applied to both std clients. An `https://` call the proxy would carry is `error.TlsThroughProxy` before anything is dialled, because std 0.17 cannot start TLS inside its tunnel; the proxy's credential goes to the proxy alone and a redirect never carries it. [ADR 267](../adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)
+16. **A reaped connection is retried onto a new one, whichever way the death arrives.** The retry bounded by the pool's size covers a FIN, an RST on the read, and a failed write of a body on a connection taken out of the pool with no head back; never a write that failed on a connection the call dialled itself. [ADR 058](../adr/058-most-of-an-s3-client-is-not-s3.md)
+17. **A retry is the caller's numbers and nilo's mechanism, declared on the `Target`.** `.retry = .{ .times, .backoff, .statuses, .retry_after_max_ms, .budget, .mint_key }`: only a call that can be sent again is (an idempotent method, or a POST or PATCH carrying an `Idempotency-Key` or on a type that mints one), a tower-shaped budget with no off switch spends retries as a share of recent calls, the backoff is jittered (`nilo_core`'s `Backoff`), `Retry-After` is a capped floor on the wait, and the route's deadline bounds the whole sequence, with no permit held across a wait. A target that declares nothing holds and runs none of it. It composes with rule 16: the replay onto a fresh connection is hygiene inside one try, the retry a decision between tries. `nilo_s3`'s `Store.Options.retry` puts `Throttled` and `Unavailable` through the same mechanism, except for the calls with a reader. [ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)
+18. **A body that announced its length is read into exactly that many bytes.** `Exchange.take` sizes its one arena allocation from `content-length` when it is within `max`, and grows only for a chunked body or one announced past the ceiling, so a call holds 2,042 bytes less an idle connection than when `allocRemaining` grew a buffer an arena cannot shrink. [ADR 061](../adr/061-a-fitting-borrows-the-loop.md)
 
 ## Decisions
 
@@ -58,10 +62,13 @@ The code is `fetch/fetch.zig` (`Client`, `Exchange`, `withQuery`), `fetch/target
 | [184](../adr/184-a-caller-that-knows-says-discard.md) | `Exchange.discard()` for a body the caller knows it will not read |
 | [186](../adr/186-the-transfer-buffer-serves-nothing-here.md) | What `transfer_buffer` and `read_buffer_size` each actually do |
 | [187](../adr/187-a-head-that-outlives-its-body.md) | `head.keep(c)` and `Response.headers`, copied once so they outlive the body |
+| [271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md) | `Target`'s `.retry`: the caller's numbers, the mechanism's idempotency rule, budget, jitter, `Retry-After` and deadline; `Backoff` in `nilo_core`; `s3.Store`'s `retry` |
+| [267](../adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md) | `Settings.proxy` and `Settings.roots`, the bypass list, and why an `https://` call is refused when a proxy would carry it |
 
 Related topics: the layering rule that makes a Fitting its own layer, never a sibling of a Service, is [ADR 038](../adr/038-a-module-sits-where-the-loop-puts-it.md) and [ADR 057](../adr/057-percent-is-needed-by-two-layers.md) (layering); what an outbound call costs the connection waiting on it is [ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md) (memory); setting a deadline on a call is [ADR 056](../adr/056-the-way-out-was-open-the-clock-was-not.md) (deadlines); `Target` is a type in the same way a Bucket is in [ADR 059](../adr/059-a-bucket-is-a-type-and-a-key-is-not.md) (s3); passing the base URL and credential to `open` instead of compiling them in follows the setting versus deployment split in [ADR 039](../adr/039-a-setting-is-a-field-and-every-bad-one-is-named-at-once.md) (config); `nilo_ready`'s default (started means ready) is [ADR 154](../adr/154-a-health-route-asks-the-services.md) (lifecycle).
 
 ## Open questions
 
+- **A circuit breaker, and the Refusal for a streamed body under a `.retry`.** The first is on [the todo list](../todo.md). The second has nothing to refuse until a streamed call can be made through a `Target`: whoever adds it adds the compile error, per [ADR 271](../adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md).
 - **Starting an `Exchange` from a `Target`.** Wanted but not built: a streamed call through a target would need the target's standing headers and limit to reach `Exchange.begin`, which today takes a client and a URL directly. [ADR 061](../adr/061-a-fitting-borrows-the-loop.md) leaves it waiting for someone who streams from a service with standing headers, and it is listed on [the todo list](../todo.md).
 - **Whether a larger `read_buffer_size` reduces syscalls for a caller reading many large bodies at once.** The field now exists for exactly this measurement; [ADR 186](../adr/186-the-transfer-buffer-serves-nothing-here.md) notes it could not be measured before the field existed.

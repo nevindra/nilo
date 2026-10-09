@@ -1031,6 +1031,194 @@ test "a key without a request, reused on another request, or still in flight is 
     try testing.expectEqual(@as(u32, 1), counter.placed);
 }
 
+// ---- a store the instances share (ADR 268) ----
+
+/// The shape `sql.Replays` has: every call takes the request's Scope first
+/// and can fail the way a database does. One of these stands for the
+/// database two instances (two Apps here) both reach, which `http/` cannot
+/// name; `sql/replays.zig` holds the real table to the same contract.
+const SharedReplays = struct {
+    pub const takes_scope = true;
+    pub const max_bytes: usize = 4096;
+
+    map: std.StringHashMap([]const u8),
+    gpa: std.mem.Allocator,
+    /// Every call fails, as with a database that stopped answering.
+    down: bool = false,
+    /// Only the write of the answer fails, the one after the handler ran.
+    down_on_put: bool = false,
+
+    fn init(gpa: std.mem.Allocator) SharedReplays {
+        return .{ .map = .init(gpa), .gpa = gpa };
+    }
+
+    fn deinit(self: *SharedReplays) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.map.deinit();
+    }
+
+    pub fn getInto(self: *SharedReplays, scope: anytype, key: []const u8, out: []u8) !?[]const u8 {
+        _ = scope;
+        if (self.down) return error.Disconnected;
+        const v = self.map.get(key) orelse return null;
+        if (v.len > out.len) return null;
+        @memcpy(out[0..v.len], v);
+        return out[0..v.len];
+    }
+
+    pub fn putIfAbsentFor(self: *SharedReplays, scope: anytype, key: []const u8, value: []const u8, ttl_s: u32) !bool {
+        _ = ttl_s;
+        if (self.down) return error.Disconnected;
+        if (self.map.contains(key)) return false;
+        try self.store(scope, key, value);
+        return true;
+    }
+
+    pub fn put(self: *SharedReplays, scope: anytype, key: []const u8, value: []const u8) !void {
+        if (self.down or self.down_on_put) return error.Disconnected;
+        try self.store(scope, key, value);
+    }
+
+    fn store(self: *SharedReplays, scope: anytype, key: []const u8, value: []const u8) !void {
+        _ = scope;
+        if (value.len > max_bytes) return error.TooLarge;
+        const k = try self.gpa.dupe(u8, key);
+        const v = try self.gpa.dupe(u8, value);
+        if (self.map.fetchRemove(k)) |old| {
+            self.gpa.free(old.key);
+            self.gpa.free(old.value);
+        }
+        try self.map.put(k, v);
+    }
+
+    pub fn del(self: *SharedReplays, scope: anytype, key: []const u8) !bool {
+        _ = scope;
+        if (self.down) return error.Disconnected;
+        const old = self.map.fetchRemove(key) orelse return false;
+        self.gpa.free(old.key);
+        self.gpa.free(old.value);
+        return true;
+    }
+};
+
+fn placeSharedOrder(key: typed.Idempotent(SharedReplays, .{}), body: KeptOrder, counter: *OrderCounter) !typed.Response(PlacedOnce) {
+    if (body.qty == 0) return fail.unprocessable("qty has to be at least 1", .{});
+    counter.placed += 1;
+    _ = key;
+    return .{ .status = 201, .value = .{ .id = counter.placed, .sku = body.sku } };
+}
+
+test "a retry the balancer sends to the other instance is answered, not run again" {
+    // Two Apps, one store: two instances and the database between them.
+    var shared = SharedReplays.init(testing.allocator);
+    defer shared.deinit();
+    var counter = OrderCounter{};
+    var a = App.init(testing.allocator);
+    defer a.deinit();
+    var b = App.init(testing.allocator);
+    defer b.deinit();
+    for ([_]*App{ &a, &b }) |app| {
+        try app.provide(&shared);
+        try app.provide(&counter);
+        try app.post("/orders", placeSharedOrder);
+    }
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const first = post(&h, &a, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, first, "HTTP/1.1 201"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+
+    const retried = post(&h, &b, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, retried, "HTTP/1.1 201"));
+    try testing.expect(std.mem.endsWith(u8, retried, "{\"id\":1,\"sku\":\"A1\"}"));
+    try testing.expect(std.mem.indexOf(u8, retried, "Idempotent-Replayed: true") != null);
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+test "a failure releases the claim on the shared store, so the retry runs" {
+    var shared = SharedReplays.init(testing.allocator);
+    defer shared.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&shared);
+    try app.provide(&counter);
+    try app.post("/orders", placeSharedOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    const refused = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":0}");
+    try testing.expect(std.mem.startsWith(u8, refused, "HTTP/1.1 422"));
+    try testing.expectEqual(@as(usize, 0), shared.map.count());
+
+    const retried = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":0}");
+    try testing.expect(std.mem.startsWith(u8, retried, "HTTP/1.1 422"));
+    try testing.expectEqual(@as(u32, 0), counter.placed);
+
+    const fixed = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":1}");
+    try testing.expect(std.mem.startsWith(u8, fixed, "HTTP/1.1 201"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+test "a store that does not answer is a 503 and the handler does not run" {
+    var shared = SharedReplays.init(testing.allocator);
+    defer shared.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&shared);
+    try app.provide(&counter);
+    try app.post("/orders", placeSharedOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    shared.down = true;
+    const refused = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, refused, "HTTP/1.1 503"));
+    try testing.expect(std.mem.indexOf(u8, refused, "Idempotency-Key") != null);
+    try testing.expectEqual(@as(u32, 0), counter.placed);
+
+    // And once it answers again the same key runs, as nothing was claimed.
+    shared.down = false;
+    const ran = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, ran, "HTTP/1.1 201"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
+test "an answer the store could not keep is still sent, and the marker holds the retry off" {
+    var shared = SharedReplays.init(testing.allocator);
+    defer shared.deinit();
+    var counter = OrderCounter{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&shared);
+    try app.provide(&counter);
+    try app.post("/orders", placeSharedOrder);
+
+    var h = Harness.init();
+    defer h.deinit();
+
+    shared.down_on_put = true;
+    const sent = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, sent, "HTTP/1.1 201"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+
+    // The marker is still there: a 409 rather than a second order, for as
+    // long as the marker lives.
+    shared.down_on_put = false;
+    const retried = post(&h, &app, "k-1", "{\"sku\":\"A1\",\"qty\":2}");
+    try testing.expect(std.mem.startsWith(u8, retried, "HTTP/1.1 409"));
+    try testing.expectEqual(@as(u32, 1), counter.placed);
+}
+
 // ---- a type that writes its own answer (ADR 157) ----
 
 const XmlInvoice = struct {

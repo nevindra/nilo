@@ -1583,12 +1583,12 @@ test "a signed call says its own host and authorization, verbatim" {
 /// helper down into Core to avoid writing it twice would put something in the
 /// vocabulary that no shipped code calls. Twenty duplicated lines is the
 /// cheaper of the two.
-const Counting = struct {
+pub const Counting = struct {
     child: std.mem.Allocator,
     allocs: usize = 0,
     bytes: usize = 0,
 
-    fn allocator(self: *Counting) std.mem.Allocator {
+    pub fn allocator(self: *Counting) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
             .alloc = alloc,
             .resize = resize,
@@ -1790,7 +1790,7 @@ test "a canned server answers what reply said, and shows the request that reache
     }.run);
 }
 
-test "a call on a warm connection allocates twice: the header block, then the body" {
+test "a call on a warm connection asks the arena for two things, the header block and a body sized by its length" {
     try withIo(struct {
         fn run(io: std.Io) !void {
             var canned = try Canned.open(io);
@@ -1824,23 +1824,43 @@ test "a call on a warm connection allocates twice: the header block, then the bo
             const res = try client.get(&counted, url, .{});
             try testing.expectEqual(@as(usize, 64), res.body.view().len);
 
-            // Two, and they are the header block and the body, in that
-            // order: the block is kept into the Scope's arena before the
-            // body reads over it (ADR 187), and the body is `allocRemaining`
-            // into the same arena. The gate is a semaphore with no allocation
-            // behind it, the deadline arms into a slot inside the `Bound` on
-            // the stack, and the request head is written into the
-            // connection's own buffer.
-            //
-            // What is counted is the arena's calls on its backing allocator,
-            // so this is chunks rather than bumps: the block is the first
-            // thing the arena is asked for and gets a chunk sized to itself,
-            // and the body's writer then asks for more than what is left of
-            // it. It was one for a year, when the body was the first and
-            // only thing. Raising this needs a reason. It is the same rule
-            // ADR 017's second row puts on the inbound path, applied to the
-            // way out.
-            try testing.expectEqual(@as(usize, 2), counting.allocs);
+            // Two requests of the arena, in this order: the header block,
+            // kept before the body reads over it (ADR 187), and the body,
+            // which announced its length and is read into exactly that many
+            // bytes (`Exchange.take`). What is counted is the arena's calls
+            // on its backing allocator, so this is chunks rather than bumps.
+            // It was two chunks while the body was `allocRemaining`'s, which
+            // grows past what is left of the chunk the block got; sized, the
+            // body fits in it, and the figure is one. A body that did not
+            // announce its length is the growing read (`serveChunked`). Raising this needs a reason. It is the same
+            // rule ADR 017's second row puts on the inbound path, applied to
+            // the way out.
+            try testing.expectEqual(@as(usize, 1), counting.allocs);
+        }
+    }.run);
+}
+
+test "a body that ends short of the length it announced is BodyTooShort, not a buffer with a tail of nothing" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+            // Claims 100 bytes, sends 40 and closes.
+            canned.body_len = 40;
+            canned.claim_len = 100;
+
+            var served = try io.concurrent(Canned.serveOne, .{&canned});
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{});
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const res = client.get(&scope, try canned.url(&buf), .{});
+            try testing.expectError(error.BodyTooShort, res);
         }
     }.run);
 }
@@ -2282,6 +2302,328 @@ test "a refusal sent before the body was finished is the answer, not WriteFailed
             // reused: the second call is a second accept.
             _ = try client.put(&scope, url, big, .{});
             try testing.expectEqual(@as(usize, 2), canned.accepted);
+        }
+    }.run);
+}
+
+/// A server that answers each request it reads and then closes the socket,
+/// without ever saying `Connection: close`: the idle-reaping server of a
+/// load balancer, as far as a pooled client can tell. It takes `count`
+/// requests, each on a connection of its own, and reads a body the head
+/// announced before it answers, so the close is a FIN and nothing is left
+/// unread to turn it into an RST.
+fn serveEachThenClose(canned: *Canned, count: usize) !void {
+    for (0..count) |_| {
+        var stream = try canned.server.accept(canned.io);
+        defer stream.close(canned.io);
+        canned.accepted += 1;
+
+        var in_buf: [4 << 10]u8 = undefined;
+        var reader = stream.reader(canned.io, &in_buf);
+        var body_len: usize = 0;
+        while (true) {
+            const line = try reader.interface.takeDelimiterInclusive('\n');
+            const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+            if (trimmed.len == 0) break;
+            if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                body_len = std.fmt.parseInt(usize, std.mem.trim(u8, trimmed["content-length:".len..], " \t"), 10) catch 0;
+            }
+        }
+        if (body_len != 0) _ = try reader.interface.discard(.limited(body_len));
+
+        var out_buf: [256]u8 = undefined;
+        var writer = stream.writer(canned.io, &out_buf);
+        try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        try writer.interface.flush();
+    }
+}
+
+/// Three calls of one kind on one client, against a server that closes after
+/// every answer. The first leaves a connection in the pool and the server
+/// closes it; the next two find a corpse, and each must be dialled again.
+fn threeCallsAcrossReaping(io: std.Io, comptime kind: enum { get, put_form, post_json }) !void {
+    var canned = try Canned.open(io);
+    defer canned.close();
+
+    var client = try started(io, .{ .timeout_ms = 5_000 });
+    defer client.deinit();
+
+    var scope: core.Run = .init(testing.allocator);
+    defer scope.deinit();
+
+    var buf: [64]u8 = undefined;
+    const url = try canned.url(&buf);
+
+    var served = try io.concurrent(serveEachThenClose, .{ &canned, @as(usize, 3) });
+    defer served.cancel(io) catch {};
+
+    for (0..3) |_| {
+        const res = switch (kind) {
+            .get => try client.get(&scope, url, .{}),
+            .put_form => try client.putForm(&scope, url, .{ .name = "a b", .active = true }, .{}),
+            .post_json => try client.postJson(&scope, url, .{ .amount = 500 }, .{}),
+        };
+        try testing.expectEqualStrings("ok", res.body.view());
+        // Let the server's close land before the next call, so that the
+        // call finds the corpse rather than racing the FIN.
+        try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+    }
+    try testing.expectEqual(@as(usize, 3), canned.accepted);
+}
+
+test "a pooled connection the peer closed after answering is dialled again for a bodiless call" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            try threeCallsAcrossReaping(io, .get);
+        }
+    }.run);
+}
+
+test "a pooled connection the peer closed after answering is dialled again for a form body" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            try threeCallsAcrossReaping(io, .put_form);
+        }
+    }.run);
+}
+
+test "a pooled connection the peer closed after answering is dialled again for a JSON body" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            try threeCallsAcrossReaping(io, .post_json);
+        }
+    }.run);
+}
+
+test "a body write that fails on a connection just dialled is not sent again" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var canned = try Canned.open(io);
+            defer canned.close();
+
+            var client = try started(io, .{ .timeout_ms = 5_000 });
+            defer client.deinit();
+
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var buf: [64]u8 = undefined;
+            const url = try canned.url(&buf);
+
+            // The server takes a connection and closes it without reading or
+            // answering, as often as it is dialled. The reset is the same one
+            // a reaped connection gives, so the only thing that tells this
+            // call from the stale ones above is that it dialled the
+            // connection itself: sending it again would be a retry policy,
+            // and `accepted` would say two.
+            const Reset = struct {
+                fn serve(c: *Canned) !void {
+                    while (true) {
+                        var stream = try c.server.accept(c.io);
+                        c.accepted += 1;
+                        stream.close(c.io);
+                    }
+                }
+            };
+            var served = try io.concurrent(Reset.serve, .{&canned});
+            defer served.cancel(io) catch {};
+
+            const big = try testing.allocator.alloc(u8, 64 << 20);
+            defer testing.allocator.free(big);
+            @memset(big, 'x');
+
+            try testing.expectError(error.WriteFailed, client.put(&scope, url, big, .{}));
+            try testing.expectEqual(@as(usize, 1), canned.accepted);
+        }
+    }.run);
+}
+
+// ---- an egress proxy and a private authority (ADR 267) ----
+
+/// `http://ann:pw@127.0.0.1:<port>`, the proxy a test points at a Canned.
+fn proxyUrl(buf: []u8, port: u16) ![]const u8 {
+    return std.fmt.bufPrint(buf, "http://ann:pw@127.0.0.1:{d}", .{port});
+}
+
+test "an http call goes to the proxy in full form, with the proxy's credentials and nobody else's" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var proxy = try Canned.open(io);
+            defer proxy.close();
+            proxy.reply("200 OK", "", "ok");
+
+            var purl: [96]u8 = undefined;
+            var client = try started(io, .{ .proxy = .{ .url = try proxyUrl(&purl, proxy.port) } });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var served = try io.concurrent(Canned.serveOne, .{&proxy});
+            defer served.cancel(io) catch {};
+            // `service.test` is not a name that resolves: reaching the proxy
+            // at all is the proof that it is the proxy that was dialled.
+            const res = try client.get(&scope, "http://service.test/v1/x?y=1", .{ .headers = &.{.{ .name = "X-Trace", .value = "t1" }} });
+            served.await(io) catch {};
+            try testing.expectEqualStrings("ok", res.body.view());
+
+            const seen = proxy.request();
+            try testing.expect(std.mem.startsWith(u8, seen, "GET http://service.test/v1/x?y=1 HTTP/1.1"));
+            try testing.expect(std.mem.indexOf(u8, seen, "host: service.test") != null);
+            // base64("ann:pw")
+            try testing.expect(std.mem.indexOf(u8, seen, "proxy-authorization: Basic YW5uOnB3") != null);
+            try testing.expect(carries(seen, "x-trace"));
+            // The proxy's credential is the proxy's: the origin's line is not it.
+            try testing.expect(!carries(seen, "authorization"));
+        }
+    }.run);
+}
+
+test "a host on the bypass list is dialled directly, in origin form, with no proxy line" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var origin = try Canned.open(io);
+            defer origin.close();
+            origin.reply("200 OK", "", "direct");
+
+            // The proxy is a port nothing listens on: a call that went to it
+            // would fail to connect instead of answering.
+            var client = try started(io, .{ .proxy = .{
+                .url = "http://ann:pw@127.0.0.1:1",
+                .bypass = &.{"127.0.0.1"},
+            } });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var served = try io.concurrent(Canned.serveOne, .{&origin});
+            defer served.cancel(io) catch {};
+            var buf: [64]u8 = undefined;
+            const res = try client.get(&scope, try origin.url(&buf), .{});
+            served.await(io) catch {};
+            try testing.expectEqualStrings("direct", res.body.view());
+            try testing.expect(std.mem.startsWith(u8, origin.request(), "GET / HTTP/1.1"));
+            try testing.expect(!carries(origin.request(), "proxy-authorization"));
+        }
+    }.run);
+}
+
+test "a redirect from the proxy to a bypassed host leaves the proxy's credential and the call's own behind" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            var proxy = try Canned.open(io);
+            defer proxy.close();
+            var origin = try Canned.open(io);
+            defer origin.close();
+            var where: [96]u8 = undefined;
+            proxy.reply("302 Found", try std.fmt.bufPrint(&where, "Location: http://127.0.0.1:{d}/after\r\n", .{origin.port}), "");
+            origin.reply("200 OK", "", "landed");
+
+            var purl: [96]u8 = undefined;
+            var client = try started(io, .{ .proxy = .{
+                .url = try proxyUrl(&purl, proxy.port),
+                .bypass = &.{"127.0.0.1"},
+            } });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            var served_proxy = try io.concurrent(Canned.serveOne, .{&proxy});
+            defer served_proxy.cancel(io) catch {};
+            var served_origin = try io.concurrent(Canned.serveOne, .{&origin});
+            defer served_origin.cancel(io) catch {};
+            const res = try client.get(&scope, "http://service.test/start", .{ .headers = &.{.{ .name = "Authorization", .value = "Bearer mine" }} });
+            served_proxy.await(io) catch {};
+            served_origin.await(io) catch {};
+            try testing.expectEqualStrings("landed", res.body.view());
+
+            // The first hop went to the proxy with both lines, the second
+            // straight to the origin with neither.
+            try testing.expect(std.mem.startsWith(u8, proxy.request(), "GET http://service.test/start "));
+            try testing.expect(carries(proxy.request(), "proxy-authorization"));
+            try testing.expect(carries(proxy.request(), "authorization"));
+            try testing.expect(std.mem.startsWith(u8, origin.request(), "GET /after "));
+            try testing.expect(!carries(origin.request(), "proxy-authorization"));
+            try testing.expect(!carries(origin.request(), "authorization"));
+        }
+    }.run);
+}
+
+test "an https call the proxy would carry is refused before anything is dialled" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            // Nothing listens on port 1, so a dial would be `ConnectionRefused`.
+            var client = try started(io, .{ .proxy = .{ .url = "http://127.0.0.1:1", .bypass = &.{"127.0.0.1"} } });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            try testing.expectError(error.TlsThroughProxy, client.get(&scope, "https://service.test/", .{}));
+            // A bypassed name is not the proxy's, so it is dialled itself,
+            // and refused by the port, which is the proof it was.
+            if (client.get(&scope, "https://127.0.0.1:1/", .{})) |_| return error.TestUnexpectedResult else |err| {
+                try testing.expect(err != error.TlsThroughProxy);
+            }
+        }
+    }.run);
+}
+
+test "a proxy that is not an http or https URL with a host stops the client at start" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            for ([_][]const u8{ "ftp://proxy.test:21", "http://", "proxy.test:3128", "socks5://proxy.test:1080" }) |bad| {
+                var client: fetch.Client = .init(testing.allocator, .{ .proxy = .{ .url = bad } });
+                defer client.deinit();
+                try testing.expectError(error.InvalidProxy, client.nilo_start(io, .none));
+            }
+        }
+    }.run);
+}
+
+/// A self-signed authority generated for this test and good for a hundred
+/// years; it signs nothing and is trusted by nothing.
+const test_authority =
+    \\MIIBojCCAUmgAwIBAgIUFMgMuZxLhrwIcpSKUkJN8x8MbcAwCgYIKoZIzj0EAwIw
+    \\JjEkMCIGA1UEAwwbbmlsbyB0ZXN0IHByaXZhdGUgYXV0aG9yaXR5MCAXDTI2MTAw
+    \\OTA0NTg1M1oYDzIxMjYwOTE1MDQ1ODUzWjAmMSQwIgYDVQQDDBtuaWxvIHRlc3Qg
+    \\cHJpdmF0ZSBhdXRob3JpdHkwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAR/PGWJ
+    \\ZFYFmca/o7F/EpjWobb9iwZ71r0Y0taxrVnpQKFAIFdRTGrLsmhx0rkR63Dyp9PW
+    \\KyTvy3eeVlPpjeaYo1MwUTAdBgNVHQ4EFgQUv0p4rQME5j+xd4ABHPjn6SooDZww
+    \\HwYDVR0jBBgwFoAUv0p4rQME5j+xd4ABHPjn6SooDZwwDwYDVR0TAQH/BAUwAwEB
+    \\/zAKBggqhkjOPQQDAgNHADBEAiA3CpcNEqjpEFUp78cJShyEPPXt6nBTrlO/QGLU
+    \\h/nO8wIgNco76dCkJFtOebzwSZKxx2AuhCF4/hCeN+Zio5pbpm8=
+;
+
+test "a bundle the caller loaded is the one both clients trust, and the client never frees it" {
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            if (std.http.Client.disable_tls) return error.SkipZigTest;
+            const gpa = testing.allocator;
+            var roots: std.crypto.Certificate.Bundle = .empty;
+            defer roots.deinit(gpa);
+
+            // One certificate, decoded the way `Bundle.addCertsFromFile` does
+            // it, from text instead of a file.
+            const decoder = std.base64.standard.decoderWithIgnore("\n");
+            const der = try gpa.alloc(u8, decoder.calcSizeUpperBound(test_authority.len));
+            defer gpa.free(der);
+            const len = try decoder.decode(der, test_authority);
+            try roots.bytes.appendSlice(gpa, der[0..len]);
+            try roots.parseCert(gpa, 0, std.Io.Clock.real.now(io).toSeconds());
+            try testing.expectEqual(@as(u32, 1), roots.map.count());
+
+            var client: fetch.Client = .init(gpa, .{ .roots = &roots });
+            try client.nilo_start(io, .none);
+            // A time is what tells std the bundle is final and that the
+            // system is not to be scanned for.
+            try testing.expect(client.inner.now != null);
+            try testing.expect(client.fresh.now != null);
+            // Both read the caller's bundle.
+            try testing.expectEqual(@as(u32, 1), client.inner.ca_bundle.map.count());
+            try testing.expectEqual(@as(u32, 1), client.fresh.ca_bundle.map.count());
+            // `deinit` hands it back: std would free it twice, and again
+            // under the caller's own `deinit` above, if it did not.
+            client.deinit();
+            try testing.expectEqual(@as(u32, 1), roots.map.count());
         }
     }.run);
 }

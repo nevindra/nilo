@@ -592,7 +592,16 @@ fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
     // Under a lifetime of its own, not the Space's: a handler that dies with
     // the process leaves this behind, and the Space may keep answers for a
     // day (ADR 155).
-    const claimed = replays.putIfAbsentFor(under, &idempotent_mod.marker(fingerprint), idempotent_mod.marker_ttl_s) catch |err| switch (err) {
+    const claimed = idempotent_mod.claim(replays, c, under, &idempotent_mod.marker(fingerprint), idempotent_mod.marker_ttl_s) catch |err| switch (err) {
+        // The store could not say whether the key is free: a database that
+        // did not answer. The handler is not run, because running it would
+        // be running it unclaimed, which for a payment is the double charge
+        // the key exists to prevent. The client retries (ADR 268).
+        error.Unavailable => return fail.status(
+            503,
+            "this endpoint could not check whether {s} {s} was already answered; try again in a moment",
+            .{ idempotent_mod.header_name, key.view() },
+        ),
         // A key the Space cannot hold: a long `by(c)`, or a Space sized
         // small. The marker is thirteen bytes, so it is the key. Refused
         // before the handler runs, not answered as `cachedBegin` answers it:
@@ -624,7 +633,11 @@ fn idempotentBegin(comptime P: type, c: *Ctx) !BeginOutcome {
     // Somebody was first. Into the arena rather than a `Held` on the
     // stack, which would be `max_bytes` per idle connection (ADR 062).
     const room = try c._arena.alloc(u8, Replays.max_bytes);
-    const kept = replays.getInto(under, room) orelse
+    const kept = (idempotent_mod.read(replays, c, under, room) catch return fail.status(
+        503,
+        "this endpoint could not read the answer kept for {s} {s}; try again in a moment",
+        .{ idempotent_mod.header_name, key.view() },
+    )) orelse
         // Gone between the claim and the read — evicted, or expired on the
         // boundary. Nothing to replay, so this request is the first again.
         return .{ .fresh = begun };
@@ -659,9 +672,7 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, spelling: anytype, 
     // Space: a retry would be told 409 until it expired. Released on every
     // error; the `put` below replaces it on success.
     var placed = false;
-    errdefer if (!placed) {
-        _ = replays.del(begun.under);
-    };
+    errdefer if (!placed) idempotent_mod.release(replays, c, begun.under);
 
     const answer = try renderAnswer(c, spelling, result);
 
@@ -678,18 +689,30 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, spelling: anytype, 
 
     const record = idempotent_mod.encode(c._arena, answer.kind, answer.status, begun.fingerprint, kept_headers, kept_trailers, answer.content_type, answer.body) catch |err| switch (err) {
         error.TooLarge => {
-            _ = replays.del(begun.under);
+            idempotent_mod.release(replays, c, begun.under);
             std.log.warn("route \"{s}\" answered with more headers than an idempotency record holds; the answer was sent and not kept", .{c._path});
             return sendRendered(c, answer);
         },
         else => |e| return e,
     };
-    replays.put(begun.under, record) catch |err| switch (err) {
+    idempotent_mod.keep(replays, c, begun.under, record) catch |err| switch (err) {
+        // The handler has run and its answer is made. The store could not
+        // take it, and the marker is left where it is (the free that would
+        // follow needs the same store), so a retry is told 409 until it
+        // expires and then runs the handler again. The answer goes out
+        // either way (ADR 268).
+        error.Unavailable => {
+            placed = true;
+            std.log.warn(
+                "route \"{s}\" answered, and the answer could not be kept for {s} {s}; a retry is told 409 for up to {d} seconds",
+                .{ c._path, idempotent_mod.header_name, begun.key.view(), idempotent_mod.marker_ttl_s },
+            );
+        },
         error.TooLarge => {
             // The answer goes out either way; what is lost is the replay,
             // and a retry runs the handler again. Said once per occurrence
             // because the fix is a number in the Space.
-            _ = replays.del(begun.under);
+            idempotent_mod.release(replays, c, begun.under);
             std.log.warn(
                 "route \"{s}\" answered {d} bytes, more than the {d} its Space keeps; the answer was sent and not kept",
                 .{ c._path, record.len, Replays.max_bytes },
@@ -705,7 +728,7 @@ fn idempotentFinish(comptime P: type, c: *Ctx, begun: Begun, spelling: anytype, 
 /// the retry, which is what a failure is for (ADR 155).
 fn idempotentRelease(comptime P: type, c: *Ctx, begun: Begun) void {
     const replays = c._services.get(*P.nilo_idempotent.replays) orelse return;
-    _ = replays.del(begun.under);
+    idempotent_mod.release(replays, c, begun.under);
 }
 
 /// The headers a kept answer is sent with: those set through the Ctx since

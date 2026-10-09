@@ -22,7 +22,7 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · The public surface has not been read back against the reference.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · The public surface has not been read back against the reference, except for `nilo_fetch`'s.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A module header's code example is not compiled, so one can rot.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A rule a build step holds against the patterns the audit kept finding.
@@ -35,19 +35,17 @@ Independent of the order: each touches files no stage of the direction above doe
 
 ### Every byte an idle connection holds is on the record
 
-**The idle figure is the number nilo sells, and what it is made of is not yet all on the record.** What is open is the `-Dtls` build's second page, whether an idle HTTP/1.1 connection needs a fiber at all, `nilo_fetch`'s per-call figures and what a connection inside a request holds, and this direction puts each on the record ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)).
+**The idle figure is the number nilo sells, and what it is made of is not yet all on the record.** What is open is how close the `-Dhttp2` park sits to a page boundary, whether an idle HTTP/1.1 connection needs a fiber at all, and what a connection inside a request holds, and this direction puts each on the record ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md), [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)).
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_fetch` · A plain call costs 4,139 bytes on every idle connection
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A `-Dtls` build parks 96 bytes past a page boundary, which costs 4,109 bytes on every idle connection of its plain listener, and a `-Dhttp2` build sits 64 bytes under it.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · The `-Dhttp2` build parked 64 bytes under a page boundary when it was last read, and which commit gave the `-Dtls` build its page back is not known.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_fetch` · What an outbound call costs through TLS is read off buffer sizes, not measured.
 - [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · What a connection inside a request holds now that `read_buffer` is 16 KiB is arithmetic, not a reading.
 
 <!-- /gathered -->
 
-**What would settle it:** the `-Dtls` page given back or recorded as the cost of that build in ADR 017, and the outbound figures read instead of derived.
+**What would settle it:** the `-Dhttp2` margin read again and held by a step, the fiberless idle connection built or refused with its number, and what a connection inside a request holds measured.
 
 ## Next
 
@@ -57,8 +55,6 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_sql` · An index on a big live Postgres table cannot be built without blocking its writes.
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_sql` · A Problem from the diff has no way out but editing `snapshot.zon` by hand.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · Migration steps and their words disagree with what runs.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `reset` and `squash` are missing from the migrations, and they are the debt that forward-only creates.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.
@@ -77,7 +73,6 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P1](./todo.md#p1-a-large-cost-and-a-real-one) · `nilo_http` · `Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · `within` remembers a push in one process, so the same push sent to two instances inside the window runs twice.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · `allowance` keeps its table in the process and has no seam for a shared one
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A Room belongs to one process and has no hook a bridge could use, so a chat served from two instances is two chats.
@@ -85,7 +80,7 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- /gathered -->
 
-**What would settle it:** an `Idempotent` route answering a retry once across two instances through a rolling restart, an allowance holding its limit across two, and the chat example delivering across two, each in a live test.
+**What would settle it:** an allowance holding its limit across two instances, and the chat example delivering across two, each in a live test.
 
 ### A queue needs no second system
 
@@ -93,7 +88,6 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A backoff has no jitter.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A schedule is UTC.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A job whose work is a write to the same database cannot commit the write and its `done` together, so a crash between the two does the work again.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.
@@ -135,16 +129,15 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 ### A call to another service survives that service's bad minute
 
-**When a service a handler calls slows down, fails or says "later", what nilo does about it is a declaration on the `Target`: the caller's numbers, nilo's mechanism, and never a loop each caller writes.** `nilo_fetch` refuses a retry policy in its header and its guide, on the ground that the numbers belong to whoever knows the other service. That holds for the numbers. What the refusal leaves to every caller is the mechanism, and the mechanism is where the double charge, the synchronised retry and the multiplied load come from. tower, the AWS SDKs and Stripe's clients agree on its shape: a budget, jitter, `Retry-After` honoured, and a POST retried only under an idempotency key. No ADR holds the refusal, so this is a new decision rather than a revision. It meets `nilo_s3`, whose `Throttled` reaches the caller unretried, and `nilo_job`, whose backoff wants the same jitter. A `Target` that declares nothing pays nothing, and a retried call waits on a fiber the call already holds.
+**When a service a handler calls is failing rather than slow, what nilo does about it is a declaration on the `Target`, and never a loop each caller writes.** The retry half is built: a `.retry` on a `Target` and on an `s3.Store` carries the caller's numbers and nilo's mechanism (idempotent methods or a key, a budget, jitter, `Retry-After`, the route's deadline; [ADR 271](./adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)). What is left is the service that is *down* and not slow: every call still waits out its timeout, and a breaker that stops calling it for a while is the other half, to be weighed against the per-call figures once a retry exists to be measured with. A `Target` that declares nothing pays nothing, and a call that waits holds a fiber it already holds.
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_fetch` · A call worth retrying is retried by a loop each caller writes, and the loop the guide teaches retries a POST.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_fetch` · Whether a `Target` should stop calling a service that is failing, rather than wait out its timeout on every call.
+- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_fetch` · A streamed call cannot be made through a `Target`, and when one can, a `.stream` body under a `.retry` has to be a compile error.
 
 <!-- /gathered -->
 
-**What would settle it:** a `Target` whose service answers 503 for a minute under load sending no more than its budget above the calls it was given, a POST retried under one key and charged once by a canned service, and the fibers held while a service is down measured with and without a breaker.
+**What would settle it:** a service behind a `Target` timing out for a minute under load, with the fibers and bytes the waiting calls held measured with and without a breaker.
 
 ### A developer from Go or Node meets no silent trap in the first week
 

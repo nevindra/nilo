@@ -277,6 +277,31 @@ pub const Options = struct {
     /// nobody read: a field renamed without `.was` is a dropped column in the
     /// same list as the one that was meant.
     drop: []const []const u8 = &.{},
+    /// The indexes to build without stopping writes to their table, by name:
+    /// `orders_org_id_idx`. **Each is written as `CREATE INDEX CONCURRENTLY`
+    /// in a version of its own after the one the rest of the diff makes**,
+    /// because Postgres refuses the statement inside a transaction and a
+    /// version is one (ADR 269). Only an index on a table that already exists
+    /// can be named, and only on a database that has the statement; a name
+    /// that matches none holds the whole version back, as a `drop` does.
+    ///
+    /// **A name, not a switch**: whether a table is big enough for the build
+    /// to matter is a fact about the database the migration will meet, and
+    /// the person at the command line is the one who knows it.
+    concurrently: []const []const u8 = &.{},
+    /// The Problems the diff found that this version records as handled, by
+    /// the key `migrate.Problem.key` gives them: `orders.customer_id@1a2b3c4d`.
+    /// **A Problem is not a step, and the diff has none to write for it**:
+    /// the person wrote the step by hand, in this version's `before` or
+    /// `after`, and naming the Problem here is what moves the snapshot past it
+    /// so the next run does not raise it again (ADR 270).
+    ///
+    /// **All or none**: while any Problem is not named here nothing is
+    /// written, as before. A name that matches no Problem holds the version
+    /// back too, which is what a key copied from a run before the types
+    /// changed looks like, and the one Problem that has no table cannot be
+    /// named at all (`migrate.Problem.acceptable`).
+    accept: []const []const u8 = &.{},
     /// What the generated files call the SQL module in their `@import`.
     module: []const u8 = default_module,
     /// Forget the snapshot and derive version 1 from nothing, rewriting the
@@ -328,6 +353,25 @@ pub const Outcome = struct {
     /// The names in `Options.drop` no destructive step has. Any at all and
     /// nothing was written: it is usually a typo for the drop that was meant.
     stray: []const []const u8 = &.{},
+    /// The names in `Options.concurrently` that no index the diff creates on a
+    /// table that exists has. Any at all and nothing was written.
+    loose: []const []const u8 = &.{},
+    /// The version written for the indexes `Options.concurrently` named, which
+    /// runs outside a transaction and comes after `file`. Null when none was.
+    outside_file: ?[]const u8 = null,
+    /// Its steps, which are also in `plan.steps` as the blocking form.
+    outside: []const Step = &.{},
+    /// The steps of the version in a transaction, when `generate` split the
+    /// plan in two; everything else in `plan.steps`.
+    inside: []const Step = &.{},
+    /// The names in `Options.accept` that no Problem has. Any at all and
+    /// nothing was written.
+    stray_accept: []const []const u8 = &.{},
+    /// The Problems `Options.accept` does not name, or cannot (the one about
+    /// the snapshot's dialect). Any at all and nothing was written.
+    unaccepted: []const migrate.Problem = &.{},
+    /// The Problems the version written records as accepted.
+    accepted: []const migrate.Problem = &.{},
 
     /// The schema and the types already agree.
     pub fn isEmpty(self: Outcome) bool {
@@ -402,44 +446,86 @@ pub fn generate(
     // behind: nothing else in this command has anything to do.
     const unnamed = try change.unnamed(gpa, opts.drop);
     const stray: []const []const u8 = if (change.isEmpty()) &.{} else try change.stray(gpa, opts.drop);
-    if (change.isEmpty() or change.problems.len > 0 or unnamed.len > 0 or stray.len > 0) {
+    const split = try change.splitOutside(gpa, opts.concurrently);
+    const loose: []const []const u8 = if (change.isEmpty()) &.{} else split.stray;
+    // **A Problem that is named is handled; one that is not holds everything
+    // back**, as it always has (ADR 270).
+    const unaccepted = try change.unaccepted(gpa, opts.accept);
+    const stray_accept: []const []const u8 = if (change.isEmpty()) &.{} else try change.strayAccepts(gpa, opts.accept);
+    if (change.isEmpty() or unaccepted.len > 0 or stray_accept.len > 0 or unnamed.len > 0 or stray.len > 0 or loose.len > 0) {
         return .{
             .plan = change,
             .unnamed = unnamed,
             .stray = stray,
+            .loose = loose,
+            .stray_accept = stray_accept,
+            .unaccepted = unaccepted,
             .twins = try writeSql(gpa, io, dir, D, opts.versions, state.entries),
         };
     }
 
-    const number = state.head() + 1;
-    const file = try std.fmt.allocPrint(gpa, "{d:0>4}_{s}.zig", .{ number, opts.name });
+    // **Up to two versions**: the diff, and after it the indexes that were
+    // asked to be built without stopping writes. They are two because Postgres
+    // refuses `CONCURRENTLY` inside a transaction, and a version is one; they
+    // are written in the order they run (ADR 269).
+    var news: std.ArrayList(Version) = .empty;
+    var entries: std.ArrayList(Entry) = .empty;
+    try entries.appendSlice(gpa, state.entries);
+    var number = state.head();
+    var first_file: ?[]const u8 = null;
+    var first_number: u32 = 0;
+    var outside_file: ?[]const u8 = null;
 
-    try dir.writeFile(io, .{
-        .sub_path = file,
-        .data = try renderVersion(gpa, number, opts.name, change.steps, opts),
-    });
+    if (split.inside.len > 0 or split.outside.len == 0) {
+        number += 1;
+        const file = try std.fmt.allocPrint(gpa, "{d:0>4}_{s}.zig", .{ number, opts.name });
+        try dir.writeFile(io, .{
+            .sub_path = file,
+            .data = try renderVersionWith(gpa, number, opts.name, split.inside, opts, .{ .accepted = change.problems }),
+        });
+        try entries.append(gpa, .{ .number = number, .name = opts.name, .file = file });
+        try news.append(gpa, .{ .number = number, .name = opts.name, .steps = split.inside });
+        first_file = file;
+        first_number = number;
+    }
+    if (split.outside.len > 0) {
+        number += 1;
+        const name = try std.fmt.allocPrint(gpa, "{s}_concurrently", .{opts.name});
+        const file = try std.fmt.allocPrint(gpa, "{d:0>4}_{s}.zig", .{ number, name });
+        try dir.writeFile(io, .{
+            .sub_path = file,
+            .data = try renderVersionWith(gpa, number, name, split.outside, opts, .{ .transactional = false }),
+        });
+        try entries.append(gpa, .{ .number = number, .name = name, .file = file });
+        try news.append(gpa, .{ .number = number, .name = name, .steps = split.outside, .transactional = false });
+        outside_file = file;
+        if (first_file == null) {
+            first_file = file;
+            first_number = number;
+        }
+    }
 
-    const with_new = try gpa.alloc(Entry, state.entries.len + 1);
-    @memcpy(with_new[0..state.entries.len], state.entries);
-    with_new[state.entries.len] = .{ .number = number, .name = opts.name, .file = file };
+    try writeManifestAndSnapshot(gpa, io, dir, D, desired, opts, entries.items, number);
 
-    try writeManifestAndSnapshot(gpa, io, dir, D, desired, opts, with_new, number);
-
-    // **The version just written is the one version no binary has compiled**,
-    // and its twin is still exact: `renderVersion` writes `before` and `after`
-    // empty, so its steps are the ones in hand. Everything before it comes out
-    // of the manifest this binary was built with.
-    const all = try withNew(gpa, opts.versions, number, opts.name, change.steps);
+    // **The versions just written are the ones no binary has compiled**, and
+    // their twins are still exact: `renderVersion` writes `before` and `after`
+    // empty, so their steps are the ones in hand. Everything before them comes
+    // out of the manifest this binary was built with.
+    const all = try withNew(gpa, opts.versions, news.items);
     const twins = if (all) |list|
-        try writeSql(gpa, io, dir, D, list, with_new)
+        try writeSql(gpa, io, dir, D, list, entries.items)
     else
         0;
     return .{
         .plan = change,
-        .file = file,
-        .number = number,
+        .file = first_file,
+        .number = first_number,
         .twins = twins,
         .twins_deferred = all == null and opts.versions.len > 0,
+        .outside_file = outside_file,
+        .inside = split.inside,
+        .outside = split.outside,
+        .accepted = change.problems,
     };
 }
 
@@ -453,16 +539,15 @@ pub fn generate(
 fn withNew(
     gpa: std.mem.Allocator,
     versions: []const Version,
-    number: u32,
-    name: []const u8,
-    steps: []const Step,
+    news: []const Version,
 ) !?[]const Version {
+    const number = news[0].number;
     if (versions.len != number - 1) return null;
-    if (versions.len > 0 and versions[versions.len - 1].number != @as(i64, number) - 1) return null;
+    if (versions.len > 0 and versions[versions.len - 1].number != number - 1) return null;
 
-    const out = try gpa.alloc(Version, versions.len + 1);
+    const out = try gpa.alloc(Version, versions.len + news.len);
     @memcpy(out[0..versions.len], versions);
-    out[versions.len] = .{ .number = number, .name = name, .steps = steps };
+    @memcpy(out[versions.len..], news);
     return out;
 }
 
@@ -632,11 +717,16 @@ pub fn renderSql(
         \\
         \\
     );
-    try w.writeAll("BEGIN;\n\n");
+    // **A version that runs outside a transaction has no BEGIN and no
+    // COMMIT**, as `migrate.applyOutside` has none (ADR 269): each statement is
+    // its own, and the ledger row is the last, so a script that stopped halfway
+    // wrote no row and is run again whole.
+    const plain = !version.transactional and D.can_build_concurrently;
+    if (!plain) try w.writeAll("BEGIN;\n\n");
     // What `migrate.apply` sets through `Dialect.lock_timeout`, as the
     // statement a shell reads: a step that waits longer for its table gives
     // up, and the script stops there with nothing kept.
-    if (D.lock_timeout != null) try w.print(
+    if (D.lock_timeout != null and !plain) try w.print(
         \\-- A step waiting longer than this for its table's lock gives up, rather
         \\-- than holding every read and write to the table behind it.
         \\SET LOCAL lock_timeout = {d};
@@ -653,6 +743,17 @@ pub fn renderSql(
         if (step.needs_backfill) try w.writeAll(
             "-- This one can fail on a table that already has rows.\n",
         );
+        // The index a failed build left behind is invalid, is never used, and
+        // would be passed over by the `IF NOT EXISTS` below: dropped first, by
+        // psql's `\gexec`, which runs what the query answers.
+        if (plain and step.index.len > 0 and D.index_validity != null) {
+            try w.writeAll(
+                \\-- A build of this index that failed halfway left it behind, invalid. Drop that one first.
+                \\SELECT format('DROP INDEX CONCURRENTLY %s', indexrelid::regclass) FROM pg_index WHERE indexrelid = to_regclass('
+            );
+            try writeSqlLiteral(w, step.index);
+            try w.writeAll("') AND NOT indisvalid \\gexec\n\n");
+        }
         try w.print("{s};\n\n", .{step.sql});
     }
 
@@ -693,7 +794,7 @@ pub fn renderSql(
             \\
         );
     }
-    try w.writeAll("COMMIT;\n");
+    if (!plain) try w.writeAll("COMMIT;\n");
     if (off) try w.writeAll("\nPRAGMA foreign_keys = ON;\n");
     return aw.toOwnedSlice();
 }
@@ -916,6 +1017,27 @@ pub fn renderVersion(
     steps: []const Step,
     opts: Options,
 ) ![]u8 {
+    return renderVersionWith(gpa, number, name, steps, opts, .{});
+}
+
+/// What a version file says beyond its steps.
+pub const Render = struct {
+    /// `false` for the version of `CREATE INDEX CONCURRENTLY` steps, which
+    /// runs outside a transaction (ADR 269).
+    transactional: bool = true,
+    /// The Problems the version records as accepted, with the step for each
+    /// still to be written by hand (ADR 270).
+    accepted: []const migrate.Problem = &.{},
+};
+
+pub fn renderVersionWith(
+    gpa: std.mem.Allocator,
+    number: u32,
+    name: []const u8,
+    steps: []const Step,
+    opts: Options,
+    render: Render,
+) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
     const w = &aw.writer;
@@ -924,7 +1046,7 @@ pub fn renderVersion(
         \\// Written by `db generate` from the Rows in this repository, and committed.
         \\//
         \\// Read it like code, because it is exactly what will run: these steps, in
-        \\// this order, inside one transaction.
+        \\// this order, {s}.
         \\//
         \\// The generated block at the bottom belongs to `db generate`, and
         \\// `--baseline` replaces it. Everything above it is yours and is kept, so a
@@ -946,14 +1068,24 @@ pub fn renderVersion(
         \\pub const version: migrate.Version = .{{
         \\    .number = {d},
         \\    .name = "{s}",
-        \\    .steps = before ++ generated ++ after,
+        \\    .steps = before ++ generated ++ after,{s}
         \\}};
         \\
         \\
-    , .{ opts.module, number, name });
+    , .{
+        if (render.transactional)
+            "inside one transaction"
+        else
+            "with no transaction around them, each one its own, because Postgres refuses\n// `CREATE INDEX CONCURRENTLY` inside one. The ledger row is written after the\n// last, so a run that failed halfway runs the whole version again: a step of\n// your own in `before` or `after` has to be safe to run twice",
+        opts.module,
+        number,
+        name,
+        if (render.transactional) "" else "\n    .transactional = false,",
+    });
 
     try writeDropped(w, steps);
-    try writeGenerated(w, steps);
+    try writeAccepted(w, gpa, render.accepted);
+    try writeGenerated(w, steps, render.transactional);
     return aw.toOwnedSlice();
 }
 
@@ -981,6 +1113,29 @@ fn writeDropped(w: *std.Io.Writer, steps: []const Step) !void {
     );
 }
 
+/// The Problems this version was written past, above the steps, with the text
+/// each one gave. **The diff wrote nothing for these**, and the version is
+/// right only if a step of the person's own, in `before` or `after`, does what
+/// the Problem says; the file says so where the reviewer reads it, because
+/// nothing else in the build can (ADR 270).
+fn writeAccepted(w: *std.Io.Writer, gpa: std.mem.Allocator, problems: []const migrate.Problem) !void {
+    if (problems.len == 0) return;
+    try w.writeAll(
+        \\// Written with `--accept` for the problems below. The diff has no step for
+        \\// any of them: the step is yours, in `before` or `after` above, and this
+        \\// version is only right once it is there. Nothing checks that it is.
+        \\//
+        \\
+    );
+    for (problems) |p| {
+        try w.print("// {s}\n", .{try p.key(gpa)});
+        var lines = std.mem.splitScalar(u8, p.text, '\n');
+        while (lines.next()) |line| try w.print("//   {s}\n", .{line});
+        try w.writeAll("//\n");
+    }
+    try w.writeAll("\n");
+}
+
 /// Replace a version file's generated block and keep every byte outside it.
 ///
 /// Whole-line matching on both markers, and `Error.NoGeneratedBlock` when
@@ -997,7 +1152,7 @@ pub fn spliceGenerated(gpa: std.mem.Allocator, old: []const u8, steps: []const S
     const w = &aw.writer;
 
     try w.writeAll(old[0..begin.start]);
-    try writeGenerated(w, steps);
+    try writeGenerated(w, steps, true);
     try w.writeAll(after_begin[end.end..]);
     return aw.toOwnedSlice();
 }
@@ -1021,7 +1176,7 @@ fn lineWith(text: []const u8, marker: []const u8) ?Line {
 }
 
 /// The block between the two markers, markers included.
-fn writeGenerated(w: *std.Io.Writer, steps: []const Step) !void {
+fn writeGenerated(w: *std.Io.Writer, steps: []const Step, transactional: bool) !void {
     try w.print(
         \\{s}
         \\// Everything to the closing line is `db generate`'s, and a run with
@@ -1038,6 +1193,13 @@ fn writeGenerated(w: *std.Io.Writer, steps: []const Step) !void {
         try w.writeAll("\",\n");
         if (s.destructive) try w.writeAll("        .destructive = true,\n");
         if (s.needs_backfill) try w.writeAll("        .needs_backfill = true,\n");
+        // Only a step that runs outside a transaction reads it back, and
+        // `applyOutside` is what does.
+        if (!transactional and s.index.len > 0) {
+            try w.writeAll("        .index = \"");
+            try writeEscaped(w, s.index);
+            try w.writeAll("\",\n");
+        }
         try w.writeAll("        .sql =\n");
         var lines = std.mem.splitScalar(u8, s.sql, '\n');
         while (lines.next()) |line| try w.print("        \\\\{s}\n", .{line});
@@ -2321,4 +2483,406 @@ test "check compares the snapshot with the newest file both ways" {
     // Written before snapshots carried a version: ahead of and behind nothing.
     state.before.version = 0;
     try testing.expectEqual(@as(usize, 0), (try audit(a, state, versions)).len);
+}
+
+// -- an index built without stopping writes (ADR 269) ----------------------
+
+/// `tickets` as it was: no index at all.
+const Ticket0 = struct {
+    pub const nilo_table = .{ .name = "tickets", .key = .id };
+    id: i64,
+    org_id: i64,
+    email: []const u8,
+};
+
+/// And with a plain index and a unique, both on a table that exists.
+const Ticket1 = struct {
+    pub const nilo_table = .{
+        .name = "tickets",
+        .key = .id,
+        .index = .{.org_id},
+        .unique = .{.{ .columns = .{.email} }},
+    };
+    id: i64,
+    org_id: i64,
+    email: []const u8,
+};
+
+test "an index named with --concurrently is written as a version of its own, outside a transaction" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    const initial = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{Ticket0} }), .{ .name = "initial" });
+    const v1: []const Version = &.{.{ .number = 1, .name = "initial", .steps = initial.plan.steps }};
+    const desired = comptime migrate.desiredOf(Pg, .{ .tables = &.{Ticket1} });
+
+    // Without the flag it is one version in a transaction, as it always was,
+    // and the step says how to ask for the other.
+    const probe = try check(box.a(), box.io(), box.dir(), Pg, desired);
+    try testing.expectEqual(@as(usize, 2), probe.steps.len);
+    try testing.expect(std.mem.indexOf(u8, probe.steps[0].why, "--concurrently") != null);
+
+    const out = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{
+        .name = "index_tickets",
+        .concurrently = &.{"tickets_org_id_idx"},
+        .versions = v1,
+    });
+    try testing.expect(!out.wasHeld());
+    try testing.expectEqualStrings("0002_index_tickets.zig", out.file.?);
+    try testing.expectEqualStrings("0003_index_tickets_concurrently.zig", out.outside_file.?);
+    try testing.expectEqual(@as(usize, 1), out.inside.len);
+    try testing.expectEqual(@as(usize, 1), out.outside.len);
+
+    // The version in a transaction holds the index that was not named, the
+    // other holds the one that was, and says it has no transaction.
+    const first = try box.slurp("0002_index_tickets.zig");
+    try testing.expect(std.mem.indexOf(u8, first, "CREATE INDEX CONCURRENTLY") == null);
+    try testing.expect(std.mem.indexOf(u8, first, ".transactional") == null);
+    const second = try box.slurp("0003_index_tickets_concurrently.zig");
+    try testing.expect(std.mem.indexOf(u8, second, ".transactional = false,") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "CONCURRENTLY IF NOT EXISTS \"tickets_org_id_idx\"") != null);
+    try testing.expect(std.mem.indexOf(u8, second, ".index = \"\\\"tickets_org_id_idx\\\"\",") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "with no transaction around them") != null);
+
+    // The manifest lists both, in the order they run, and the snapshot is at
+    // the second.
+    const manifest = try box.slurp(manifest_file);
+    try testing.expect(std.mem.indexOf(u8, manifest, "0002_index_tickets.zig").? <
+        std.mem.indexOf(u8, manifest, "0003_index_tickets_concurrently.zig").?);
+    try testing.expect(std.mem.indexOf(u8, manifest, "pub const head: i64 = 3;") != null);
+    const state = try read(box.a(), box.io(), box.dir(), Pg);
+    try testing.expectEqual(@as(u32, 3), state.before.version);
+
+    // And the twin of the second has no BEGIN and no COMMIT, drops an index a
+    // failed build left, and still records the version.
+    const twin = try box.slurp("0003_index_tickets_concurrently.sql");
+    try testing.expect(std.mem.indexOf(u8, twin, "BEGIN;") == null);
+    try testing.expect(std.mem.indexOf(u8, twin, "COMMIT;") == null);
+    try testing.expect(std.mem.indexOf(u8, twin, "NOT indisvalid \\gexec") != null);
+    try testing.expect(std.mem.indexOf(u8, twin, "to_regclass('\"tickets_org_id_idx\"')") != null);
+    try testing.expect(std.mem.indexOf(u8, twin, "INSERT INTO \"nilo_migrations\"") != null);
+    // The twin of the one in a transaction is as it was.
+    try testing.expect(std.mem.indexOf(u8, try box.slurp("0002_index_tickets.sql"), "\nBEGIN;\n") != null);
+}
+
+test "naming every new index leaves a single version, outside a transaction" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{Ticket0} }), .{ .name = "initial" });
+    const desired = comptime migrate.desiredOf(Pg, .{ .tables = &.{Ticket1} });
+
+    const out = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{
+        .name = "index_tickets",
+        .concurrently = &.{ "tickets_org_id_idx", "tickets_email_key" },
+    });
+    // A version in a transaction would be empty, so there is not one.
+    try testing.expectEqualStrings("0002_index_tickets_concurrently.zig", out.file.?);
+    try testing.expectEqualStrings("0002_index_tickets_concurrently.zig", out.outside_file.?);
+    try testing.expectEqual(@as(u32, 2), out.number);
+    try testing.expectEqual(@as(usize, 0), out.inside.len);
+    const text = try box.slurp("0002_index_tickets_concurrently.zig");
+    try testing.expect(std.mem.indexOf(u8, text, "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "CREATE INDEX CONCURRENTLY IF NOT EXISTS") != null);
+}
+
+test "a name --concurrently gave that matches no new index holds the version back, and SQLite has none to give" {
+    const gpa = testing.allocator;
+    inline for (.{ Pg, Lite }) |D| {
+        var box = try Sandbox.init(gpa);
+        defer box.deinit(gpa);
+
+        _ = try generate(box.a(), box.io(), box.dir(), D, comptime migrate.desiredOf(D, .{ .tables = &.{Ticket0} }), .{ .name = "initial" });
+        const desired = comptime migrate.desiredOf(D, .{ .tables = &.{Ticket1} });
+        const probe = try check(box.a(), box.io(), box.dir(), D, desired);
+
+        const typo = try generate(box.a(), box.io(), box.dir(), D, desired, .{
+            .name = "index_tickets",
+            .concurrently = &.{"tickets_org_idx"},
+        });
+        try testing.expect(typo.wasHeld());
+        try testing.expectEqual(@as(usize, 1), typo.loose.len);
+        try testing.expect(typo.file == null);
+
+        if (comptime D == Lite) {
+            // SQLite has no such statement: the step carries no name to be
+            // asked for, and its text says nothing about `--concurrently`.
+            try testing.expectEqualStrings("", probe.steps[0].target);
+            try testing.expect(std.mem.indexOf(u8, probe.steps[0].why, "--concurrently") == null);
+            try testing.expectEqualStrings("", probe.steps[0].index);
+        }
+        // Nothing was written by either.
+        try testing.expectEqual(@as(u32, 1), (try read(box.a(), box.io(), box.dir(), D)).head());
+    }
+}
+
+test "a twin of a version outside a transaction on SQLite is an ordinary one" {
+    const gpa = testing.allocator;
+    const text = try renderSql(gpa, Lite, .{
+        .number = 2,
+        .name = "x",
+        .steps = &.{.{ .kind = .create_index, .why = "index", .sql = "CREATE INDEX \"i\" ON \"t\" (\"a\")" }},
+        .transactional = false,
+    }, "x", "abc", "0002_x.zig");
+    defer gpa.free(text);
+    // Nothing there can be built outside one, so it is run as every other.
+    try testing.expect(std.mem.indexOf(u8, text, "BEGIN;") != null);
+}
+
+// -- a Problem accepted by name (ADR 270) ----------------------------------
+
+/// `posts` with a column and no key on it.
+const Post0 = struct {
+    pub const nilo_table = .{ .name = "posts", .key = .id };
+    id: i64,
+    org_id: i64,
+};
+
+/// And the same column now with a key, which the diff will not add to a table
+/// that exists.
+const Post1 = struct {
+    pub const nilo_table = .{
+        .name = "posts",
+        .key = .id,
+        .references = .{ .org_id = .{ Org, .id } },
+    };
+    id: i64,
+    org_id: i64,
+};
+
+test "a Problem is held until it is named, then recorded, and the next run finds nothing" {
+    const gpa = testing.allocator;
+    inline for (.{ Pg, Lite }) |D| {
+        var box = try Sandbox.init(gpa);
+        defer box.deinit(gpa);
+
+        _ = try generate(box.a(), box.io(), box.dir(), D, comptime migrate.desiredOf(D, .{ .tables = &.{ Org, Post0 } }), .{ .name = "initial" });
+        const desired = comptime migrate.desiredOf(D, .{ .tables = &.{ Org, Post1 } });
+
+        // Held, as it always was; and, unlike before, not "nothing to do".
+        const held = try generate(box.a(), box.io(), box.dir(), D, desired, .{ .name = "key_org" });
+        try testing.expect(held.wasHeld());
+        try testing.expect(!held.isEmpty());
+        try testing.expectEqual(@as(usize, 1), held.unaccepted.len);
+        try testing.expectEqual(@as(usize, 0), held.plan.steps.len);
+
+        const key = try held.plan.problems[0].key(box.a());
+        try testing.expect(std.mem.startsWith(u8, key, "posts.org_id@"));
+        try testing.expect(held.plan.problems[0].acceptable());
+
+        // A key it has not got is refused, not ignored.
+        const typo = try generate(box.a(), box.io(), box.dir(), D, desired, .{
+            .name = "key_org",
+            .accept = &.{"posts.org_id@00000000"},
+        });
+        try testing.expect(typo.wasHeld());
+        try testing.expectEqual(@as(usize, 1), typo.stray_accept.len);
+        try testing.expectEqual(@as(usize, 1), typo.unaccepted.len);
+
+        const out = try generate(box.a(), box.io(), box.dir(), D, desired, .{ .name = "key_org", .accept = &.{key} });
+        try testing.expect(!out.wasHeld());
+        try testing.expectEqualStrings("0002_key_org.zig", out.file.?);
+        try testing.expectEqual(@as(usize, 1), out.accepted.len);
+
+        // The file says what was accepted and that the step is the person's.
+        const text = try box.slurp("0002_key_org.zig");
+        try testing.expect(std.mem.indexOf(u8, text, "// Written with `--accept`") != null);
+        try testing.expect(std.mem.indexOf(u8, text, key) != null);
+
+        // The snapshot moved past it, so nothing is raised now and `check`
+        // is green.
+        const again = try check(box.a(), box.io(), box.dir(), D, desired);
+        try testing.expect(again.isEmpty());
+        const quiet = try generate(box.a(), box.io(), box.dir(), D, desired, .{ .name = "again" });
+        try testing.expect(quiet.file == null and quiet.isEmpty());
+    }
+}
+
+test "a name taken from a Problem that has since changed is refused" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Post0 } }), .{ .name = "initial" });
+    const first = comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Post1 } });
+    const held = try generate(box.a(), box.io(), box.dir(), Pg, first, .{ .name = "key_org" });
+    const old_key = try held.plan.problems[0].key(box.a());
+
+    // The key points somewhere else before the run that names the old one.
+    const Other = struct {
+        pub const nilo_table = .{ .name = "others", .key = .id };
+        id: i64,
+    };
+    const Moved = struct {
+        pub const nilo_table = .{
+            .name = "posts",
+            .key = .id,
+            .references = .{ .org_id = .{ Other, .id } },
+        };
+        id: i64,
+        org_id: i64,
+    };
+    const second = comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Other, Moved } });
+    const stale = try generate(box.a(), box.io(), box.dir(), Pg, second, .{ .name = "key_org", .accept = &.{old_key} });
+    try testing.expect(stale.wasHeld());
+    try testing.expectEqual(@as(usize, 1), stale.stray_accept.len);
+    try testing.expect(stale.file == null);
+}
+
+test "a Problem that is accepted and then changed again is raised again" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Post0 } }), .{ .name = "initial" });
+    const first = comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Post1 } });
+    const held = try generate(box.a(), box.io(), box.dir(), Pg, first, .{ .name = "key_org" });
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, first, .{
+        .name = "key_org",
+        .accept = &.{try held.plan.problems[0].key(box.a())},
+    });
+
+    // The same key, now cascading: the snapshot has the old one.
+    const Cascading = struct {
+        pub const nilo_table = .{
+            .name = "posts",
+            .key = .id,
+            .references = .{ .org_id = .{ Org, .id, .cascade } },
+        };
+        id: i64,
+        org_id: i64,
+    };
+    const again = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Cascading } }), .{ .name = "cascade" });
+    try testing.expect(again.wasHeld());
+    try testing.expectEqual(@as(usize, 1), again.unaccepted.len);
+}
+
+test "several Problems are accepted together or not at all, and steps beside them are still written" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    const Wide0 = struct {
+        pub const nilo_table = .{ .name = "wide", .key = .id };
+        id: i64,
+        a: i64,
+        b: i64,
+    };
+    const Wide1 = struct {
+        pub const nilo_table = .{
+            .name = "wide",
+            .key = .id,
+            .references = .{ .a = .{ Org, .id }, .b = .{ Org, .id } },
+        };
+        id: i64,
+        a: i64,
+        b: i64,
+        note: ?[]const u8,
+    };
+    _ = try generate(box.a(), box.io(), box.dir(), Pg, comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Wide0 } }), .{ .name = "initial" });
+    const desired = comptime migrate.desiredOf(Pg, .{ .tables = &.{ Org, Wide1 } });
+
+    const held = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{ .name = "wide" });
+    try testing.expectEqual(@as(usize, 2), held.plan.problems.len);
+    try testing.expectEqual(@as(usize, 1), held.plan.steps.len);
+
+    // One of two is not enough.
+    const half = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{
+        .name = "wide",
+        .accept = &.{try held.plan.problems[0].key(box.a())},
+    });
+    try testing.expect(half.wasHeld());
+    try testing.expectEqual(@as(usize, 1), half.unaccepted.len);
+
+    const both = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{
+        .name = "wide",
+        .accept = &.{ try held.plan.problems[0].key(box.a()), try held.plan.problems[1].key(box.a()) },
+    });
+    try testing.expect(!both.wasHeld());
+    try testing.expectEqual(@as(usize, 2), both.accepted.len);
+    // The column the diff can add was added.
+    try testing.expect(std.mem.indexOf(u8, try box.slurp("0002_wide.zig"), "ADD COLUMN \"note\"") != null);
+}
+
+test "the Problem about the snapshot's dialect cannot be accepted" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    _ = try generate(box.a(), box.io(), box.dir(), Lite, comptime migrate.desiredOf(Lite, .{ .tables = &.{Org} }), .{ .name = "initial" });
+    const desired = comptime migrate.desiredOf(Pg, .{ .tables = &.{Org} });
+    const held = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{ .name = "initial" });
+    try testing.expect(held.wasHeld());
+    try testing.expect(!held.plan.problems[0].acceptable());
+
+    const tried = try generate(box.a(), box.io(), box.dir(), Pg, desired, .{
+        .name = "x",
+        .accept = &.{try held.plan.problems[0].key(box.a())},
+    });
+    try testing.expect(tried.wasHeld());
+    try testing.expectEqual(@as(usize, 1), tried.unaccepted.len);
+}
+
+test "the two Problems only SQLite has, a key with a default and a key of several columns, are accepted the same way" {
+    const gpa = testing.allocator;
+    var box = try Sandbox.init(gpa);
+    defer box.deinit(gpa);
+
+    // A foreign key column with a default, added to a table that exists.
+    const Defaulted = struct {
+        pub const nilo_table = .{
+            .name = "posts",
+            .key = .id,
+            .references = .{ .org_id = .{ Org, .id } },
+            .default = .{ .org_id = 1 },
+        };
+        id: i64,
+        org_id: i64,
+    };
+    // And a key of two columns over two it already had.
+    const Board = struct {
+        pub const nilo_table = .{ .name = "boards", .key = .{ .org_id, .id } };
+        org_id: i64,
+        id: i64,
+    };
+    const CardPlain = struct {
+        pub const nilo_table = .{ .name = "cards", .key = .id };
+        id: i64,
+        org_id: i64,
+        board_id: i64,
+    };
+    const CardKeyed = struct {
+        pub const nilo_table = .{
+            .name = "cards",
+            .key = .id,
+            .references = .{ .board = .{ .columns = .{ .org_id, .board_id }, .to = .{ "boards", .{ .org_id, .id } } } },
+        };
+        id: i64,
+        org_id: i64,
+        board_id: i64,
+    };
+    const Bare = struct {
+        pub const nilo_table = .{ .name = "posts", .key = .id };
+        id: i64,
+    };
+
+    const first = comptime migrate.desiredOf(Lite, .{ .tables = &.{ Org, Bare, Board, CardPlain } });
+    const second = comptime migrate.desiredOf(Lite, .{ .tables = &.{ Org, Defaulted, Board, CardKeyed } });
+    _ = try generate(box.a(), box.io(), box.dir(), Lite, first, .{ .name = "initial" });
+
+    const held = try generate(box.a(), box.io(), box.dir(), Lite, second, .{ .name = "keys" });
+    try testing.expect(held.wasHeld());
+    try testing.expectEqual(@as(usize, 2), held.plan.problems.len);
+    try testing.expectEqual(@as(usize, 0), held.plan.steps.len);
+
+    // Both are named, each by what it said, and the snapshot moves past both.
+    const out = try generate(box.a(), box.io(), box.dir(), Lite, second, .{
+        .name = "keys",
+        .accept = &.{ try held.plan.problems[0].key(box.a()), try held.plan.problems[1].key(box.a()) },
+    });
+    try testing.expect(!out.wasHeld());
+    try testing.expectEqual(@as(usize, 2), out.accepted.len);
+    try testing.expect((try check(box.a(), box.io(), box.dir(), Lite, second)).isEmpty());
 }
