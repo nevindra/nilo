@@ -4647,3 +4647,23 @@ The 40-byte rows differ by 0.2 instructions in 684, and the 16 KiB ranges overla
 **Where the rest of the gap is.** `sfollow` is half of `base` and 2.5 times swerver's 9.26 µs. The h2c control with the same files costs 8.7 µs, so what is left is TLS: the average body is 15.9 KB, and std's AES-GCM runs at about 2.1 GB/s alone and about 1.1 GB/s a thread with an SMT sibling busy, which is about 14 µs of the 22.8. tls.zig writes two records a DATA frame (a short header record and the payload) and copies the cleartext into the record buffer before encrypting in place; neither is the larger part (wider AES features were tried in `gcm.zig`, a microbench, and did not move it). That is an AEAD in the pinned tls.zig fork, not in static, and not changed here.
 
 **The decision it moved.** The entry serves `/data/static` with `.follow = true` and drops `.reload`; ADR 277 is the design; the default stays off. **Can it be pushed further:** the TLS cost above is the whole remaining difference to the leader, and a faster AES-GCM in tls.zig is the lever; keeping unchanged files between generations (not needed for 1.7 MB) matters only for trees of tens of megabytes.
+
+## The arena's HTTP/2 profiles with the three changes together
+
+Run on 2026-10-09, the rig of [the section above](#the-arenas-http2-profiles-work-stealing-the-request-cap-and-where-nilo-stands-against-the-framework-leagues-leader), at `c416e35` plus the working tree: ADR 260 revised (a route known never to wait runs on its connection's fiber), ADR 278 (the JSON answer written once) and ADR 277 (`.follow`). The entry as in that section, plus three lines a dependent would write: `staticWith(..., .{ .follow = true })` in place of `.reload`, `pub const nilo_never_waits = true` on the in-memory `Dataset`, and the JSON route taking `arena: std.mem.Allocator` in place of a `*Ctx` it used only for its arena. One round, swerver then nilo per row.
+
+| profile | c | swerver req/s | nilo req/s | swerver µs a request | nilo µs a request | swerver peak | nilo peak |
+|---|---|---|---|---|---|---|---|
+| baseline-h2 (TLS) | 256 | 2.11M | 5.35M | 3.05 | 1.44 | 501 MB | 51 MB |
+| baseline-h2 (TLS) | 1,024 | 2.09M | 4.89M | 3.09 | 1.58 | 983 MB | 138 MB |
+| static-h2 (TLS) | 256 | 714k | 337k | 9.13 | 22.50 | 531 MB | 167 MB |
+| static-h2 (TLS) | 1,024 | 705k | 271k | 9.28 | 27.55 | 1,027 MB | 232 MB |
+| baseline-h2c | 256 | 6.12M | 6.61M | 1.25 | 1.18 | 482 MB | 24 MB |
+| baseline-h2c | 1,024 | 5.92M | 5.87M | 1.27 | 1.27 | 906 MB | 50 MB |
+| baseline-h2c | 4,096 | 5.20M | 5.39M | 1.28 | 1.31 | 2,495 MB | 124 MB |
+| json-h2c | 1,024 | 1.65M | 1.11M | 4.56 | 6.27 | 920 MB | 109 MB |
+| json-h2c | 4,096 | 1.63M | 0.90M | 4.77 | 7.73 | 2,561 MB | 270 MB |
+
+**Where static's gap is.** Both servers send 16.4 KB a request (the `.br` forms). AES-GCM is most of the difference: std's `Aes128Gcm` and `Aes256Gcm` encrypt 2.2 GB/s on one core of this machine at the rig's `x86_64_v3+aes+pclmul` (7.4 µs a 16 KiB record), 2.7 to 2.8 GB/s built for `znver2`, the board's CPU, while OpenSSL, which swerver links, reads 27 GB/s here with VAES. The board's Zen 2 has no VAES, so this machine overstates the gap there; how much it closes is not measured.
+
+**What it moved.** Projected onto the board by these ratios against swerver's published numbers, nilo would be second in the framework league's HTTP/2 composite (about 3,000 against swerver's recomputed 3,340 and fib's 2,600), with baseline-h2 setting the league's maximum. The board's own run is the number that counts. **Can it be pushed further:** static-h2 through the cipher (the kernel's AES-GCM by kTLS, which also opens `sendfile` under TLS, or a faster AES-GCM), and json-h2c at 4,096 connections.
