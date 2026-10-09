@@ -4584,6 +4584,30 @@ h2load opens its connections once: each one took its GOAWAY after 900 to 1,000 c
 
 **What it moved.** ADR 275's cap counts HTTP/1.1 only, and the HTTP/2 one is its own option, `max_requests_per_h2_connection`, off by default. Not a throughput figure: the logger was on and nothing was pinned, and the question was only whether the run survives.
 
+## A call to a route that never waits runs on its connection's fiber
+
+Run on 2026-10-09, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0. The arena rig of the section above: the entry of HttpArena PR 1539 (no `.work_stealing`, `max_requests_per_connection = 0`) built as the board builds it, server on cpus 0-3,8-11, the board's `h2load` on 4-7,12-15 with its own arguments (`-m 100`, `-t 8`, 5 s), µs being the server's user and system time over the run divided by requests answered. **base** is the tree this work started from (`01ca862` plus the uncommitted work of ADR 272 to 275), **after** is that plus the design of [ADR 260](../../docs/adr/260-a-request-on-http2-runs-from-its-headers.md): a call to a route known never to wait (`typed.knownNotToWait`: here `baselineGet` and the gRPC `getSum`, whose arguments are a query and a message) runs on the connection's fiber once its stream has ended, held for that when its message is still to come, and the stream arena keeps 32 KiB where it kept 4 KiB. Runs interleaved, base then after, each under the rig's lock. The entry was not changed: `baselinePost` and the JSON route take a `*Ctx` and keep their fibers.
+
+| profile | c | base µs a request | after µs a request | base req/s | after req/s |
+|---|---|---|---|---|---|
+| baseline-h2c | 256 | 2.29, 2.31 | 1.22, 1.22 | 3.19M, 3.23M | 6.43M, 6.23M |
+| baseline-h2c | 1,024 | 2.50, 2.60, 2.47, 2.71, 2.48, 2.46 | 1.25, 1.28, 1.29, 1.27, 1.27, 1.22 | 2.77M to 2.97M | 5.16M to 5.98M |
+| baseline-h2c | 4,096 | 2.55, 2.62 | 1.33, 1.29 | 2.82M, 2.90M | 5.33M, 5.71M |
+| baseline-h2 (TLS) | 1,024 | 3.03, 2.99 | 1.52, 1.50 | 2.40M | 4.56M, 4.62M |
+| unary-grpc | 256 | 5.74, 5.57, 5.44, 5.61, 5.83 | 2.44, 2.41, 2.47, 2.54 | 1.2M to 1.4M | 3.0M to 3.2M |
+| unary-grpc | 1,024 | 5.86, 6.04, 6.15, 6.16, 6.20 | 2.80, 2.75, 2.67, 2.80 | 1.17M to 1.30M | 2.65M to 2.83M |
+| json-h2c (`*Ctx`, fiber) | 1,024 | 10.02, 10.10, 10.18 | 7.98, 7.96, 8.04 | 680k to 689k | 876k to 884k |
+
+The leader's recorded figures on this box are 1.24 µs (1,024 connections) and 1.30 (4,096) for baseline-h2c and 3.09 for baseline-h2: after, nilo is level with it cleartext and ahead of it over TLS. The JSON row moved only through the arena change, not the inline run: **an HTTP/2 stream's arena kept 4 KiB, so any answer that grew it past the allocator's 32 KiB slab limit unmapped a node every request** (the lead's gdb sampling: about 20% of the busy samples of json-h2c in mmap and munmap); with 32 KiB kept the row went from 10.1 to 8.0 µs, and the peak fell from 230 to 300 MB to 167 to 181 MB.
+
+**The first version held no call: it ran only a call whose stream had ended when its headers did, or whose next frame was its DATA.** gRPC did not move (5.7 µs), because h2load writes the HEADERS frames of its hundred streams first and their DATA behind them; the debugging print showed the next frame at every HEADERS to be another HEADERS. Holding the call until the frame that ends it is read (`Conn.holds`), and giving a fiber to the held ones before the connection waits (`Conn.startHeld`), took gRPC to 2.4 µs.
+
+**The four axes.** Allocations a request: none added (the held call is in the stream, the answer is written from the connection's fiber with no queue, no lock, no waker post). Memory per idle connection, `bench/mem.py --h2 --get` on the arena entry's 8082, 1,000 and 10,000 connections, two rounds each: base 9,276 and 9,202 bytes at 10,000, after 9,302 and 9,192; `park-check` reads one page for every connection. A busy connection's spare streams (up to 100, dropped when the connection has nothing in flight) now keep up to 32 KiB of arena each rather than 4 KiB, but only what a call actually used: the peak RSS of json-h2c at 1,024 connections is lower, not higher. Throughput and p99: the table; no latency percentile was taken, only the rows.
+
+**What is left.** baseline-h2c is at the leader's number, so the head rebuilt and reparsed (about 90 ns of 810 in process, the earlier bound) and the clock reads were not taken: the case for them is gone at this figure. unary-grpc at 2.4 µs is the largest remaining gap (the 123 ns HPACK decode of its larger header block, the envelope, the trailers frame), and the board's unary-grpc leader is not measured here. The write path was not counted: a burst answered from the connection's fiber is flushed once when the buffer empties.
+
+**The decision it moved:** ADR 260 (a route known never to wait runs where its call arrives; the refusal of running on the connection's fiber now says "whatever its route does"). The connection stalls once for a promise that is wrong, which `grpc_live.zig` holds ("a route promised never to wait that does is named, and from then on gets a fiber"). **Can it be pushed further:** a `*Ctx` route outside the promise (`baselinePost`, the JSON route) keeps its fiber and its 9.5% spawn share; a per-executor stack cache in the Engine is the next place for them.
+
 ## What moving the WebSocket frame into Core costs the server
 
 Run on 2026-10-09, AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, Zig 0.17.0, at `0f6a939` against `0f6a939` plus the change that moves the frame code from `http/websocket.zig` to `core/ws_frame.zig` so that `nilo_fetch`'s WebSocket client can use it ([ADR 281](../../docs/adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)). The before is `git archive 0f6a939` in a scratch directory, built with the same flags the same afternoon (`zig build autobahn-server -Dtarget=x86_64-linux-gnu -Dstrip=false`, which is `ReleaseFast`), and the server is `bench/autobahn/server.zig`, the echo loop out of the guide with `max_message` raised.

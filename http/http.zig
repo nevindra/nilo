@@ -409,6 +409,22 @@ pub const testing = @import("testing.zig");
 /// ```
 pub const Query = @import("typed.zig").Query;
 
+/// Register `handler` as one that never waits (ADR 260). Over HTTP/2 a call to
+/// a route known never to wait runs on its connection's own fiber, with no
+/// fiber of its own, which halves the CPU a small request costs. nilo can see
+/// that for a function whose arguments are request data and services that say
+/// `pub const nilo_never_waits = true;`; it cannot see into a function that
+/// takes a `*Ctx`, so this is where its author says so:
+///
+/// ```zig
+/// try app.post("/echo", nilo.neverWaits(echo));
+/// ```
+///
+/// No service that waits, no `nilo.sleep`, no outbound call. A promise that is
+/// wrong costs a stalled connection once: the route is named in the log and
+/// gets a fiber from then on. It changes nothing on HTTP/1.1.
+pub const neverWaits = @import("typed.zig").neverWaits;
+
 /// The path params, read by name into a struct of yours: one field per
 /// `:name` of the pattern, `@"*"` for a trailing wildcard. Required on a route
 /// with two or more params, which a bare argument cannot tell apart

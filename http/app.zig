@@ -1064,6 +1064,7 @@ pub const App = struct {
             break :blk derived;
         };
         try self.router.addNamed(method, pattern, comptime typed.wrap(pattern, handler), route_name);
+        self.router.routes.items[self.router.routes.items.len - 1].never_waits = comptime typed.knownNotToWait(pattern, handler);
         if (comptime typed.speaksAMessage(pattern, handler)) self.failure_connect = &connect.pick;
 
         // Read from the same argument list `wrap` just read, so the
@@ -1821,6 +1822,26 @@ pub const App = struct {
                 const app: *App = @ptrCast(@alignCast(ptr));
                 return app.router.match(.POST, path) != null;
             }
+            fn runsInline(ptr: *anyopaque, method: []const u8, target: []const u8, listener: u8) bool {
+                const app: *App = @ptrCast(@alignCast(ptr));
+                return app.router.inlineRoute(http1.methodFrom(method), pathOf(target), listener) != null;
+            }
+            fn parkedInline(ptr: *anyopaque, method: []const u8, target: []const u8, listener: u8) void {
+                const app: *App = @ptrCast(@alignCast(ptr));
+                const hit = app.router.inlineRoute(http1.methodFrom(method), pathOf(target), listener) orelse return;
+                if (@cmpxchgStrong(bool, &hit.parked, false, true, .monotonic, .monotonic) != null) return;
+                std.log.warn(
+                    "the route \"{s} {s}\" waited while a call to it ran on its HTTP/2 connection's own fiber, " ++
+                        "which a route is only given when it is known never to wait; it gets a fiber of its own " ++
+                        "from now on. A `nilo.neverWaits(…)` around it, or a service that declares " ++
+                        "`nilo_never_waits`, was wrong about it.",
+                    .{ @tagName(hit.method), hit.pattern },
+                );
+            }
+            fn pathOf(target: []const u8) []const u8 {
+                const q = std.mem.indexOfScalar(u8, target, '?') orelse return target;
+                return target[0..q];
+            }
             fn bodyLimit(ptr: *anyopaque, method: []const u8, path: []const u8) usize {
                 const app: *App = @ptrCast(@alignCast(ptr));
                 return app.h2BodyLimit(http1.methodFrom(method), path);
@@ -1856,6 +1877,8 @@ pub const App = struct {
             .ceiling = self.grpcBodyCeiling(),
             .body_limit = Adapter.bodyLimit,
             .routes = Adapter.routes,
+            .runs_inline = Adapter.runsInline,
+            .parked_inline = Adapter.parkedInline,
             .handle = Adapter.handle,
         };
     }

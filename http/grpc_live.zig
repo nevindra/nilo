@@ -439,6 +439,164 @@ test "calls queued behind a fiber are given their own once it parks, and a burst
     }
 }
 
+const SumIn = struct {
+    pub const wire = .{ .a = 1, .b = 2 };
+    a: i32 = 0,
+    b: i32 = 0,
+};
+
+const SumOut = struct {
+    pub const wire = .{ .total = 1 };
+    total: i32 = 0,
+};
+
+/// A service that waits and does not say so: the compiler must assume it
+/// may, and a route taking it keeps its fiber (ADR 260).
+const Napper = struct {
+    fn nap(_: *Napper) !void {
+        try nilo.sleep(50);
+    }
+};
+
+fn sumNapping(napper: *Napper, in: SumIn) !SumOut {
+    try napper.nap();
+    return .{ .total = in.a + in.b };
+}
+
+/// Nothing in its arguments can wait, so a call runs on the connection's own
+/// fiber.
+fn sumQuick(in: SumIn) SumOut {
+    return .{ .total = in.a + in.b };
+}
+
+/// Promised never to wait, and does (ADR 260).
+fn sumLied(in: SumIn) !SumOut {
+    try nilo.sleep(50);
+    return .{ .total = in.a + in.b };
+}
+
+const sum_message = "\x08\x01\x10\x02";
+
+test "a typed route whose service may wait keeps its fiber, and the quick one beside it is not held behind it" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try SocketDir.init(gpa, "grpc-typed-wait.sock");
+    defer where.deinit(gpa);
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    var napper: Napper = .{};
+    try app.provide(&napper);
+    try app.post("/test.Sum/Nap", sumNapping);
+    try app.post("/test.Sum/Quick", sumQuick);
+
+    var serving: Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    try serving.waitUntilUp(io);
+
+    var stream = try connect(io, where.path);
+    defer stream.close(io);
+    var out_buf: [1024]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    var in_buf: [32 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+
+    try writer.interface.writeAll(h2.preface);
+    try h2.writeSettings(&writer.interface, &.{});
+    // The one that waits first, so served in order the quick one finishes last.
+    try writeCall(&writer.interface, 1, "/test.Sum/Nap", sum_message);
+    try writeCall(&writer.interface, 3, "/test.Sum/Quick", sum_message);
+    try writer.interface.flush();
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var calls: [2]Call = .{ .{}, .{} };
+    try readAnswers(arena.allocator(), &reader.interface, &writer.interface, &calls);
+    try testing.expectEqualStrings("0", calls[0].status.?);
+    try testing.expectEqualStrings("0", calls[1].status.?);
+    try testing.expectEqualStrings("\x08\x03", calls[0].message.items[5..]);
+    try testing.expectEqualStrings("\x08\x03", calls[1].message.items[5..]);
+    try testing.expect(calls[1].finished_at < calls[0].finished_at);
+}
+
+test "a route promised never to wait that does is named, and from then on gets a fiber" {
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var where = try SocketDir.init(gpa, "grpc-lied.sock");
+    defer where.deinit(gpa);
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.post("/test.Sum/Lied", nilo.neverWaits(sumLied));
+    try app.post("/test.Sum/Quick", sumQuick);
+
+    var serving: Serving = .{ .app = &app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        thread.join();
+    }
+    try serving.waitUntilUp(io);
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+
+    // The first call runs on the connection's fiber, which the promise said it
+    // could, and the route waits in it: the call is answered all the same.
+    {
+        var stream = try connect(io, where.path);
+        defer stream.close(io);
+        var out_buf: [1024]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        var in_buf: [32 * 1024]u8 = undefined;
+        var reader = stream.reader(io, &in_buf);
+        try writer.interface.writeAll(h2.preface);
+        try h2.writeSettings(&writer.interface, &.{});
+        try writeCall(&writer.interface, 1, "/test.Sum/Lied", sum_message);
+        try writer.interface.flush();
+        var calls: [1]Call = .{.{}};
+        try readAnswers(arena.allocator(), &reader.interface, &writer.interface, &calls);
+        try testing.expectEqualStrings("0", calls[0].status.?);
+        try testing.expectEqualStrings("\x08\x03", calls[0].message.items[5..]);
+    }
+    var flagged = false;
+    for (app.router.routes.items) |route| {
+        if (std.mem.eql(u8, route.pattern, "/test.Sum/Lied")) flagged = @atomicLoad(bool, &route.parked, .monotonic);
+    }
+    try testing.expect(flagged);
+
+    // Now it has a fiber like any route that may wait, so the quick call
+    // behind it on the same connection is not held up.
+    var stream = try connect(io, where.path);
+    defer stream.close(io);
+    var out_buf: [1024]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    var in_buf: [32 * 1024]u8 = undefined;
+    var reader = stream.reader(io, &in_buf);
+    try writer.interface.writeAll(h2.preface);
+    try h2.writeSettings(&writer.interface, &.{});
+    try writeCall(&writer.interface, 1, "/test.Sum/Lied", sum_message);
+    try writeCall(&writer.interface, 3, "/test.Sum/Quick", sum_message);
+    try writer.interface.flush();
+    var calls: [2]Call = .{ .{}, .{} };
+    try readAnswers(arena.allocator(), &reader.interface, &writer.interface, &calls);
+    try testing.expectEqualStrings("0", calls[0].status.?);
+    try testing.expectEqualStrings("0", calls[1].status.?);
+    try testing.expect(calls[1].finished_at < calls[0].finished_at);
+}
+
 /// A handler that waits far longer than a stop is allowed to take.
 fn hang(c: *nilo.Ctx) anyerror!void {
     try nilo.sleep(4_000);

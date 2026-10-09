@@ -114,6 +114,11 @@ pub fn Space(comptime name: []const u8, comptime V: type, comptime opts: Options
 
         store: *Store,
 
+        /// Nothing a Space does waits (ADR 109: a lock is held across a copy
+        /// and nothing else), which is what lets an HTTP/2 call to a route
+        /// that takes one run on its connection's fiber (ADR 260).
+        pub const nilo_never_waits = true;
+
         /// Hashed while compiling. Two Spaces whose names land on the same 32
         /// bits are caught by `Store.registerSpace` when the second opens,
         /// which turns a one-in-four-billion wrong answer into a panic naming

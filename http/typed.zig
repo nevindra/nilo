@@ -357,9 +357,89 @@ const Role = union(enum) {
     bound_query,
 };
 
+/// A handler its author promised never waits, so that HTTP/2 may run a call
+/// to it on the connection's own fiber (ADR 260). Wrap the function where it
+/// is registered: `try app.post("/echo", nilo.neverWaits(echoBody))`.
+///
+/// **A handler that takes a `*Ctx` is opaque to the compiler**, which cannot
+/// see what `c` is used for, so this is the one place the author says it:
+/// no service that waits, no sleep, no outbound call, no lock another fiber
+/// holds across a wait. Nothing else changes: the route is registered, checked
+/// and described as the function would have been. A promise that turns out
+/// false is caught the first time the route parks (`h2conn.zig` reads the
+/// loop's turn around the call), logged by name, and the route then gets a
+/// fiber like any other; the connection stalled for that one call.
+pub fn neverWaits(comptime handler: anytype) Marked(handler) {
+    return .{};
+}
+
+fn Marked(comptime handler: anytype) type {
+    return struct {
+        pub const nilo_handler = handler;
+    };
+}
+
+fn isMarked(comptime F: type) bool {
+    return switch (@typeInfo(F)) {
+        .@"struct" => @hasDecl(F, "nilo_handler"),
+        else => false,
+    };
+}
+
+/// Whether a call to this route may run on the connection's fiber under
+/// HTTP/2: known, from the signature, never to wait (ADR 260). A promise made
+/// with `neverWaits` stands for the whole handler; without one, every argument
+/// has to be something that cannot park. **Request data cannot** (a path
+/// param, a query, a header, a body that the stream has already ended, a
+/// form, the arena), nor can an `Authorization`. **A service can only say so itself**, with
+/// `pub const nilo_never_waits = true;` on its type: a database, a store or an
+/// outbound client waits and says nothing, and the safe answer for a type that
+/// is silent is that it may. A `*Ctx`, a resolved value, the server's `Io`,
+/// a `Verified` (which fetches keys) and the two kept-answer arguments are
+/// opaque or take a store, so a route with one of them keeps its fiber. A returned file is read into the
+/// connection's frames, so it keeps its fiber too.
+pub fn knownNotToWait(comptime pattern: []const u8, comptime given: anytype) bool {
+    comptime {
+        const promised = isMarked(@TypeOf(given));
+        if (promised) return true;
+        const Fn = fnTypeOf(pattern, @TypeOf(given));
+        const params = @typeInfo(Fn).@"fn".param_types;
+        const roles = rolesOf(pattern, params);
+        for (params, 0..) |p, i| {
+            switch (roles[i]) {
+                // A `Verified` may fetch the keys a token was signed with.
+                .ctx, .resolved, .io, .idempotent, .cached, .verified => return false,
+                .service => if (!serviceNeverWaits(p.?)) return false,
+                else => {},
+            }
+        }
+        return !answersWithAFile(@typeInfo(Fn).@"fn".return_type.?);
+    }
+}
+
+fn serviceNeverWaits(comptime P: type) bool {
+    const T = @typeInfo(P).pointer.child;
+    return hasNamedDecl(T, "nilo_never_waits") and T.nilo_never_waits;
+}
+
+fn answersWithAFile(comptime R: type) bool {
+    comptime {
+        var V = switch (@typeInfo(R)) {
+            .error_union => |u| u.payload,
+            else => R,
+        };
+        if (@typeInfo(V) == .optional) V = @typeInfo(V).optional.child;
+        if (filebody.isFileBody(V)) return true;
+        if ((hasNamedDecl(V, "nilo_response") or versioned_mod.isVersioned(V)) and @hasField(V, "value"))
+            return answersWithAFile(@FieldType(V, "value"));
+        return false;
+    }
+}
+
 /// Turn `f` into an ordinary `Ctx` handler. `pattern` comes along so the
 /// path param count can be checked and error messages can name the route.
-pub fn wrap(comptime pattern: []const u8, comptime f: anytype) router.CtxHandler {
+pub fn wrap(comptime pattern: []const u8, comptime given: anytype) router.CtxHandler {
+    const f = if (comptime isMarked(@TypeOf(given))) @TypeOf(given).nilo_handler else given;
     const Fn = comptime fnTypeOf(pattern, @TypeOf(f));
     const params = @typeInfo(Fn).@"fn".param_types;
     const roles = comptime rolesOf(pattern, params);
@@ -1519,6 +1599,7 @@ fn checkOptionalInside(comptime pattern: []const u8, comptime V: type) void {
 }
 
 fn fnTypeOf(comptime pattern: []const u8, comptime F: type) type {
+    if (comptime isMarked(F)) return fnTypeOf(pattern, @TypeOf(F.nilo_handler));
     const Fn = switch (@typeInfo(F)) {
         .@"fn" => F,
         // A handler may also be given as a function pointer.
@@ -2706,4 +2787,68 @@ test "a body type that says .misfit = 422 puts the 422 in the document beside th
     w = std.Io.Writer.fixed(&buf);
     try openapi.write(testing.allocator, &w, &.{quiet}, .{});
     try testing.expect(std.mem.indexOf(u8, buf[0..w.end], "\"422\"") == null);
+}
+
+test "a route is known not to wait when nothing it takes can, and not when something might" {
+    const Quiet = struct {
+        pub const nilo_never_waits = true;
+        n: u32 = 0,
+    };
+    const Silent = struct { n: u32 = 0 };
+    const Filter = struct { limit: u32 = 10 };
+    const Found = struct { id: u32 };
+    const handlers = struct {
+        fn byId(id: u32) Found {
+            return .{ .id = id };
+        }
+        fn filtered(q: Query(Filter)) Found {
+            return .{ .id = q.value.limit };
+        }
+        fn withBody(body: Found) Found {
+            return body;
+        }
+        fn withQuietService(_: *Quiet, id: u32) Found {
+            return .{ .id = id };
+        }
+        fn withSilentService(_: *Silent, id: u32) Found {
+            return .{ .id = id };
+        }
+        fn withCtx(c: *Ctx, id: u32) !void {
+            _ = c;
+            _ = id;
+        }
+        fn withIo(io: std.Io, id: u32) Found {
+            _ = io;
+            return .{ .id = id };
+        }
+        fn aFile(id: u32) !?filebody.FileBody {
+            _ = id;
+            return null;
+        }
+        fn aStatusFile(id: u32) Response(filebody.FileBody) {
+            _ = id;
+            unreachable;
+        }
+    };
+    comptime {
+        // Request data cannot wait.
+        std.debug.assert(knownNotToWait("/found/:id", handlers.byId));
+        std.debug.assert(knownNotToWait("/found", handlers.filtered));
+        std.debug.assert(knownNotToWait("/found", handlers.withBody));
+        // A service says so itself, and one that is silent may.
+        std.debug.assert(knownNotToWait("/found/:id", handlers.withQuietService));
+        std.debug.assert(!knownNotToWait("/found/:id", handlers.withSilentService));
+        // Opaque to the compiler: a `Ctx`, the server's `Io`.
+        std.debug.assert(!knownNotToWait("/found/:id", handlers.withCtx));
+        std.debug.assert(!knownNotToWait("/found/:id", handlers.withIo));
+        // A file is read into the connection's frames.
+        std.debug.assert(!knownNotToWait("/found/:id", handlers.aFile));
+        std.debug.assert(!knownNotToWait("/found/:id", handlers.aStatusFile));
+        // The author's word stands for the whole handler, and the route is
+        // described and checked as the function would have been.
+        std.debug.assert(knownNotToWait("/found/:id", neverWaits(handlers.withCtx)));
+        std.debug.assert(knownNotToWait("/found/:id", neverWaits(handlers.withSilentService)));
+        check("/found/:id", neverWaits(handlers.withCtx));
+        std.debug.assert(requirements("/found/:id", neverWaits(handlers.withSilentService)).len == 1);
+    }
 }

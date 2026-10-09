@@ -134,6 +134,14 @@ pub const Route = struct {
     /// ([ADR 162](../docs/adr/162-a-middleware-can-learn-which-route-it-is-in-front-of.md)).
     /// Owned by whoever registered the route; the Router only points at it.
     name: []const u8 = "",
+    /// The handler is known, from its signature or its author's word, never to
+    /// wait (`typed.knownNotToWait`), so an HTTP/2 call to it may run on the
+    /// connection's own fiber (ADR 260).
+    never_waits: bool = false,
+    /// A call to this route parked while it ran on a connection's fiber, which
+    /// its `never_waits` said it would not: read and written atomically, set
+    /// once, and from then on the route gets a fiber of its own.
+    parked: bool = false,
     /// `pattern`, split up once at registration. Owned by the Router.
     segments: []const Segment,
 
@@ -420,6 +428,22 @@ pub const Router = struct {
         // checker gets a 404 from a route that plainly exists.
         if (method == .HEAD) return self.matchExact(.GET, trimmed, parts, deep, out);
         return false;
+    }
+
+    /// The route a call to `path` runs, when it may run on the connection's
+    /// fiber under HTTP/2: matched, answered on this listener, known not to
+    /// wait, not parked before, and with no middleware in front of it (a
+    /// middleware takes a `Ctx` and can wait on anything). Null for every other
+    /// call, which gets a fiber (ADR 260).
+    pub fn inlineRoute(self: *const Router, method: http1.Method, path: []const u8, listener: u8) ?*Route {
+        var found: Match = undefined;
+        if (!self.matchInto(method, path, &found)) return null;
+        if (found.chain.len != 0) return null;
+        const route = &self.routes.items[found.index];
+        if (!route.never_waits or route.chain_by_path) return null;
+        if (!onListener(route.listeners, listener)) return null;
+        if (@atomicLoad(bool, &route.parked, .monotonic)) return null;
+        return route;
     }
 
     /// The methods that answer this path, whatever the request asked for.
@@ -783,6 +807,39 @@ test "static routes and methods" {
     try testing.expect(r.match(.POST, "/health") == null);
     try testing.expect(r.match(.GET, "/other") == null);
     try testing.expect(r.match(.GET, "/health/") != null);
+}
+
+fn passThrough(c: *Ctx, next: mw.Next) anyerror!void {
+    return next.run(c);
+}
+
+test "a call runs on its connection's fiber only to a route that never waits, has no middleware, is on this listener and has not parked" {
+    var r = Router.init(testing.allocator);
+    defer r.deinit();
+    try r.add(.GET, "/quick", testHandler);
+    try r.add(.GET, "/slow", testHandler);
+    try r.add(.GET, "/guarded", testHandler);
+    try r.add(.GET, "/elsewhere", testHandler);
+    try r.add(.GET, "/users/:id", testHandler);
+    const quick = &r.routes.items[0];
+    quick.never_waits = true;
+    r.routes.items[2].never_waits = true;
+    r.routes.items[2].chain = &.{&passThrough};
+    r.routes.items[3].never_waits = true;
+    r.routes.items[3].listeners = 1 << 1;
+    r.routes.items[4].never_waits = true;
+
+    try testing.expect(r.inlineRoute(.GET, "/quick", 0) == quick);
+    try testing.expect(r.inlineRoute(.GET, "/users/7", 0) != null);
+    try testing.expect(r.inlineRoute(.GET, "/slow", 0) == null);
+    try testing.expect(r.inlineRoute(.GET, "/guarded", 0) == null);
+    try testing.expect(r.inlineRoute(.GET, "/nowhere", 0) == null);
+    try testing.expect(r.inlineRoute(.POST, "/quick", 0) == null);
+    try testing.expect(r.inlineRoute(.GET, "/elsewhere", 0) == null);
+    try testing.expect(r.inlineRoute(.GET, "/elsewhere", 1) != null);
+    // One that parked is a route that waits from then on.
+    quick.parked = true;
+    try testing.expect(r.inlineRoute(.GET, "/quick", 0) == null);
 }
 
 test "path params are captured" {

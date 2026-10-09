@@ -132,6 +132,13 @@ pub const Host = struct {
     body_limit: *const fn (ptr: *anyopaque, method: []const u8, path: []const u8) usize,
     /// Whether a `POST` to this path reaches a route.
     routes: *const fn (ptr: *anyopaque, path: []const u8) bool,
+    /// Whether a call to this method and target may run on the connection's own
+    /// fiber: its route is known never to wait and has no middleware (ADR 260).
+    /// The last argument is the listener the connection came in on.
+    runs_inline: *const fn (ptr: *anyopaque, method: []const u8, target: []const u8, listener: u8) bool,
+    /// A call to a route `runs_inline` said yes to parked while it ran: the
+    /// route is given a fiber of its own from now on, and is named in the log.
+    parked_inline: *const fn (ptr: *anyopaque, method: []const u8, target: []const u8, listener: u8) void,
     /// One call through the App, handed over as what was read rather than
     /// as HTTP/1.1 text, and its answer kept in `collected` rather than
     /// written (ADR 253), with no waker and no read limits: a call's fiber
@@ -202,7 +209,7 @@ const idle_peek_ms = 200;
 /// How much of a finished call's arena a spare stream keeps for the next one.
 /// A unary call with a small message stays inside it, so a busy connection's
 /// calls stop reaching the general-purpose allocator at all.
-const spare_arena_keep = 4096;
+const spare_arena_keep = 32 * 1024;
 
 /// `:status 100`, which is all an interim answer carries: the static table's
 /// `:status` name and the three digits. A test holds it to `encodeBlock`.
@@ -461,8 +468,15 @@ const Stream = struct {
     /// when the call started, and it is not a gRPC call, whose message is
     /// read whole by the call's fiber before the route sees it.
     piped: bool = false,
-    /// A call that cannot run until its stream has ended, with no Engine.
+    /// A call that cannot run until its stream has ended: with no Engine, or
+    /// one the connection will run itself once its message is in (`inline_ok`).
     deferred: bool = false,
+    /// The route is known never to wait (`Host.runs_inline`), so the call runs
+    /// on the connection's own fiber as soon as its stream has ended, without
+    /// a fiber of its own (ADR 260).
+    inline_ok: bool = false,
+    /// Held for the connection's fiber to run when its stream ends (`Conn.holds`).
+    holding: bool = false,
     /// The call is to be cancelled rather than answered: its client was too
     /// slow sending it.
     cancel: bool = false,
@@ -727,6 +741,8 @@ const Conn = struct {
     /// A fiber that finishes a call takes the next one queued (ADR 260).
     /// Off for a server whose tasks are not tied to an executor.
     reuse: bool = true,
+    /// Calls held for this fiber to run once their stream has ended (`Stream.holding`).
+    holds: u32 = 0,
 
     fn newStream(c: *Conn, id: u31) !*Stream {
         if (c.spare) |s| {
@@ -800,6 +816,8 @@ const Conn = struct {
         c.out.flush() catch return;
 
         while (true) {
+            // Calls held for this fiber, and this fiber about to wait.
+            if (c.holds != 0 and !c.frameBuffered()) c.startHeld() catch break;
             // Calls queued behind a fiber, and this fiber about to wait.
             if (@atomicLoad(?*Stream, &c.shared.pending_head, .monotonic) != null and !c.frameBuffered()) {
                 const yielded = c.rendezvous() catch {
@@ -882,6 +900,7 @@ const Conn = struct {
             };
         }
         if (c.cancelled and c.events_open != 0) c.endCancelled();
+        c.dropHeld();
         // Nothing more is read: a call still waiting for its body is told so.
         c.abortInbound(false);
         c.windDown();
@@ -1595,6 +1614,10 @@ const Conn = struct {
         c.settle();
         if (s.deferred) {
             s.deferred = false;
+            if (s.holding) {
+                s.holding = false;
+                c.holds -= 1;
+            }
             return c.start(s);
         }
     }
@@ -1899,6 +1922,15 @@ const Conn = struct {
             // route returns and the calls beside it wait on a window nothing
             // is left to give back (ADR 220).
             .running => {
+                // Held for the connection's own fiber, which has not run it: no
+                // fiber has it, so nobody is left to hand it back.
+                if (s.holding) {
+                    s.holding = false;
+                    c.holds -= 1;
+                    c.letGo(s);
+                    c.remove(s);
+                    return s.destroy();
+                }
                 s.reset = true;
                 if (s.open) {
                     s.open = false;
@@ -2014,7 +2046,86 @@ const Conn = struct {
             }
         }
         s.piped = s.open and !s.grpc;
+        // A route known never to wait is run where its call arrives, once the
+        // stream has ended. A call whose request is still arriving is held
+        // for that: the frames behind its headers are usually in the same
+        // read (a client sends a burst of calls, and their messages after
+        // it), and the call runs when the one that ends it is read. The
+        // connection never waits with a call held, because there is nothing
+        // to run it on while it does: before it would, every held call is
+        // given a fiber and reads the rest as any call does (`startHeld`).
+        s.inline_ok = c.app.runs_inline(c.app.ptr, method, path, c.peer.listener);
+        if (s.inline_ok and s.open) {
+            s.state = .running;
+            c.armInbox(s);
+            s.deferred = true;
+            s.holding = true;
+            c.holds += 1;
+            return;
+        }
         return c.start(s);
+    }
+
+    /// Give a fiber to every call held for the connection's own fiber to run,
+    /// as the connection is about to wait for something: what they are held
+    /// for is not in the read buffer, and a call that waits for its body is a
+    /// call for a fiber (ADR 260).
+    fn startHeld(c: *Conn) ReadError!void {
+        while (c.holds != 0) {
+            var found = false;
+            for (c.streams.items) |s| {
+                if (!s.holding) continue;
+                found = true;
+                s.holding = false;
+                s.deferred = false;
+                c.holds -= 1;
+                try c.start(s);
+                break;
+            }
+            if (!found) c.holds = 0;
+        }
+    }
+
+    /// The connection is ending: a call still held has no message to be run
+    /// with and nobody to answer, and no fiber holds it.
+    fn dropHeld(c: *Conn) void {
+        var i = c.streams.items.len;
+        while (i > 0 and c.holds != 0) {
+            i -= 1;
+            const s = c.streams.items[i];
+            if (!s.holding) continue;
+            s.holding = false;
+            c.holds -= 1;
+            c.letGo(s);
+            c.remove(s);
+            s.destroy();
+        }
+        c.holds = 0;
+    }
+
+    /// Run a call whose stream has ended on this fiber, the connection's, and
+    /// write its answer (ADR 260). Its pipes cannot park (`can_park`), so the
+    /// connection is never waited on from inside it. A route that parked in
+    /// spite of `runs_inline` is named and given a fiber from then on: the
+    /// loop's turn is read around the call, and it moves only when the fiber
+    /// suspended.
+    fn runInline(c: *Conn, s: *Stream) ReadError!void {
+        c.armInbox(s);
+        s.state = .running;
+        _ = s.shared.running.fetchAdd(1, .acquire);
+        s.shared.retain();
+        s.inbox.can_park = false;
+        const turn = bulkhead.loopTurnNanos();
+        _ = callBody(s, turn != null);
+        if (turn != null and bulkhead.loopTurnNanos() != turn) {
+            c.app.parked_inline(c.app.ptr, s.field(":method").?, s.field(":path").?, c.peer.listener);
+        }
+        _ = s.shared.running.fetchSub(1, .release);
+        s.shared.drop();
+        s.state = .writing;
+        // A pipe the call opened is written by the pump, with the rest.
+        if (s.out != null or s.events != null) return;
+        _ = c.writeStream(s) catch return error.Gone;
     }
 
     /// Hand the call its pipe, as far as it is told about now, and run it.
@@ -2038,6 +2149,7 @@ const Conn = struct {
     /// Run a call whose headers are whole: on a fiber of its own, which
     /// reads what the client has still to send through the stream's pipe.
     fn start(c: *Conn, s: *Stream) ReadError!void {
+        if (s.inline_ok and !s.open) return c.runInline(s);
         c.armInbox(s);
         s.state = .running;
         _ = s.shared.running.fetchAdd(1, .acquire);
@@ -3434,6 +3546,167 @@ test "a method of a service of typed functions reads its message and answers one
     const refusal = try got.trailers(3);
     try testing.expectEqualStrings("3", Answer.value(refusal, "grpc-status").?);
     try testing.expect(std.mem.indexOf(u8, Answer.value(refusal, "grpc-message").?, "not a protobuf") != null);
+}
+
+/// Read frames until a call has come in, which is past the client's SETTINGS.
+fn headersRead(conn: *Conn, in: *std.Io.Reader) !void {
+    while (in.bufferedLen() > 0 and conn.streams.items.len == 0) try conn.readFrame();
+}
+
+var typed_ran_on: ?std.Thread.Id = null;
+var ctx_ran_on: ?std.Thread.Id = null;
+
+/// A typed function with nothing in its arguments that can wait: known never
+/// to, so the connection's own fiber runs a call to it (ADR 260).
+fn sumHere(in: SumRequest) SumReply {
+    typed_ran_on = std.Thread.getCurrentId();
+    return .{ .total = in.a + in.b };
+}
+
+/// The same work behind a `*Ctx`, which the compiler cannot see into, so a
+/// call to it is given a fiber (here, with no Engine, a thread).
+fn sumHereCtx(c: *Ctx) anyerror!void {
+    ctx_ran_on = std.Thread.getCurrentId();
+    try c.send(200, "application/grpc", "");
+}
+
+fn hereApp() !App {
+    var app = App.init(testing.allocator);
+    errdefer app.deinit();
+    try app.post("/test.Here/Typed", sumHere);
+    try app.post("/test.Here/Ctx", sumHereCtx);
+    try app.post("/test.Here/Promised", Ctx_neverWaits);
+    try app.resolveChains();
+    return app;
+}
+
+/// A `*Ctx` handler its author promises never waits.
+const Ctx_neverWaits = @import("typed.zig").neverWaits(sumHereCtx);
+
+test "a call to a route known never to wait runs on the connection's own thread, and one that may wait does not" {
+    var app = try hereApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    typed_ran_on = null;
+    ctx_ran_on = null;
+    try client.call(1, "/test.Here/Typed", "\x08\x01\x10\x02");
+    try client.call(3, "/test.Here/Ctx", "");
+    try client.call(5, "/test.Here/Promised", "");
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqualStrings("\x08\x03", try got.message(1));
+    try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
+    try testing.expectEqualStrings("0", Answer.value(try got.trailers(3), "grpc-status").?);
+    try testing.expectEqualStrings("0", Answer.value(try got.trailers(5), "grpc-status").?);
+    const here = std.Thread.getCurrentId();
+    try testing.expectEqual(here, typed_ran_on.?);
+    // The one that takes a `*Ctx` ran twice (once as itself, once under the
+    // promise, which shares the function), and the last of them was the
+    // promised one on this thread.
+    try testing.expectEqual(here, ctx_ran_on.?);
+}
+
+test "a route that may wait is given a thread of its own even when a route that never waits is beside it" {
+    var app = try hereApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    typed_ran_on = null;
+    ctx_ran_on = null;
+    try client.call(1, "/test.Here/Ctx", "");
+    try client.call(3, "/test.Here/Typed", "\x08\x01\x10\x02");
+
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqualStrings("0", Answer.value(try got.trailers(1), "grpc-status").?);
+    try testing.expectEqualStrings("\x08\x03", try got.message(3));
+    const here = std.Thread.getCurrentId();
+    try testing.expect(ctx_ran_on.? != here);
+    try testing.expectEqual(here, typed_ran_on.?);
+}
+
+test "a call held for the connection's fiber runs when the frame that ends it is read" {
+    var app = try hereApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    typed_ran_on = null;
+    try client.call(1, "/test.Here/Typed", "\x08\x01\x10\x02");
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    var conn = try steppedConn(&app, &in, &out.writer);
+    defer conn.deinit();
+    // The HEADERS frame: the call waits for its message, and nothing ran.
+    try headersRead(&conn, &in);
+    try testing.expectEqual(@as(u32, 1), conn.holds);
+    try testing.expect(typed_ran_on == null);
+    // The DATA that ends it: the call has run and its answer is written, with
+    // no call left in flight and nothing queued for a writer.
+    try conn.readFrame();
+    try testing.expectEqual(@as(u32, 0), conn.holds);
+    try testing.expectEqual(std.Thread.getCurrentId(), typed_ran_on.?);
+    try testing.expectEqual(@as(u32, 0), conn.shared.running.load(.acquire));
+    var got = try answerOf(out.written());
+    defer got.deinit();
+    try testing.expectEqualStrings("\x08\x03", try got.message(1));
+}
+
+test "a call still held when the connection is about to wait is given a fiber, and reads its message there" {
+    var app = try hereApp();
+    defer app.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    typed_ran_on = null;
+    try client.headersFor(1, "/test.Here/Typed", &.{}, false);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    var conn = try steppedConn(&app, &in, &out.writer);
+    defer conn.deinit();
+    try headersRead(&conn, &in);
+    try testing.expectEqual(@as(u32, 1), conn.holds);
+    try conn.startHeld();
+    try testing.expectEqual(@as(u32, 0), conn.holds);
+    // On a thread of its own, parked on the message that has not come.
+    try testing.expectEqual(@as(u32, 1), conn.shared.running.load(.acquire));
+    try testing.expect(typed_ran_on == null);
+}
+
+test "a held call that is reset is let go of, and a connection that ends with one held leaks nothing" {
+    var app = try hereApp();
+    defer app.deinit();
+    {
+        var client = try TestClient.init();
+        defer client.deinit();
+        try client.headersFor(1, "/test.Here/Typed", &.{}, false);
+        try h2.writeRstStream(client.w(), 1, .cancel);
+
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        var in: std.Io.Reader = .fixed(client.buf.written());
+        var conn = try steppedConn(&app, &in, &out.writer);
+        defer conn.deinit();
+        try headersRead(&conn, &in);
+        try testing.expectEqual(@as(u32, 1), conn.holds);
+        try conn.readFrame();
+        try testing.expectEqual(@as(u32, 0), conn.holds);
+        try testing.expectEqual(@as(usize, 0), conn.streams.items.len);
+    }
+    // A frame the connection cannot accept ends it with the call held, which
+    // nothing owns: dropped on the way out.
+    var client = try TestClient.init();
+    defer client.deinit();
+    try client.headersFor(1, "/test.Here/Typed", &.{}, false);
+    try h2.writeHeader(client.w(), 1, .data, 0, 0);
+    try client.w().writeByte(0);
+    var got = try converse(&app, &client);
+    defer got.deinit();
+    try testing.expectEqual(h2.ErrorCode.protocol_error, got.goaway().?);
 }
 
 test "the server's own SETTINGS ask for an HPACK table of 0, and cap the calls at max_streams" {

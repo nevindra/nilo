@@ -145,6 +145,14 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
             return path.len > 1 and (path[1] == 'e' or path[1] == 'f' or path[1] == 'c');
         }
 
+        /// The routes whose handler answers whole and never reads its pipe,
+        /// so the connection's own fiber runs them (ADR 260).
+        fn runsInline(_: *anyopaque, _: []const u8, target: []const u8, _: u8) bool {
+            return target.len > 1 and target[1] == 'g';
+        }
+
+        fn parkedInline(_: *anyopaque, _: []const u8, _: []const u8, _: u8) void {}
+
         fn limit(_: *anyopaque, _: []const u8, _: []const u8) usize {
             return 1024;
         }
@@ -205,6 +213,8 @@ fn stub(gpa: std.mem.Allocator, stop: *const bulkhead.Stop) h2conn.Host {
         .ceiling = 1024,
         .body_limit = Stub.limit,
         .routes = Stub.routes,
+        .runs_inline = Stub.runsInline,
+        .parked_inline = Stub.parkedInline,
         .handle = Stub.handle,
     };
 }
