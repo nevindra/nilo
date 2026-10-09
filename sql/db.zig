@@ -618,6 +618,11 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// The schema check, with the Row list baked in by `checking`. Null
         /// when nobody asked for one.
         check: ?*const fn (*Self) anyerror!usize = null,
+        /// Set when `checking` is called a second time. The second call
+        /// still replaces the first, and `nilo_check` refuses to start on
+        /// it, because the tables a program checks belong in one
+        /// `sql.Schema` (ADR 192, ADR 181).
+        checked_twice: bool = false,
         /// The version guard `expecting` installed, or null for none. The
         /// number and the function that reads the ledger travel together,
         /// so that a program which never calls `expecting` links nothing
@@ -1074,7 +1079,16 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// var db = sql.Db.init(gpa, url, .{});
         /// db.checking(schema);
         /// ```
+        ///
+        /// **Call it once.** A second call, with the same schema or another,
+        /// makes `nilo_check` refuse to start: the later list would
+        /// silently replace the earlier one and the check would cover less
+        /// than the program thinks. A program whose tables live in several
+        /// files joins them into the one `sql.Schema` (`a.tables ++
+        /// b.tables`), the value the migrations tool and `createMissing`
+        /// are given too (ADR 192).
         pub fn checking(self: *Self, comptime schema_decl: migrate.Schema) void {
+            if (self.check != null) self.checked_twice = true;
             self.check = &struct {
                 fn run(me: *Self) anyerror!usize {
                     return me.checkSchema(schema_decl.tables);
@@ -1435,6 +1449,20 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// holds calls it itself, after its own boot work, or calls
         /// `checkSchema` directly.
         pub fn nilo_check(self: *Self, io: std.Io) !void {
+            // The shape of the program, true whether or not the database is
+            // up, so it comes before the dial's early return (ADR 192).
+            if (self.checked_twice) {
+                // At `warn` so a test can take this path (the runner fails on
+                // `err`); the refusal is the error returned, which stops the
+                // boot.
+                std.log.warn(
+                    "{s}: `db.checking` was called twice, and the second list would " ++
+                        "replace the first. Put every table in one `sql.Schema` " ++
+                        "(`a.tables ++ b.tables`) and call `checking` once.",
+                    .{nilo_type_name},
+                );
+                return error.CheckedTwice;
+            }
             if (self.check_dial_failed) return;
             try self.checkAtBoot();
             try self.expectAtBoot(io);
@@ -11460,4 +11488,23 @@ test "the readiness probe on SQLite does not wait behind a write transaction" {
     var tx = try db.begin(&run, .{});
     defer tx.deinit();
     try testing.expect(db.nilo_ready(&scope) == null);
+}
+
+test "a second call to checking makes the boot refuse instead of replacing the first list" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    var db: SqliteDb = .init(
+        testing.allocator,
+        "file:checked-twice?mode=memory&cache=shared",
+        .{ .size = 2 },
+    );
+    defer db.deinit();
+    db.checking(.{ .tables = &.{SqliteAccount} });
+    try testing.expect(!db.checked_twice);
+    db.checking(.{ .tables = &.{SqliteAccount} });
+    try testing.expect(db.checked_twice);
+
+    try db.nilo_start(threaded.io(), .none);
+    try testing.expectError(error.CheckedTwice, db.nilo_check(threaded.io()));
 }

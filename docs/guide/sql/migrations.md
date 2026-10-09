@@ -253,7 +253,7 @@ pub const schema = sql.Schema{
 };
 ```
 
-Write it once and pass it to `db.checking(schema)`, `sql.cli.Tool(Db, schema)` and `createMissing(&db, &run, schema)`. That is why it is one value rather than three lists: the tool, the startup check and the startup code cannot disagree about what the database is. A program with only tables writes `.{ .tables = &.{ User, Order } }` and is done.
+Write it once and pass it to `db.checking(schema)`, `sql.cli.Tool(Db, schema)` and `createMissing(&db, &run, schema)`. That is why it is one value rather than three lists: the tool, the startup check and the startup code cannot disagree about what the database is. A program with only tables writes `.{ .tables = &.{ User, Order } }` and is done. A program whose tables are owned by several files joins them (`.tables = a.tables ++ b.tables`) rather than calling `db.checking` once for each: a second call makes the server refuse to start, because it would otherwise replace the first list without a word.
 
 `@embedFile` is why functions and views are separate named lists. A sixty-line view belongs in `sql/open_orders.sql` with syntax highlighting, not in sixty `\\` lines, and `.body = @embedFile("sql/open_orders.sql")` puts it there. The snapshot records a function or a view as its name and a hash, the same way it records a check, so the snapshot stays readable however long the SQL is.
 

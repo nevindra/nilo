@@ -52,6 +52,7 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 - **`Within(…).Int` is `Within(…).Number`**, an integer for whole bounds and an `f64` for real ones. Only code that names the declaration changes.
 - **`Date.days_from_epoch_to_y2k` is `sql.types.date_days_from_epoch_to_y2k`**, because `Timestamp` and `Date` moved to `nilo_core` (below).
 - **`examples/orders` answers an empty order or a zero quantity with a 400 from its types**, where its handler answered a 422.
+- **`db.checking` called a second time on one `Db` makes the boot fail with `error.CheckedTwice`**, where the second list replaced the first without a word and the check covered less than the program thought. A program whose tables are owned by several files joins them into one `sql.Schema` (`.tables = a.tables ++ b.tables`) and calls `checking` once ([ADR 192](docs/adr/192-a-db-with-no-schema-check-says-so-or-is-told.md)).
 
 ### Added
 

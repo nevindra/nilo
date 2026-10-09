@@ -36,6 +36,8 @@ request that reads it. If that is meant, say `.unchecked = true` in the
 options.
 ```
 
+**`checking` is called once.** A second call, with the same schema or another, used to replace the first without a word, so a program whose tables belong to several files could register it twice and have a check that covered less than it thought. It is now a refusal at boot: `nilo_check` returns `error.CheckedTwice` with a sentence saying `checking` was called twice on one `Db` and that the tables belong in one `sql.Schema` (`a.tables ++ b.tables`), the value ADR 181 hands to `checking`, the migrations tool and `createMissing` alike. It is not additive, because that would make three places that take a schema disagree about what one is. It is said at `warn` and the error is what stops the boot, because a test cannot take a path that logs `err` (ADR 145). It is checked before the dial, since it is a fact about the program and not the database.
+
 **The option is a word rather than an empty list because the two mean
 different things.** `checking(.{ .tables = &.{} })` claims to check and
 checks nothing; `unchecked` says the check is off. A `Db` with `check ==
@@ -60,6 +62,8 @@ line per process for a program that has not decided.
 
 ## Alternatives
 
+**Making a second `checking` add to the first.** Rejected: ADR 181 makes the schema one value, and an additive call is a second way to spell it that the migrations tool and `createMissing` cannot follow.
+
 **Warn with no way to silence it.** Rejected by the roadmap: noise for a
 program that meant it is a warning that gets tuned out, and then the one
 that mattered is tuned out with it.
@@ -73,7 +77,7 @@ types, and a type is not enumerable from a program.
 ## Consequences
 
 - `sql/db.zig`: `Opts.unchecked`, `forgotTheCheck`, the line in
-  `nilo_start`.
+  `nilo_start`, and `checked_twice` with its refusal in `nilo_check`.
 - Every `Db` a test starts without a `checking` list says
   `.unchecked = true`.
 - The guide's running page and the reference's `Opts` table carry the

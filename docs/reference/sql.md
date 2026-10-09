@@ -104,6 +104,8 @@ try app.provide(&db);
 
 `init` opens nothing. The pool is built by `listen()`, which is the only moment there is an event loop to dial through. So a server starts with its database switched off, and the first request that needs it gets `error.Disconnected`.
 
+**Call `db.checking` once.** A second call, with the same schema or another, makes the boot fail with `error.CheckedTwice` rather than replacing the first list. A program whose tables are owned by several files joins them into one `sql.Schema` (`.tables = a.tables ++ b.tables`), the same value `createMissing` and the migrations tool are given ([ADR 192](../adr/192-a-db-with-no-schema-check-says-so-or-is-told.md)).
+
 #### `db.expecting`
 
 **`db.expecting(version)` refuses to serve a database whose migration ledger is behind `version`.** It is checked once at boot, after the work `app.before` registered has run and before the first request ([ADR 180](../adr/180-work-that-needs-the-services-runs-on-their-loop.md)). `db.checking` runs at the same point, so a `createMissing` or a migration in `before` runs first and the check reads what it made.
@@ -147,7 +149,7 @@ It is null before `listen()` has opened the pool and on SQLite, which has no poo
 **`listen()` calls these for you; call them yourself only when driving a `Db` without an App.**
 
 - `db.nilo_start(io, limits)` is what `listen()` calls first. A program starting a `Db` by hand passes `.none` (`.off` is the older spelling of the same value), and then the pool's waits have no bound. It opens the pool and nothing more.
-- `db.nilo_check(io)` is what `listen()` calls next, once the work `app.before` registered has run. The `checking` list is compared against the live tables and the `expecting` version against the ledger, and if either disagrees the boot fails. A program driving a `Db` by hand calls it after its own boot work, or calls `db.checkSchema(rows)` directly for the tables alone ([ADR 180](../adr/180-work-that-needs-the-services-runs-on-their-loop.md)).
+- `db.nilo_check(io)` is what `listen()` calls next, once the work `app.before` registered has run. The `checking` list is compared against the live tables and the `expecting` version against the ledger, and if either disagrees the boot fails, and so does a `Db` on which `checking` was called twice. A program driving a `Db` by hand calls it after its own boot work, or calls `db.checkSchema(rows)` directly for the tables alone ([ADR 180](../adr/180-work-that-needs-the-services-runs-on-their-loop.md)).
 - `db.nilo_stop()` is the other half, and `listen()` calls it too: after the last connection is cut off and before the Engine's loop is torn down, so the pool lets go of the loop it was built on ([ADR 121](../adr/121-a-service-is-stopped-before-the-loop-is.md)). **A `Db` cannot be used after `listen()` returns.** A program driving one by hand calls `deinit` as before.
 - `db.nilo_ready(scope)` is what `app.health` asks: it sends `SELECT 1` down the pool and returns the reason when it did not come back. So a server started with `connect_on_init = 0` over a database that is down shows a 503 on its health page, not a 200 over an empty pool ([ADR 154](../adr/154-a-health-route-asks-the-services.md)). An `s3` Store answers the same question with whether it started.
 
