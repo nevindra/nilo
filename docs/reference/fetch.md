@@ -119,7 +119,7 @@ var api: fetch.Client = .init(gpa, .{
 
 ### Errors
 
-**Each error means one thing.** `error.TimedOut` is this call's own deadline. `error.Stalled` is `stall_ms` passing with nothing arriving while the other side keeps the socket open. `error.Canceled` is the server shutting down underneath the call. The three are kept distinct instead of guessed at. `error.RedirectRefused` is a 3xx with a `Location` under an `Exchange` that did not choose a redirect policy (`Client.get` and the other calls above do follow redirects). `error.InsecureRedirect` is a followed redirect that led from `https` to `http`: it is not followed. `error.NotStarted` is a call made before `listen()`; the client is finished at startup like any other service. `error.TlsThroughProxy` is an `https://` call through a proxy that is itself `https://`, `error.TunnelRefused` is a proxy that answered the `CONNECT` with anything but a 2xx, and `error.InvalidProxy` is a proxy URL the start refused. `error.TlsOverSocket`, `error.InvalidSocket` and `error.RedirectLeavesSocket` are the three refusals of a call over a unix socket ([above](#a-call-over-a-unix-socket)).
+**Each error means one thing.** `error.TimedOut` is this call's own deadline. `error.Stalled` is `stall_ms` passing with nothing arriving while the other side keeps the socket open. `error.Canceled` is the server shutting down underneath the call. The three are kept distinct instead of guessed at. `error.RedirectRefused` is a 3xx with a `Location` under an `Exchange` that did not choose a redirect policy (`Client.get` and the other calls above do follow redirects). `error.InsecureRedirect` is a followed redirect that led from `https` to `http`: it is not followed. `error.NotStarted` is a call made before `listen()`; the client is finished at startup like any other service. `error.TlsThroughProxy` is an `https://` call through a proxy that is itself `https://`, `error.TunnelRefused` is a proxy that answered the `CONNECT` with anything but a 2xx, and `error.InvalidProxy` is a proxy URL the start refused. `error.TlsOverSocket`, `error.InvalidSocket` and `error.RedirectLeavesSocket` are the three refusals of a call over a unix socket ([above](#a-call-over-a-unix-socket)). A WebSocket adds its own ([below](#fetchwebsocket)).
 
 **A 4xx or 5xx is a `Response`, not an error.** The call worked and the service said no; only the caller knows which of those matters.
 
@@ -188,6 +188,7 @@ fn charge(stripe: *Stripe, c: *nilo.Ctx, charge_id: nilo.Str) !fetch.Response {
 | `fetch.retry.Ledger` | the budget's counts, 264 bytes, one per target that declares `.retry` and one per `s3.Store`; `fetch.retry.Tries` is one call's progress, on the stack, for a module that retries a round trip of its own (`nilo_s3` does) |
 | `fetch.retry.retryAfterMs(value, now_s)` | `?u64`, the header's wait in milliseconds, or null |
 | `fetch.testing.Canned.serveScript(script, count)` | answers `count` requests from `[]const fetch.testing.Reply`, one connection each and `Connection: close`; `canned.tried` has how many arrived, when, and `headOfTry(n)` the head of each |
+| `fetch.testing.Canned.serveWebSocket(steps)` | accepts one connection, answers its WebSocket handshake with a `101`, then plays `[]const fetch.testing.WsStep` at it: `.send` a `WsFrame` (opcode, payload, `fin`, a `declared_len` that lies), `.read` one frame, `.hold_until_closed`, `.sleep_ms`. `canned.ws_seen` has the frames it read, each with its mask bit and payload; `ws_protocol`, `ws_accept` and `headers` bend the handshake; `wsUrl(&buf)` is the URL |
 
 ### `fetch.Exchange`
 
@@ -218,6 +219,62 @@ _ = try ex.pipe(&body.writer);   // straight out, allocating nothing
 **A `.stream` body is sent on a connection no pool held.** It is a reader that cannot be read twice, so it cannot be replayed onto a second connection when the first turns out to be one the server closed while it idled, the case that protects a `.slice` body. Instead it never meets one: the call uses a second std client whose pool keeps nothing, so every streamed body opens a connection (one TCP handshake, plus TLS over `https://`) and closes it after. Calls with a slice, no body or `get` are unchanged, and the second client costs nothing until the first streamed body, when an `https://` call scans the system's root certificates once, as the first call on the main client does.
 
 **Do not copy an `Exchange` once it has begun**, because it holds a `std.http.Client.Request`. Declare it, fill it in place, and leave it there.
+
+### `fetch.WebSocket`
+
+**A WebSocket opened from a URL, to consume a feed or hold a platform's gateway.** It is an `Exchange` that was upgraded: the open is a GET asking for `Upgrade: websocket`, so the client's gate, `timeout_ms` and the route's deadline, TLS and the roots from `Settings.roots`, `Call.unix_socket`, the request id and the trace all apply to it unchanged, and the permit goes back as soon as the `101` is in ([ADR 281](../adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)).
+
+<!-- compiles: body -->
+```zig
+var ws: fetch.WebSocket = .idle;
+defer ws.deinit();
+try ws.open(&client, c, "wss://stream.example.com/prices", .{ .idle_ms = 30_000 });
+try ws.sendJson(.{ .op = "subscribe", .channels = [_][]const u8{"BTC-USD"} });
+while (try ws.receive()) |message| {
+    // message.data is borrowed: copy what must outlive the next receive
+    _ = message.kind; // .text or .binary
+}
+if (!ws.closedCleanly()) {} // the connection stopped without a close frame
+_ = ws.close(.normal, "done");
+```
+
+| | |
+|---|---|
+| `ws.open(client, c, url, call)` | dial and ask to become a WebSocket. `ws://`, `wss://`, and `http://` and `https://` for the same two; anything else is `error.UnsupportedUriScheme`. `c` is a Scope. A refusal leaves the socket as it was, so one variable can be opened again |
+| `ws.receive()` | `?Message`: `.kind` (`.text` or `.binary`) and `.data`, **borrowed until the next `receive`, `send` or `close`**. Null when the conversation is over, by a close frame or by the connection stopping. Pings are answered inside it and pongs and close frames are not the caller's |
+| `ws.send(kind, data)`, `sendText`, `sendBinary` | one message in one frame, masked. `error.Closed` on a socket that is closed or closing |
+| `ws.sendJson(value)` | `value` written as JSON and sent as one text message, on the client's allocator, freed before it returns. Text is refused while compiling |
+| `ws.ping(data)` | a ping, cut to 125 bytes; its pong is swallowed by `receive` |
+| `ws.close(code, reason)` | the close frame out, then the other side's awaited for at most `close_timeout_ms`. `.acknowledged`, `.timed_out` or `.dropped`; the connection is destroyed whichever |
+| `ws.deinit()` | lets the socket go **without waiting**: an open one gets a close frame with 1000 written and is destroyed. Safe twice, after `close`, and on one that never opened |
+| `ws.status` | the status the upgrade was answered with, readable after `error.UpgradeRefused` |
+| `ws.subprotocol` | the subprotocol the server chose: one of the caller's `protocols`, or null |
+| `ws.closedCleanly()`, `ws.closeCode()`, `ws.closeReason()` | whether the other side closed with a close frame, and the code and reason it gave |
+| `ws.isOpen()` | whether `receive` and `send` can still be called |
+
+**`fetch.websocket.Call`.**
+
+| Field | |
+|---|---|
+| `headers` | sent with the handshake, in order. A name the handshake writes (`upgrade`, `connection`, `sec-websocket-key`, `-version`, `-extensions`, `-protocol`) is `error.ReservedHeader` |
+| `protocols` | the subprotocols offered, in order of preference. A name that is not an HTTP token is `error.InvalidProtocol` |
+| `timeout_ms` | how long the **open** may take, overriding `Settings.timeout_ms`; the route's deadline narrows it as for any call. It bounds nothing after the `101` |
+| `max_message` | the biggest message `receive` assembles, **in decoded bytes, all the pieces of a message together**. Default `fetch.websocket.default_max_message`, 1 MiB. A frame announcing more than is left of it is refused on its header and closes the socket with 1009 (`error.MessageTooBig`) |
+| `idle_ms` | how long `receive` may wait with nothing at all arriving before it is `error.Stalled`. Default 0, never: a quiet socket is working |
+| `close_timeout_ms` | how long `close` waits for the other side's close frame. Default 5,000 |
+| `unix_socket` | open over the unix socket at this absolute path, as `Client.Call.unix_socket` does; `wss://` is `error.TlsOverSocket` |
+
+**Errors.** Beside the client's own (`TimedOut`, `Stalled`, `NotStarted`, `TlsOverSocket`, the transport's): `error.UpgradeRefused` (the answer was not `101`; the status is `ws.status`), `error.BadHandshake` (a `101` that is not the answer to this request: no `Upgrade: websocket`, no `Connection: Upgrade`, an accept key that is not the hash of ours, an extension or a subprotocol nobody offered), `error.ReservedHeader`, `error.InvalidProtocol`, `error.ProtocolError` (the other end broke the framing; closed with 1002), `error.MessageTooBig` (1009), `error.InvalidPayload` (text that is not UTF-8; 1007) and `error.Closed`. After any error from `receive`, it returns null.
+
+**Every frame the client sends is masked with four fresh bytes from `std.Io`** (RFC 6455 §5.3), applied as the payload is copied into the write buffer; the caller's slice is never written to. **There is no permessage-deflate**: the client offers no extension and refuses an answer that names one.
+
+**A proxy.** `Settings.proxy` carries a `ws://` open the way it carries an `http://` call, as a forward proxy request, and most forward proxies do not pass an upgrade: name the host in `Proxy.bypass` to open it directly. A `wss://` open is `error.TlsThroughProxy` for the reason an `https://` call is ([ADR 267](../adr/267-a-call-can-go-through-a-proxy-and-trust-a-private-authority.md)).
+
+**One fiber at a time.** `receive` writes the pongs, so `send` from a second fiber while the first is in `receive` would interleave two frames. A feed read in one place and written from another is two sockets or a queue between them.
+
+**Do not copy a `WebSocket` once it has opened**, for the reason an `Exchange` must not: it holds one. A `WebSocket` is 1,200 bytes, on the frame of the fiber that holds it.
+
+**Nothing is allocated for a message that arrived whole in the connection's read buffer**, which is every message a feed sends and nearly every one under 8 KiB: a server never masks, so it is handed over where it lies. A larger or fragmented one is collected in one buffer the socket holds, grown to the largest message seen and never past `max_message`, and freed at `deinit`.
 
 ### `fetch.testing`
 

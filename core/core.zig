@@ -1,11 +1,11 @@
 //! nilo_core — what every layer of nilo agrees about (ADR 038).
 //!
-//! Six things live here. Text that belongs to a piece of work, the Scope
+//! Seven things live here. Text that belongs to a piece of work, the Scope
 //! that hands out the memory it lives in, what time it is (and the `Timestamp`
-//! and `Date` that hold it), percent encoding, and how long to wait before
-//! trying again. Each is used by two layers, which is the rule for a seventh: **a
-//! file earns its place by being needed by two layers, not by having nowhere
-//! else to live.** The moment this is where things go because they fit
+//! and `Date` that hold it), percent encoding, how long to wait before
+//! trying again, and the WebSocket frame. Each is used by two layers, which is
+//! the rule for an eighth: **a file earns its place by being needed by two
+//! layers, not by having nowhere else to live.** The moment this is where things go because they fit
 //! nowhere, the layering has stopped meaning anything and only the directory
 //! is left.
 //!
@@ -22,6 +22,9 @@
 //! `backoff` is the fifth (ADR 271): `nilo_job` waits between a job's
 //! attempts and `nilo_fetch` between a call's, both with the same jitter, and
 //! the two are siblings.
+//! `ws_frame` is the sixth (ADR 281): the server's WebSocket frames are read and
+//! written by the code `nilo_fetch`'s client reads and writes them with, and
+//! the client cannot import `nilo_http` to share it.
 //! `tmp` is the third (ADR 250): a test under `http/` and a test under
 //! `sql/` both need the path of a directory of their own, and the second
 //! cannot reach `nilo.testing`. It is the one file here only a test calls.
@@ -102,6 +105,12 @@ pub const Limits = @import("limits.zig").Limits;
 pub const Backoff = @import("backoff.zig").Backoff;
 pub const Jitter = @import("backoff.zig").Jitter;
 
+/// The WebSocket frame as bytes: header, masking, close payload, the rules
+/// both ends hold a frame to
+/// ([ADR 281](../docs/adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)).
+/// `nilo_http`'s `Socket` and `nilo_fetch`'s `WebSocket` are the two callers.
+pub const ws_frame = @import("ws_frame.zig");
+
 /// A directory for one test, with the path to it that `std.testing.tmpDir`
 /// does not give ([ADR 250](../docs/adr/250-a-test-directory-hands-back-its-path.md)).
 /// `nilo.testing.tmpDir` is this one.
@@ -118,4 +127,5 @@ test {
     _ = @import("backoff.zig");
     _ = @import("trace.zig");
     _ = @import("tmp.zig");
+    _ = @import("ws_frame.zig");
 }

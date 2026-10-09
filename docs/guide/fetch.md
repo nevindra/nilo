@@ -2,7 +2,7 @@
 
 **`nilo_fetch` is the HTTP client for calling other services from inside a handler: one shared client for the whole program, a deadline on every call, and the response kept in the request's memory.**
 
-**Reference:** [`nilo_fetch`](../reference/fetch.md#nilo_fetch), [`fetch.Target`](../reference/fetch.md#fetchtarget), [`fetch.Exchange`](../reference/fetch.md#fetchexchange), [`fetch.testing`](../reference/fetch.md#fetchtesting) · **Design:** [Outbound calls](../design/fetch.md)
+**Reference:** [`nilo_fetch`](../reference/fetch.md#nilo_fetch), [`fetch.Target`](../reference/fetch.md#fetchtarget), [`fetch.WebSocket`](../reference/fetch.md#fetchwebsocket), [`fetch.Exchange`](../reference/fetch.md#fetchexchange), [`fetch.testing`](../reference/fetch.md#fetchtesting) · **Design:** [Outbound calls](../design/fetch.md)
 
 `nilo_fetch` is an HTTP client for use inside a handler: a payment provider, a geocoder, a webhook, somebody's JSON API. It is `std.http.Client` (its pool, HTTP/1.1, TLS) with the policy a server needs and a script does not, added in front in about sixty lines ([ADR 061](../adr/061-a-fitting-borrows-the-loop.md)).
 
@@ -287,6 +287,38 @@ fn chargeCard(payments: *Payments, c: *nilo.Ctx) !fetch.Response {
 **A reaped connection is not a retry.** The replay `nilo_fetch` makes onto a fresh connection when the pooled one was closed by the peer while idle is transport hygiene inside one try; it costs no wait, no budget and none of `times`.
 
 `nilo_s3` takes the same `retry` on the Store, for `Throttled` and `Unavailable` ([the s3 guide](./s3.md)).
+
+## Consuming a feed (WebSocket)
+
+**A service that reads a feed (prices) or holds a platform's gateway opens a WebSocket from the same client, with the same TLS, roots, deadline and request id as any call.** No second library, and no second idea of a timeout ([ADR 281](../adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)).
+
+<!-- compiles: body -->
+```zig
+var ws: fetch.WebSocket = .idle;
+defer ws.deinit();
+try ws.open(&client, c, "wss://stream.example.com/prices", .{
+    .headers = &.{.{ .name = "authorization", .value = "Bearer token" }},
+    .protocols = &.{"v2.prices"},
+    .idle_ms = 30_000,
+});
+try ws.sendJson(.{ .op = "subscribe", .channels = [_][]const u8{"BTC-USD"} });
+while (try ws.receive()) |message| {
+    // message.data is only good until the next receive: copy what you keep
+    if (message.kind == .text) _ = message.data;
+}
+// null: the server closed (ws.closedCleanly()) or the connection stopped.
+// A loop that reconnects goes round again with a fresh open.
+```
+
+**What it decides so you do not.** A ping is answered inside `receive` and you never see it. Every frame you send is masked with fresh random bytes, as the RFC requires of a client. A message past `max_message` (1 MiB; a field, because a gateway's first message can be large) closes the socket with 1009 and is `error.MessageTooBig`, and it is counted in decoded bytes, all the pieces of a message together, and refused on its header before a byte of it is read. Text that is not UTF-8 is closed with 1007. A close you start with `ws.close(.normal, "bye")` waits at most five seconds (`close_timeout_ms`) for the other side's and tells you whether it came (`.acknowledged`, `.timed_out`, `.dropped`); `deinit` never waits, so a `defer` on an error path costs nothing.
+
+**A socket may be quiet, and nothing ends it unless you say so.** `idle_ms` is how long `receive` may wait with *nothing at all* arriving, a ping included, before it is `error.Stalled`. Set it above the server's heartbeat when the feed must not go quiet; leave it at zero for a chat gateway with nobody typing. The `timeout_ms` of the open bounds the open and nothing after it, and the route's deadline narrows the open as it does any call.
+
+**A refusal says why.** If the server answers something other than `101` (a 401 for a token to refresh, a 429 for a wait) the error is `error.UpgradeRefused` and the status is `ws.status`. A failed open leaves `ws` as it was, so a reconnect loop opens the same variable again, with its own backoff.
+
+**One fiber uses a socket at a time**, because `receive` writes the pongs. Read and write from two places with two sockets, or a queue between them. The socket takes one permit of `max_in_flight` while it opens and gives it back at the `101`, so thirty-two open feeds do not stop the client making a call. A message that arrived whole in the read buffer costs no allocation; a larger one is collected in a buffer the socket grows to the largest message seen. There is no permessage-deflate.
+
+Over a unix socket it is the same (`.unix_socket = "/run/feed.sock"` with a `ws://` URL), and a test drives it against `fetch.testing.Canned.serveWebSocket`.
 
 ## Client settings
 

@@ -476,6 +476,163 @@ test "a call that queued for a permit past its route's deadline is refused and n
     try testing.expectEqualStrings("TimedOut at once", body);
 }
 
+// ---- the WebSocket client against nilo's own server (ADR 281) ----
+//
+// The client's tests in `websocket_live.zig` run against a canned server on
+// `std.Io.Threaded`. What they cannot show is the two things that need the
+// other half of the repository: that the client and the server agree about
+// the wire, which is `core.ws_frame` under both and is still worth watching
+// meet, and that the two clocks the client arms (silence, and the wait for a
+// close) fire under the Engine's timer as they do under a task of `Io`, which
+// is the thing ADR 032 says has to be seen.
+
+/// The port the server below listens on, for the handlers that dial it.
+var ws_port: u16 = 0;
+
+fn wsEchoLoop(socket: *nilo.Socket) !void {
+    while (try socket.receive()) |message| try socket.send(message.kind, message.data);
+}
+
+fn wsEcho(c: *nilo.Ctx) !void {
+    return c.upgradeWith(wsEchoLoop, {}, .{ .idle_ms = 0, .max_message = 1 << 20 });
+}
+
+/// Reads and answers nothing, so a client waiting for a message waits.
+fn wsQuietLoop(socket: *nilo.Socket) !void {
+    while (try socket.receive()) |_| {}
+}
+
+fn wsQuiet(c: *nilo.Ctx) !void {
+    return c.upgradeWith(wsQuietLoop, {}, .{ .idle_ms = 0 });
+}
+
+/// Never reads, so a close frame sent to it is never answered.
+fn wsDeafLoop(_: *nilo.Socket) !void {
+    nilo.sleep(2_000) catch {};
+}
+
+fn wsDeaf(c: *nilo.Ctx) !void {
+    return c.upgradeWith(wsDeafLoop, {}, .{ .idle_ms = 0 });
+}
+
+fn wsUrl(buf: []u8, route: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "ws://127.0.0.1:{d}{s}", .{ ws_port, route });
+}
+
+/// A text message, a binary one and one of 40,000 bytes out of this handler
+/// and back through the server's loop, then a close the server echoes.
+fn callWsEcho(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    var url_buf: [64]u8 = undefined;
+    var ws: fetch.WebSocket = .idle;
+    defer ws.deinit();
+    ws.open(api, c, try wsUrl(&url_buf, "/echo"), .{}) catch |err| return c.str(@errorName(err));
+
+    try ws.sendText("hello");
+    const text = (try ws.receive()) orelse return c.str("ended");
+    const text_ok = text.kind == .text and std.mem.eql(u8, text.data, "hello");
+
+    try ws.sendBinary("\x00\x01\x02");
+    const binary = (try ws.receive()) orelse return c.str("ended");
+    const binary_ok = binary.kind == .binary and std.mem.eql(u8, binary.data, "\x00\x01\x02");
+
+    const big = try c.arena().alloc(u8, 40_000);
+    for (big, 0..) |*b, i| b.* = @truncate(i *% 31);
+    try ws.sendBinary(big);
+    const echoed = (try ws.receive()) orelse return c.str("ended");
+    const big_ok = std.mem.eql(u8, echoed.data, big);
+
+    const closed = ws.close(.normal, "done");
+    return c.str(try std.fmt.allocPrint(c.arena(), "{s} {s} {s} {s} {s}", .{
+        if (text_ok) "text" else "BAD",
+        if (binary_ok) "binary" else "BAD",
+        if (big_ok) "big" else "BAD",
+        @tagName(closed),
+        if (ws.closedCleanly()) "clean" else "unclean",
+    }));
+}
+
+/// A socket that never hears anything, with 200 ms of patience: the Engine's
+/// timer is what ends the wait, and the error is the silence bound's.
+fn callWsQuiet(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    var url_buf: [64]u8 = undefined;
+    var ws: fetch.WebSocket = .idle;
+    defer ws.deinit();
+    ws.open(api, c, try wsUrl(&url_buf, "/quiet"), .{ .idle_ms = 200 }) catch |err| return c.str(@errorName(err));
+    const began = nilo.nowMillis();
+    const verdict: []const u8 = if (ws.receive()) |_| "message" else |err| @errorName(err);
+    const pace: []const u8 = if (nilo.nowMillis() - began < 2_000) "fast" else "slow";
+    return c.str(try std.fmt.allocPrint(c.arena(), "{s} {s}", .{ verdict, pace }));
+}
+
+/// A close the far end never answers, with 200 ms to wait for it.
+fn callWsDeaf(api: *fetch.Client, c: *nilo.Ctx) !nilo.Str {
+    var url_buf: [64]u8 = undefined;
+    var ws: fetch.WebSocket = .idle;
+    defer ws.deinit();
+    ws.open(api, c, try wsUrl(&url_buf, "/deaf"), .{ .close_timeout_ms = 200 }) catch |err| return c.str(@errorName(err));
+    const began = nilo.nowMillis();
+    const closed = ws.close(.normal, "");
+    const pace: []const u8 = if (nilo.nowMillis() - began < 1_500) "fast" else "slow";
+    return c.str(try std.fmt.allocPrint(c.arena(), "{s} {s}", .{ @tagName(closed), pace }));
+}
+
+/// A server with the three socket routes and the one client route asked for,
+/// one request to the client route, and what its handler reported.
+fn driveWs(comptime route: []const u8, comptime handler: anytype) ![]u8 {
+    hushStartupWiring();
+    const gpa = std.heap.smp_allocator;
+
+    var api: fetch.Client = .init(gpa, .{});
+    defer api.deinit();
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.provide(&api);
+    try app.get("/echo", wsEcho);
+    try app.get("/quiet", wsQuiet);
+    try app.get("/deaf", wsDeaf);
+    try app.get(route, handler);
+
+    // A free port, found by asking, and in a range of its own: Debug and
+    // ReleaseSafe run at the same time, and `Quiet` takes 39,500 and up.
+    var probe: std.Io.Threaded = .init(gpa, .{});
+    defer probe.deinit();
+    var port: u16 = 41_000 + @as(u16, @intCast(std.Thread.getCurrentId() % 400)) * 2;
+    while (port < 42_000) : (port += 1) {
+        const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+        var server = address.listen(probe.io(), .{}) catch continue;
+        server.deinit(probe.io());
+        break;
+    } else return error.NoFreePortForTheWebSocketServer;
+    ws_port = port;
+
+    var serving: Serving = .{ .app = &app, .port = port };
+    const app_thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
+    defer {
+        if (serving.bound.load(.acquire)) app.shutdown();
+        app_thread.join();
+    }
+    return askOnce(gpa, serving.port, route);
+}
+
+test "the client and the server speak the same wire, and the close is acknowledged" {
+    const body = try driveWs("/call", callWsEcho);
+    defer std.heap.smp_allocator.free(body);
+    try testing.expectEqualStrings("text binary big acknowledged clean", body);
+}
+
+test "a socket that goes quiet is stalled by the Engine's timer, and says so" {
+    const body = try driveWs("/call", callWsQuiet);
+    defer std.heap.smp_allocator.free(body);
+    try testing.expectEqualStrings("Stalled fast", body);
+}
+
+test "a close nobody answers is given up on by the Engine's timer, after the time it was given" {
+    const body = try driveWs("/call", callWsDeaf);
+    defer std.heap.smp_allocator.free(body);
+    try testing.expectEqualStrings("timed_out fast", body);
+}
+
 /// One request over a real socket, from a thread that is not the Engine's.
 ///
 /// `nilo.testing.Client` cannot be used here: it drives `App.handleRequest`

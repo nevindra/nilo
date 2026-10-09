@@ -4537,3 +4537,28 @@ Over TLS nilo is already ahead. Cleartext, it spends twice the CPU a request; JS
 h2load opens its connections once: each one took its GOAWAY after 900 to 1,000 calls (16 connections, 15,392 started) and every request it had left was counted failed. After `Connection: close` both tools open another connection. The arena rig showed the same first ([the section above](#the-arenas-http2-profiles-work-stealing-the-request-cap-and-where-nilo-stands-against-the-framework-leagues-leader): 195k req/s, 92,729 errored).
 
 **What it moved.** ADR 275's cap counts HTTP/1.1 only, and the HTTP/2 one is its own option, `max_requests_per_h2_connection`, off by default. Not a throughput figure: the logger was on and nothing was pinned, and the question was only whether the run survives.
+
+## What moving the WebSocket frame into Core costs the server
+
+Run on 2026-10-09, AMD Ryzen 7 9700X (8 cores, 16 threads), Linux 7.2.5, Zig 0.17.0, at `0f6a939` against `0f6a939` plus the change that moves the frame code from `http/websocket.zig` to `core/ws_frame.zig` so that `nilo_fetch`'s WebSocket client can use it ([ADR 281](../../docs/adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)). The before is `git archive 0f6a939` in a scratch directory, built with the same flags the same afternoon (`zig build autobahn-server -Dtarget=x86_64-linux-gnu -Dstrip=false`, which is `ReleaseFast`), and the server is `bench/autobahn/server.zig`, the echo loop out of the guide with `max_message` raised.
+
+**The question.** The masking loop (ADR 046: 2.4 times a single 32-byte tile on a 16 KiB message) is the one hot loop here, and it moved to another file. Zig compiles the modules as one unit and inlines across them, so the expectation was no change; that is an expectation and not a measurement.
+
+**Machine code.** `unmaskInto` (152 instructions), `readPayload` (91) and `handleControl` (269) disassemble to the same instructions in both binaries, address operands aside (`objdump -d`, diffed after normalising addresses: 0 differing lines each). The connection loop that inlines `receive` (`websocket.runner…call`) is not the same: 798 instructions before, 847 after, and 0xd34 against 0xe17 bytes. The register allocation moved, and the header checks, now one function (`Frame.wellFormed`) instead of four `if`s in a row, are laid out differently. That is why the next two are measured and not argued.
+
+**User instructions an echoed message**, read from a hardware counter (`perf_event_open`, user mode, inherited by the server's threads, read at exit; two counts of messages per run and the difference over the difference, so start, handshake and stop come out, as `bench/release.py` does with cachegrind, which this host lacks). One client on a pinned core, the server on another, a window of 32 messages in flight. Four interleaved runs of each:
+
+| message | before | after |
+|---|---|---|
+| 40 bytes | 683.7, 683.7, 683.7, 683.7 | 683.9, 683.9, 683.9, 683.9 |
+| 16 KiB | 8,596.9 to 8,599.3 | 8,596.5 to 8,597.6 |
+
+The 40-byte rows differ by 0.2 instructions in 684, and the 16 KiB ranges overlap. **Unchanged.**
+
+**The server's CPU a message** (the schedstat of the server's threads over the measured stretch, 3,000,000 messages of 40 bytes and 300,000 of 16 KiB, five interleaved runs each; the client is Python, so this is the server's CPU and the rate is the client's): 40 bytes, 0.165 to 0.190 µs before and 0.160 to 0.181 after; 16 KiB, 2.60 to 3.53 µs before and 2.51 to 2.72 after. The ranges overlap. **Unchanged.**
+
+**Memory per idle WebSocket** (`bench/ws_idle.py nilo ws-room`, `bench/ws_server.zig`, ReleaseFast, marginal at 2,000 sockets, three interleaved pairs from freshly started servers): before 5,181, 5,186 and 5,186 bytes a socket, after 5,186, 5,186 and 5,186. **Unchanged.** A first single reading had 5,186 against 5,190, which the interleaved pairs show to be the spread. `zig build park-check` on the changed tree reads one page in all four builds (0 of 48 connections above it).
+
+**Binary.** `.text` of the echo server is 1,212,963 bytes before and 1,213,187 after (+224 bytes, the connection loop above).
+
+**What it decided.** The move stands: one copy of the framing in Core. Nothing here is a reason to keep a second one in the server. The Autobahn suite (`bash bench/autobahn/run.sh`) on the changed tree reads as it did before the move: 301 cases, 294 OK, the four 6.4.x NON-STRICT and the three 9.x INFORMATIONAL, 0 failed. The framing tests in `http/websocket.zig` (every one that was not a pure table of bytes, which went to `core/ws_frame.zig` with the code) pass in Debug and ReleaseSafe.

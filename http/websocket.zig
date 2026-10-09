@@ -36,6 +36,7 @@
 //! buffer entirely, and unmasked where it lands. There is no third case.
 
 const std = @import("std");
+const core = @import("nilo_core");
 
 const bulkhead = @import("bulkhead.zig");
 const watchdog = @import("watchdog.zig");
@@ -45,10 +46,10 @@ const naming = @import("names.zig");
 const room_mod = @import("room.zig");
 const scratch_mod = @import("scratch.zig");
 
-/// The string every WebSocket handshake in the world hashes against. It has
-/// no meaning; it is there so that a server which merely echoes the key
-/// cannot be mistaken for one that speaks the protocol (RFC 6455 §1.3).
-const handshake_salt = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+/// The frame as bytes: header, masking, close payload and the rules a frame
+/// is held to. It is `nilo_core`'s because `nilo_fetch`'s client reads and
+/// writes the same frames and may not import this file (ADR 281, ADR 057).
+const ws_frame = core.ws_frame;
 
 pub const Options = struct {
     /// A sub-protocol this route speaks, the one-name spelling of `protocols`.
@@ -338,19 +339,9 @@ pub const Message = struct {
 };
 
 /// Why a connection is being closed. The numbers are RFC 6455 §7.4.1's, and
-/// the ones a server actually sends.
-pub const Close = enum(u16) {
-    normal = 1000,
-    going_away = 1001,
-    protocol_error = 1002,
-    unsupported = 1003,
-    /// Text that was not valid UTF-8.
-    invalid_payload = 1007,
-    policy = 1008,
-    too_big = 1009,
-    internal = 1011,
-    _,
-};
+/// the ones a server actually sends. Defined in `nilo_core` beside the rest of
+/// the frame, because the client sends the same ones (ADR 281).
+pub const Close = ws_frame.Close;
 
 pub const Error = error{
     /// The other end broke the framing rules. The connection is closed.
@@ -363,27 +354,15 @@ pub const Error = error{
     EndOfStream,
 };
 
-const Opcode = enum(u4) {
-    continuation = 0,
-    text = 1,
-    binary = 2,
-    close = 8,
-    ping = 9,
-    pong = 10,
-    _,
+const Opcode = ws_frame.Opcode;
 
-    fn isControl(self: Opcode) bool {
-        return @backingInt(self) & 0x8 != 0;
-    }
-
-    fn of(kind: Kind) Opcode {
-        return if (kind == .text) .text else .binary;
-    }
-};
+fn opcodeOf(kind: Kind) Opcode {
+    return if (kind == .text) .text else .binary;
+}
 
 /// The longest a header nilo writes can be: two bytes and a 64-bit length.
 /// A server never masks, so there are no four bytes of key on the end of it.
-pub const max_header = 10;
+pub const max_header = ws_frame.max_header;
 
 /// The bytes that go in front of one outgoing message, written into `into`
 /// and returned as the part of it that counts.
@@ -393,28 +372,10 @@ pub const max_header = 10;
 /// mask and no per-connection anything, so there is nothing in a header worth
 /// building a thousand times (ADR 035, ADR 046).
 pub fn headerFor(into: *[max_header]u8, kind: Kind, len: u64) []u8 {
-    return writeHeader(into, .of(kind), len);
+    return writeHeader(into, opcodeOf(kind), len);
 }
 
-fn writeHeader(into: *[max_header]u8, opcode: Opcode, len: u64) []u8 {
-    into[0] = 0x80 | @as(u8, @backingInt(opcode)); // FIN, no reserved bits
-
-    // A server never masks. The mask exists to stop a hostile page making a
-    // browser send bytes that a proxy would read as a request, and only a
-    // browser is in that position.
-    if (len < 126) {
-        into[1] = @intCast(len);
-        return into[0..2];
-    }
-    if (len <= std.math.maxInt(u16)) {
-        into[1] = 126;
-        std.mem.writeInt(u16, into[2..4], @intCast(len), .big);
-        return into[0..4];
-    }
-    into[1] = 127;
-    std.mem.writeInt(u64, into[2..10], len, .big);
-    return into[0..10];
-}
+const writeHeader = ws_frame.writeHeader;
 
 /// An open WebSocket connection.
 pub const Socket = struct {
@@ -640,7 +601,7 @@ pub const Socket = struct {
         // Text is defined to be UTF-8, and a client is entitled to be told
         // when it is not rather than handed bytes that will break something
         // further along.
-        if (kind == .text and !std.unicode.utf8ValidateSlice(data)) {
+        if (kind == .text and !ws_frame.validText(data)) {
             self.closeWith(.invalid_payload) catch {};
             return error.ProtocolError;
         }
@@ -665,7 +626,7 @@ pub const Socket = struct {
     pub fn send(self: *Socket, kind: Kind, data: []const u8) Error!void {
         if (self._closed) return;
         if (self._seated.room != null) try self.deliver();
-        return self.sendFrame(.of(kind), data);
+        return self.sendFrame(opcodeOf(kind), data);
     }
 
     pub fn sendText(self: *Socket, text: []const u8) Error!void {
@@ -740,11 +701,8 @@ pub const Socket = struct {
         if (self._seated.room != null) self.deliver() catch {};
         self._closed = true;
 
-        var payload: [125]u8 = undefined;
-        std.mem.writeInt(u16, payload[0..2], @backingInt(code), .big);
-        const room = fits(reason);
-        @memcpy(payload[2..][0..room], reason[0..room]);
-        try self.writeFrame(.close, payload[0 .. 2 + room]);
+        var payload: [ws_frame.max_control]u8 = undefined;
+        try self.writeFrame(.close, ws_frame.closePayload(&payload, code, reason));
         // Flushed whatever the read buffer holds: this connection is not
         // going to read again, so there is no later moment (ADR 201).
         self._out.flush() catch return error.WriteFailed;
@@ -815,59 +773,9 @@ pub const Socket = struct {
 
     // ---- the wire ----
 
-    /// One frame header, as it was found on the wire. `reserved` and `masked`
-    /// are carried rather than judged, because `headerFrom` is pure and every
-    /// refusal belongs to the connection that has a close frame to send.
-    const Frame = struct {
-        fin: bool,
-        reserved: bool,
-        masked: bool,
-        opcode: Opcode,
-        len: u64,
-        mask: [4]u8,
-        /// How many bytes of the stream this header took.
-        size: usize,
-    };
-
-    /// How long a header is, from its first two bytes. The rest of it is a
-    /// length in one of three widths and, from a client, four bytes of key.
-    fn headerSize(lead: [2]u8) usize {
-        const extra: usize = switch (@as(u7, @truncate(lead[1]))) {
-            126 => 2,
-            127 => 8,
-            else => 0,
-        };
-        return 2 + extra + @as(usize, if (lead[1] & 0x80 != 0) 4 else 0);
-    }
-
-    /// Read a frame header out of bytes already in hand, or null when there
-    /// are not yet enough of them to say.
-    ///
-    /// Pure: no reader, no socket, no refusals. That is what lets the whole of
-    /// RFC 6455 §5.2 be checked against a table of byte strings instead of
-    /// through a connection, and it is why the fast path below is three lines.
-    fn headerFrom(bytes: []const u8) ?Frame {
-        if (bytes.len < 2) return null;
-        const lead: [2]u8 = bytes[0..2].*;
-        const size = headerSize(lead);
-        if (bytes.len < size) return null;
-
-        const short: u7 = @truncate(lead[1]);
-        const masked = lead[1] & 0x80 != 0;
-        return .{
-            .fin = lead[0] & 0x80 != 0,
-            .reserved = lead[0] & 0x70 != 0,
-            .masked = masked,
-            .opcode = @fromBackingInt(@intCast(@as(u4, @truncate(lead[0])))),
-            .len = switch (short) {
-                126 => std.mem.readInt(u16, bytes[2..4], .big),
-                127 => std.mem.readInt(u64, bytes[2..10], .big),
-                else => short,
-            },
-            .mask = if (masked) bytes[size - 4 ..][0..4].* else .{ 0, 0, 0, 0 },
-            .size = size,
-        };
-    }
+    const Frame = ws_frame.Frame;
+    const headerSize = ws_frame.headerSize;
+    const headerFrom = ws_frame.headerFrom;
 
     /// The next frame's header, consumed. `room` is what is left of the
     /// handler's buffer, which is the only ceiling there is.
@@ -877,27 +785,13 @@ pub const Socket = struct {
         // no call into the reader at all.
         const frame = headerFrom(self._in.buffered()) orelse try self.fillHeader();
 
-        // The three reserved bits are for extensions that were negotiated in
-        // the handshake. nilo negotiates none, so a frame setting one is
-        // talking to a server that is not there.
-        if (frame.reserved) return self.fail(error.ProtocolError);
-        // Every frame from a client is masked. An unmasked one is either a
-        // broken client or something that is not a client at all, and the
-        // RFC says to fail the connection either way.
-        if (!frame.masked) return self.fail(error.ProtocolError);
-        // The shortest form that holds the length, and in the 64-bit form
-        // with its top bit clear (RFC 6455 §5.2). A header read loosely here
-        // is one a proxy in front may read strictly, which is how a frame is
-        // smuggled past it.
-        const wide = frame.size - 2 - @as(usize, if (frame.masked) 4 else 0);
-        if ((wide == 2 and frame.len < 126) or (wide == 8 and (frame.len <= 0xffff or frame.len >> 63 != 0))) {
-            return self.fail(error.ProtocolError);
-        }
-        // A control frame has to fit in one small frame, because it may
-        // arrive in the middle of somebody else's message.
-        if (frame.opcode.isControl() and (frame.len > 125 or !frame.fin)) {
-            return self.fail(error.ProtocolError);
-        }
+        // No reserved bit (nilo negotiates no extension), every frame from a
+        // client masked, the length in its shortest form, a control frame
+        // small and whole: `Frame.wellFormed` holds them, so the client in
+        // `nilo_fetch` holds a server's frames to the same rules (RFC 6455
+        // §5.2, ADR 281). A header read loosely here is one a proxy in front
+        // may read strictly, which is how a frame is smuggled past it.
+        if (!frame.wellFormed(.client)) return self.fail(error.ProtocolError);
         // Refused on what the header claims, before a byte of it is read: a
         // frame announcing four gigabytes should cost four bytes to refuse.
         if (!frame.opcode.isControl() and frame.len > room) return self.tooBig();
@@ -981,7 +875,7 @@ pub const Socket = struct {
                 // should be two, a code nobody assigned, a reason that is not
                 // UTF-8 — is a framing error like any other, and echoing it
                 // would put the same broken bytes back on the wire.
-                if (!closeIsWellFormed(data)) return self.fail(error.ProtocolError);
+                if (!ws_frame.closeIsWellFormed(data)) return self.fail(error.ProtocolError);
                 // Only now: a close frame that was not one is a framing error
                 // and not a goodbye, so `closedCleanly` stays false for it.
                 self._said_goodbye = true;
@@ -1267,102 +1161,8 @@ pub fn counted(
     return counter.fullCount();
 }
 
-/// Whether a close frame's payload is one RFC 6455 §5.5.1 allows: nothing at
-/// all, or two bytes of code and a reason in UTF-8.
-///
-/// One byte is neither. A code outside the ranges the registry hands out is
-/// one nobody can act on, and 1005 and 1006 in particular only ever mean
-/// something locally — an end that puts either on the wire is reporting
-/// something it cannot have observed.
-fn closeIsWellFormed(payload: []const u8) bool {
-    if (payload.len == 0) return true;
-    if (payload.len < 2) return false;
-
-    const code = std.mem.readInt(u16, payload[0..2], .big);
-    const known = switch (code) {
-        1000...1003, 1007...1014 => true,
-        // 3000-3999 belong to libraries and 4000-4999 to applications, and
-        // neither is this server's business to second-guess.
-        3000...4999 => true,
-        else => false,
-    };
-    if (!known) return false;
-    return std.unicode.utf8ValidateSlice(payload[2..]);
-}
-
-/// The most of `reason` that fits beside a close code, cut on a character
-/// boundary.
-///
-/// 123 is what is left of a control frame's 125 once the code has had its
-/// two, and a reason cut through the middle of a multi-byte character is a
-/// close frame the other end is entitled to refuse — which would turn saying
-/// goodbye politely into the crash it was meant to avoid.
-fn fits(reason: []const u8) usize {
-    if (reason.len <= 123) return reason.len;
-    var n: usize = 123;
-    // A continuation byte is 10xxxxxx. Back up to the one that starts the
-    // character it belongs to.
-    while (n > 0 and reason[n] & 0xc0 == 0x80) n -= 1;
-    return n;
-}
-
-/// The widths the unmasking steps down through. The key is four bytes, so
-/// every one of them tiles it exactly, and LLVM splits each into whatever
-/// registers the target actually has.
-///
-/// 128 is where the throughput stopped improving when ADR 046 measured it:
-/// 2.4× a single 32-byte tile on a 16 KiB message, with 256 worth another 6%
-/// and twice the unrolled code. The smaller steps are not an afterthought —
-/// a chat line is forty bytes and would otherwise fall straight past the wide
-/// tile into a byte-at-a-time tail almost as long as the message.
-const unmask_tiers = [_]usize{ 128, 32, 8, 4 };
-
-/// Undo the client's masking, in place. `offset` is how far into the message
-/// these bytes are, so the key lines up across a payload read in pieces.
-fn unmask(data: []u8, key: [4]u8, offset: usize) void {
-    unmaskInto(data, data, key, offset);
-}
-
-/// Undo the client's masking out of `src` and into `dst`, which may be the
-/// same slice. `offset` is how far into the message these bytes are, so the
-/// key lines up across a payload that arrived in pieces.
-///
-/// The obvious loop — one XOR per byte, `key[i % 4]` — is what the RFC
-/// describes, and it runs at about a fourteenth of the speed of copying the
-/// same bytes. For a 16 KiB message that was the entire cost of receiving
-/// one: 6.4µs, against 0.5µs to send the same message back. Since the key
-/// repeats every four bytes, the whole thing is one XOR against a repeating
-/// pattern, which is a vector operation rather than a loop.
-///
-/// **Copying and unmasking are the same pass**, which is the second half of
-/// that finding (ADR 046): the bytes arrive in the connection's read buffer
-/// and have to reach the handler's, and doing the XOR on the way costs
-/// nothing over the move itself. Reading them and then unmasking them where
-/// they landed is two walks over the same cache lines for one result.
-fn unmaskInto(dst: []u8, src: []const u8, key: [4]u8, offset: usize) void {
-    std.debug.assert(dst.len == src.len);
-
-    // Where these bytes sit in the message decides which byte of the key
-    // lines up with the first of them.
-    var rotated: [4]u8 = undefined;
-    inline for (0..4) |k| rotated[k] = key[(k +% offset) & 3];
-
-    // Widest first, and each step only entered if there is work its size for
-    // it — so a 16 KiB message never touches the narrow loops and a forty-byte
-    // one never builds the wide pattern.
-    var i: usize = 0;
-    inline for (unmask_tiers) |lanes| {
-        if (dst.len - i >= lanes) {
-            const pattern: @Vector(lanes, u8) = std.simd.repeat(lanes, @as(@Vector(4, u8), rotated));
-            while (i + lanes <= dst.len) : (i += lanes) {
-                const block: @Vector(lanes, u8) = src[i..][0..lanes].*;
-                dst[i..][0..lanes].* = block ^ pattern;
-            }
-        }
-    }
-    // Three bytes at the most.
-    while (i < dst.len) : (i += 1) dst[i] = src[i] ^ rotated[i & 3];
-}
+const unmask = ws_frame.unmask;
+const unmaskInto = ws_frame.unmaskInto;
 
 // ---- the handshake ----
 
@@ -1458,20 +1258,9 @@ pub fn sameAuthority(origin: []const u8, host: []const u8) bool {
     return std.ascii.eqlIgnoreCase(origin[scheme_end + "://".len ..], host);
 }
 
-/// The answer to `Sec-WebSocket-Key`: SHA-1 of the key and a fixed string,
-/// base64'd. It proves nothing about anybody; it proves the server on the
-/// other end knows what protocol it is speaking.
-pub fn accept(key: []const u8) [28]u8 {
-    var hash: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
-    var sha = std.crypto.hash.Sha1.init(.{});
-    sha.update(key);
-    sha.update(handshake_salt);
-    sha.final(&hash);
-
-    var out: [28]u8 = undefined;
-    _ = std.base64.standard.Encoder.encode(&out, &hash);
-    return out;
-}
+/// The answer to `Sec-WebSocket-Key`. Written in `nilo_core`, because the
+/// client in `nilo_fetch` checks the one this writes (ADR 281).
+pub const accept = ws_frame.accept;
 
 /// The 101 that ends the HTTP half of the conversation.
 pub fn writeAcceptance(
@@ -1840,124 +1629,6 @@ test "a reset in the middle of a frame is still a broken frame" {
 /// still round-trips against itself, and every test here passed.
 fn maskLikeTheRfc(data: []u8, key: [4]u8, offset: usize) void {
     for (data, offset..) |*byte, i| byte.* ^= key[i % 4];
-}
-
-test "unmask agrees with the RFC at every length around a vector boundary" {
-    // The lanes are what a length has to be checked against: one short of a
-    // block, exactly a block, one past it, and the same around two blocks —
-    // and around the eight- and four-byte steps that clear up the tail.
-    const lengths = [_]usize{ 0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 31, 32, 33, 39, 40, 63, 64, 65, 127, 1000 };
-    const key = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
-
-    var original: [1000]u8 = undefined;
-    for (&original, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
-
-    for (lengths) |len| {
-        // And at every alignment of the key, which is what `offset` decides
-        // when a payload arrives in more than one piece.
-        for (0..4) |offset| {
-            var masked: [1000]u8 = undefined;
-            @memcpy(masked[0..len], original[0..len]);
-            maskLikeTheRfc(masked[0..len], key, offset);
-
-            unmask(masked[0..len], key, offset);
-            try testing.expectEqualSlices(u8, original[0..len], masked[0..len]);
-        }
-    }
-}
-
-test "unmasking into somewhere else agrees with unmasking in place" {
-    // The pass that receive actually takes: out of the read buffer and into
-    // the handler's, with the XOR done on the way. It has to agree with the
-    // in-place one byte for byte, at every length and every key alignment.
-    const lengths = [_]usize{ 0, 1, 3, 4, 7, 8, 15, 16, 31, 32, 33, 40, 65, 500 };
-    const key = [4]u8{ 0x9a, 0x11, 0xc3, 0x04 };
-
-    var original: [500]u8 = undefined;
-    for (&original, 0..) |*b, i| b.* = @truncate(i *% 17 +% 3);
-
-    for (lengths) |len| {
-        for (0..4) |offset| {
-            var masked: [500]u8 = undefined;
-            @memcpy(masked[0..len], original[0..len]);
-            maskLikeTheRfc(masked[0..len], key, offset);
-
-            var landed: [500]u8 = undefined;
-            unmaskInto(landed[0..len], masked[0..len], key, offset);
-            try testing.expectEqualSlices(u8, original[0..len], landed[0..len]);
-        }
-    }
-}
-
-test "unmask picks up mid-message where the previous piece left off" {
-    // The property `offset` exists for: two calls over halves of a payload
-    // must produce what one call over the whole of it does.
-    const key = [4]u8{ 0x01, 0x02, 0x03, 0x04 };
-    var whole: [70]u8 = undefined;
-    for (&whole, 0..) |*b, i| b.* = @truncate(i);
-    var split = whole;
-
-    maskLikeTheRfc(&whole, key, 0);
-    maskLikeTheRfc(&split, key, 0);
-
-    unmask(&whole, key, 0);
-    // 33 is deliberately not a multiple of four or of the vector width.
-    unmask(split[0..33], key, 0);
-    unmask(split[33..], key, 33);
-
-    try testing.expectEqualSlices(u8, &whole, &split);
-}
-
-test "a header is read out of the bytes in hand, or not read at all" {
-    // Pure, so the whole of RFC 6455 §5.2 is a table rather than a
-    // connection. Nothing here refuses anything: that is the socket's job,
-    // and it needs a close frame to do it with.
-    try testing.expect(Socket.headerFrom("") == null);
-    try testing.expect(Socket.headerFrom("\x81") == null);
-    // Announced as masked, and the four bytes of key have not arrived.
-    try testing.expect(Socket.headerFrom("\x81\x85\x37\xfa") == null);
-
-    const short = Socket.headerFrom("\x81\x85\x37\xfa\x21\x3d").?;
-    try testing.expect(short.fin);
-    try testing.expect(!short.reserved);
-    try testing.expect(short.masked);
-    try testing.expectEqual(Opcode.text, short.opcode);
-    try testing.expectEqual(@as(u64, 5), short.len);
-    try testing.expectEqual([4]u8{ 0x37, 0xfa, 0x21, 0x3d }, short.mask);
-    try testing.expectEqual(@as(usize, 6), short.size);
-
-    // 126 means the length is the next two bytes, and the header is 8 long.
-    const medium = Socket.headerFrom("\x82\xfe\xea\x60\x01\x02\x03\x04").?;
-    try testing.expectEqual(Opcode.binary, medium.opcode);
-    try testing.expectEqual(@as(u64, 60_000), medium.len);
-    try testing.expectEqual(@as(usize, 8), medium.size);
-
-    // 127 means eight bytes of length, and a header of 14.
-    const long = Socket.headerFrom(
-        "\x02\xff\x00\x00\x00\x01\x00\x00\x00\x00\x0a\x0b\x0c\x0d",
-    ).?;
-    try testing.expect(!long.fin);
-    try testing.expectEqual(@as(u64, 1 << 32), long.len);
-    try testing.expectEqual(@as(usize, 14), long.size);
-
-    // An unmasked frame is four bytes shorter and carries no key. It is a
-    // header that parses and a frame that will be refused.
-    const bare = Socket.headerFrom("\x89\x00").?;
-    try testing.expect(!bare.masked);
-    try testing.expectEqual(@as(usize, 2), bare.size);
-    try testing.expect(bare.opcode.isControl());
-
-    // Any of the three reserved bits.
-    try testing.expect(Socket.headerFrom("\xc1\x80\x00\x00\x00\x00").?.reserved);
-    try testing.expect(Socket.headerFrom("\xa1\x80\x00\x00\x00\x00").?.reserved);
-    try testing.expect(Socket.headerFrom("\x91\x80\x00\x00\x00\x00").?.reserved);
-}
-
-test "the handshake answer is the one every client checks" {
-    // The example from RFC 6455 §1.3, which every implementation is tested
-    // against and which pins the salt, the hash and the encoding at once.
-    const answer = accept("dGhlIHNhbXBsZSBub25jZQ==");
-    try testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", &answer);
 }
 
 test "an upgrade is recognised, and an ordinary request is not" {

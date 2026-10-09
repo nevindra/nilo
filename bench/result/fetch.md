@@ -549,6 +549,23 @@ It is unconditional, because the branch is a runtime one; a program that does no
 
 **Decision this moves.** ADR 276 quotes the size and the frame; ADR 267's refusal of `https://` through a proxy goes. Whether the frame saving shows up in a parked fiber's resident set is the run that would say, and it is the one to take before quoting a per-connection number for `nilo_fetch` again.
 
+## A WebSocket client: what it costs (ADR 281)
+
+Run on 2026-10-09, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0, at `0f6a939` plus the change that adds `fetch.WebSocket` ([ADR 281](../../docs/adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)). `bench/release/fetch_ws.zig` against `bench/release/fetch.zig`, built `-Doptimize=ReleaseFast -Dstrip=true -Dcpu=x86_64_v3`, the upstream a thread in the same process in both.
+
+| | a GET on a kept-alive connection | a 100-byte text message sent on an open socket and its echo received |
+|---|---|---|
+| allocations and bytes an operation | 2 and 166 | **0 and 0** |
+| user instructions an operation, upstream's half included | 9,745 | 1,920 |
+
+Instructions are a hardware counter in user mode, read at exit at 1,000 and at 5,000 operations, the difference over the difference (three runs each, no spread). The message arrived whole in the connection's read buffer, so it was handed over where it lay, a server never masking; the 100 bytes sent were masked while they were copied into the write buffer.
+
+**Binary.** A program that dials out and opens no socket is 946,688 bytes stripped before the change and 946,688 after: the client costs a program that does not use it nothing. The program that opens a socket is 956,160 bytes, 9,472 more than the GET program, which is the upstream stub and the client together.
+
+**Memory.** A `fetch.WebSocket` is 1,200 bytes (an `Exchange` is 992 of them), held on the frame of the fiber that uses it. **Not measured:** what a handler parked in `receive` holds per inbound connection (ADR 062's figure for a stack at its high-water mark), and a socket through TLS. Both are open.
+
+**What it decided.** The shape stands: the message is handed over where it lies and the socket holds a buffer only for a message that did not arrive whole, so a feed costs no allocation per message.
+
 ## What is still missing
 
 - **A quiet machine.** The load average was between 6 and 18 across these runs

@@ -4,7 +4,7 @@
 
 **Guide:** [WebSocket](../guide/websocket.md) · **Reference:** [`Socket`](../reference/streaming.md#socket), [`Room`](../reference/streaming.md#room)
 
-The code is `http/websocket.zig` (the handshake, the frame reader, `Socket`), `http/room.zig` (broadcast), and `http/testing.zig` (`Conversation`, for driving one from a test).
+The code is `http/websocket.zig` (the handshake, the frame reader, `Socket`), `core/ws_frame.zig` (the frame as bytes: header, masking, close payload, shared with the client in `nilo_fetch`), `http/room.zig` (broadcast), and `http/testing.zig` (`Conversation`, for driving one from a test).
 
 ## Overview
 
@@ -63,7 +63,7 @@ A message that is complete and already in the connection's read buffer is unmask
 | [216](../adr/216-a-message-that-arrived-whole-is-handed-over-where-it-lies.md) | A complete message already in the read buffer is unmasked and handed over there, taking no free-list buffer |
 | [228](../adr/228-a-room-for-a-key-is-lent-from-a-pool.md) | `nilo.Rooms`: a Room per key, borrowed from a pool sized up front, pinned while anything reaches it by key |
 
-Related topics: a handler that ignores the server's stopping flag keeps a deploy waiting, see [ADR 019](../adr/019-a-request-that-lasts-is-still-one-request.md); why a `std.log` call on a per-connection path becomes a lock every connection queues on is [ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md); why an assert cannot be the check in ADR 076 is [ADR 007](../adr/007-no-recover-middleware.md) (Zig cannot recover from a panic) and [ADR 032](../adr/032-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md) (a check must have been seen to fail); TLS being terminated in front, which is why `Origin`'s scheme is not compared, is [ADR 027](../adr/027-tls-is-terminated-in-front.md).
+Related topics: the WebSocket *client* in `nilo_fetch`, which reads and writes the same frames from `nilo_core`, is [ADR 281](../adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md); a handler that ignores the server's stopping flag keeps a deploy waiting, see [ADR 019](../adr/019-a-request-that-lasts-is-still-one-request.md); why a `std.log` call on a per-connection path becomes a lock every connection queues on is [ADR 062](../adr/062-where-a-connection-waits-is-what-it-costs.md); why an assert cannot be the check in ADR 076 is [ADR 007](../adr/007-no-recover-middleware.md) (Zig cannot recover from a panic) and [ADR 032](../adr/032-a-guard-is-not-a-guard-until-it-has-been-seen-to-fail.md) (a check must have been seen to fail); TLS being terminated in front, which is why `Origin`'s scheme is not compared, is [ADR 027](../adr/027-tls-is-terminated-in-front.md).
 
 ## Open questions
 

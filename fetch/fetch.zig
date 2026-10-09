@@ -130,6 +130,13 @@ pub const testing = @import("testing.zig");
 pub const target = @import("target.zig");
 pub const Target = target.Target;
 
+/// A WebSocket opened from a URL, to consume a feed or talk to a gateway
+/// ([ADR 281](../docs/adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)).
+/// `fetch.websocket.Call` is what `open` takes and `fetch.websocket.Message`
+/// what `receive` returns.
+pub const websocket = @import("websocket.zig");
+pub const WebSocket = websocket.WebSocket;
+
 /// A call tried again by a mechanism, with the caller's numbers: the policy,
 /// its budget and the helpers `nilo_s3` shares
 /// ([ADR 271](../docs/adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md)).
@@ -788,7 +795,7 @@ pub const Client = struct {
     /// goes in `carried`. A call that passes headers spends one bump of the
     /// Scope's arena on the merge, which is the one allocation this decision
     /// makes and the reason it is written down (ADR 158, ADR 247).
-    fn withCarried(
+    pub fn withCarried(
         c: anytype,
         given: []const std.http.Header,
         carried: *[3]std.http.Header,
@@ -821,7 +828,7 @@ pub const Client = struct {
     }
 
     /// Tell a Scope that traces how the call it began a span for ended.
-    fn endTrace(c: anytype, begun: core.trace.Outbound, method: std.http.Method, url: []const u8, status: u16, failure: ?[]const u8) void {
+    pub fn endTrace(c: anytype, begun: core.trace.Outbound, method: std.http.Method, url: []const u8, status: u16, failure: ?[]const u8) void {
         core.traceEndOf(c, begun, .{
             .method = @tagName(method),
             .url = url,
@@ -1605,7 +1612,7 @@ pub const Exchange = struct {
     /// A chunk has landed: move the silence clock. Under an Engine that is
     /// the timer re-armed; without one it is a word the waiter in `bounded`
     /// reads.
-    fn mark(self: *Exchange) void {
+    pub fn mark(self: *Exchange) void {
         self.last_byte.store(core.monotonicMicros(), .release);
         if (!self.client.limits.engineless()) self.armNearer();
     }
@@ -2389,7 +2396,7 @@ pub const Exchange = struct {
     /// engineless path already keeps, and `end` reads those. The first
     /// draft asked the bound here and drained in `end`, and the stall test
     /// under the Engine sat at zero CPU until it was noticed.
-    fn blame(self: *Exchange, err: anytype) Client.Error {
+    pub fn blame(self: *Exchange, err: anytype) Client.Error {
         if (self.bound.fired()) {
             if (self.stall_armed) self.stalled = true else self.expired = true;
         }
@@ -2415,7 +2422,7 @@ pub const Exchange = struct {
     /// A cancellation of *this* task — a shutdown — comes back through the
     /// wait, is passed to the inner task, and is put back with `recancel`
     /// so the next `Io` call the caller makes still sees it.
-    fn bounded(self: *Exchange, comptime f: anytype, args: anytype) Returns(f, @TypeOf(args)) {
+    pub fn bounded(self: *Exchange, comptime f: anytype, args: anytype) Returns(f, @TypeOf(args)) {
         // Under an Engine the fiber carries the bound; with none, and with
         // neither clock set, there is nothing to wait for.
         //
@@ -2597,6 +2604,79 @@ pub const Exchange = struct {
     /// The order is the part that is not arbitrary: the permit is what bounds
     /// how many connections are live, so handing it back before the connection
     /// would let the next caller in while this one still holds one.
+    /// The connection an answer of `101 Switching Protocols` left open, which
+    /// is no longer HTTP and is the caller's to read and write from here on
+    /// (`WebSocket`, ADR 281). It is marked closing, so that `end` destroys it
+    /// and never hands it back to the pool as an idle HTTP connection.
+    ///
+    /// The Exchange stays begun and must not move: `end` still has to run, and
+    /// it is what closes the socket.
+    pub fn upgraded(self: *Exchange) *std.http.Client.Connection {
+        const conn = self.req.connection.?;
+        conn.closing = true;
+        return conn;
+    }
+
+    /// Give the permit back now rather than at `end`. A call holds one for as
+    /// long as its connection is live, and a connection that was upgraded
+    /// lives for hours: counting it against `max_in_flight` would make thirty
+    /// two open sockets the end of every other call the client makes
+    /// (ADR 281).
+    pub fn releasePermit(self: *Exchange) void {
+        if (!self.permit) return;
+        self.client.gate.post(self.client.inner.io);
+        self.permit = false;
+    }
+
+    /// Whether a clock this Exchange keeps is what ended the step just taken.
+    /// std collapses a cancelled read into `ReadFailed` or an ended stream, so
+    /// a caller that treats "the stream ended" as an ordinary end has to ask
+    /// this first (ADR 056, ADR 281).
+    ///
+    /// The Engine's answer is read **once and written down**: `Bound.fired`
+    /// does not say yes twice, so the verdict goes into `stalled` or
+    /// `expired`, which is where `blame` looks for it.
+    pub fn clockFired(self: *Exchange) bool {
+        if (self.bound.fired()) {
+            if (self.stall_armed) self.stalled = true else self.expired = true;
+        }
+        return self.expired or self.stalled;
+    }
+
+    /// Stop every clock this Exchange keeps: the call's deadline and the
+    /// silence bound. What `begin` armed for the head is over once the head is
+    /// in, and a socket that stays open is bounded by what its owner arms
+    /// next (`watchSilence`, `startClock`).
+    pub fn stopClocks(self: *Exchange) void {
+        self.bound.release();
+        self.deadline_us = 0;
+        self.expired = false;
+        self.stall_ms = 0;
+        self.stalled = false;
+        self.stall_armed = false;
+    }
+
+    /// Bound the steps that follow to `ms` from now, end to end. Zero is no
+    /// bound. What `begin` does for a call, for a caller that is already
+    /// holding the connection.
+    pub fn startClock(self: *Exchange, ms: u32) void {
+        self.stopClocks();
+        if (ms == 0) return;
+        if (self.client.limits.engineless()) {
+            self.deadline_us = core.monotonicMicros() + @as(i64, ms) * std.time.us_per_ms;
+        } else self.bound.arm(self.client.limits, ms);
+    }
+
+    /// Bound the steps that follow by silence: `ms` since the last `mark`,
+    /// which the caller stamps at every frame it reads. Zero is no bound.
+    pub fn watchSilence(self: *Exchange, ms: u32) void {
+        self.stopClocks();
+        if (ms == 0) return;
+        self.stall_ms = ms;
+        self.last_byte.store(core.monotonicMicros(), .release);
+        if (!self.client.limits.engineless()) self.armNearer();
+    }
+
     pub fn end(self: *Exchange) void {
         if (self.open) {
             // A call its deadline stopped has nothing left worth draining
@@ -3121,6 +3201,7 @@ test {
     _ = @import("params.zig");
     _ = @import("retry.zig");
     _ = @import("retry_live.zig");
+    _ = @import("websocket.zig");
 }
 
 /// 400 params with 40-character names. Declared apart from the test, so the

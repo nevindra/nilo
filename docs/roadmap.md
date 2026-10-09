@@ -182,7 +182,6 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
 - [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_jwt` · A service that calls an API asking for a JWT it signed itself has nothing here to sign one with.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_fetch` · `nilo_fetch` has no WebSocket client, so a service that consumes a feed (prices, a chat platform's gateway) brings a library of its own.
 
 <!-- /gathered -->
 

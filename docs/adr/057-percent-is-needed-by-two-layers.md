@@ -137,3 +137,7 @@ in either half.
 - `nilo_s3` will name `nilo_core` in its `layers` row. It was going to anyway:
   its `get` returns a `Str`, and a Service reaches request-lifetime memory
   through a Scope. `percent` costs it no import it did not already have.
+
+## The WebSocket frame is a sixth
+
+`nilo_fetch` opens WebSockets ([ADR 281](./281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md)), and the frame it reads and writes is the frame the server's `Socket` reads and writes: a masking loop that differs by a byte between the two ends is a bug that shows only against the other end, and the Fitting may not import `nilo_http`. So `core/ws_frame.zig` holds the opcodes and close codes, the header parse and write, masking with the SIMD tiers of [ADR 046](./046-a-message-is-copied-once-and-framed-once.md), the rules a header is held to (`Frame.wellFormed`), the close payload, the text rule and the handshake's accept key, and `http/websocket.zig` aliases them. It imports `std` only and does no IO, so `zig test core/core.zig` runs its table; what stays in `http/` is everything that needs the Engine's `Waker` (the handshake, the park, `Room`). The server's frame path is the same instructions after the move: 683.7 and 683.9 user instructions an echoed 40-byte message, 8,599.0 and 8,596.8 for 16 KiB, before and after.

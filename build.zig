@@ -1843,6 +1843,17 @@ const fetch_refusals = [_]Refusal{
         .name = "fetch_json_body_is_text",
         .says = "fetch.postJson was handed text, and would send it as one JSON string. A body already encoded goes through post, put, patch or send.",
     },
+    // A WebSocket is a call that does not end (ADR 281): the two mistakes
+    // that would otherwise reach the wire, or a line of `fetch.zig` the caller
+    // never wrote.
+    .{
+        .name = "fetch_ws_json_message_is_text",
+        .says = "fetch.WebSocket.sendJson was handed text, and would send it as one JSON string. A message already encoded goes through sendText.",
+    },
+    .{
+        .name = "fetch_ws_open_without_a_scope",
+        .says = "fetch.WebSocket.open needs a Scope and *mem.Allocator is not one.",
+    },
     // A target is a type, and a path is a template (ADR 061): what the
     // template and its arguments can be got wrong about while compiling.
     .{

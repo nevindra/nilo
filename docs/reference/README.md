@@ -142,7 +142,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
 - [`Upload`](./ctx.md#upload)
 - [Failing](./ctx.md#failing)
 
-**[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, and `Backoff`.
+**[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, `Backoff`, and the WebSocket frame.
 
 - [`Str`](./core.md#str)
 - [`Run`](./core.md#run)
@@ -152,6 +152,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
 - [Scope](./core.md#scope)
   - [`AnyScope`](./core.md#anyscope)
 - [`nilo_core.Backoff`](./core.md#nilo_corebackoff)
+- [`nilo_core.ws_frame`](./core.md#nilo_corews_frame)
 - [`nilo_core.percent`](./core.md#nilo_corepercent)
 - [The clock](./core.md#the-clock)
 - [`Timestamp` and `Date`](./core.md#timestamp-and-date)
@@ -313,6 +314,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`fetch.Target`](./fetch.md#fetchtarget)
   - [`fetch.Retry`](./fetch.md#fetchretry)
   - [`fetch.Exchange`](./fetch.md#fetchexchange)
+  - [`fetch.WebSocket`](./fetch.md#fetchwebsocket)
   - [`fetch.testing`](./fetch.md#fetchtesting)
 
 **[nilo_job](./job.md)**: `nilo_job` runs work later, again, or on a schedule, from a queue stored as a table in the database you already have.

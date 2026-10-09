@@ -615,6 +615,37 @@
           "marginal": 70719.0784
         }
       ]
+    },
+    "ws-room": {
+      "label": "WebSocket in one Room, one 6-byte echo",
+      "path": "/ws/room",
+      "base_kb": 11908,
+      "rows": [
+        {
+          "n": 500,
+          "rss_kb": 14508,
+          "gc_kb": 14508,
+          "per_conn": 5324.8,
+          "gc_per_conn": 5324.8,
+          "marginal": 5324.8
+        },
+        {
+          "n": 1000,
+          "rss_kb": 17032,
+          "gc_kb": 17032,
+          "per_conn": 5246.976,
+          "gc_per_conn": 5246.976,
+          "marginal": 5169.152
+        },
+        {
+          "n": 2000,
+          "rss_kb": 22096,
+          "gc_kb": 22096,
+          "per_conn": 5216.256,
+          "gc_per_conn": 5216.256,
+          "marginal": 5185.536
+        }
+      ]
     }
   }
 }

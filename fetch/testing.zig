@@ -120,6 +120,13 @@ pub const Canned = struct {
     reaped: std.atomic.Value(bool) = .init(false),
     /// What `serveScript` saw.
     tried: Tried = .{},
+    /// The frames `serveWebSocket` read off the client, in order.
+    ws_seen: WsSeen = .{},
+    /// What `serveWebSocket` answers the handshake with beyond the standard
+    /// lines: a subprotocol it chose, and an accept key that is not the hash
+    /// of the client's, for the test of a client that checks it.
+    ws_protocol: ?[]const u8 = null,
+    ws_accept: ?[]const u8 = null,
 
     /// Port 0, and the kernel's answer read back.
     ///
@@ -757,8 +764,128 @@ pub const Canned = struct {
         return self.tried.heads[n][0..self.tried.head_lens[n]];
     }
 
+    /// `ws://127.0.0.1:<port>/feed`, written into `buf`.
+    pub fn wsUrl(self: *Canned, buf: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "ws://127.0.0.1:{d}/feed", .{self.port});
+    }
+
+    /// Accept one connection, answer its WebSocket handshake with a `101`,
+    /// and play `steps` at it: frames to send, frames to read, a wait, a
+    /// hold. What the client sent is in `ws_seen`, and the upgrade request is
+    /// in `request()`.
+    ///
+    /// **A server never masks, and this one reports whether the client did**:
+    /// each frame read is recorded with its mask bit as it arrived, so a test
+    /// can say a client masked every frame it sent. The frames are the ones
+    /// `core.ws_frame` writes and reads, the same code under the client being
+    /// tested; what a test of the *framing* wants is `ws_frame`'s own table,
+    /// and what this is for is the conversation (ADR 281).
+    ///
+    /// Start it with `io.concurrent`, as every `serve*` here.
+    pub fn serveWebSocket(self: *Canned, steps: []const WsStep) !void {
+        var stream = try self.server.accept(self.io);
+        defer stream.close(self.io);
+        self.accepted += 1;
+
+        var in_buf: [4 << 10]u8 = undefined;
+        var reader = stream.reader(self.io, &in_buf);
+        const r = &reader.interface;
+        _ = try self.readHead(r);
+
+        const key = blk: {
+            var lines = std.mem.splitScalar(u8, self.request(), '\n');
+            while (lines.next()) |line| {
+                if (std.ascii.startsWithIgnoreCase(line, "sec-websocket-key:")) {
+                    break :blk std.mem.trim(u8, line["sec-websocket-key:".len..], " \t");
+                }
+            }
+            break :blk "";
+        };
+        const accept = core.ws_frame.accept(key);
+
+        var out_buf: [4 << 10]u8 = undefined;
+        var writer = stream.writer(self.io, &out_buf);
+        const w = &writer.interface;
+        try w.print("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {s}\r\n", .{self.ws_accept orelse &accept});
+        if (self.ws_protocol) |p| try w.print("Sec-WebSocket-Protocol: {s}\r\n", .{p});
+        try w.writeAll(self.headers);
+        try w.writeAll("\r\n");
+        try w.flush();
+
+        for (steps) |step| switch (step) {
+            .send => |f| {
+                var head: [core.ws_frame.max_header]u8 = undefined;
+                var bytes = core.ws_frame.writeHeader(&head, @fromBackingInt(f.opcode), f.declared_len orelse f.payload.len);
+                bytes[0] = (bytes[0] & 0x7f) | (if (f.fin) @as(u8, 0x80) else 0);
+                try w.writeAll(bytes);
+                try w.writeAll(f.payload);
+                try w.flush();
+            },
+            .read => try self.readWsFrame(r),
+            .hold_until_closed => while (true) self.readWsFrame(r) catch return,
+            .sleep_ms => |ms| try std.Io.sleep(self.io, .fromMilliseconds(ms), .awake),
+        };
+    }
+
+    fn readWsFrame(self: *Canned, r: *std.Io.Reader) !void {
+        const lead = (try r.peekArray(2)).*;
+        const header = core.ws_frame.headerFrom(try r.peek(core.ws_frame.headerSize(lead))).?;
+        r.toss(header.size);
+        var seen = &self.ws_seen;
+        const at = @min(seen.count, WsSeen.max - 1);
+        const keep = @min(header.len, seen.payload[at].len);
+        try r.readSliceAll(seen.payload[at][0..keep]);
+        if (header.len > keep) try r.discardAll64(header.len - keep);
+        if (header.masked) core.ws_frame.unmask(seen.payload[at][0..keep], header.mask, 0);
+        seen.opcode[at] = @backingInt(header.opcode);
+        seen.masked[at] = header.masked;
+        seen.mask[at] = header.mask;
+        seen.len[at] = header.len;
+        seen.count += 1;
+    }
+
     pub fn close(self: *Canned) void {
         self.server.socket.close(self.io);
+    }
+};
+
+/// One step of what `Canned.serveWebSocket` plays at a client.
+pub const WsStep = union(enum) {
+    /// A frame to the client, unmasked as a server's is.
+    send: WsFrame,
+    /// Read one frame from the client and record it in `ws_seen`.
+    read,
+    /// Read and record frames until the client goes away: the server that
+    /// never answers a close.
+    hold_until_closed,
+    sleep_ms: u32,
+};
+
+/// A frame `serveWebSocket` sends.
+pub const WsFrame = struct {
+    /// 1 text, 2 binary, 0 continuation, 8 close, 9 ping, 10 pong.
+    opcode: u4 = 1,
+    payload: []const u8 = "",
+    fin: bool = true,
+    /// The length the header announces, when it is not the payload's: a frame
+    /// that claims four gigabytes and sends none of them.
+    declared_len: ?u64 = null,
+};
+
+/// The frames `serveWebSocket` read, the first `max` of them.
+pub const WsSeen = struct {
+    pub const max = 8;
+    count: usize = 0,
+    opcode: [max]u8 = @splat(0),
+    masked: [max]bool = @splat(false),
+    mask: [max][4]u8 = @splat(.{ 0, 0, 0, 0 }),
+    /// The length the header said, which can be more than `payload` keeps.
+    len: [max]u64 = @splat(0),
+    payload: [max][128]u8 = undefined,
+
+    /// What frame `i` carried, unmasked, up to 128 bytes.
+    pub fn payloadOf(self: *const WsSeen, i: usize) []const u8 {
+        return self.payload[i][0..@min(self.len[i], 128)];
     }
 };
 

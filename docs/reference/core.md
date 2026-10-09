@@ -1,6 +1,6 @@
 # Core
 
-**`nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, and `Backoff`.**
+**`nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, `Backoff`, and the WebSocket frame.**
 
 **Guide:** [Handlers](../guide/handlers.md), [Work that is not a request](../guide/background.md), [Decoding a cookie](../guide/cookies.md#decoding-an-encoded-value) · **Design:** [Memory per request and per connection](../design/memory.md), [The clock, entropy, and a UUID](../design/id-clock-entropy.md)
 
@@ -154,6 +154,21 @@ It passes the Scope check, so `db.select(Row, &erased, …)` works: a callback c
 | `.{ .exponential = .{ .from_ms, .to_ms, .jitter } }` | doubling from `from_ms`, never past `to_ms`; `.jitter` is `.none` (the default), `.full` (anywhere from none to the whole wait) or `.equal` (the top half) |
 | `b.ceilingMs(failed)` | the wait after the attempt numbered `failed` (1 for the first) before any jitter, in milliseconds |
 | `b.delayMs(failed, random)` | the same with the jitter spent, `random` being any 64 bits; a backoff without jitter ignores them. Core has no `Io`, so the caller draws the bits (`std.Io.random` is a per-executor generator, not a syscall) |
+
+## `nilo_core.ws_frame`
+
+**The WebSocket frame as bytes**: the opcodes and close codes, the header read and written, the masking, the rules a header is held to, the close payload, the text rule and the handshake's accept key. It reads and writes nothing, imports `std` only, and is what the server's `Socket` and `nilo_fetch`'s `WebSocket` share, so a masking loop cannot differ by a byte between the two ends ([ADR 281](../adr/281-nilo-fetch-opens-a-websocket-and-the-framing-is-core.md), [ADR 057](../adr/057-percent-is-needed-by-two-layers.md)). A handler does not call it; a test that wants to write a frame by hand or a client of another transport may.
+
+| | |
+|---|---|
+| `Opcode`, `Close` | RFC 6455 §5.2's and §7.4.1's numbers; `nilo.websocket.Close` is `Close` |
+| `headerFrom(bytes)` | a `?Frame` out of the bytes in hand, or null when there are not yet enough of them; pure, and judges nothing |
+| `Frame.wellFormed(sender)` | whether the header is one `.client` or `.server` may send: no reserved bit, masked from a client and not from a server, the length in its shortest form, a control frame small and whole |
+| `writeHeader(&buf, opcode, len)`, `writeMaskedHeader(&buf, opcode, len, key)` | the bytes in front of a server's frame and a client's |
+| `unmask`, `unmaskInto`, `maskInto` | the XOR with the key, in place or while copying, in 128, 32, 8 and 4 byte steps; `offset` lines the key up across a payload read in pieces |
+| `closeIsWellFormed(payload)`, `closePayload(&buf, code, reason)`, `reasonFits(reason)` | a close frame's payload checked and built, the reason cut on a character |
+| `validText(bytes)` | UTF-8, which is what text is |
+| `accept(key)` | the answer to `Sec-WebSocket-Key` |
 
 ## `nilo_core.percent`
 
