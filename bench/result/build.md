@@ -410,3 +410,56 @@ CPU is within a second of wall on every `ReleaseSafe` row, so the C compile and 
 
 **Can it go further:** the `ReleaseSafe` row after the change is the Zig program, not SQLite, and is the compiler's. The 20 seconds left are clang at `-O2` on one 9 MB file and cannot be split; what could move them is a cache that outlives the checkout, which a CI runner keeping `~/.cache/zig` and the project's `.zig-cache` already has.
 
+
+## Where `zig build test` waits on Zig 0.17
+
+16 cores, 30 GB, x86_64 Linux, Zig 0.17.0, `-Dtarget=x86_64-linux-gnu` (CLAUDE.md), measured at `c6d6b20` with commits up to `d0b1f8e` landing during the session, none of them in `build.zig` or the suite's slow tests. Wall and CPU from bash's `time` around the whole `zig build`, after one comment appended to `http/router.zig`; a timeline from `ps` every two seconds; per-test time from the test binary run by hand, its `N/M name...OK` lines stamped as they arrive.
+
+| | wall | CPU |
+|---|---|---|
+| `test`, nothing changed | 4.3 s | 48 s |
+| `refusals`, nothing changed | 2.8 s | 27 s |
+| `test`, one edit under `http/` | 133 s | 375 s |
+| `test-all`, one edit under `http/` | 108 s | 525 s |
+
+**The refusals are not the wait.** After the edit, the 303 refusals on `test` add up to about 50 s of step time and the 225 snippets to about 140 s, spread over sixteen cores: 3 to 4 s and about 9 s of wall, beside the run rather than in front of it. The timeline has two phases and nothing else: compilers until 45 s, then one process, the `http/` suite running, until 98 s.
+
+**The compile is 33 s of semantic analysis on one core.** The suite's own `zig test` line, taken from `--verbose` and run alone after the same edit, is 32.9 s and 33.1 s of wall against 34.7 s of CPU; with `-fno-emit-bin` it is 32.2 s. Code generation and the link are under a second, so neither LLVM nor the linker is in it: this is comptime and Sema over some 1,575 tests (1,572 at the start, 1,577 once the landed commits were in). The `ReleaseSafe` suite, on the same self-hosted backend, was 42 s to 45 s inside a whole `test-all`, not timed alone.
+
+**The run was 62 s, and 25 of it was one test.** "a client with a window of one byte that answers each byte with two updates is a flood" called `pump(…, 50)`, which returns only after 50 ms of quiet, once per byte; `pumpSome`, which exists for exactly this, takes it to 0.20 s. What is left, 36 s, is 36 live tests whose time is real timers (deadlines, idle limits, keep-alive comments), `h2pipe_live` 10 s, `live` 8.5 s, `grpc_tls_live` 4.7 s, `grpc_live` 3.4 s and `tls_live` 2.9 s, run one after another by Zig's test runner; the other 1,540 tests are under 10 s together.
+
+**Two binaries were built only to see that they still compile, through LLVM.** `nilo-profile` (`ReleaseFast`) and `nilo-fuzz` (`ReleaseSafe`) were 22 s and 27 s on every `test`, competing with the suite's compile for cores. A Compile step whose binary nobody asks for is passed `-fno-emit-bin`, so `test` now depends on a second step over the same root module: 0.6 s and 3 s, the same analysis, no backend.
+
+After both, the same afternoon, run after the befores rather than interleaved with them; the margins are far outside the spread of the repeats:
+
+| | before | after |
+|---|---|---|
+| `test`, one edit under `http/` | 133 s | 75 s, 77 s |
+| `test-all`, one edit under `http/` | 108 s | 88 s, 97 s |
+
+`test` is now the suite's compile and its run back to back, 39 s and 36 s; `test-all` is the `ReleaseSafe` compile, 42 s, then the same run.
+
+**`-fincremental` works here on 0.17, and it takes the compile off the loop.** It died with `undefined symbol: main` on 0.16 (ADR 138). On 0.17, `zig build test-http -fincremental --watch` (the suite alone, a step added for this) builds once in 54 s with a 750 MB resident compiler, and then three edits inside `Router.deinit`, each a new value so none is a cache hit, reached the end of the run 35.0 s to 35.2 s after the save against a 35 s run: the compile is under a second where it was 33. All 1,577 tests pass in the incremental binary. Not tried under `test` itself, which is 568 compile steps, and a resident compiler each is not memory this machine has.
+
+**What it changed:** the one-byte flood test uses `pumpSome`; `test` checks the profile and the fuzzer rather than building them; `test-http` exists for the incremental loop, and ADR 138 says `-fincremental` is the loop on 0.17.
+
+**Can it go further:** yes, and each lever is named with what it would cost. The run's 36 s is timers: a `-Dtest-filter` on `test-http` would make the incremental loop seconds for the file being worked on, and splitting the live tests into a binary of their own would run them beside the rest at the price of a second 33 s analysis of the whole framework. The 33 s of Sema is the real floor of a cold `test`, and nobody has looked inside it: `--time-report` against the suite, read through its web UI, is the run that would say which comptime is spending it. One `park-check` failed in four runs, "1 of 48 idle connections hold a second page of stack", on an unchanged loop; the other three and both `test-all` runs passed.
+
+### The run, test by test
+
+The same machine, the next day, at `d0b1f8e` plus the changes above; the suite's binary run by hand, each test timed from its line. 1,504 of the 1,577 tests took 1.2 s together and 73 took 34.4 s, and every one of the 73 was read for what its time was spent on.
+
+**Forty of them were a fifth of a second of the Engine's, not of the test.** They stopped at 0.201, 0.408, 0.601 and 0.802 s, multiples of `accept_poll_ms`: `serve` saw a stop only at its next 200 ms look, and every test that starts a server stops it. With the poll set to 5 ms for one run, the suite was 27.9 s against 35.8; with a doorbell `Stop.request` rings instead (ADR 200), it was 27.8 s. A test now holds that `listen()` returns well inside a poll after `shutdown()`; without the doorbell it fails.
+
+**Two were waiting longer than their claim needed.** "a second TLS record that arrived with the first is answered" ran twenty TLS handshakes, 95 ms each in Debug, for a condition the client creates on every one by sending both records in one write: three now, 0.30 s against 2.0. "an event stream handed to an HTTP/2 connection is sent comments while it is quiet" waited 2.6 s to count a second and third keep-alive comment, which `h2conn`'s own keep-alive test already counts; it waits 1.4 s for one now, 2.07 s against 3.4.
+
+**The rest are what they test.** A write limit passed three times, a body grace that has to run out, a TLS record held while a post arrives 300 ms later, a block warning that has to fire: each waits a multiple of the limit it is about, and shortening the limit trades a margin on a busy machine for a fraction of a second. They were left alone. Argon2 at its default cost in Debug is 0.65 s over two tests, and a 2,000-input property test 1.3 s.
+
+| | wall |
+|---|---|
+| the suite's run, before | 35.8 s |
+| after, three runs | 25.0 s, 25.1 s, 25.2 s |
+| `test`, one edit under `http/` | 69 s (75 s and 77 s the day before) |
+| `test-all`, one edit under `http/` | 76 s (88 s and 97 s the day before) |
+
+**`park-check` fails about one run in six, before this change and after it**: 10 of 60 with the doorbell and 11 of 60 without, interleaved, the program run alone. That `test` run was one of them. The entry is in `docs/todo.md`.

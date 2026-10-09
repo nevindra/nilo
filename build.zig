@@ -4326,8 +4326,14 @@ pub fn build(b: *std.Build) void {
     // (it lost `nilo_build` with ADR 248, and `Stream.init` with ADR 253).
     // The fuzzer is the same case: it lost `nilo_build` when `framing.zig`
     // started asking it whether gRPC is in, and nothing noticed.
-    test_step.dependOn(&profile.step);
-    test_step.dependOn(&fuzzer.step);
+    //
+    // Checked, not built: a Compile step whose binary nobody asks for is
+    // passed `-fno-emit-bin`, so it is the same analysis with the same
+    // module, mode and options, and none of LLVM. Building them was 22s and
+    // 27s of LLVM on every `zig build test`, beside a suite compilation that
+    // is the run's longest (bench/result/build.md).
+    test_step.dependOn(&b.addExecutable(.{ .name = "nilo-profile", .root_module = profile.root_module }).step);
+    test_step.dependOn(&b.addExecutable(.{ .name = "nilo-fuzz", .root_module = fuzzer.root_module }).step);
 
     // Core, on its own, in both modes (ADR 038). It hangs off `test` rather
     // than beside it because it is the fastest thing in this file — no
@@ -5658,7 +5664,15 @@ pub fn build(b: *std.Build) void {
 
         for ([_]*std.Build.Module{ lib_tests, bench_tests }) |module| {
             const tests = b.addTest(.{ .root_module = module, .use_llvm = testBackend(target, mode) });
-            step.dependOn(&b.addRunArtifact(tests).step);
+            const ran = b.addRunArtifact(tests);
+            step.dependOn(&ran.step);
+            // The suite alone, for `-fincremental --watch`: a save recompiles
+            // it in under a second where a fresh compile is 33 s of Sema, and
+            // `test` is too many compile steps to keep a resident compiler
+            // each (ADR 138).
+            if (mode == loop_mode and module == lib_tests) {
+                b.step("test-http", "Run the framework's own suite in Debug, and nothing else").dependOn(&ran.step);
+            }
         }
 
         // The examples carry the tests the README promises are possible, so

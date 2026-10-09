@@ -57,6 +57,10 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
+**`park-check` fails about one run in six on an unchanged tree, so `zig build test` is red that often for nothing a change did.** It reports "1 of 48 idle connections hold a second page of stack". Run alone on one machine, 10 of 60 runs failed with the stop's doorbell and 11 of 60 without it, interleaved ([`build.md`](../bench/result/build.md#where-zig-build-test-waits-on-zig-017)), so the flake is older than that change and not from it. The program counts every fiber stack above one page against a count taken before the connections opened, so a server fiber that is not a connection (an acceptor, the main fiber, a service) deepening during the window reads the same as a connection whose park crossed the boundary; which of the two it is has not been looked at, and the second would be a real 4,096 bytes on some connections.
+
+**What would settle it:** the failing run's stacks named by owner, from the smaps ranges against the fibers the server spawned, and then either the check counting connections only or the connection whose park crosses found and kept under the page.
+
 **`Idempotent` answers once per key per process, so a retry that the balancer sends to another instance runs the handler again.** The store a route is given is a `cache.Space` in memory ([ADR 155](./adr/155-a-request-answered-once-is-answered-the-same-way-again.md)), and a payment retried during a rolling deploy is charged twice with nothing logged, which is the one thing the header exists to prevent. `Idempotent` asks its store for `getInto`, `putIfAbsentFor`, `put`, `del`, `max_bytes` and `Held` and nothing else (`http/idempotent.zig:268`), so a second store needs no change to it. A table in the database the program already has is the shape [ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md) chose for jobs, for the same reason.
 
 **Needs:** a store over a `Db` type the caller hands in, the way `job.Table(Db)` is, costing its round trip on `Idempotent` routes only, and [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)'s answer to which module it lives in.

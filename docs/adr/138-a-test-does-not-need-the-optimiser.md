@@ -53,13 +53,17 @@ On x86_64, `ReleaseSafe` test binaries build with `.use_llvm = false`: `.use_llv
 
 **This is a very close gate rather than the identical one, and it is worth naming rather than waving past.** A use-after-return is undefined behaviour, and whether it is caught depends on stack layout, which is exactly what a backend decides: LLVM reuses a dead frame differently from the self-hosted backend, so a lifetime bug that one of them exposes the other might not. The trade is a gate that runs in 1.6s instead of 27.6s on x86_64, which means it runs on every `zig build test` rather than being something a contributor is tempted to skip. A gate nobody waits for catches more than a gate nobody runs.
 
+**A program built only to see that it still compiles builds no binary.** `nilo-profile` and `nilo-fuzz` are on `test` because both stopped compiling unnoticed, and the step they hung off was the one that builds them, `ReleaseFast` and `ReleaseSafe` through LLVM: 22 s and 27 s of every `test`, beside the suite's compile. `test` now depends on a second Compile step over the same root module, whose binary nothing asks for, so the Maker passes `-fno-emit-bin`: the same analysis in the same mode with the same options, 0.6 s and 3 s. `zig build profile` and `zig build fuzz` build the real ones as before.
+
+**On Zig 0.17 the loop is incremental.** `zig build test-http -fincremental --watch` runs the framework's suite alone and rebuilds it in under a second after a save, where a fresh compile is 33 s of semantic analysis on one core; what is left of the loop is the suite's own run ([the run](../../bench/result/build.md#where-zig-build-test-waits-on-zig-017)). `test` and `test-all` stay what they were, the gate before a commit.
+
 Every `bench-*` target stays on LLVM and none of them was touched: they are all pinned to `.ReleaseFast` already. A throughput number measured through a backend that does not optimise would be fiction, and ADR 017's axes are the whole point of that directory.
 
 ## What was rejected
 
 **Take the `ReleaseSafe` module gates off `test`.** Tried first, and it works on the symptom: `test` drops from 30.6s to 9.5s. It does nothing for `test-all`, which CI runs on every push and which took 65.9s, and it weakens the gate on purpose rather than as a side effect. The backend swap is strictly better: `test-all` after the same edit is 12.5s and every mode still runs.
 
-**`-fincremental`.** Incremental compilation only exists on the self-hosted backend, so switching would have unlocked it. It does not work on Zig 0.16 here: all thirteen test binaries linked and then died with `undefined symbol: main`, exit 127. Worth retrying on a later Zig, and nothing to build on now.
+**`-fincremental` on `test` itself.** On Zig 0.16 it did not work here at all: all thirteen test binaries linked and then died with `undefined symbol: main`, exit 127. On 0.17 it does, and it is now the loop (Decision), but on `test-http` and not on `test`: `test` is 568 compile steps, and a resident compiler each, at 750 MB for the suite's, is not memory a laptop has.
 
 **More modules.** The reflex, given ten modules and a layering build step, is that finer splits would compile faster. They would not: LLVM works on a whole compilation at once, with no equivalent of a Rust crate boundary, and this one compilation discovered 712 files. The ten-module layering buys import discipline, which is what ADR 038 claimed for it, and buys nothing at all here.
 

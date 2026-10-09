@@ -29,6 +29,7 @@ The ADRs are the important one. Before you propose a design change, check whethe
 ```
 zig build test          # the loop: the suite in Debug, the refusals, every module gate, layering, snippets, adr-check, docs-check
 zig build test-all      # the same plus ReleaseSafe and the SQL suite. What CI runs, and the whole gate
+zig build test-http -fincremental --watch   # the framework's suite alone, rebuilt in under a second on a save
 zig build refusals-sql  # one module's refusal table; refusals, -config, -pw, -cache, -proto, -s3, -job, -fetch for the others
 zig build examples      # build every example
 zig build fuzz -- --iterations 1000000 --seed 0x…

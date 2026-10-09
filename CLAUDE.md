@@ -71,6 +71,8 @@ zig build test         # the loop: the suite in Debug, the refusals, every modul
                        #   test-sql, plus layering, adr-check, docs-check and snippets
 zig build test-all     # the above, the suite in ReleaseSafe, test-sql and refusals-sql.
                        #   What CI runs, and the whole gate
+zig build test-http -fincremental --watch   # the framework's suite alone, rebuilt in under a
+                       #   second on a save; the loop while working under http/ (ADR 138)
 zig build test-{core,id,config,pw,cache,jwt,proto,fetch,job,s3,dev}   # one module, both modes,
                        #   plus its refusals where it has a table
 zig build test-fetch-engine  # an outbound deadline firing against a real port; on `test`
@@ -117,7 +119,7 @@ zig test --dep nilo_core -Mroot=fetch/fetch.zig -Mnilo_core=core/core.zig
 zig test --dep nilo_core -Mroot=job/job.zig -Mnilo_core=core/core.zig
 ```
 
-Everything else under `http/` needs the module graph, so `zig build test` is the only way. **For the bottom two layers standalone is the entry condition, not a nicety**: if a change stops one of those lines working, the layering broke, not the test. That is why `fetch/deadline.zig`, which names `nilo_http`, is its own root (`test-fetch-engine`), and `job/live.zig`, which names `nilo_sql`, is `test-job-sql`. `nilo_s3` needs the module graph only because `s3/live.zig` names the generated `s3_config`.
+Everything else under `http/` needs the module graph, so `zig build test-http` (the suite alone) or `zig build test` is the way. **Most of a `test` after an edit is not the refusals**: it is 33 s of single-threaded Sema compiling the `http/` suite and 25 s running it, mostly live tests waiting out the limits they test ([`bench/result/build.md`](bench/result/build.md#where-zig-build-test-waits-on-zig-017)). `-fincremental --watch` on `test-http` takes the first to under a second. **For the bottom two layers standalone is the entry condition, not a nicety**: if a change stops one of those lines working, the layering broke, not the test. That is why `fetch/deadline.zig`, which names `nilo_http`, is its own root (`test-fetch-engine`), and `job/live.zig`, which names `nilo_sql`, is `test-job-sql`. `nilo_s3` needs the module graph only because `s3/live.zig` names the generated `s3_config`.
 
 ## Invariants that are load-bearing
 
