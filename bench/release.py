@@ -243,7 +243,8 @@ def stop(proc):
 
 
 def served(s):
-    """Read one whole response, which has a `Content-Length`."""
+    """Read one whole response, which has a `Content-Length`; true when it
+    ends the connection, as one in every 900 to 1,000 does (ADR 275)."""
     buf = b""
     while True:
         chunk = s.recv(65536)
@@ -257,7 +258,7 @@ def served(s):
         if length is None:
             raise SystemExit("a response without a Content-Length")
         if len(buf) >= end + 4 + int(length.group(1)):
-            return
+            return re.search(rb"(?im)^connection: *close", buf[:end]) is not None
 
 
 def cachegrind(work):
@@ -278,10 +279,17 @@ def server_instructions(binary, n, work):
     """Every instruction the server ran from start to stop, serving `n` requests."""
     out, cmd = cachegrind(work)
     with open(os.path.join(work, "valgrind.log"), "w") as log, serving(cmd + [binary], log) as (_, s):
-        with s:
+        try:
             for _ in range(n):
                 s.sendall(REQUEST)
-                served(s)
+                if served(s):
+                    # The server ended the connection after this answer, as it
+                    # does every ~1,000 requests: the next one comes on a new
+                    # connection, whose accept is part of what is measured.
+                    s.close()
+                    s = socket.create_connection((HOST, PORT), timeout=10)
+        finally:
+            s.close()
     return summary(out)
 
 
