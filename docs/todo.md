@@ -381,10 +381,6 @@ Nothing is open at this tier.
 
 **Needs:** the two told apart where an operator looks: a count of cookies that failed to open on `/metrics`, or one `warn` line an interval while it keeps happening.
 
-**`spawn` could refuse a `Str` argument and does not.** [`risks.md`](./risks.md) says spawned work capturing a `Str` cannot be caught, but `App.spawn` takes its arguments as `std.meta.ArgsTuple(@TypeOf(func))` (`http/app.zig:777`), a type known while compiling, so a `Str`, a `Ctx` or a `*Ctx` in it, or in a struct in it, can be refused the way a handler's argument list is. Only a capture through a container-level variable stays the staleness trap's, which in ReleaseSafe watches nothing.
-
-**Needs:** the refusal, a file and a row in the framework's refusal table, and the risk narrowed to the capture that is still unrefusable.
-
 **`.tls` compiles in a build without `-Dtls`, and is refused when `listen()` runs.** `Options.tls` is `?Tls` in every build (`http/bulkhead.zig:297`, `:433`), and [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) chose a one-line refusal at `listen()`, before the port is taken. That keeps the port from serving plain HTTP, and still turns a mistake the build could name into one a deploy finds, which principle 2 asks the other way round.
 
 **Needs:** a decision on making the field's type depend on `nilo_build.tls`, so `.tls = …` without the flag is a compile error naming it, with ADR 212 edited whichever way it goes.

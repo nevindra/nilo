@@ -260,9 +260,9 @@ try testing.expectEqual(@as(u16, 200), answer.status);
 
 ## What not to pass in
 
-**Do not pass a `Str` or use a fail function in background work.** The compiler catches neither, and both apply to `nilo.spawn` in the same way.
+**Do not pass a `Str` or use a fail function in background work.** The compiler refuses the first and not the second, and both apply to `nilo.spawn` in the same way.
 
-**A `Str`.** It points into the request arena, which is reset when the request ends, and background work outlives the request that started it. Copy anything borrowed from a request before passing it in, with `.keep()` or your own allocation.
+**A `Str`.** It points into the request arena, which is reset when the request ends, and background work outlives the request that started it. `app.spawn` and `nilo.spawn` refuse, while compiling, an argument that is a `Str`, a `Ctx` or a pointer to one, or that holds one in a field, a slice, an optional or behind a pointer, and the message names the argument. Copy anything borrowed from a request before passing it in, with `.keep()` or your own allocation. A capture through a variable at file level is the one route the compiler does not see.
 
 **A fail function.** `fail.notFound` and the others write their message into the request being served. There is no request here, so it returns a plain error with no message, and nothing builds a response from it. Log instead.
 

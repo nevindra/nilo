@@ -773,9 +773,12 @@ pub const App = struct {
     /// answer it, so an error has nowhere to go. Log instead. The two things
     /// that must not travel in are the two `nilo.spawn` names — a `Str`,
     /// which points into a request arena, and a fail function, which has no
-    /// request to fail.
+    /// request to fail. The first is a compile error: an argument that is a
+    /// `Str`, a `Ctx` or a pointer to one, or holds one anywhere inside it,
+    /// is refused by `refuseBorrowed`.
     pub fn spawn(self: *App, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
         const Args = @TypeOf(args);
+        comptime refuseBorrowed(Args, "app.spawn");
         const held = try self.gpa.create(Args);
         errdefer self.gpa.destroy(held);
         held.* = args;
@@ -2473,6 +2476,56 @@ fn readsOpened(_: *Opened) []const u8 {
     return "ok";
 }
 
+/// Refuse, while compiling, a spawned function's argument list that carries
+/// something borrowed from a request: a `Str` (it points into the arena,
+/// reset when the request ends) or a `Ctx` (the request itself). `Args` is the
+/// `ArgsTuple` of the function, so every argument is known here, and the walk
+/// goes through structs, unions, arrays, optionals, error unions and
+/// pointers of every size. The one thing it cannot see is a capture through a
+/// container-level variable, which is the staleness trap's (risks.md, ADR 028).
+///
+/// A type met twice on the way down is not walked again, so a struct that
+/// points to itself ends the walk instead of being its infinite loop.
+pub fn refuseBorrowed(comptime Args: type, comptime who: []const u8) void {
+    comptime {
+        @setEvalBranchQuota(1_000_000);
+        const fields = @typeInfo(Args).@"struct".field_types;
+        for (fields, 0..) |F, i| {
+            var seen: []const type = &.{};
+            if (borrowedIn(F, &seen)) |what| {
+                const name = if (what == str_mod.Str) "a `nilo.Str`" else "a `nilo.Ctx`";
+                @compileError("nilo: " ++ who ++ " argument " ++ std.fmt.comptimePrint("{d}", .{i + 1}) ++
+                    " holds " ++ name ++ " borrowed from a request, and spawned work outlives the request.\n" ++
+                    "  The argument is `" ++ @typeName(F) ++ "`.\n" ++
+                    "  A `Str` points into the request arena and a `Ctx` is the request itself, both gone once the response is sent, which is before this fiber is done.\n" ++
+                    "  Copy what the work needs first: `try text.keep(gpa)` for a `Str` (or `text.view()` into your own buffer), then pass the copy, " ++
+                    "or pass a service (`&exporter`) that owns what it needs.");
+            }
+        }
+    }
+}
+
+/// The `Str` or `Ctx` that `T` holds, or null. `seen` is every type already
+/// walked, which is what makes a self-referential type terminate.
+fn borrowedIn(comptime T: type, comptime seen: *[]const type) ?type {
+    if (T == str_mod.Str or T == Ctx) return T;
+    for (seen.*) |S| if (S == T) return null;
+    seen.* = seen.* ++ &[_]type{T};
+    return switch (@typeInfo(T)) {
+        .@"struct" => |s| for (s.field_types) |F| {
+            if (borrowedIn(F, seen)) |w| break w;
+        } else null,
+        .@"union" => |u| for (u.field_types) |F| {
+            if (borrowedIn(F, seen)) |w| break w;
+        } else null,
+        .optional => |o| borrowedIn(o.child, seen),
+        .error_union => |e| borrowedIn(e.payload, seen),
+        .array => |a| borrowedIn(a.child, seen),
+        .pointer => |p| borrowedIn(p.child, seen),
+        else => null,
+    };
+}
+
 test "app.start refuses when a route needs a service nobody provided" {
     var app = App.init(testing.allocator);
     defer app.deinit();
@@ -2751,4 +2804,9 @@ test "a plain listener of a -Dhttp2 build hands the HTTP/2 preface on unanswered
     const empty = servedBySniffing(&app, "", &wire);
     try testing.expectEqual(bulkhead.Hand.done, empty.hand);
     try testing.expectEqual(@as(usize, 0), empty.answer.len);
+}
+
+test "spawned work may take a service that points to itself, and a string it owns" {
+    const Node = struct { next: ?*@This(), name: []const u8, io: ?*std.Io };
+    comptime refuseBorrowed(std.meta.ArgsTuple(fn (*Node, []const u8, u32) void), "app.spawn");
 }

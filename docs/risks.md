@@ -120,13 +120,9 @@ the crash ([ADR 007](./adr/007-no-recover-middleware.md)).
 it, because Zig has no ownership tracking to force it with
 ([ADR 010](./adr/010-shared-services-need-a-lock-from-the-bulkhead.md)).
 
-**Spawned work can capture a `Str`, or call a fail function, and both compile.**
-Neither can be caught: Zig has no ownership tracking, and `spawn` takes a plain
-function that nothing marks as being outside a request. Documented at the
-function, in the reference and in
-[ADR 028](./adr/028-a-spawned-fiber-belongs-to-the-server.md), and `spawn`
-takes its arguments by value so the copy is at least the obvious thing to
-write. A `Str` that escapes this way is the staleness trap's problem, and it is
+**Spawned work can read a `Str` through a variable at file level, or call a fail function, and both compile.**
+A `Str` or a `Ctx` handed to `spawn` as an argument, at any depth, is a compile error. What cannot be caught is a capture that never goes through the argument list: Zig has no ownership tracking, and a function that reads a container-level variable holding a `Str` is a plain function that nothing marks as being outside a request. A fail function is the same. Documented at the function, in the reference and in
+[ADR 028](./adr/028-a-spawned-fiber-belongs-to-the-server.md). A `Str` that escapes this way is the staleness trap's problem, and it is
 the case that trap cannot watch.
 
 ## Open

@@ -2910,6 +2910,18 @@ const refusals = [_]Refusal{
         .says = "the route pattern \"/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q\" has 17 segments, and the most nilo matches is 16.",
     },
     .{
+        .name = "spawn_with_a_str",
+        .says = "app.spawn argument 1 holds a `nilo.Str` borrowed from a request, and spawned work outlives the request.",
+    },
+    .{
+        .name = "spawn_with_a_str_inside_a_struct",
+        .says = "nilo.spawn argument 1 holds a `nilo.Str` borrowed from a request, and spawned work outlives the request.",
+    },
+    .{
+        .name = "spawn_with_a_ctx",
+        .says = "app.spawn argument 1 holds a `nilo.Ctx` borrowed from a request, and spawned work outlives the request.",
+    },
+    .{
         .name = "two_bodies",
         .says = "the handler for route \"/orders\" takes two structs by value — argument 1 is a two_bodies.Store and argument 2 is a two_bodies.NewOrder — and a request only has one body.",
     },

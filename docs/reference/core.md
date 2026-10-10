@@ -243,7 +243,7 @@ The warning fires on the first request, even with nobody else waiting, on purpos
 
 ## `nilo.spawn` and `app.spawn`
 
-**`nilo.spawn` starts `f` in a fiber the server owns**: counted while it runs, and cut off when the shutdown grace period ends. It returns `error.NoServer` if nothing is listening. Two things must not be passed into it, and the compiler catches neither: a `Str`, which points into the request arena that is about to be reset, and a fail function, which has no request to fail and so returns a bare error that nobody turns into a response. Copy what you borrow, and log instead of failing.
+**`nilo.spawn` starts `f` in a fiber the server owns**: counted while it runs, and cut off when the shutdown grace period ends. It returns `error.NoServer` if nothing is listening. Two things must not be passed into it: a `Str`, which points into the request arena that is about to be reset, and a fail function, which has no request to fail and so returns a bare error that nobody turns into a response. **The first is a compile error**, for `nilo.spawn` and `app.spawn` alike: an argument that is a `Str` or a `Ctx`, or a pointer, struct, union, array or optional holding one at any depth, is refused with the argument's position (a capture through a variable at file level is the one route not seen). The second is not caught. Copy what you borrow with `.keep()`, and log instead of failing.
 
 ```zig
 try nilo.spawn(flushMetrics, .{&exporter});

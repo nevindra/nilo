@@ -230,15 +230,20 @@ pub const Limits = @import("bulkhead.zig").Limits;
 /// nothing is listening yet — which is what a unit test calling a handler
 /// directly gets.
 ///
-/// Two things do not travel into it, and neither is caught by the compiler:
+/// Two things do not travel into it. The first is a compile error and the
+/// second is not caught:
 ///
-/// - **A `Str`.** It points into the request arena, which is reset when the
-///   request ends; spawned work outlives the call that started it by
-///   definition. Copy anything borrowed from a request before it goes in.
+/// - **A `Str`**, or a `Ctx`, or anything holding one. It points into the
+///   request arena, which is reset when the request ends; spawned work
+///   outlives the call that started it by definition. Copy anything borrowed
+///   from a request before it goes in (`.keep()`).
 /// - **A fail function.** There is no request to fail, so `fail.notFound`
 ///   returns a plain error with no message and nobody assembles a response
 ///   from it. Log instead.
-pub const spawn = @import("bulkhead.zig").spawn;
+pub fn spawn(func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !void {
+    comptime @import("app.zig").refuseBorrowed(@TypeOf(args), "nilo.spawn");
+    return @import("bulkhead.zig").spawn(func, args);
+}
 
 /// The `std.Io` the server runs on, for a fiber `app.spawn` started, which
 /// has no `Ctx` to ask. A handler asks with `io: std.Io` or `c.io()`; this is
