@@ -365,12 +365,6 @@ Nothing is open at this tier.
 
 **What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
 
-**The multipart parser is the one parser of untrusted bytes that no fuzzer reaches.** `zig build fuzz` sends request heads and `--frames` sends HTTP/2 frames, and neither builds a multipart body (`http/fuzz.zig` names none). `parseMultipart` (`http/form.zig:615`) is slicing by hand over the body, where a slip is a panic a request reaches in ReleaseSafe and undefined behaviour in ReleaseFast, and the one defect found in it so far, a search for a blank line to the end of the body once per part, was found by the audit at `39896d2` rather than by a run.
-
-**Needs:** a `--forms` mode generating multipart bodies (a boundary inside a file, bare LF, a part never closed, quoted and unquoted parameters, `filename*`, part counts either side of `max_parts`) that checks each is a `Fields` whose slices lie inside the body or a 400, never a panic.
-
-**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
-
 **Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.** `Path(T)`, typed middleware, the one log sink, `Bearer(T)`, the deadline that reaches the toolkit, `nilo.app` and the startup warnings each have tests, and each test was written by the people who built it. The direction's own closing condition is a reader who did not: every mistake they make is either a compile error or a refusal at `listen()` naming the fix, or it is the next entry here.
 
 **What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from `docs/guide/getting-started.md` with a database, a login middleware and a container, and their mistakes are written down, each either refused in a sentence or filed.

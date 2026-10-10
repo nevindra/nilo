@@ -90,7 +90,7 @@ zig build refusals     # the framework's table only; refusals-{sql,config,pw,cac
 zig build snippets     # the documentation's marked snippets, which must compile
 zig build examples     # build every example; run-{hello,rest,orders,forms,spa,embedded,stream,chat,scheduled,outbound,sqlite}
 zig build dev-{hello,…}  # an example restarted on a save to its Zig, and on nothing else (ADR 190)
-zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser; --frames for gRPC
+zig build fuzz -- --iterations 1000000 --seed 0x…   # generated requests at the parser; --frames for gRPC, --forms for multipart
 zig build fuzz-llhttp -Dllhttp -- --iterations 1000000   # the same heads read by llhttp too; fetches it, exits 1 on an undecided difference (ADR 231)
 zig build smoke-tls -Dnetwork   # a real HTTPS endpoint; not on test
 zig build tzdata-check -Dnetwork   # IANA has no newer time zone release than nilo_job carries; not on test

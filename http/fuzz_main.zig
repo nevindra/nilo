@@ -19,6 +19,8 @@
 //! zig build fuzz                                  # 50,000 inputs, random seed
 //! zig build fuzz -- --iterations 2000000          # longer
 //! zig build fuzz -- --seed 0x4a1f...              # the seed a failure printed
+//! zig build fuzz -- --frames                      # HTTP/2 connections at the gRPC listener
+//! zig build fuzz -- --forms                       # multipart bodies at the form parser
 //! ```
 //!
 //! A failure prints the seed, the iteration, and the input as a line that
@@ -29,6 +31,7 @@
 const std = @import("std");
 const bulkhead = @import("bulkhead.zig");
 const fuzz = @import("fuzz.zig");
+const fuzz_forms = @import("fuzz_forms.zig");
 const fuzz_frames = @import("fuzz_frames.zig");
 
 const default_iterations: usize = 50_000;
@@ -48,11 +51,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // requests at the parser (`fuzz_frames.zig`, ADR 220).
     var frames = false;
 
+    // `--forms` throws multipart bodies at the form parser instead
+    // (`fuzz_forms.zig`, ADR 030).
+    var forms = false;
+
     var args: std.process.Args.Iterator = .init(init.args);
     _ = args.skip(); // the program's own name
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--frames")) {
             frames = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--forms")) {
+            forms = true;
             continue;
         }
         const which: enum { iterations, seed } =
@@ -70,6 +81,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (frames) return fuzzFrames(iterations, seed);
+    if (forms) return fuzzForms(iterations, seed);
     std.debug.print("fuzzing the request parser: {d} inputs, seed 0x{x}\n", .{ iterations, seed });
 
     var prng = std.Random.DefaultPrng.init(seed);
@@ -119,9 +131,34 @@ fn fuzzFrames(iterations: usize, seed: u64) void {
     std.debug.print("{d} connections, every property held\n", .{iterations});
 }
 
+/// The form parser's turn. Each input gets an allocator of its own, so a leak
+/// is reported on the input that made it rather than at the end.
+fn fuzzForms(iterations: usize, seed: u64) void {
+    std.debug.print("fuzzing the multipart parser: {d} bodies, seed 0x{x}\n", .{ iterations, seed });
+    var prng = std.Random.DefaultPrng.init(seed);
+    var buf: [fuzz_forms.buffer_len]u8 = undefined;
+    for (0..iterations) |n| {
+        const input = fuzz_forms.generate(prng.random(), &buf);
+        var debug: std.heap.DebugAllocator(.{}) = .init;
+        const held = fuzz_forms.checkOne(debug.allocator(), input);
+        const leaked = debug.deinit() == .leak;
+        const failed: ?anyerror = if (held) |_| null else |err| err;
+        if (failed == null and !leaked) continue;
+        if (failed == null) fuzz_forms.dump(input);
+        std.debug.print(
+            "\nFAILED on body {d} of {d} with {s}.\n" ++
+                "Reproduce with: zig build fuzz -- --forms --seed 0x{x}\n" ++
+                "Then paste the line above into the corpus in http/fuzz_forms.zig.\n",
+            .{ n, iterations, if (failed) |err| @errorName(err) else "a leak", seed },
+        );
+        std.process.exit(1);
+    }
+    std.debug.print("{d} bodies, every property held\n", .{iterations});
+}
+
 fn usage() void {
     std.debug.print(
-        \\usage: zig build fuzz -- [--frames] [--iterations N] [--seed N]
+        \\usage: zig build fuzz -- [--frames | --forms] [--iterations N] [--seed N]
         \\
     , .{});
     std.process.exit(2);

@@ -174,7 +174,7 @@ const http_above_core = [_][]const u8{
     "logger",    "cors",        "csrf",      "secure", "allowance", "deadline",
     "maxbody",   "http",        "behaviour", "live",   "profile",   "fuzz",
     "fuzz_main", "fuzz_llhttp", "test_root", "wide",   "h2test",
-    "bodyencodings",
+    "bodyencodings", "fuzz_forms",
 };
 
 const Layer = struct {
@@ -4777,7 +4777,7 @@ pub fn build(b: *std.Build) void {
     wireOptions(b, fuzzer.root_module, target, .safe, false, true, false);
     const run_fuzzer = b.addRunArtifact(fuzzer);
     run_fuzzer.addPassthruArgs();
-    b.step("fuzz", "Throw generated requests at the parser, or with --frames connections at the gRPC listener").dependOn(&run_fuzzer.step);
+    b.step("fuzz", "Throw generated requests at the parser, with --frames connections at the gRPC listener, or with --forms bodies at the multipart parser").dependOn(&run_fuzzer.step);
 
     // The same generated requests, read by nilo and by llhttp, Node's
     // parser, and every disagreement reported (ADR 231). Behind a flag of

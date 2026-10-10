@@ -1152,6 +1152,7 @@ test {
     _ = @import("inbound.zig");
     _ = @import("h2test.zig");
     _ = @import("fuzz_frames.zig");
+    _ = @import("fuzz_forms.zig");
     _ = @import("serve.zig");
     _ = @import("wiring.zig");
     _ = @import("behaviour.zig");
