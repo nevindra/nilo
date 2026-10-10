@@ -108,6 +108,7 @@ const date = @import("date.zig");
 const inbound = @import("inbound.zig");
 const outbound = @import("outbound.zig");
 const Lease = @import("lease.zig").Lease;
+const Burst = @import("burst.zig").Burst;
 
 /// What a gRPC connection asks of the App, handed over by `app.zig` rather
 /// than named here. This file sits outside the App's core (`http_core` in
@@ -251,6 +252,7 @@ pub fn serveConnection(
         .gpa = app.gpa,
         .in = in,
         .out = out,
+        .wire = out,
         .deadlines = deadlines,
         .waker = waker,
         .peer = peer,
@@ -655,12 +657,21 @@ const Conn = struct {
     app: Host,
     gpa: std.mem.Allocator,
     in: *std.Io.Reader,
+    /// What frames are written into: `wire`, or `burst` while there is one.
     out: *std.Io.Writer,
+    /// The Engine's writer, whose buffer is the connection's page.
+    wire: *std.Io.Writer,
     deadlines: bulkhead.Deadlines,
     waker: bulkhead.Waker,
     peer: bulkhead.Peer,
     shared: *Shared,
     decoder: hpack.Decoder,
+
+    /// The buffer a burst of answers is written into once one of them does
+    /// not fit the room left in the page, so the burst leaves in writes of
+    /// 32 KiB rather than a write for every answer (ADR 285). Taken then and
+    /// given back by the flush, so an idle connection holds none.
+    burst: ?*Burst = null,
 
     /// Every call this connection holds: collecting, running or being
     /// written. Its length is what the cap counts.
@@ -791,6 +802,10 @@ const Conn = struct {
             queued = s.next;
             c.forget(s);
         }
+        // Nothing more is sent: what a burst still holds goes with it.
+        if (c.burst) |b| b.destroy();
+        c.burst = null;
+        c.out = c.wire;
         for (c.streams.items) |s| if (s.state != .running) s.destroy();
         c.streams.deinit(c.gpa);
         c.trailer_block.deinit(c.gpa);
@@ -856,7 +871,7 @@ const Conn = struct {
             if (c.in.bufferedLen() == 0) {
                 // Everything answered since the last wait goes out in one
                 // write, rather than a write for every frame read (ADR 220).
-                c.out.flush() catch break;
+                c.flushOut() catch break;
                 // A stream with more to send than its turn: the calls get
                 // theirs, and the next round is its.
                 if (c.out_more) {
@@ -932,7 +947,7 @@ const Conn = struct {
         defer bulkhead.endShield();
         c.goaway(.no_error) catch return;
         c.endEvents() catch return;
-        c.out.flush() catch {};
+        c.flushOut() catch {};
     }
 
     fn wait(c: *Conn) Waited {
@@ -971,7 +986,7 @@ const Conn = struct {
                 .timed_out => {
                     // Quiet: hand the pages back, the way an idle HTTP/1.1
                     // connection does, and wait again from this frame.
-                    bulkhead.releaseIdlePages(c.in, c.out);
+                    bulkhead.releaseIdlePages(c.in, c.wire);
                     c.dropSpares();
                     c.streams.clearAndFree(c.gpa);
                     c.waker.releaseStack();
@@ -1016,7 +1031,7 @@ const Conn = struct {
                 },
                 .timed_out => {
                     if (limit != 0 and limit <= idle_peek_ms) return c.overdue();
-                    bulkhead.releaseIdlePages(c.in, c.out);
+                    bulkhead.releaseIdlePages(c.in, c.wire);
                     c.dropSpares();
                     c.scratch.deinit();
                     c.scratch = .init(c.gpa);
@@ -1227,17 +1242,42 @@ const Conn = struct {
         }
     }
 
+    /// Send everything written, and give a burst's buffer back.
+    fn flushOut(c: *Conn) !void {
+        try c.out.flush();
+        if (c.burst) |b| if (!b.pending()) {
+            b.destroy();
+            c.burst = null;
+            c.out = c.wire;
+        };
+    }
+
+    /// Before an answer is written: one whose body would be a write of its
+    /// own, larger than the room left in the page and smaller than a frame,
+    /// takes a burst's buffer for the rest of the burst (ADR 285). Any other,
+    /// and a connection that cannot have the buffer, write into the page as
+    /// they always did.
+    fn roomFor(c: *Conn, s: *const Stream) void {
+        if (c.burst != null) return;
+        if (s.data.len < Burst.smallest or s.data.len >= Burst.largest) return;
+        const wanted = s.head_block.len + s.data.len + s.trailers.len + 3 * h2.header_len;
+        if (wanted <= c.wire.buffer.len - c.wire.end) return;
+        const b = Burst.create(c.gpa, c.wire) catch return;
+        c.burst = b;
+        c.out = &b.interface;
+    }
+
     fn flushReady(c: *Conn) !void {
         try c.service();
         try c.writeReady();
-        try c.out.flush();
+        try c.flushOut();
     }
 
     fn goaway(c: *Conn, code: h2.ErrorCode) !void {
         if (c.goaway_sent) return;
         c.goaway_sent = true;
         try h2.writeGoaway(c.out, c.last_stream, code);
-        try c.out.flush();
+        try c.flushOut();
     }
 
     fn goawayFor(c: *Conn, err: ReadError) void {
@@ -2414,6 +2454,7 @@ const Conn = struct {
     /// gone and the stream has been let go of.
     fn writeStream(c: *Conn, s: *Stream) !bool {
         if (!s.head_sent) {
+            c.roomFor(s);
             try h2.writeHeaderBlock(c.out, s.id, s.head_block, s.trailers_only, c.peer_max_frame);
             s.head_sent = true;
             if (s.trailers_only) return c.finished(s);
@@ -4707,6 +4748,7 @@ test "a call reset while its message is arriving gives its bytes back to the con
         .gpa = testing.allocator,
         .in = &in,
         .out = &out.writer,
+        .wire = &out.writer,
         .deadlines = .off,
         .waker = .off,
         .peer = .{},
@@ -4751,6 +4793,7 @@ fn steppedConn(app: *App, in: *std.Io.Reader, out: *std.Io.Writer) !Conn {
         .gpa = testing.allocator,
         .in = in,
         .out = out,
+        .wire = out,
         .deadlines = .off,
         .waker = .off,
         .peer = .{},
@@ -4989,6 +5032,7 @@ test "a call whose grpc-timeout passes while it waits for room is DEADLINE_EXCEE
     waiting.inbox.fail(.deadline);
     conn.settle();
     try conn.writeReady();
+    try conn.flushOut();
     try testing.expect(conn.find(3) == null);
 
     var got = try answerOf(out.written());
@@ -5177,6 +5221,11 @@ fn bigRoute(c: *Ctx) anyerror!void {
     try c.send(200, "application/octet-stream", repeat("0123456789", 4_000));
 }
 
+/// Larger than a connection's 4 KiB page and smaller than a frame.
+fn midRoute(c: *Ctx) anyerror!void {
+    try c.send(200, "application/octet-stream", repeat("abcdefghij", 500));
+}
+
 fn pathRoute(c: *Ctx) anyerror!void {
     const id = c.param("id").?.view();
     try c.sendText(200, id);
@@ -5247,6 +5296,7 @@ fn httpApp() !App {
     try app.get("/cookie", cookieRoute);
     try app.get("/trailing", trailingRoute);
     try app.get("/big", bigRoute);
+    try app.get("/mid", midRoute);
     try app.get("/users/:id", pathRoute);
     try app.post("/size", sizeRoute);
     try app.get("/stream", streamRoute);
@@ -5282,6 +5332,106 @@ test "a GET is answered as HTTP: its status, type, length and date in one HEADER
     try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
     try testing.expectEqual(@as(usize, 1), Answer.of(.headers, &ex.answer, 1).len);
     try testing.expect(!Answer.of(.headers, &ex.answer, 1)[0].head.has(h2.Flags.end_stream));
+}
+
+// ---- a burst of answers leaves in writes of 32 KiB (ADR 285) ----
+
+/// A socket's writer as far as these tests need one: the connection's 4 KiB
+/// page, and every drain counted as one write.
+const CountingSink = struct {
+    interface: std.Io.Writer,
+    got: std.ArrayList(u8) = .empty,
+    writes: usize = 0,
+    page: [4096]u8 = undefined,
+
+    fn init(self: *CountingSink) void {
+        self.* = .{ .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} } };
+        self.interface.buffer = &self.page;
+    }
+
+    fn deinit(self: *CountingSink) void {
+        self.got.deinit(testing.allocator);
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *CountingSink = @alignCast(@fieldParentPtr("interface", w));
+        self.writes += 1;
+        self.got.appendSlice(testing.allocator, w.buffer[0..w.end]) catch return error.WriteFailed;
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            self.got.appendSlice(testing.allocator, d) catch return error.WriteFailed;
+            n += d.len;
+        }
+        for (0..splat) |_| {
+            self.got.appendSlice(testing.allocator, data[data.len - 1]) catch return error.WriteFailed;
+            n += data[data.len - 1].len;
+        }
+        return n;
+    }
+};
+
+/// `paths` asked on one connection, the answers written and flushed as the
+/// loop does before it waits. The writes it took, and the frames.
+fn burstOf(app: *App, paths: []const []const u8, sink: *CountingSink) !usize {
+    var client = try TestClient.init();
+    defer client.deinit();
+    for (paths, 0..) |path, i| try h2test.requestOn(&client, @intCast(2 * i + 1), .{ .path = path });
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    var conn = try steppedConn(app, &in, &sink.interface);
+    defer conn.deinit();
+    while (in.bufferedLen() > 0) try conn.readFrame();
+    const before = sink.writes;
+    try conn.writeReady();
+    try conn.flushOut();
+    // Sent, so the buffer is given back.
+    try testing.expect(conn.burst == null);
+    try testing.expect(conn.out == conn.wire);
+    return sink.writes - before;
+}
+
+test "a burst of answers larger than the connection's page leaves in two writes, not ten, and every body arrives whole" {
+    var app = try httpApp();
+    defer app.deinit();
+    var sink: CountingSink = undefined;
+    sink.init();
+    defer sink.deinit();
+    const paths: [10][]const u8 = @splat("/mid");
+    // Ten answers of 5,000 bytes through a 4 KiB page were a write each.
+    try testing.expectEqual(@as(usize, 2), try burstOf(&app, &paths, &sink));
+
+    var got = try h2test.answerOf(sink.got.items);
+    defer got.deinit();
+    const want = repeat("abcdefghij", 500);
+    for (0..paths.len) |i| {
+        const id: u31 = @intCast(2 * i + 1);
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(testing.allocator);
+        const data = Answer.of(.data, &got, id);
+        for (data) |f| try body.appendSlice(testing.allocator, f.payload);
+        try testing.expectEqualStrings(want, body.items);
+        try testing.expect(data[data.len - 1].head.has(h2.Flags.end_stream));
+    }
+}
+
+test "answers that fit the connection's page take no burst buffer and leave in one write" {
+    var app = try httpApp();
+    defer app.deinit();
+    var sink: CountingSink = undefined;
+    sink.init();
+    defer sink.deinit();
+    var client = try TestClient.init();
+    defer client.deinit();
+    for ([_]u31{ 1, 3, 5, 7, 9 }) |id| try h2test.requestOn(&client, id, .{ .path = "/ping" });
+    var in: std.Io.Reader = .fixed(client.buf.written());
+    var conn = try steppedConn(&app, &in, &sink.interface);
+    defer conn.deinit();
+    while (in.bufferedLen() > 0) try conn.readFrame();
+    const before = sink.writes;
+    try conn.writeReady();
+    try testing.expect(conn.burst == null);
+    try conn.flushOut();
+    try testing.expectEqual(@as(usize, 1), sink.writes - before);
 }
 
 // ---- who owns a body of 16 KiB or more that HTTP/2 writes after the route has returned ----
@@ -5326,10 +5476,13 @@ fn windowedBody(app: *App, path: []const u8, after_route: ?*const fn () void) ![
         defer conn.deinit();
         while (in.bufferedLen() > 0) try conn.readFrame();
         try conn.writeReady();
+        try conn.flushOut();
         if (after_route) |hook| hook();
         var update: std.Io.Reader = .fixed(later.written());
         try nextFrames(&conn, &update);
         try conn.writeReady();
+        // What the loop does before it waits, and where a burst is sent.
+        try conn.flushOut();
     }
     var got = try h2test.answerOf(out.written());
     defer got.deinit();
@@ -6895,6 +7048,7 @@ test "an event stream on HTTP/2 reset by its client leaves the room, the connect
         var ping: std.Io.Reader = .fixed(ping_frames);
         try nextFrames(&conn, &ping);
         try conn.writeReady();
+        try conn.flushOut();
     }
     var got = try h2test.answerOf(out.written());
     defer got.deinit();

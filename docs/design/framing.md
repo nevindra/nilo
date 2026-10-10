@@ -77,6 +77,7 @@ Stage 6 used to be listed as the roadmap's second direction's. The pipes are thi
 | [258](../adr/258-a-struct-of-typed-functions-is-an-rpc-service.md) | `app.rpc(T)` serves a struct's `pub fn`s as `/<nilo_service>/<Method>`; not `app.service`, which reads as a Service |
 | [259](../adr/259-http2-is-a-framing-of-every-request.md) | `-Dhttp2` brings HTTP/2 for every request: every listener answers both, by the first bytes or by ALPN; gRPC is an envelope over it (stages 5 and 7) |
 | [260](../adr/260-a-request-on-http2-runs-from-its-headers.md) | A request on HTTP/2 runs from its headers; its body and its answer are pipes between its fiber and the connection's, under the client's windows (stage 6) |
+| [285](../adr/285-a-burst-of-http2-answers-leaves-in-writes-of-32-kib.md) | A burst of HTTP/2 answers of 1 to 16 KiB is written into a 32 KiB buffer taken for the burst and given back at the flush, so it leaves in writes of 32 KiB, not one an answer |
 
 Related topics: [ADR 220](../adr/220-grpc-is-served-over-h2c-behind-a-flag.md) (topic grpc, no page of its own) is the HTTP/2 connection whose calls the second arm collects. [ADR 027](../adr/027-tls-is-terminated-in-front.md) and [`tls.md`](./tls.md) hold the refusal of HTTP/2 for browsers that stage 5 would revise. [`http1-protocol.md`](./http1-protocol.md) is the HTTP/1.1 arm's wire format, and [`engine.md`](./engine.md) the connection loops both arms sit on.
 

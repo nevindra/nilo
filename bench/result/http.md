@@ -4740,3 +4740,28 @@ Run on 2026-10-10, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0, a loaded machine 
 **What the rig cannot show, read from the code.** Every request through `serve.serveRequest` makes two read-modify-writes on one process-wide word (`stop.in_flight`, `serve.zig:427`), on the line `stop.requested` is read from by every keep-alive request; and every request that gets a fiber of its own takes zio's one `StackPool` mutex twice (`zio/src/coro/stack_pool.zig`, one pool a runtime). On one CCD both are cheap. On the board's sixteen core complexes they are the shared lines of a request, and nilo's baseline-h2c there costs 6.2 µs of CPU a request against swerver's 3.5 while the rig has them level (1.32 against 1.16 here), and HTTP/2 cleartext and HTTP/1.1 pipelined both stop near 10 to 12M req/s. That is a correlation, not a measurement.
 
 **What it moved.** The composite recomputed from the board's results with nilo's rows replaced: json-h2c at fib-tuned's 2.3M is 2,691 (fourth); at swerver's 4.4M, 3,158 (second); static-h2 at 1,024 connections held at its 256-connection 903k is 2,745 (fourth); both of the first and that, 3,012 (third). A burst's answers leaving in one write is the first piece of work, because the rig shows it at the leader's figure. **Can it be pushed further:** a write buffer of 64 KiB is the experiment, not the design (it is per connection, and allocated past the allocator's slab limit); the design is the burst's DATA written from where it already is, in one vectored write at the loop's flush. The two shared lines need a run on the board's part to settle.
+
+## A burst of HTTP/2 answers leaves in writes of 32 KiB
+
+Run on 2026-10-10, AMD Ryzen 7 9700X, Linux 7.2.5, Zig 0.17.0, the same rig as the section above: the HttpArena entry of PR 1539 built as the board builds it, with `--fork=` on the tree at `d2bf561` (**before**) and on that tree with ADR 285 (**burst**), server pinned to cpus 0-3,8-11 and h2load to 4-7,12-15, five seconds a run, two rounds interleaved before, burst, before, burst. The figure to read is server CPU a request; req/s moves with it here because the server is the side that saturates.
+
+| profile | c | before req/s | before µs a request | burst req/s | burst µs a request |
+|---|---|---|---|---|---|
+| json-h2c | 1,024 | 1.17M | 5.93 to 5.96 | 1.63M | 4.55 to 4.56 |
+| json-h2c | 4,096 | 0.95M | 7.28 to 7.29 | 1.45M to 1.53M | 4.82 to 5.08 |
+| h2c (`/baseline2`) | 1,024 | 5.86M to 5.98M | 1.30 to 1.31 | 5.94M to 5.99M | 1.29 to 1.31 |
+| h2 over TLS | 1,024 | 4.96M to 4.97M | 1.56 to 1.57 | 4.94M to 4.98M | 1.56 to 1.57 |
+| static-h2 | 256 | 334k to 336k | 22.57 to 22.62 | 337k to 339k | 22.40 to 22.52 |
+| static-h2 | 1,024 | 276k to 277k | 27.04 to 27.12 | 270k to 271k | 27.64 to 27.70 |
+| unary gRPC | 256 | 3.29M | 2.39 | 3.36M to 3.37M | 2.33 to 2.34 |
+| unary gRPC | 1,024 | 2.91M to 2.94M | 2.66 to 2.69 | 2.97M to 2.98M | 2.63 |
+
+swerver on the same rig earlier the same day: json-h2c 1.74M at 4.47 µs at 1,024 connections and 1.67M at 4.68 µs at 4,096. The gap on json-h2c went from 31% of server CPU to 2 to 8%. static-h2 at 1,024 connections is 2% slower, outside the spread of the two rounds; it is the one row that went the wrong way, and why is not found: its answers of 1 to 16 KiB take the buffer and pay the copy, but the same copy is a gain on json-h2c.
+
+**Bytes a segment** (`ss -ti` over one second mid-run, json-h2c, 1,024 connections, four server cpus): 6,218 before, 25,271 with the burst; swerver's was 50.8 KB. The writes are 32 KiB, so a segment carries less than swerver's because nilo writes when the buffer fills rather than once a burst.
+
+**Memory per idle connection** (`bench/mem.py --h2 --get --path '/json/1?m=3'`, the entry's h2c port, each connection idle after one 4 KB answer): 9,851, 9,476 and 9,288 bytes at 1,000, 2,000 and 4,000 connections before, 9,847, 9,474 and 9,287 with the burst. The buffer is given back at the flush, so nothing is left behind it. `park-check` passed.
+
+**What was tried and dropped, the same day on the same rig** (one round each unless said): lending each body to one vectored write at the flush instead of copying it, 5.99 to 7.30 µs of server CPU on json-h2c at 1,024 (the stream could not be recycled until the flush, so `ArenaAllocator.reset` went from 0.62% to 8.51% of the profile) while the client's fell; a `write_buffer` of 64 KiB, 4.35 µs against the burst's 4.59 in that round, held by every connection for its whole life and an `mmap` each; a burst buffer of 12 KiB, 6.05 µs; a burst buffer for every answer, which took unary gRPC from 2.37 to 2.70 µs at 256 connections and static-h2 at 1,024 connections from 27.1 to 30.1, and is why only bodies of 1 KiB to under 16 KiB take it.
+
+**What it moved:** ADR 285. **Can it be pushed further:** yes, by writing once a burst rather than once a buffer, which is what swerver's 50.8 KB a segment is; that needs the answers of a burst to outlive the copy, the lending design above, without holding their streams.
