@@ -48,6 +48,9 @@ pub const Serving = struct {
     body_grace_ms: u32 = 10_000,
     body_min_rate: u32 = 8 * 1024,
     bound: std.atomic.Value(bool) = .init(true),
+    /// Set once `tryListen` has returned, so a test can bound how long a stop
+    /// takes rather than join a thread that may never come back.
+    stopped: std.atomic.Value(bool) = .init(false),
 
     pub fn run(self: *Serving) void {
         var buf: [std.Io.net.UnixAddress.max_len + 8]u8 = undefined;
@@ -64,6 +67,7 @@ pub const Serving = struct {
         }) catch {
             self.bound.store(false, .release);
         };
+        self.stopped.store(true, .release);
     }
 
     /// Bounded, for the reason every wait in `live.zig` is.
@@ -597,14 +601,21 @@ test "a route promised never to wait that does is named, and from then on gets a
     try testing.expect(calls[1].finished_at < calls[0].finished_at);
 }
 
+/// How many `hang` handlers slept their whole wait. A stop cancels the sleep,
+/// so a server that stopped as it should leaves this at zero; one that waited
+/// the handlers out does not.
+var hang_slept_through: std.atomic.Value(u32) = .init(0);
+
 /// A handler that waits far longer than a stop is allowed to take.
 fn hang(c: *nilo.Ctx) anyerror!void {
-    try nilo.sleep(4_000);
+    try nilo.sleep(10_000);
+    _ = hang_slept_through.fetchAdd(1, .acq_rel);
     return echo(c);
 }
 
 test "a server stop that lands in a burst of calls ends the connection promptly, however many are queued or sleeping" {
     hush();
+    hang_slept_through.store(0, .release);
     const gpa = std.heap.smp_allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
@@ -647,12 +658,128 @@ test "a server stop that lands in a burst of calls ends the connection promptly,
     }
     try writer.interface.flush();
 
-    const started = std.Io.Clock.awake.now(io);
+    // Promptly is an order and not a figure: the server came back before one
+    // handler had slept through its ten seconds. A wall-clock bound on the
+    // stop raced the scheduler on a loaded machine; this cannot be lost to it
+    // unless the machine stalls for the whole ten.
     app.shutdown();
     thread.join();
     joined = true;
-    const took_ms = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
-    try testing.expect(took_ms < 2_500);
+    try testing.expectEqual(@as(u32, 0), hang_slept_through.load(.acquire));
+}
+
+// ---- A stop placed among the calls a fiber has queued (ADR 260) ----
+
+/// What the placed-stop test below counts: the handler that holds the thread
+/// until the stop is asked for, and every call behind it that got to run.
+var held_entered: std.atomic.Value(u32) = .init(0);
+var queued_ran: std.atomic.Value(u32) = .init(0);
+var held_app: *nilo.App = undefined;
+var held_io: std.Io = undefined;
+
+/// Holds its thread, and with it the fiber the connection's calls queue
+/// behind, until `app.shutdown()` has been requested. A blocking wait on
+/// purpose: a fiber that parked would hand the thread back, the connection
+/// would give each call behind it a fiber of its own, and nothing would be
+/// queued when the stop landed. Bounded, so a test that never stops the
+/// server fails rather than holding the suite.
+fn heldUntilStop(c: *nilo.Ctx) anyerror!void {
+    _ = held_entered.fetchAdd(1, .acq_rel);
+    const until = std.Io.Clock.awake.now(held_io).addDuration(.fromSeconds(30));
+    while (!held_app.stop.isRequested()) {
+        if (std.Io.Clock.awake.now(held_io).nanoseconds > until.nanoseconds) return error.NeverStopped;
+        std.Io.sleep(held_io, .fromMilliseconds(1), .awake) catch {};
+    }
+    return echo(c);
+}
+
+fn behindTheHeld(c: *nilo.Ctx) anyerror!void {
+    _ = queued_ran.fetchAdd(1, .acq_rel);
+    return echo(c);
+}
+
+test "a stop that lands while calls are queued behind a running one turns them away unrun and ends the connection" {
+    // The ordering the burst test above leaves to chance. All eight calls
+    // arrive in one write, so the connection queues seven behind the fiber
+    // running the first, and that first call holds the thread until the stop
+    // has been requested: the stop lands with the queue known to be full, and
+    // the claim is what the stop does to it. Three things keep that safe (a
+    // yield hands its cancel back, a fiber that finishes the held call turns
+    // the queue away instead of running it, a spawn that fails at a stop
+    // answers what is queued). Taking out the second fails this test, with the
+    // queued calls run; taking out either of the others does not, because the
+    // stop flag ends the connection by GOAWAY whether or not the cancel
+    // reached it, and a spawn failing at a stop is a window between the flag
+    // and the cancel that a fiber holding the thread cannot be placed in.
+    //
+    // Nothing here is a time. What is asserted is what ran (none of the seven)
+    // and that the server came back; the only clocks are the 10 s and 20 s
+    // bounds on waits that finish in milliseconds.
+    hush();
+    const gpa = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    held_io = io;
+    held_entered.store(0, .release);
+    queued_ran.store(0, .release);
+
+    var where = try SocketDir.init(gpa, "grpc-stop-placed.sock");
+    defer where.deinit(gpa);
+
+    // On the heap and left there when the server does not stop: its thread
+    // is then detached and still reading them.
+    const app = try gpa.create(nilo.App);
+    app.* = nilo.App.init(gpa);
+    held_app = app;
+    try app.post("/test.Echo/Held", heldUntilStop);
+    try app.post("/test.Echo/Behind", behindTheHeld);
+
+    const serving = try gpa.create(Serving);
+    serving.* = .{ .app = app, .path = where.path };
+    const thread = try std.Thread.spawn(.{}, Serving.run, .{serving});
+    try serving.waitUntilUp(io);
+
+    var stream = try connect(io, where.path);
+    defer stream.close(io);
+    var out_buf: [2048]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    try writer.interface.writeAll(h2.preface);
+    try h2.writeSettings(&writer.interface, &.{});
+    try writeCall(&writer.interface, 1, "/test.Echo/Held", "held");
+    var id: u31 = 3;
+    for (0..7) |_| {
+        try writeCall(&writer.interface, id, "/test.Echo/Behind", "queued");
+        id += 2;
+    }
+    try writer.interface.flush();
+
+    // The first call is inside its handler, holding the thread.
+    var waited: u32 = 0;
+    while (held_entered.load(.acquire) == 0) : (waited += 1) {
+        if (waited > 10_000) return error.HeldCallNeverStarted;
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    }
+    // Long enough for the connection to have read the calls behind it: they
+    // came in the one write, and the connection reads them before it yields.
+    std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
+
+    app.shutdown();
+    waited = 0;
+    while (!serving.stopped.load(.acquire)) : (waited += 1) {
+        if (waited > 20_000) {
+            // Left running: the heap it reads is not freed.
+            thread.detach();
+            return error.ServerDidNotStop;
+        }
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    }
+    thread.join();
+    try testing.expectEqual(@as(u32, 1), held_entered.load(.acquire));
+    try testing.expectEqual(@as(u32, 0), queued_ran.load(.acquire));
+    app.deinit();
+    gpa.destroy(app);
+    gpa.destroy(serving);
 }
 
 /// How many handlers are running right now, and the most there have been.

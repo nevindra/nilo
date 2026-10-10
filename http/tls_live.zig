@@ -163,6 +163,32 @@ const Client = struct {
         try whole.appendSlice(gpa, body);
         return whole.toOwnedSlice(gpa);
     }
+
+    /// Whether a byte can be read without asking the socket: the TLS layer
+    /// above it or the buffer under it already holds one.
+    fn holdsBytes(self: *Client) bool {
+        return self.client.reader.bufferedLen() > 0 or self.reader.interface.bufferedLen() > 0;
+    }
+
+    /// Exactly `buf.len` bytes of cleartext, each wait for the socket bounded
+    /// by `limit_ms`. Only a wait that has nothing buffered asks the kernel,
+    /// so a record the library already holds is never mistaken for silence.
+    /// A server that stops answering is `error.ServerWentQuiet` here, where
+    /// the stream's own reader would wait for it (see `readSome`).
+    fn readWithin(self: *Client, buf: []u8, limit_ms: i32) !void {
+        var have: usize = 0;
+        while (have < buf.len) {
+            if (!self.holdsBytes()) {
+                var fds = [_]std.posix.pollfd{.{ .fd = self.reader.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+                if (try std.posix.poll(&fds, limit_ms) == 0) return error.ServerWentQuiet;
+            }
+            const got = try self.client.reader.peekGreedy(1);
+            const n = @min(got.len, buf.len - have);
+            @memcpy(buf[have..][0..n], got[0..n]);
+            self.client.reader.toss(n);
+            have += n;
+        }
+    }
 };
 
 test "a request over TLS is answered, and the certificate is the one the listener was given" {
@@ -579,6 +605,99 @@ test "a body of 300 KB, a file and a small answer after them cross a TLS connect
     }
     stream.close(io);
 
+    app.shutdown();
+    thread.join();
+}
+
+fn echoOnly(socket: *nilo.Socket) !void {
+    while (try socket.receive()) |message| try socket.send(message.kind, message.data);
+}
+
+fn echoRoute(c: *nilo.Ctx) anyerror!void {
+    return c.upgrade(echoOnly, {});
+}
+
+/// A masked text frame, the shape a client sends (RFC 6455 section 5.3).
+fn maskedText(out: []u8, text: []const u8) []const u8 {
+    out[0] = 0x81;
+    out[1] = 0x80 | @as(u8, @intCast(text.len));
+    const key = [4]u8{ 0x37, 0xfa, 0x21, 0x3d };
+    @memcpy(out[2..6], &key);
+    for (text, 0..) |b, i| out[6 + i] = b ^ key[i % 4];
+    return out[0 .. 6 + text.len];
+}
+
+test "a second WebSocket frame that arrived over TLS with the first is echoed, not waited for" {
+    // Two frames, each its own TLS record, leave in one socket write, so the
+    // server's record layer holds the second whole when its first read has
+    // only decrypted the first. `Wake.wait` answers `.readable` for a whole
+    // record it holds (`held`, ADR 259); a WebSocket's `park` waits in it
+    // too, so this is the test that fails if that line is lost: the second
+    // echo then waits for a socket the kernel has emptied, until the
+    // client speaks again or the idle limit (75 s here) runs out. The wait
+    // is bounded at five seconds, a margin a loaded machine does not need
+    // for a loopback echo, and the claim is the order: the second echo
+    // arrives with nothing sent after the two frames.
+    hush();
+    const gpa = std.heap.smp_allocator;
+
+    var app = nilo.App.init(gpa);
+    defer app.deinit();
+    try app.get("/ws", echoRoute);
+
+    var serving: ServingTls = .{ .app = &app };
+    const thread = try std.Thread.spawn(.{}, ServingTls.run, .{&serving});
+    const port = try waitForPort(gpa, &serving);
+
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const stream = try connect(io, port);
+    var client: Client = undefined;
+    try client.handshake(io, stream);
+
+    try client.client.writer.writeAll("GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n" ++
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n");
+    try client.client.writer.flush();
+    try client.writer.interface.flush();
+    // The 101's head, a byte at a time so nothing past it is taken.
+    var head: [512]u8 = undefined;
+    var head_len: usize = 0;
+    while (!std.mem.endsWith(u8, head[0..head_len], "\r\n\r\n")) {
+        try client.readWithin(head[head_len..][0..1], 5_000);
+        head_len += 1;
+    }
+    try testing.expect(std.mem.startsWith(u8, head[0..head_len], "HTTP/1.1 101 "));
+
+    // Each frame is its own record, staged apart from the socket and then
+    // written in one go: flushing the library's writer would send each record
+    // on its own, and the server would have read the first before the second
+    // was written.
+    // The library asks its output for a whole record's room before it writes.
+    var staging: [3 * std.crypto.tls.max_ciphertext_record_len]u8 = undefined;
+    var staged: std.Io.Writer = .fixed(&staging);
+    const wire = client.client.output;
+    client.client.output = &staged;
+    var one: [16]u8 = undefined;
+    var two: [16]u8 = undefined;
+    try client.client.writer.writeAll(maskedText(&one, "one"));
+    try client.client.writer.flush();
+    try client.client.writer.writeAll(maskedText(&two, "two"));
+    try client.client.writer.flush();
+    client.client.output = wire;
+    try testing.expect(staged.end > 2 * (5 + 6 + 3));
+    try wire.writeAll(staged.buffered());
+    try wire.flush();
+
+    var echo: [5]u8 = undefined;
+    try client.readWithin(&echo, 5_000);
+    try testing.expectEqualSlices(u8, &.{ 0x81, 3, 'o', 'n', 'e' }, echo[0..5]);
+    try client.readWithin(&echo, 5_000);
+    try testing.expectEqualSlices(u8, &.{ 0x81, 3, 't', 'w', 'o' }, echo[0..5]);
+
+    stream.close(io);
     app.shutdown();
     thread.join();
 }

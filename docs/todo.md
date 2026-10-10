@@ -199,16 +199,6 @@ Nothing is open at this tier.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
-**A gRPC stop test fails when the machine is busy, so a red gate can be a false one.** `a server stop that lands in a burst of calls ends the connection promptly` (`http/grpc_live.zig`) asserts the stop took under 2.5 s against handlers that sleep 4 s. It failed once in a `test-all -Dsql` on the shared two-core vCPU, while the gate's other compilations ran beside it, and the same test binary then passed three runs out of three on the idle machine. A bound measured on wall time is a bound on the scheduler as much as on the stop.
-
-**Needs:** an assertion that does not race the scheduler: the stop observed as the connection closing before any `Hang` handler returns, rather than a wall-clock figure, or a margin derived from the handlers' 4 s that a loaded machine cannot reach.
-
-**A WebSocket over TLS has no test of its own for a second frame that arrived with the first.** `Wake.wait` answers `.readable` while the record layer holds ciphertext or decrypted bytes ([`bench/result/http.md`](../bench/result/http.md#what-offering-h2-to-a-browser-costs)), which a WebSocket's `park` waits in too, so the stall the HTTP/2 connection over TLS showed (one in a thousand) is closed for it by the same line. The test that holds it is HTTP/2's, `grpc_tls_live.zig`; `tls_live.zig` has no WebSocket test, so a change to how `park` waits could lose it unseen.
-
-**What would settle it:** a live test in `tls_live.zig` sending two WebSocket frames in one TLS write and timing the second.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
 **A message's `bytes` field is text in its JSON, where protobuf's JSON mapping makes it base64.** A message read or written as JSON is nilo's JSON ([ADR 256](./adr/256-a-body-is-read-as-what-its-type-says.md)), so a `[]const u8` declared `.bytes` in its `wire` table goes out as the bytes themselves and is read back the same way. A Connect client speaking JSON sends and expects base64 there, and the two would disagree without either refusing. Field names and 64-bit integers do not have the problem: a Connect client reads both of nilo's spellings.
 
 **What would settle it:** a decision between writing a `.bytes` field as base64 in a message's JSON, with the document saying so, and refusing JSON for a message that has one; either held by a test with a Connect client's bytes.
@@ -264,10 +254,6 @@ Nothing is open at this tier.
 **Should a JSON body be refused when the request says it is something else?** `Ctx.json` parses whatever `Content-Type` came, while `Form(T)` refuses the wrong one, so a cross-site `<form enctype="text/plain">` can deliver valid JSON with no preflight, which matters to an app with a cookie sent cross-site and no `nilo.csrf`. A 415 is safer and breaks a client that sends JSON unlabelled.
 
 **What would settle it:** a decision between a 415 for a present non-JSON type and an absent one allowed, or the gap written into the CSRF guide as the reason `nilo.csrf` exists.
-
-**What a stop does to the calls a reused HTTP/2 fiber has queued has no test that fails without it.** A fiber that finishes a call takes the next one waiting ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)), and three things keep that safe at a stop: a yield hands its cancel back instead of swallowing it (zio's `yield` consumes a pending cancel, shown by a standalone zio program and not by a test here), the calls still queued when a stop is requested are turned away rather than run, and a spawn that fails at a stop answers every queued call. The test "a server stop that lands in a burst of calls ends the connection promptly" in `http/grpc_live.zig` passes with all three taken out, because the window is microseconds wide, and the fallback for `InvalidPlacement` (a work-stealing configuration) is not run by any test, because the suite cannot build one ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting)). The change was reviewed once; the review of the fixes it asked for was not finished.
-
-**What would settle it:** a test that places the stop: a handler that blocks on a flag until `app.shutdown()` has been requested, so the calls behind it are known to be queued when the stop lands, seen to fail with each of the three taken out; and a second review of `h2conn.zig`'s `runner`, `finishNext`, `rendezvous` and `spawnRunner`.
 
 **The `-Dhttp2` build parked 64 bytes under a page boundary when it was last read, and which commit gave the `-Dtls` build its page back is not known.** The `-Dtls` plain listener held a second page (4,109 bytes a connection) at `514e8c1` and holds one at `1e583bc`, 4,692 bytes, with `park-check` pinning every build at one page ([`http.md`](../bench/result/http.md#a-tls-builds-plain-listener-holds-one-page), [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)). Nobody has bisected what moved it, so nothing says it will stay moved, and the depths (2,505 default, 2,729 with `-Dhttp2`, against a boundary at 2,793) were read before that change. The pooling question sits beside it: arguments under zio's 384-byte pool size would take 115 bytes more off an HTTP/1.1 connection and cost an h2c one about 390, and why is not known.
 
@@ -370,6 +356,10 @@ Nothing is open at this tier.
 **`.tls` compiles in a build without `-Dtls`, and is refused when `listen()` runs.** `Options.tls` is `?Tls` in every build (`http/bulkhead.zig:297`, `:433`), and [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) chose a one-line refusal at `listen()`, before the port is taken. That keeps the port from serving plain HTTP, and still turns a mistake the build could name into one a deploy finds, which principle 2 asks the other way round.
 
 **Needs:** a decision on making the field's type depend on `nilo_build.tls`, so `.tls = …` without the flag is a compile error naming it, with ADR 212 edited whichever way it goes.
+
+**Two of the three things that keep a stop safe for the calls a reused HTTP/2 fiber has queued have no test that fails without them.** A fiber that finishes a call takes the next one waiting ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)), and three things keep that safe at a stop. The calls still queued when a stop is requested are turned away rather than run, and the test "a stop that lands while calls are queued behind a running one turns them away unrun and ends the connection" (`http/grpc_live.zig`) fails with that taken out. It passes with either of the other two taken out: a yield that hands its cancel back (zio's `yield` consumes a pending cancel), because the stop flag alone sends GOAWAY and ends the connection once no stream is in flight; and a spawn that fails at a stop answering every queued call, because that branch sits between the stop flag and the connection fiber's own cancel, where a fiber holding the thread cannot place a stop. The fallback for `InvalidPlacement` (a work-stealing configuration) is run by no test, because the suite cannot build one, and the second review of `h2conn.zig`'s `runner`, `finishNext`, `rendezvous` and `spawnRunner` was not finished.
+
+**What would settle it:** a connection that blocks after a swallowed cancel (a write to a client that never reads, with a stream still in flight), seen to hang with the yield's handback taken out; a spawn that can be made to fail, or a unit test of `spawnRunner`, which is a design decision; and the second review.
 
 ---
 
