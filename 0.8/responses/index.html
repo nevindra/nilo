@@ -1,0 +1,2816 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="An HTTP framework for Zig 0.17, and the toolkit it is built from">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.8/responses/">
+      
+      
+        <link rel="prev" href="../forms/">
+      
+      
+        <link rel="next" href="../cookies/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Responses - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#responses" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Responses
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#sending-from-a-ctx" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sending from a Ctx
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trailers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trailers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#redirects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redirects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Files">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#bytes-already-in-memory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bytes already in memory
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#etags-and-304-not-modified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ETags and 304 Not Modified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#json-field-names-and-union-tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSON field names and union tags
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="JSON field names and union tags">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#camelcase-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        camelCase keys
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-a-response-is-sent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a response is sent
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#keep-alive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keep-alive
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#content-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Content types
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#xml-csv-and-other-formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        XML, CSV and other formats
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#sending-from-a-ctx" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sending from a Ctx
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trailers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Trailers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#redirects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redirects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Files">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#bytes-already-in-memory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bytes already in memory
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#etags-and-304-not-modified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ETags and 304 Not Modified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#json-field-names-and-union-tags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSON field names and union tags
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="JSON field names and union tags">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#camelcase-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        camelCase keys
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-a-response-is-sent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a response is sent
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#keep-alive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keep-alive
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#content-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Content types
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#xml-csv-and-other-formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        XML, CSV and other formats
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/responses.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="responses">Responses<a class="headerlink" href="#responses" title="Permanent link">&para;</a></h1>
+<p><strong>Most handlers answer by returning a value; this page covers what a <code>*Ctx</code> can send directly, and the rules both follow: headers, redirects, files, ETags, JSON names, keep-alive and compression.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#answering"><code>Ctx</code>: answering</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#handler-returns">handler returns</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#json-shapes">JSON shapes</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/app.md#compress-options"><code>compress</code> options</a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/responses.md">Responses</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/json.md">JSON</a></p>
+<p>Returning a value is covered in <a href="../handlers/#what-a-handler-returns">Handlers</a>. This page is the layer underneath.</p>
+<h2 id="sending-from-a-ctx">Sending from a <code>Ctx</code><a class="headerlink" href="#sending-from-a-ctx" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">handler</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>c.sendText(200, "hi")</code></td>
+<td><code>text/plain</code></td>
+</tr>
+<tr>
+<td><code>c.sendJson(201, value)</code></td>
+<td>serialised and sent</td>
+</tr>
+<tr>
+<td><code>c.send(200, "text/csv", bytes)</code></td>
+<td>a content type of your own</td>
+</tr>
+<tr>
+<td><code>c.sendFile(.{ .file = f, … })</code></td>
+<td>an open file, closed here. See <a href="#files">Files</a></td>
+</tr>
+<tr>
+<td><code>c.stream(200, "text/csv")</code></td>
+<td>a response written in pieces. See <a href="../streaming/">Streaming</a></td>
+</tr>
+<tr>
+<td><code>c.events()</code></td>
+<td>a stream of server-sent events</td>
+</tr>
+<tr>
+<td><code>c.upgrade(loop, state)</code></td>
+<td>turn the connection into a <a href="../websocket/">WebSocket</a> and hand it to <code>loop</code></td>
+</tr>
+</tbody>
+</table>
+<p>Every call is listed in <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#answering">the reference</a>.</p>
+<p><strong>JSON that is already bytes goes out through <code>send</code>.</strong> A body serialised somewhere else (kept in a cache, built by another library, read from a file) is <code>c.send(200, "application/json", bytes)</code>, and nothing parses or re-encodes it. The bytes are written before <code>send</code> returns, compressed first when <a href="#compression">compression</a> is on, so a buffer of your own can be freed or reused on the next line. What it costs is the API description: a handler that returns nothing is documented as <code>default</code>, because its signature cannot say what it sent (<a href="../openapi/">OpenAPI</a>), and returning the typed value is what documents it.</p>
+<h2 id="headers">Headers<a class="headerlink" href="#headers" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>c.setHeader(name, value)</code></td>
+<td>copied into the request arena</td>
+</tr>
+<tr>
+<td><code>c.setStaticHeader(name, value)</code></td>
+<td>for text that already outlives the request (a literal), so nothing is copied</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Set headers before sending.</strong> A response is finished the moment it is sent, so nothing can change afterwards. A header set after the head has gone is refused with an error sentence, never lost silently. A middleware that needs to change an answer on the way out holds it first (<a href="../middleware/#changing-an-answer-after-next"><code>next.hold</code></a>).</p>
+<p>nilo writes <code>Content-Type</code>, <code>Content-Length</code>, <code>Transfer-Encoding</code> and <code>Connection</code> itself, and setting them is refused, because a response carrying two of any of those is malformed. Pass the content type to <code>send</code> instead.</p>
+<p><strong><code>Set-Cookie</code> and <code>Vary</code> add a line instead of replacing one.</strong> Two cookies need two lines because they cannot be folded into one. Two <code>Vary</code> lines happen because the CORS middleware and a gzipped static file each name a different part of the same response, and replacing one lost the other (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/029-a-header-is-checked-once-and-two-of-them-repeat.md">ADR 029</a>). Setting either with a name and value that is already there adds nothing.</p>
+<p><strong>A value may not contain a control byte, and a name has to be a token.</strong> A header is <code>name: value\r\n</code> with no escaping, so a value containing a newline does not make a broken header: it makes a second header, and two of them start a second response. Both are refused with a 500 naming the header (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/029-a-header-is-checked-once-and-two-of-them-repeat.md">ADR 029</a>). Watch for this with values that did not come from you, such as a <code>Location</code> read from a database or a filename from an upload. Percent-encode those, or strip them.</p>
+<p>A handler that returns a value sets the same headers through <code>.headers</code>, which is copied rather than borrowed:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// The status is part of the signature — `!Status(201, User)` — so the API</span>
+<span class="c1">// description names it. `Response(T)` is the same thing with the status as</span>
+<span class="c1">// a runtime field, for when it depends on what the handler found.</span>
+<span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"Location"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">url</span><span class="w"> </span><span class="p">},</span>
+<span class="p">}),</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">created</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+<p>The limit there is eight per response. A ninth is a compile error that points you to <code>c.setHeader</code>, which has no limit (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/018-a-response-owns-its-headers.md">ADR 018</a>).</p>
+<h2 id="trailers">Trailers<a class="headerlink" href="#trailers" title="Permanent link">&para;</a></h2>
+<p><strong>A trailer is a field sent after the body</strong>, for what is only known once the body is out, such as a checksum or a gRPC status. <code>c.setTrailer(name, value)</code> sets one, and <code>c.trailers()</code> lists what is set:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">export_</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">setTrailer</span><span class="p">(</span><span class="s">"x-rows"</span><span class="p">,</span><span class="w"> </span><span class="s">"1204"</span><span class="p">);</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">send</span><span class="p">(</span><span class="mi">200</span><span class="p">,</span><span class="w"> </span><span class="s">"text/csv"</span><span class="p">,</span><span class="w"> </span><span class="n">csv</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A trailer can be set until the body ends: before <code>send</code> for a whole answer, before <code>finish</code> for <a href="../streaming/#trailers">a stream</a>, and after <code>next</code> only from a middleware that called <a href="../middleware/#changing-an-answer-after-next"><code>next.hold</code></a>. Setting a name twice keeps the last value.</p>
+<p><strong>Where a trailer goes depends on the protocol.</strong> On HTTP/2, which is gRPC, it is a HEADERS frame after the body. On an HTTP/1.1 stream it is the trailer section of the chunked body. A whole HTTP/1.1 answer has a length, so carrying a trailer means sending it chunked, and nilo does that only when the request said <code>TE: trailers</code> (and is not a HEAD, and the status has a body). Without that header the trailers are left off, which RFC 9110 allows, because a client that did not ask may not read them. <code>c.clientReadsTrailers()</code> says which case this request is.</p>
+<p><strong>Some names are refused</strong>: the ones RFC 9110 section 6.5.1 bars from a trailer (<code>content-length</code>, <code>transfer-encoding</code>, <code>host</code>, <code>authorization</code>, <code>set-cookie</code>, <code>cache-control</code>, <code>content-type</code>, <code>content-encoding</code> and the like) and any pseudo-header (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/254-an-answer-can-carry-trailers.md">ADR 254</a>).</p>
+<p>A handler that returns a value sets trailers through <code>.trailers</code>, beside <code>.headers</code>, on <code>nilo.Response(T)</code> and <code>nilo.Status(code)</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">trailers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"x-rows"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1204"</span><span class="w"> </span><span class="p">},</span>
+<span class="p">}),</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">report</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+<p>The limit there is eight, as for headers, and a ninth is a compile error that points to <code>c.setTrailer</code>.</p>
+<h2 id="redirects">Redirects<a class="headerlink" href="#redirects" title="Permanent link">&para;</a></h2>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#handler-returns"><code>Redirect(status)</code></a> carries its status in the type, so the API description names it and says the answer carries a <code>Location</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">shortLink</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">code</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Redirect</span><span class="p">(</span><span class="mi">302</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">to</span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">target</span><span class="p">(</span><span class="n">code</span><span class="p">.</span><span class="n">view</span><span class="p">()));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The only hard part is choosing the status:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>301</strong></td>
+<td>moved for good</td>
+</tr>
+<tr>
+<td><strong>302</strong></td>
+<td>found, temporary</td>
+</tr>
+<tr>
+<td><strong>303</strong></td>
+<td>see other. <strong>Use this to answer a form POST</strong>: it turns the follow-up into a GET, so the reload button re-reads the page instead of posting the form again</td>
+</tr>
+<tr>
+<td><strong>307</strong></td>
+<td>temporary, and the method is kept</td>
+</tr>
+<tr>
+<td><strong>308</strong></td>
+<td>permanent, and the method is kept</td>
+</tr>
+</tbody>
+</table>
+<p>Any other status is a compile error, because a <code>Location</code> on a status that does not carry one means nothing to a client.</p>
+<p>A redirect can carry headers, which is how a sign-in answers:</p>
+<div class="highlight"><pre><span></span><code><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="s">"/"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="p">.{.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"Set-Cookie"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">session</span><span class="w"> </span><span class="p">}}));</span>
+</code></pre></div>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#answering"><code>c.redirect(status, location)</code></a> sends the same response from a <code>*Ctx</code>, for when the status is only known while the request is running.</p>
+<p>There is no body. Browsers follow the header and never look at it (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/031-a-redirect-puts-its-status-in-the-type.md">ADR 031</a>).</p>
+<h2 id="files">Files<a class="headerlink" href="#files" title="Permanent link">&para;</a></h2>
+<p><strong><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#handler-returns"><code>FileBody</code></a> is a file as a return value.</strong> The handler names it, nilo opens it, and the bytes go from the disk to the socket without passing through your process (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/009-static-files-are-held-in-memory-or-opened.md">ADR 009</a>).</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">invoice</span><span class="p">(</span><span class="n">files</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Files</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">nilo</span><span class="p">.</span><span class="n">FileBody</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">files</span><span class="p">.</span><span class="n">nameOf</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">files</span><span class="p">.</span><span class="n">dir</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">content_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"application/pdf"</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>It is a return type rather than a call for the same reason a redirect is: the signature is the contract, so the API description says the endpoint answers with bytes, and the <code>?</code> says it can answer 404, exactly as it does for a <code>?User</code>.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dir</code></td>
+<td>the directory to open the file in, a <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/streaming.md#dir"><code>nilo.Dir</code></a></td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>the name inside it</td>
+</tr>
+<tr>
+<td><code>content_type</code></td>
+<td>default <code>"application/octet-stream"</code></td>
+</tr>
+<tr>
+<td><code>cache_control</code></td>
+<td>empty leaves the header off</td>
+</tr>
+<tr>
+<td><code>headers</code></td>
+<td>up to eight, the same list a <code>Redirect</code> carries</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>dir</code> matters. It is opened once, at startup, and held as a service:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">files</span><span class="o">:</span><span class="w"> </span><span class="n">Files</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Dir</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="s">"uploads"</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">files</span><span class="p">.</span><span class="n">dir</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">files</span><span class="p">);</span>
+</code></pre></div>
+<p>A name is opened relative to that directory rather than joined onto a path, so nothing a request carries is ever resolved as a path. What is left (a <code>..</code> segment, an absolute path, a NUL byte, and on Windows a backslash or a drive letter) is refused before anything is opened. It answers the same 404 a missing file does, word for word, so a probe cannot tell the two apart. The log line says which it was.</p>
+<p>A download's filename is a header, and goes with the other headers:</p>
+<div class="highlight"><pre><span></span><code><span class="k">return</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">dir</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">files</span><span class="p">.</span><span class="n">dir</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">content_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"application/pdf"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="p">.{.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"Content-Disposition"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"attachment; filename=</span><span class="se">\"</span><span class="s">invoice-42.pdf</span><span class="se">\"</span><span class="s">"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">}}),</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>There is deliberately no <code>download_as</code> field. Quoting a filename properly is RFC 6266, not one line, and <code>attachment</code> is not the only answer: a PDF that should open in a browser tab wants <code>inline</code> with a filename.</p>
+<p><code>Range</code>, <code>If-Range</code>, <code>If-None-Match</code> and <code>HEAD</code> work here exactly as they do for a <a href="../static-files/#range-requests">static file</a>. The API description says the body is <code>application/octet-stream</code> with <code>format: binary</code> rather than the content type you set, because that one is a runtime field and the document does not guess.</p>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#answering"><code>c.sendFile(.{ .file = f, .content_type = … })</code></a> sends the same response from a <code>*Ctx</code>, for a handler that already holds an open file and has its own <code>etag</code>, <code>size</code> or <code>cache_control</code> to give it. It closes the file on every way out.</p>
+<h3 id="bytes-already-in-memory">Bytes already in memory<a class="headerlink" href="#bytes-already-in-memory" title="Permanent link">&para;</a></h3>
+<p><strong><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#handler-returns"><code>nilo.Bytes</code></a> is <code>FileBody</code> with the bytes in memory.</strong> Use it for a proxy that downloads a bundle from another service and hands it to the browser with <em>that</em> service's <code>Content-Type</code>: there is no file and no <code>Dir</code>, and the content type is only known per request (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/173-bytes-handed-on-are-an-answer.md">ADR 173</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">bundle</span><span class="p">(</span><span class="n">licences</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Licences</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">nilo</span><span class="p">.</span><span class="n">Bytes</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">got</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">licences</span><span class="p">.</span><span class="n">download</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">number</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">body</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">got</span><span class="p">.</span><span class="n">body</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">content_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">got</span><span class="p">.</span><span class="n">content_type</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="o">&amp;</span><span class="p">.{.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"Content-Disposition"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"attachment"</span><span class="w"> </span><span class="p">}}),</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Nothing is copied: the body belongs to the handler, in the request arena or in a response it still holds. <code>?Bytes</code> means 404, as it does everywhere else. Unlike a <code>FileBody</code> it accepts a status wrapper, so <code>Status(201, Bytes)</code> does what it says. The document describes it as <code>format: binary</code>, for the same reason as <code>FileBody</code>. Before <code>Bytes</code>, the choices were <code>c.send</code> from a <code>*Ctx</code> handler, which the document could not see, or a <code>nilo_write</code> type naming a content type it did not know.</p>
+<h2 id="etags-and-304-not-modified">ETags and 304 Not Modified<a class="headerlink" href="#etags-and-304-not-modified" title="Permanent link">&para;</a></h2>
+<p><strong><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#handler-returns"><code>nilo.Versioned(T)</code></a> is <code>T</code> with a version, sent as a weak <code>ETag</code>, so a client that already has the answer gets a 304.</strong> A list a dashboard polls every five seconds is the same list nearly every time. A client that sends the tag back as <code>If-None-Match</code> gets a 304 and no body, and if the handler checks first, no query runs either (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/189-a-version-a-handler-names-is-an-etag.md">ADR 189</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"orders"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">revision</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">listOrders</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Versioned</span><span class="p">([]</span><span class="n">Order</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">revision</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">rawOne</span><span class="p">(</span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="s">"select coalesce(max(revision), 0) from orders"</span><span class="p">,</span><span class="w"> </span><span class="p">.{})</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">version</span><span class="o">:</span><span class="w"> </span><span class="kt">u64</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@intCast</span><span class="p">(</span><span class="n">revision</span><span class="p">);</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="p">.</span><span class="n">clientHas</span><span class="p">(</span><span class="n">version</span><span class="p">))</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="p">.</span><span class="n">unchanged</span><span class="p">(</span><span class="n">version</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">version</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">Order</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>You choose the version, because only you know what it is: a revision column, a <code>max(updated_at)</code>, a counter the writer increments. It has to be known <em>before</em> the body is built, which is what lets <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#reading"><code>c.clientHas</code></a> skip the query and not just the bytes. A handler that never checks still answers 304, because nilo compares on the way out, but it has already done the work.</p>
+<p>The version is a <code>u64</code>. A timestamp in milliseconds fits. Text, such as an <code>updated_at</code> kept as a string, is one hash away:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">hash</span><span class="p">.</span><span class="n">Wyhash</span><span class="p">.</span><span class="n">hash</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="p">.</span><span class="n">updated_at</span><span class="p">.</span><span class="n">view</span><span class="p">());</span>
+</code></pre></div>
+<p>The tag is weak, <code>W/"1a"</code>, because a version says the content is the same and promises nothing about the bytes: the same value goes out gzipped to one client and plain to another. <code>If-None-Match</code> only ever compares weakly anyway. <code>headers</code> on the value go out on both the 200 and the 304, which is where a <code>Cache-Control</code> belongs; <code>.unchangedWith(version, headers)</code> is the 304 with them. Returning <code>.unchanged(version)</code> to a client that did <em>not</em> send the version is a 500 naming the route, because the handler skipped the work without checking.</p>
+<p><code>Versioned(?T)</code> is a compile error, because <code>null</code> would mean both "404" and "you have it"; a missing thing is <code>nilo.fail.notFound</code>. A <code>Versioned</code> inside a <code>Status</code> or a <code>Response</code> is also a compile error, and so is one under a <code>Cached</code> or an <code>Idempotent</code>, where a 304 decided for the first client would be replayed to everyone else. <strong>Only a <code>GET</code> or a <code>HEAD</code> is answered 304.</strong> A <code>PUT</code> that returns a <code>Versioned(T)</code> has already run when the tag is compared, so it answers its ordinary 200 with the <code>ETag</code> on it, whatever <code>If-None-Match</code> says. The API description puts the <code>ETag</code> on the 200 and lists a 304 beside it on a <code>GET</code> or a <code>HEAD</code>.</p>
+<h2 id="json-field-names-and-union-tags">JSON field names and union tags<a class="headerlink" href="#json-field-names-and-union-tags" title="Permanent link">&para;</a></h2>
+<p><strong>A struct becomes a JSON object and an enum becomes its tag name; one declaration on a type changes how its names or union tags are written.</strong> That default covers nearly everything. The two cases it does not cover are common in REST APIs (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/016-the-api-description-comes-from-the-signatures.md">ADR 016</a>). The full list is <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#json-shapes">JSON shapes in the reference</a>.</p>
+<p><strong>A float is written the way serde_json writes it.</strong> The shortest digits that read back as the same value, with a whole number keeping its <code>.0</code> (<code>1.0</code>, <code>0.0</code>, <code>1000000000000000.0</code>) so a typed client can tell it from an integer, a sign-carrying exponent outside 1e-5 to 1e15 (<code>1e+16</code>, <code>1e-7</code>, never a 300-digit <code>f64::MAX</code>), an <code>f32</code> from its own digits (<code>1.1</code>), and <code>null</code> for infinity and NaN. It is the same on every path a value takes out, a <code>std.json.Value</code> and a <code>jsonStringify(self, jw: anytype)</code> included, and a body is read as before: <code>1</code> fills an <code>f64</code> (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/096-a-byte-that-is-not-text-is-not-a-string.md">ADR 096</a>).</p>
+<p><strong>A union is externally tagged by default</strong>: <code>{"metrics":{…}}</code>, one object with one key, which is what <code>std.json</code> writes and what nilo sends if you say nothing. <code>.tag</code> asks for the other encoding, with the variant's name next to its own fields:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">nilo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_http"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Condition</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">union</span><span class="p">(</span><span class="k">enum</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">tag</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"signal"</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">jsonParse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">jsonParseFor</span><span class="p">(</span><span class="nb">@This</span><span class="p">());</span>
+
+<span class="w">    </span><span class="n">metrics</span><span class="o">:</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">metric_name</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">threshold</span><span class="o">:</span><span class="w"> </span><span class="kt">f64</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">logs</span><span class="o">:</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">query</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">count_over</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="n">disabled</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Severity</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">rename_all</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">SCREAMING_SNAKE_CASE</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">jsonParse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">jsonParseFor</span><span class="p">(</span><span class="nb">@This</span><span class="p">());</span>
+
+<span class="w">    </span><span class="n">info</span><span class="p">,</span>
+<span class="w">    </span><span class="n">needs_attention</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Rule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">severity</span><span class="o">:</span><span class="w"> </span><span class="n">Severity</span><span class="p">,</span><span class="w"> </span><span class="n">condition</span><span class="o">:</span><span class="w"> </span><span class="n">Condition</span><span class="w"> </span><span class="p">};</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="mi">3</span><span class="p">,</span><span class="nt">"severity"</span><span class="p">:</span><span class="s2">"NEEDS_ATTENTION"</span><span class="p">,</span><span class="nt">"condition"</span><span class="p">:{</span><span class="nt">"signal"</span><span class="p">:</span><span class="s2">"logs"</span><span class="p">,</span><span class="nt">"query"</span><span class="p">:</span><span class="s2">"level:error"</span><span class="p">,</span><span class="nt">"count_over"</span><span class="p">:</span><span class="mi">5</span><span class="p">}}</span>
+</code></pre></div>
+<p>A variant carrying nothing is just the tag: <code>{"signal":"disabled"}</code>. Read as a request body, an object with the tag key twice is a 400 naming the key, since a client that keeps the other one would mean another variant (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/016-the-api-description-comes-from-the-signatures.md">ADR 016</a>).</p>
+<p><strong><code>rename_all</code> spells names the way the wire wants them</strong>: an enum's tags, a union's variant names, and a struct's field names.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>not_found</code> becomes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.lowercase</code></td>
+<td><code>notfound</code></td>
+</tr>
+<tr>
+<td><code>.UPPERCASE</code></td>
+<td><code>NOTFOUND</code></td>
+</tr>
+<tr>
+<td><code>.camelCase</code></td>
+<td><code>notFound</code></td>
+</tr>
+<tr>
+<td><code>.PascalCase</code></td>
+<td><code>NotFound</code></td>
+</tr>
+<tr>
+<td><code>.SCREAMING_SNAKE_CASE</code></td>
+<td><code>NOT_FOUND</code></td>
+</tr>
+<tr>
+<td><code>.@"kebab-case"</code></td>
+<td><code>not-found</code></td>
+</tr>
+</tbody>
+</table>
+<p>The first two join the words rather than keeping the underscore, which is what serde does and what the names literally say. <code>.SCREAMING_SNAKE_CASE</code> is the one that keeps it. There is no <code>.snake_case</code>, because a Zig field name already is snake_case. Two names that end up the same are a compile error, because they would put the same key in an object twice.</p>
+<h3 id="camelcase-keys">camelCase keys<a class="headerlink" href="#camelcase-keys" title="Permanent link">&para;</a></h3>
+<p><strong>One declaration sends snake_case fields as camelCase keys.</strong> Your Rows are snake_case because Postgres is, and your wire is camelCase because the browser is. Declaring it once is better than a mapping function written out field by field, which is what a DTO layer is. Nothing checks such a mapping against the Row it came from, so a column added to the Row reaches the wire only if somebody remembers the second file (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/148-a-field-name-is-a-spelling-too.md">ADR 148</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Contact</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">rename_all</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">camelCase</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">full_name</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w">   </span><span class="c1">// goes out as "fullName"</span>
+<span class="w">    </span><span class="n">partner_id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w">         </span><span class="c1">// and "partnerId"</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>The API description uses the same keys, so a generated client reads what the server sends. It costs nothing per request: the name is settled at compile time either way.</p>
+<p><strong>A field no case rule reaches can be spelled on its own.</strong> A column called <code>estimated_cost_amount_minor</code> that the frontend knows as <code>estimatedCostMinor</code> is one <code>.rename</code> entry, and the entry wins over the case rule for that field only (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/168-one-field-can-be-spelled-on-its-own.md">ADR 168</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Summary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">rename_all</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">camelCase</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">rename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">estimated_cost_amount_minor</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"estimatedCostMinor"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">estimated_cost_amount_minor</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w">   </span><span class="c1">// goes out as "estimatedCostMinor"</span>
+<span class="w">    </span><span class="n">due_at</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w">                </span><span class="c1">// and "dueAt", by the case</span>
+<span class="p">};</span>
+</code></pre></div>
+<p><code>.rename</code> on its own, with no case rule, is fine too. Each of these is a compile error where the marker is written: a name that is not a field, a spelling that is the field's own name, and an entry that lands on a key another field already uses.</p>
+<p><strong>The spelling applies to a request body too.</strong> The same Row you send can be posted: a body is matched against the renamed keys (<code>fullName</code>, not <code>full_name</code>), and a 400 about a key quotes the spelling the client sent or should have sent. A form and a query string read field names as written, so a struct with <code>rename_all</code>, <code>.rename</code> or <code>.skip</code> used as one of those is a compile error naming the route: give it a struct of its own.</p>
+<p><strong>A field can stay off the wire.</strong> <code>.skip = &amp;.{"password_hash"}</code> names fields that are never written in a response and never read from a body. A client sending the key gets the answer any unknown key gets, and the field is left out of the API description. Because nothing fills a skipped field when a body is read, it needs a default value (or a <code>?T</code>) if the struct is ever read; a struct that is only returned needs nothing.</p>
+<p><strong>A key can be left out when it has no value.</strong> Go's <code>omitempty</code> is two entries here (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/282-an-answer-can-leave-a-field-out.md">ADR 282</a>): <code>.omit_null = true</code> leaves out every optional field that is null, and <code>.omit_empty = &amp;.{"root_attributes"}</code> leaves out the named lists that are empty. A list you do not name is still written as <code>[]</code>, because an empty list is often the answer.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Page</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_json</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">omit_null</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">omit_empty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">.{</span><span class="s">"root_attributes"</span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w">                  </span><span class="c1">// no "title" key when null</span>
+<span class="w">    </span><span class="n">root_attributes</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="c1">// no key when empty</span>
+<span class="w">    </span><span class="n">tags</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w">            </span><span class="c1">// "tags":[] when empty</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>The generated writer does it, so the type is still written at full speed and still takes <code>rename_all</code>. The API description stops listing those fields as <code>required</code>. It means nothing when a body is read: a <code>?T</code> or a field with a default is already optional there. As with <code>rename_all</code>, a type that nilo's own writer cannot handle (see below) is a compile error rather than a quiet <code>null</code>.</p>
+<p>A renamed or omitting struct that nilo's own writer cannot handle is also refused. The writer is deliberately narrow: one shape it does not recognise (a tuple, an array of bytes, an untagged union, a type that writes its own JSON without describing it, anything more than eight levels deep) sends the whole value to <code>std.json</code>, which ignores the marker.</p>
+<p><strong>A type that writes its own JSON and describes it is not one of those.</strong> <code>sql.Uuid</code>, <code>sql.Timestamp</code>, <code>sql.AsText</code> and <code>id.Uuid</code> all carry a <code>nilo_openapi</code> next to their <code>jsonStringify</code>, and a marker may only name a scalar. So nilo knows the value is one string or one number and keeps writing the object around it (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/148-a-field-name-is-a-spelling-too.md">ADR 148</a>). A Row holding uuids can rename its fields, which is the ordinary case and the whole reason this was reopened.</p>
+<p>That also makes such a response faster whether or not it renames anything, by more than you might expect: the writer is chosen for the <em>whole</em> value, so a single field it could not handle used to send every string next to it to <code>std.json</code> too. <strong>250ns → 165ns on a 305-byte row with three uuids in it.</strong> Your own type gets the same speed by writing the same two declarations.</p>
+<p><strong>The marker applies to one type and is not inherited.</strong> A struct renames its own fields. A union renames its <em>variants</em> and leaves a payload struct's fields to that struct's own marker. A nested struct with no marker keeps its own spelling.</p>
+<p><strong>Why the <code>jsonParse</code> line is needed.</strong> For a struct it is not: nilo reads a body into a struct itself and reads the marker while it does. An enum or a union that is read back does need it, because <code>std.json</code> picks the parser for those and nothing can add a declaration to a type you wrote, so the type hands over a parser nilo supplies. Leave the line off if the type is only ever sent; nilo tells you if you add it to a struct, or to a type whose JSON spelling was never changed.</p>
+<p>The generated API description follows either encoding, so a client generated from it reads what the server actually sends (<a href="../openapi/">the API description</a>).</p>
+<h2 id="when-a-response-is-sent">When a response is sent<a class="headerlink" href="#when-a-response-is-sent" title="Permanent link">&para;</a></h2>
+<p><strong>A response is written in one go, and only once.</strong> There is no "start the response, then change your mind" state, so a header set too late is refused with an error rather than lost. If you need to decide as you go, use <a href="../streaming/">a stream</a>; even there the head goes out first and cannot change after that.</p>
+<p>The response is on the wire before the connection next waits for the client. For a client that sends a request and waits for the answer, which is every browser, that is the moment <code>send</code> returns. A client that pipelines, sending its next request before reading this answer, gets the answers in one write instead of one each. It was not waiting, and the batch is bounded by <code>write_buffer</code> (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/201-a-response-is-flushed-before-the-connection-waits.md">ADR 201</a>).</p>
+<p>Sending twice is an assertion failure, not two responses on the wire. A handler that fails <em>after</em> sending gets its connection closed, because a half-sent response cannot be taken back and the next request on that connection would read bytes of unclear origin. It is logged:</p>
+<div class="highlight"><pre><span></span><code>warning: handler GET /report failed after answering: WriteFailed
+</code></pre></div>
+<h2 id="keep-alive">Keep-alive<a class="headerlink" href="#keep-alive" title="Permanent link">&para;</a></h2>
+<p><strong>nilo decides whether the connection stays open.</strong> HTTP/1.1 keeps it open unless the client says <code>Connection: close</code>. HTTP/1.0 closes it unless the client asks otherwise. A failed stream or an unreadable body closes it. <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#reading"><code>c.keepAlive()</code></a> reports what will happen. A handler never has to think about it: a 404 is a normal answer, not a reason to hang up.</p>
+<p>The response only mentions it when there is something to say: <code>Connection: close</code> when it is closing, <code>Connection: keep-alive</code> to an HTTP/1.0 client being kept, and nothing on an HTTP/1.1 connection staying open, because that is what HTTP/1.1 means by default (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/197-a-response-says-when-it-was-sent.md">ADR 197</a>). Every response also carries a <code>Date</code>, which a cache in front reads to decide how old the answer is.</p>
+<h2 id="compression">Compression<a class="headerlink" href="#compression" title="Permanent link">&para;</a></h2>
+<p><strong>Compression is off unless you turn it on.</strong> One line turns it on:</p>
+<!-- compiles: body -->
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">compress</span><span class="p">(.{});</span>
+</code></pre></div>
+<p>From then on, every answer that is text, at least a kilobyte long, and going to a client whose <code>Accept-Encoding</code> accepts gzip goes out gzipped, whether it came from <code>sendJson</code>, <code>sendText</code>, <code>send</code> or a typed handler returning a value. The response carries <code>Content-Encoding: gzip</code>, <code>Vary: Accept-Encoding</code> and the compressed length. A client that sent no <code>Accept-Encoding</code>, or <code>gzip;q=0</code>, gets the body unchanged and no <code>Content-Encoding</code>.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>min_bytes</code></td>
+<td><code>1024</code>: shorter bodies go out as they are; compressing a hundred bytes makes them longer</td>
+</tr>
+<tr>
+<td><code>max_bytes</code></td>
+<td><code>1048576</code> (1 MiB): longer bodies go out as they are, because gzipping one holds its thread for the whole of it, about 7 ms a megabyte at <code>.default</code> and 130 ms for 20 MB. <code>0</code> means no limit</td>
+</tr>
+<tr>
+<td><code>level</code></td>
+<td><code>.default</code>, zlib's level 6. <code>.fastest</code> is level 1, roughly a fifth larger and a little quicker; <code>.best</code> is level 9, under one percent smaller and five to nine percent slower. In a libdeflate build (below) they are levels 1, 6 and 7</td>
+</tr>
+</tbody>
+</table>
+<p>The options are in <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/app.md#compress-options">the reference</a>.</p>
+<p>Text means the same list static files use: <code>text/*</code>, JSON, JavaScript, XML, WASM, and the <code>+json</code> and <code>+xml</code> structured types. A PNG, a woff2 or an <code>application/octet-stream</code> is left alone, as is a body under <code>min_bytes</code> or over <code>max_bytes</code>, a 204, and an answer whose handler set <code>Content-Encoding</code> itself: a body you gzipped is not gzipped twice. <strong>What a handler said about the representation stands</strong>: a 206, a 416, an answer with a <code>Content-Range</code> and one with <code>Cache-Control: no-transform</code> are never compressed, because a range is an offset into the plain bytes and <code>no-transform</code> is a request not to. A strong <code>ETag</code> on an answer that is compressed goes out weak (<code>W/"…"</code>), since the gzipped and the plain body are different bytes and a strong tag promises identical ones. A HEAD carries the length its GET would have.</p>
+<p><strong>Three things are never compressed here.</strong> A static file, because it was gzipped once when the App was built and that copy costs nothing per request (<a href="../static-files/#compression">Static files</a>). A stream, because it has no whole body to compress and would hold a compressor across every write. An event stream, because it must never be buffered at all (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md">ADR 211</a>).</p>
+<p><strong>What it costs.</strong> One compressor per thread, about 288 KB each, allocated once when the chains are resolved and never on a connection's stack: 4.6 MB on sixteen threads. One arena allocation on a compressed request, for the compressed body, and none on a request that is not compressed. And the gzip itself: for a 4 KB JSON answer at <code>.default</code>, about 37 µs on one core, of which 6 µs is resetting the compressor. <code>zig build bench-compress</code> prints the table for your machine. Nothing per connection, and nothing on a request under the threshold, which a test checks.</p>
+<p><strong>A build can gzip in a quarter of the time.</strong> The default compressor is the standard library's; passing <code>.libdeflate = true</code> to the dependency gzips with <a href="https://github.com/ebiggers/libdeflate">libdeflate</a> instead, for answers and for static files alike (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/248-gzip-is-libdeflate-when-a-build-asks-for-it.md">ADR 248</a>):</p>
+<div class="highlight"><pre><span></span><code><span class="c1">// build.zig</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">nilo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">dependency</span><span class="p">(</span><span class="s">"nilo"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">optimize</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">optimize</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">libdeflate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p>Nothing in your code changes, and the same bodies go out gzipped. A 4 KB JSON answer takes about 9 µs rather than 37 and comes out a little smaller, a megabyte about 2.4 ms rather than 7, and a server on sixteen threads holds less memory than the default build, because a libdeflate compressor costs nothing resident until it is used. What you pay is about 42 KB of binary and a C library compiled into it, with no libc needed; a build without the flag fetches and compiles none of it.</p>
+<h2 id="content-types">Content types<a class="headerlink" href="#content-types" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Returned</th>
+<th>Sent as</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>void</code></td>
+<td>no body, and no <code>Content-Type</code> either</td>
+</tr>
+<tr>
+<td><code>Str</code>, <code>[]const u8</code></td>
+<td><code>text/plain</code></td>
+</tr>
+<tr>
+<td><code>FileBody</code></td>
+<td>its <code>content_type</code>, <code>application/octet-stream</code> by default</td>
+</tr>
+<tr>
+<td>a type with <code>nilo_content_type</code></td>
+<td>that, and the bytes its <code>nilo_write</code> wrote. See <a href="#xml-csv-and-other-formats">below</a></td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>application/json</code></td>
+</tr>
+</tbody>
+</table>
+<p>A failure is always <code>application/json</code>, whether it came from a <code>fail.*</code> function, from an error, or from nilo refusing a request. See <a href="../errors/">Errors</a>.</p>
+<p>For anything else, use <code>c.send(status, content_type, bytes)</code>, or <code>c.stream(status, content_type)</code> when the length is not known yet.</p>
+<h2 id="xml-csv-and-other-formats">XML, CSV and other formats<a class="headerlink" href="#xml-csv-and-other-formats" title="Permanent link">&para;</a></h2>
+<p><strong>A type of yours can write its own body under a content type it names.</strong> nilo answers JSON, and it will not learn XML, CSV or a template language (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/157-a-type-can-write-its-own-answer.md">ADR 157</a> says why). What it will do is send bytes your type wrote, under the label the type names. That is what a consumer that only reads XML needs, and before this a <code>*Ctx</code> handler calling <code>c.send</code> was the only way to get it:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Invoice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_content_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"application/xml"</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">nilo_write</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">Invoice</span><span class="p">,</span><span class="w"> </span><span class="n">w</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">std</span><span class="p">.</span><span class="n">Io</span><span class="p">.</span><span class="n">Writer</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">w</span><span class="p">.</span><span class="n">print</span><span class="p">(</span><span class="s">"&lt;invoice&gt;&lt;number&gt;{d}&lt;/number&gt;&lt;total&gt;{d}&lt;/total&gt;&lt;/invoice&gt;"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">number</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="p">});</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">showInvoice</span><span class="p">(</span><span class="n">number</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="n">Invoice</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">number</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">number</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1500</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Return it the way you would return a struct (bare, in a <code>?</code>, in a <code>Status(201, …)</code> or a <code>Response(…)</code>) and the wrappers mean what they always mean. The difference from <code>c.send</code> is that the route is described: the document names <code>application/xml</code>, and says what the body looks like if the type adds <code>pub const nilo_openapi = .{ .type = "string" };</code>. See <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#a-type-that-writes-its-own-answer">the reference</a>.</p>
+<p>Write both declarations or neither: a content type with no <code>nilo_write</code>, or the other way round, is a compile error naming the route. The same content type with <code>nilo_decode</code> reads the format on the way in (<a href="../requests/#protobuf-and-other-formats">Requests</a>).</p>
+<p><strong>A protobuf message answers in the spelling it was asked in</strong>: a struct with a <code>wire</code> table goes out as protobuf to a request that sent protobuf and as JSON to everything else, with no declaration (<a href="../requests/#protobuf-and-other-formats">Requests</a>).</p>
+<p>Static files get their type from the file extension. See <a href="../static-files/">Static files</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../forms/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Forms">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Forms
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../cookies/" class="md-footer__link md-footer__link--next" aria-label="Next: Cookies">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Cookies
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

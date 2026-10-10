@@ -1,0 +1,2645 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="An HTTP framework for Zig 0.17, and the toolkit it is built from">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.8/requests/">
+      
+      
+        <link rel="prev" href="../routing/">
+      
+      
+        <link rel="next" href="../forms/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Requests - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#requests" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Requests
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#path-params" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Path params
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#query-params" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Query params
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#json-bodies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSON bodies
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="JSON bodies">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#dates-and-times" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dates and times
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reporting-every-bad-field-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reporting every bad field at once
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#patch-telling-not-sent-from-sent-as-null" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PATCH: telling "not sent" from "sent as null"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reading-the-body-yourself" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the body yourself
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#checking-what-arrived" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checking what arrived
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#protobuf-and-other-formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Protobuf and other formats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#streaming-a-large-body" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Streaming a large body
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-method-and-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers, method and path
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#path-params" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Path params
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#query-params" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Query params
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#json-bodies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        JSON bodies
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="JSON bodies">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#dates-and-times" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dates and times
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reporting-every-bad-field-at-once" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reporting every bad field at once
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#patch-telling-not-sent-from-sent-as-null" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PATCH: telling "not sent" from "sent as null"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#reading-the-body-yourself" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the body yourself
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#checking-what-arrived" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checking what arrived
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#protobuf-and-other-formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Protobuf and other formats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#streaming-a-large-body" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Streaming a large body
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#headers-method-and-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Headers, method and path
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/requests.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="requests">Requests<a class="headerlink" href="#requests" title="Permanent link">&para;</a></h1>
+<p><strong>Everything a request carries (path, query, body, headers), and the handler argument that reads each one.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#handler-arguments">handler arguments</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#reading">reading a request from <code>Ctx</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/streaming.md#body"><code>Body</code></a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/request-input.md">Request input</a></p>
+<h2 id="path-params">Path params<a class="headerlink" href="#path-params" title="Permanent link">&para;</a></h2>
+<p><strong>A route with one <code>:name</code> takes it as a bare argument, and the argument's type decides the conversion. A route with two or more reads them by name, in a struct:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">"/users/:id"</span><span class="p">,</span><span class="w"> </span><span class="n">getUser</span><span class="p">);</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">getUser</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">get</span><span class="p">(</span><span class="s">"/posts/:year/:slug"</span><span class="p">,</span><span class="w"> </span><span class="n">getPost</span><span class="p">);</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">getPost</span><span class="p">(</span><span class="n">p</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Path</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">year</span><span class="o">:</span><span class="w"> </span><span class="kt">u16</span><span class="p">,</span><span class="w"> </span><span class="n">slug</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="w"> </span><span class="p">}))</span><span class="w"> </span><span class="o">!</span><span class="n">Post</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">year</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>Zig keeps no argument names, so <code>fn getPost(year: u16, slug: nilo.Str)</code> could not say which <code>:name</code> each argument is, and two <code>u32</code> on <code>/orgs/:org/members/:id</code> would compile either way round and run a tenant-scoped query with the ids swapped. A struct keeps its field names, so <code>Path(T)</code> reads each field from the <code>:name</code> it is spelled like, in whatever order you list them, and the compiler checks the two together. The positional form on a route with two or more params is a compile error that writes the <code>Path(…)</code> for you.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Member</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">org</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">member</span><span class="p">(</span><span class="n">p</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Path</span><span class="p">(</span><span class="n">Member</span><span class="p">))</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">org</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">id</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The fields can be a <code>u32</code>, <code>i64</code>, <code>f64</code>, <code>bool</code>, an enum, a type carrying <code>nilo_parse</code>, or a <code>Str</code> for the text as it arrived; never optional, because a param on a route that matched is always there. A value that doesn't convert is a 400 saying which param and what was expected, and your handler doesn't run. Values are percent-decoded before conversion, and the decoding happens after the route matched, so an encoded slash (<code>%2F</code>) stays inside its one segment instead of splitting it: <code>/files/a%2Fb</code> matches <code>/files/:name</code> and <code>name</code> is <code>a/b</code>. A field that names no param of the route, and a param of the route with no field, stop the compiler with a sentence naming the route (a handler holding a <code>*Ctx</code> may leave params out and read them with <code>c.param</code>).</p>
+<p>A <code>*</code> as the last segment matches the whole rest of the path and is the field <code>@"*"</code>: <code>p: nilo.Path(struct { repo: nilo.Str, @"*": nilo.Str })</code>. A <code>*Ctx</code> handler reads it with <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#reading"><code>c.param("*")</code></a>.</p>
+<p>A <a href="../middleware/#resolved-values">resolved value</a> may take a <code>Path(T)</code> too, to work something out of a param (the tenant out of <code>:org</code>). Reached from a handler, its field names are checked against that handler's route while compiling. Reached from a bare middleware through <code>c.resolve</code>, there is no route to check, so the names are read at run time and a route without one answers a 500 naming the resolver, the param and the route.</p>
+<h2 id="query-params">Query params<a class="headerlink" href="#query-params" title="Permanent link">&para;</a></h2>
+<p><strong>Query params arrive as a struct, one field per param</strong>, because unlike a path param a query param is named and may be missing:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Search</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">q</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span><span class="w">             </span><span class="c1">// no default: absent is a 400 saying which one</span>
+<span class="w">    </span><span class="n">page</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w">      </span><span class="c1">// a default is what "absent" means</span>
+<span class="w">    </span><span class="n">sort</span><span class="o">:</span><span class="w"> </span><span class="n">Sort</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">newest</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tag</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">Str</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">   </span><span class="c1">// optional: absent is null</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">search</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">params</span><span class="o">:</span><span class="w"> </span><span class="n">Query</span><span class="p">(</span><span class="n">Search</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">Item</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">search</span><span class="p">(</span><span class="n">params</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">q</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w"> </span><span class="n">params</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">page</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The types are checked before your handler runs, so the answers to a client that gets it wrong are already written:</p>
+<div class="highlight"><pre><span></span><code>?q is required
+?page has to be a whole number, not "soon"
+?sort is not one of the known choices (newest, oldest): "sideways"
+</code></pre></div>
+<p>A <code>?T</code> is optional with or without <code>= null</code>, and the rule is the same in a <a href="../forms/">form</a> and a <a href="#json-bodies">JSON body</a>: a field with a default or a <code>?</code> may be left out, and any other must be sent.</p>
+<p>Values arrive percent-decoded, with <code>+</code> counting as a space the way an HTML form sends one. <code>Query(Search)</code> is an ordinary struct, so a test builds one directly (<code>listUsers(&amp;db, .{ .value = .{ .page = 2 } })</code>) and never touches a query string.</p>
+<p>For one-off reads, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#reading"><code>c.query("q")</code></a> on a <code>*Ctx</code> gives a <code>?Str</code> and converts nothing. <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/011-the-query-string-is-a-struct-of-your-own.md">ADR 011</a> explains why the struct is the default.</p>
+<h2 id="json-bodies">JSON bodies<a class="headerlink" href="#json-bodies" title="Permanent link">&para;</a></h2>
+<p><strong>Any struct argument that isn't a <code>Query(T)</code>, a service or a resolved value is the request body, parsed from JSON:</strong></p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">NewUser</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span><span class="w"> </span><span class="n">age</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">plan</span><span class="o">:</span><span class="w"> </span><span class="n">Plan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">free</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">createUser</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">NewUser</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">incoming</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A body that does not fit gets the same treatment as a query param: a 400 that names the field and what was wrong with it.</p>
+<div class="highlight"><pre><span></span><code>the request body has a field "titl" this endpoint does not know. It takes: title, done (optional)
+the request body is missing "age" (a whole number)
+"plan" is not one of the known choices (free, paid): "gold"
+"plan" has to be one of free, paid, not a number
+"name" has to be text, not a number
+the request body is not valid JSON — it stops making sense at line 1, column 12
+the request body is empty. This endpoint expects a JSON object with: title, done (optional)
+</code></pre></div>
+<p>A field with a default may be absent, and so may a <code>?T</code>, which is then null: exactly as in a query struct, whether or not it says <code>= null</code>. Working out which message to send costs a second parse, and only a request that was already going to be refused pays it.</p>
+<p>Nested objects and lists are named by where the problem is, not by the top-level field that contains it:</p>
+<div class="highlight"><pre><span></span><code>the request body is missing "address.city" (text)
+the request body has a field "address.zip" this endpoint does not know. It takes: street, city
+"lines[1].qty" has to be a whole number, not text
+</code></pre></div>
+<p>A body field that is an internally tagged union (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/016-the-api-description-comes-from-the-signatures.md">ADR 016</a>) is described the same way, naming the variant it was read as:</p>
+<div class="highlight"><pre><span></span><code>"condition.signal" is not one of the known variants (metrics, logs): "traces"
+the request body has a field "condition.metric_nme" the "metrics" variant does not know. It takes: signal, metric_name, agg (optional)
+the request body is missing "condition.signal", which names the variant: one of metrics, logs
+</code></pre></div>
+<p>A tagged union that is the whole body is described the same way, with the discriminator and the variants:</p>
+<div class="highlight"><pre><span></span><code>the request body is missing "kind", which names the variant: one of loose, tight, off
+"kind" is not one of the known variants (loose, tight, off): "nope"
+the request body has a field "x" the "tight" variant does not know. It takes: kind, n
+the request body is empty. This endpoint expects an object whose "kind" is one of loose, tight, off
+</code></pre></div>
+<p><strong>A body is read by the keys its struct goes out under.</strong> A struct with <code>rename_all</code> or <code>.rename</code> in its <code>nilo_json</code> is posted under the renamed keys (<code>fullName</code>), and every sentence above quotes that spelling, so a camelCase front end can post the same snake_case Row it receives. <code>.skip = &amp;.{"password_hash"}</code> takes a field out of the body altogether: a client that sends its key has sent an unknown one, and the field needs a default value (<a href="../responses/#json-field-names-and-union-tags">the guide</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/148-a-field-name-is-a-spelling-too.md">ADR 148</a>).</p>
+<p><strong>To accept a body that carries keys your type does not list</strong>, say so on the type with <code>pub const nilo_json = .{ .unknown_fields = .ignore };</code>. That is for a webhook or an OTLP/HTTP JSON receiver whose sender adds fields over time; it applies to that struct alone and not to the ones it holds (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#skipping-the-keys-a-body-struct-does-not-know">reference</a>).</p>
+<p><strong>To answer JSON of the wrong shape with a 422 rather than a 400</strong>, the line an axum server draws and its clients read, say so on the body's type with <code>pub const nilo_json = .{ .misfit = 422 };</code>. Text that is not JSON, an empty body and one nested past 64 levels stay a 400, because none of them is a body of any shape. A missing field, a value of the wrong kind, a key the type does not know, a key given twice and a body that is not an object become a 422 with the same sentence. It holds under <code>Bound(T)</code> for what the binding cannot collect, and the API document lists the 422 beside the 400 (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#answering-json-of-the-wrong-shape-with-a-422">reference</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/251-json-that-does-not-fit-can-be-a-422.md">ADR 251</a>).</p>
+<p>A struct with many fields lists the first of them and says how many it left out: <code>It takes: alpha, bravo, charlie, and 9 more</code>.</p>
+<p>That goes eight levels down, the same depth the API description and the staleness check follow. Below that there is no field name left to quote, so the 400 says which limit it hit instead of saying nothing:</p>
+<div class="highlight"><pre><span></span><code>the request body is valid JSON and does not fit this endpoint, but it is nested
+deeper than 8 levels — which is as far as nilo follows a body — so it cannot say
+which part is wrong. The mistake is somewhere below that.
+</code></pre></div>
+<p>That message means the shape is too deep to name, not that the depth is refused: a body that <em>fits</em> is parsed however deep it goes.</p>
+<p>A <code>Str</code> field lives in the request arena, so like every <code>Str</code> it stops being valid when the request ends. <code>keep</code> it if the value goes into a service.</p>
+<h3 id="dates-and-times">Dates and times<a class="headerlink" href="#dates-and-times" title="Permanent link">&para;</a></h3>
+<p><strong><code>nilo.Timestamp</code> and <code>nilo.Date</code> are a moment and a calendar day, and they read and write as text everywhere request data does, with no database in the build:</strong> a JSON body field, a JSON response field, a query field, a path param and a form field. The OpenAPI document says <code>type: string</code> with <code>format: date-time</code> and <code>format: date</code>.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Booking</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">starts_at</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Timestamp</span><span class="p">,</span><span class="w"> </span><span class="n">on</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Date</span><span class="p">,</span><span class="w"> </span><span class="n">ends_at</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">nilo</span><span class="p">.</span><span class="n">Timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">book</span><span class="p">(</span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">Booking</span><span class="p">)</span><span class="w"> </span><span class="n">Booking</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">incoming</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>{"starts_at":"2026-08-16T16:30:00+07:00","on":"2026-09-17"}</code> is read, the offset normalised to UTC, and comes back as <code>"2026-08-16T09:30:00.000000Z"</code> and <code>"2026-09-17"</code>. A time with no zone is a 400, because there is no correct reading of it, and so is a date with a time on it. They carry no calendar arithmetic and no time zones (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/core.md#timestamp-and-date"><code>Timestamp</code> and <code>Date</code> in the reference</a>). <code>sql.Timestamp</code> and <code>sql.Date</code> are the same types, so a column and a field agree.</p>
+<h3 id="reporting-every-bad-field-at-once">Reporting every bad field at once<a class="headerlink" href="#reporting-every-bad-field-at-once" title="Permanent link">&para;</a></h3>
+<p><strong><code>Bound(T)</code> collects every bad field and hands them to the handler</strong>, where the plain 400 above names only one, because the parse stops at the first thing it cannot do:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">placeOrder</span><span class="p">(</span><span class="n">b</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Bound</span><span class="p">(</span><span class="n">NewOrder</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="n">nilo</span><span class="p">.</span><span class="n">Status</span><span class="p">(</span><span class="mi">201</span><span class="p">,</span><span class="w"> </span><span class="n">Order</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">value</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">fail</span><span class="p">();</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>b.fail()</code> is a 422 naming each one, and <code>b.failures()</code> is there when the answer needs a shape of its own. <code>b.must("total", order.total &gt; 0, "has to be more than nothing")</code> adds a rule of your own to the same answer, so an endpoint does not end up rejecting requests in two different shapes. <code>Bound(Query(T))</code> does the same for the query string. The full explanation, including the three cases that stay a plain 400, is under <a href="../forms/#collecting-every-field-error-bound">Forms</a>, where it matters most. The type is <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#boundw"><code>Bound(W)</code></a> in the reference.</p>
+<p>A number field in a JSON body also takes the number quoted, so <code>{"quantity":"12"}</code> is twelve, held to the same spelling rule as an unquoted one and as a form field's text.</p>
+<p><strong>A number in a body is read by the same rule a query's is</strong> (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/084-a-number-in-a-request-is-not-a-zig-literal.md">ADR 084</a>). Digits, a <code>-</code> where the type has one, and for a real number a fraction and an exponent, so a quoted <code>"10"</code> is still ten and <code>"1_0"</code>, <code>"+7"</code> and <code>"nan"</code> are refused. A whole number is digits: <code>5.0</code> and <code>1e2</code> are not read as 5 and 100, and <code>1e999</code> is not read as infinity. A number that is the right kind and does not fit its field says so and quotes the number, as a query does:</p>
+<div class="highlight"><pre><span></span><code>"age" has to be a whole number, not 300, which is outside 0 to 255
+"qty" has to be a whole number, not 1.5
+"count" has to be a whole number, not -1, which is outside 0 to 4294967295
+</code></pre></div>
+<p>Under <code>Bound</code> those are collected with the other fields. A key that appears twice in an object is a 400 naming it, and nilo does not guess which one was meant.</p>
+<h3 id="patch-telling-not-sent-from-sent-as-null">PATCH: telling "not sent" from "sent as null"<a class="headerlink" href="#patch-telling-not-sent-from-sent-as-null" title="Permanent link">&para;</a></h3>
+<p><strong><code>Patch(T)</code> tells apart a field that was not sent, one sent as null, and one sent with a value.</strong> <code>?T</code> has two states and a PATCH needs three. With <code>due: ?Str = null</code>, the bodies <code>{}</code> and <code>{"due":null}</code> arrive identical, so "leave the due date alone" and "clear the due date" cannot be told apart. <code>Patch(T)</code> keeps all three:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">EditTodo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Patch</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">absent</span><span class="p">,</span>
+<span class="w">    </span><span class="n">due</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Patch</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">absent</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">editTodo</span><span class="p">(</span><span class="n">store</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">EditTodo</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">Todo</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">current</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">due</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">incoming</span><span class="p">.</span><span class="n">due</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">absent</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">current</span><span class="p">.</span><span class="n">due</span><span class="p">,</span><span class="w">   </span><span class="c1">// not mentioned: leave it</span>
+<span class="w">        </span><span class="p">.</span><span class="n">cleared</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w">         </span><span class="c1">// sent as null: empty it</span>
+<span class="w">        </span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="o">|</span><span class="n">v</span><span class="o">|</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w">   </span><span class="c1">// sent with a value</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="err">…</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The <code>= .absent</code> default is required: it is what "the field was not in the body" means, and it also makes the field optional in the generated description. Where "leave it" and "clear it" really are the same, <code>incoming.due.orNull()</code> merges the two.</p>
+<p>See <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/025-a-patch-needs-three-answers-and-an-optional-has-two.md">ADR 025</a>.</p>
+<h3 id="reading-the-body-yourself">Reading the body yourself<a class="headerlink" href="#reading-the-body-yourself" title="Permanent link">&para;</a></h3>
+<p>From a <code>*Ctx</code>:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>c.body()</code></td>
+<td>the whole body as a <code>Str</code>, read once into the request arena</td>
+</tr>
+<tr>
+<td><code>c.json(T)</code></td>
+<td>the body parsed into <code>T</code>, the same as a struct argument</td>
+</tr>
+<tr>
+<td><code>c.bodyStream()</code></td>
+<td>the body in pieces, below</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>c.body()</code> reads the whole body and refuses anything past 1 MB.</strong> That is right for JSON and wrong for a file.</p>
+<p>It takes arena memory as the bytes arrive, not as <code>Content-Length</code> promises them, so a client that announces a megabyte and then trickles holds a page, not a megabyte (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/083-a-body-is-taken-as-it-arrives.md">ADR 083</a>). A body that arrives normally pays nothing for this: under a page it is still one allocation, over a page it is two.</p>
+<p><strong>A body sent as <code>Content-Encoding: gzip</code> is decompressed before anything reads it.</strong> <code>c.body()</code>, <code>c.json</code>, a struct argument and a <code>Form(T)</code> all see the JSON, not the compressed stream, just as they never see the framing. The stock OpenTelemetry Collector and most agents that push to a server gzip by default, and until <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/089-a-body-under-an-encoding-other-than-gzip-is-refused.md">ADR 089</a> that default got a 415.</p>
+<p>The limits: the compressed bytes are bounded by <code>max_body</code>, and so is what they decompress to. That is checked against the length the stream announces before a byte is decompressed, so a small body that would expand into a large one is a 413, not a megabyte. A stream that does not decode is a 400 naming the coding. Every other coding (<code>br</code>, <code>deflate</code>, <code>zstd</code>, two stacked) is still a 415 naming the header. A gzipped request costs one more arena allocation, of exactly the decompressed size; a request that is not gzipped pays nothing.</p>
+<p><code>c.bodyStream()</code> is the exception: a stream hands bytes out as they arrive and holds nothing, so there is nowhere to decompress into, and a gzipped body on a streaming route is a 415 that says so.</p>
+<p><strong>A route can say it reads a <code>Content-Encoding</code> itself.</strong> Prometheus remote-write sends a protobuf body compressed with snappy under <code>Content-Encoding: snappy</code>, an OTLP exporter may send zstd, and a gateway forwarding a body wants it untouched. nilo decodes none of those, and the 415 is still right for every route that was not written to expect one. Name the codings a route reads and it gets the bytes as they arrived, plus the coding in the head (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/283-a-route-can-read-a-content-encoding-itself.md">ADR 283</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">remoteWrite</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">sent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">body</span><span class="p">()).</span><span class="n">view</span><span class="p">();</span><span class="w"> </span><span class="c1">// still snappy-framed</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">coding</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"content-encoding"</span><span class="p">);</span><span class="w"> </span><span class="c1">// "snappy", or null when it was not compressed</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sent</span><span class="p">;</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">coding</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// decode it, and cap what it decodes to</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">routes</span><span class="p">(</span><span class="n">app</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">App</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">with</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">bodyEncodings</span><span class="p">(.{</span><span class="s">"snappy"</span><span class="p">})).</span><span class="n">post</span><span class="p">(</span><span class="s">"/api/v1/write"</span><span class="p">,</span><span class="w"> </span><span class="n">remoteWrite</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>max_body</code>, or the route's <code>nilo.maxBody</code>, is applied to the bytes that arrived, so a 413 is on the compressed length. What they decode to is yours to bound, because you know the format and nilo does not: a decoder that trusts a length the sender wrote is the decompression bomb. A coding the route did not name is a 415 whose <code>Accept-Encoding</code> lists the ones it reads, and every other route keeps answering exactly what it did. Naming <code>"gzip"</code> passes gzip through undecoded on that route; without it gzip is inflated as everywhere else. <code>c.bodyStream()</code> hands the bytes over too. <code>c.json</code>, a <code>Form(T)</code> and a typed body argument refuse such a body with a 415 rather than parse compressed bytes; a type that decodes its own body (<code>nilo_decode</code>) is handed them, which is what it is for. It means the same on HTTP/2.</p>
+<h2 id="checking-what-arrived">Checking what arrived<a class="headerlink" href="#checking-what-arrived" title="Permanent link">&para;</a></h2>
+<p><strong>The type of a field is its rule.</strong> A number inside a range, text of a given length or shape, a list of a given size: each is a type, and each is read the same way in a JSON body, a form, a query string or a path param (a list is the exception, below). It is the job go-playground's <code>validate:"min=1,email"</code> tag does and zod's <code>z.string().email().min(1)</code> does, with the rule in the type rather than a string or a call chain, so the compiler sees it, a bad default is a compile error, and the API description is written from the same declaration the server enforces.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">NewPost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Text</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">min</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">120</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="n">author</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Email</span><span class="p">,</span>
+<span class="w">    </span><span class="n">rating</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Within</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="p">),</span>
+<span class="w">    </span><span class="n">weight</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Within</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span><span class="w"> </span><span class="mf">1.0</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">of</span><span class="p">(</span><span class="mf">0.5</span><span class="p">),</span>
+<span class="w">    </span><span class="n">tags</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Many</span><span class="p">(</span><span class="n">Str</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">min</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="n">slug</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Text</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">check</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">isSlug</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">said</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"has to be lowercase words joined by dashes"</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="n">password</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Text</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">min</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="n">confirm</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">nilo_check</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="n">NewPost</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Rules</span><span class="p">(</span><span class="n">NewPost</span><span class="p">))</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">r</span><span class="p">.</span><span class="n">must</span><span class="p">(</span><span class="s">"confirm"</span><span class="p">,</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">password</span><span class="p">.</span><span class="n">eql</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">confirm</span><span class="p">.</span><span class="n">view</span><span class="p">()),</span><span class="w"> </span><span class="s">"has to match the password"</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">isSlug</span><span class="p">(</span><span class="n">text</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">ch</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">std</span><span class="p">.</span><span class="n">ascii</span><span class="p">.</span><span class="n">isLower</span><span class="p">(</span><span class="n">ch</span><span class="p">)</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="o">!</span><span class="n">std</span><span class="p">.</span><span class="n">ascii</span><span class="p">.</span><span class="n">isDigit</span><span class="p">(</span><span class="n">ch</span><span class="p">)</span><span class="w"> </span><span class="k">and</span><span class="w"> </span><span class="n">ch</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">'-'</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">text</span><span class="p">.</span><span class="n">len</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">createPost</span><span class="p">(</span><span class="n">post</span><span class="o">:</span><span class="w"> </span><span class="n">NewPost</span><span class="p">)</span><span class="w"> </span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">post</span><span class="p">.</span><span class="n">tags</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">post</span><span class="p">.</span><span class="n">rating</span><span class="p">.</span><span class="n">value</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Each one is a struct holding the value as <code>.value</code>, so the handler reads <code>post.rating.value</code> (an integer) and <code>post.weight.value</code> (an <code>f64</code>). A body outside a rule is a 400 that names the field, what it has to be and, for a number or a list, what it was; nothing quotes a <code>Text</code> back, because a password in a response is a leak, except an <code>Email</code>, where seeing the address is how the typo is found:</p>
+<div class="highlight"><pre><span></span><code>"title" has to be text of 1 to 120 characters, not 0
+"author" has to look like an address, not "wati"
+"rating" has to be a whole number from 1 to 5, not "9"
+"weight" has to be a number from 0 to 1, not "1.5"
+"tags" has to be a list of 1 to 5 items, not a list of 7
+"tags[2]" has to be text, not a number
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Holds</th>
+<th>The rule</th>
+<th>The document says</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Text(.{ .min, .max, .check, .said })</code></td>
+<td>a <code>Str</code></td>
+<td>length in characters, and a function of yours</td>
+<td><code>minLength</code>, <code>maxLength</code></td>
+</tr>
+<tr>
+<td><code>Email</code>, <code>Url</code></td>
+<td>a <code>Str</code></td>
+<td>an address, a URL</td>
+<td><code>format: email</code>, <code>format: uri</code></td>
+</tr>
+<tr>
+<td><code>Within(min, max)</code></td>
+<td>an integer, or an <code>f64</code> when a bound is written with a point</td>
+<td>inclusive range; <code>nan</code> and <code>inf</code> are refused</td>
+<td><code>minimum</code>, <code>maximum</code></td>
+</tr>
+<tr>
+<td><code>Many(T, .{ .min, .max })</code></td>
+<td>a <code>[]const T</code></td>
+<td>how many</td>
+<td><code>minItems</code>, <code>maxItems</code></td>
+</tr>
+</tbody>
+</table>
+<p>A default is written <code>.of(…)</code> (<code>weight: nilo.Within(0.0, 1.0) = .of(0.5)</code>) and is checked against the rule while compiling, because a default is the one value a request never sends. A bound the wrong way round, a <code>Many</code> with no bound and a default outside its range are compile errors naming the type.</p>
+<p><strong>A rule about the struct goes on the struct.</strong> <code>nilo_check</code> runs once every field has bound and says what did not hold with <code>r.must</code>, whichever way the struct arrived. It is the place for "confirm matches password" and "end is after start". A rule that needs the database ("that address is taken") goes in the handler as <a href="../forms/#custom-validation-rules"><code>b.must</code></a>.</p>
+<p><strong><code>Bound(T)</code> collects them all.</strong> A plain body stops at the first bad field with a 400, the way <code>std.json</code> stops. <code>Bound</code> keeps going and answers a 422 naming each one, the way a form with three wrong boxes should:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">createPostBound</span><span class="p">(</span><span class="n">b</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Bound</span><span class="p">(</span><span class="n">NewPost</span><span class="p">))</span><span class="w"> </span><span class="o">!</span><span class="kt">usize</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">post</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">value</span><span class="p">()</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">fail</span><span class="p">();</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">post</span><span class="p">.</span><span class="n">tags</span><span class="p">.</span><span class="n">len</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code>3 fields did not fit: "rating" has to be a whole number from 1 to 5, not "9";
+"tags" has to be a list of 1 to 5 items, not a list of 0;
+"confirm" has to match the password
+</code></pre></div>
+<p>A <code>Many</code> also reads a form: the values sent under one name (a checkbox group, a <code>&lt;select multiple&gt;</code>) are counted, and an empty group is a count of none. It is not read from a query string, where <code>?tag=a,b</code> is a plain <code>[]const T</code> and the count is yours to check. Its elements are read as they are in any list, so a <code>Many(Text(…), …)</code> holds each element to its own shape and names a bad one by position.</p>
+<p>The numbers are read as a query's are (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/084-a-number-in-a-request-is-not-a-zig-literal.md">ADR 084</a>), which is why <code>Within(0.0, 1.0)</code> refuses <code>nan</code>, <code>1e999</code> and <code>0x1p-1</code>. nilo has no validation language: a rule a type cannot state is a <code>check</code>, a <code>nilo_check</code> or a <a href="../forms/#custom-validation-rules"><code>must</code></a>, and whether an age is plausible is still the application's question (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/167-a-whole-number-inside-a-range-is-a-type.md">ADR 167</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/193-text-with-a-shape-is-a-type-and-a-rule-about-the-struct-is-a-function-on-it.md">ADR 193</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/266-a-list-with-a-length-is-a-type.md">ADR 266</a>).</p>
+<h2 id="protobuf-and-other-formats">Protobuf and other formats<a class="headerlink" href="#protobuf-and-other-formats" title="Permanent link">&para;</a></h2>
+<p><strong>A struct with a <code>wire</code> table is read as protobuf or as JSON, whichever the request sent, and answered in the same.</strong> One function serves a browser's <code>fetch</code> in JSON and another service's client in protobuf, and is a gRPC method too:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">SumRequest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">wire</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="n">a</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="n">b</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">SumReply</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">wire</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">sum</span><span class="p">(</span><span class="n">in</span><span class="o">:</span><span class="w"> </span><span class="n">SumRequest</span><span class="p">)</span><span class="w"> </span><span class="n">SumReply</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">in</span><span class="p">.</span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">in</span><span class="p">.</span><span class="n">b</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>Content-Type: application/proto</code> is protobuf, the field numbers <a href="../proto/"><code>nilo_proto</code></a>'s, and anything else is JSON, as for any struct. Bytes that are not the message are a 400 that says what was wrong with them.</p>
+<p><strong>A format nilo does not know is read by the type itself</strong>: declare the content type and a <code>nilo_decode</code> that turns the body's bytes into the value, and the route reads it only when it arrives under that label. MsgPack, a vendor's binary or a CSV upload all fit; see <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#a-body-in-another-format">the reference</a> for both, and what each refuses.</p>
+<h2 id="streaming-a-large-body">Streaming a large body<a class="headerlink" href="#streaming-a-large-body" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">upload</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">store</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Receipt</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">incoming</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">bodyStreamWith</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">max_bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="k">catch</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">tooLarge</span><span class="p">(</span><span class="s">"this endpoint takes up to 8 MB"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+
+<span class="w">    </span><span class="kr">var</span><span class="w"> </span><span class="n">buf</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="mi">64</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">]</span><span class="kt">u8</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="k">try</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="o">&amp;</span><span class="n">buf</span><span class="p">))</span><span class="w"> </span><span class="o">|</span><span class="n">part</span><span class="o">|</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">part</span><span class="p">);</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">bytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">seen</span><span class="p">()</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>A body read in pieces allocates nothing at all.</strong> The 64 KB above is the only memory involved. It does not even take the one buffer a response stream takes, because a body reader already has somewhere to put bytes. <code>Content-Length</code> and chunked bodies look the same from here, exactly as they do to <code>c.body()</code>: a handler asks for the body, not for how it arrived. The reader is <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/streaming.md#body"><code>Body</code></a> in the reference.</p>
+<p>Measured on the streaming example: 5 × (a 3 MB upload plus a 50,000-row streamed report) moved the server's RSS by <strong>72 KB</strong>.</p>
+<p><code>max_bytes</code> defaults to 64 MB and must be a number, because a chunked body announces no size, and "however much they send" would let a client decide how much of your memory to use. A <code>Content-Length</code> past the limit is refused before a byte is read.</p>
+<p><strong>A client that asks first is answered first.</strong> A client sending <code>Expect: 100-continue</code> (curl does, for bodies over 1 KB) waits for the server before it sends the body. nilo answers <code>100 Continue</code> only when it commits to reading, so a request refused before that gets its final status and <strong>never sends the body at all</strong>: over the limit, no such route, wrong method, or a handler that never asks for the body (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/073-a-header-is-answered-as-asked-or-refused.md">ADR 073</a>). There is nothing to turn on and nothing to write.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>incoming.read(&amp;buf)</code></td>
+<td>the next piece, or <code>null</code> at the end</td>
+</tr>
+<tr>
+<td><code>incoming.writeTo(w)</code></td>
+<td>pump the lot into a <code>std.Io.Writer</code>, returning the count</td>
+</tr>
+<tr>
+<td><code>incoming.discardRest()</code></td>
+<td>give up on the rest, deliberately</td>
+</tr>
+<tr>
+<td><code>incoming.seen()</code></td>
+<td>bytes read so far</td>
+</tr>
+<tr>
+<td><code>incoming.size()</code></td>
+<td>what the request announced, or <code>null</code> if it was chunked</td>
+</tr>
+<tr>
+<td><code>incoming.reader</code></td>
+<td>a plain <code>std.Io.Reader</code>, for handing to the standard library</td>
+</tr>
+</tbody>
+</table>
+<p>A body left half-read is fine: nilo discards the rest so the connection is clean for the next request.</p>
+<p><strong>An upload the client cut short is an error, not a short file.</strong> If the connection ends while bytes are still owed (<code>Content-Length: 1000000</code> and the client stops at 300,000), <code>read</code>, <code>writeTo</code> and <code>discardRest</code> fail with <code>error.BodyTruncated</code>, which is a 400 if you let it through, and the connection is closed afterwards. The same cut under <code>c.body()</code> is the same 400, <code>the request body ended before all of it had been sent</code>. You do not need to compare <code>seen()</code> with <code>size()</code> to know the file is whole.</p>
+<p>See <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/019-a-request-that-lasts-is-still-one-request.md">ADR 019</a>.</p>
+<h2 id="headers-method-and-path">Headers, method and path<a class="headerlink" href="#headers-method-and-path" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><span class="n">c</span><span class="p">.</span><span class="n">method</span><span class="w">            </span><span class="c1">// .GET, .POST, …</span>
+<span class="n">c</span><span class="p">.</span><span class="n">path</span><span class="p">()</span><span class="w">            </span><span class="c1">// the path, without the query string</span>
+<span class="n">c</span><span class="p">.</span><span class="n">header</span><span class="p">(</span><span class="s">"X-Token"</span><span class="p">)</span><span class="w"> </span><span class="c1">// a request header, name matched case-insensitively</span>
+<span class="n">c</span><span class="p">.</span><span class="n">param</span><span class="p">(</span><span class="s">"id"</span><span class="p">)</span><span class="w">       </span><span class="c1">// a path param, percent-decoded</span>
+<span class="n">c</span><span class="p">.</span><span class="n">query</span><span class="p">(</span><span class="s">"q"</span><span class="p">)</span><span class="w">        </span><span class="c1">// a query param, percent-decoded</span>
+</code></pre></div>
+<p><strong><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/ctx.md#reading"><code>c.header</code></a> returns the first header of that name.</strong> To read the others, or in a middleware that does not know the names in advance, walk them all:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">it</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">headers</span><span class="p">();</span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">it</span><span class="p">.</span><span class="n">next</span><span class="p">())</span><span class="w"> </span><span class="o">|</span><span class="n">h</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// h.name and h.value are both Str, and both die with the request</span>
+<span class="w">    </span><span class="n">std</span><span class="p">.</span><span class="n">log</span><span class="p">.</span><span class="n">debug</span><span class="p">(</span><span class="s">"{s}: {s}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">h</span><span class="p">.</span><span class="n">name</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span><span class="w"> </span><span class="n">h</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">view</span><span class="p">()</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Neither allocates: both read the head where it already is.</p>
+<p>The whole request head has to fit in the connection's <code>read_buffer</code> (16 KB by default, which is enough for a browser behind a single sign-on). A head that doesn't fit is answered with a 431. Raise it in <code>listen()</code> if your clients send cookies bigger than that.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../routing/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Routing">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Routing
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../forms/" class="md-footer__link md-footer__link--next" aria-label="Next: Forms">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Forms
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2599 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="An HTTP framework for Zig 0.17, and the toolkit it is built from">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.8/services/">
+      
+      
+        <link rel="prev" href="../middleware/">
+      
+      
+        <link rel="next" href="../static-files/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Services - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#services" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Services
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#registering-a-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registering a service
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-of-the-same-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two of the same type
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking-a-shared-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking a shared service
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storing-request-text-in-a-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storing request text in a service
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Storing request text in a service">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#one-arena-per-row" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One arena per row
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#returning-text-a-service-owns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Returning text a service owns
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#converting-deeply-nested-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Converting deeply nested types
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handlers-must-not-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handlers must not block
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Handlers must not block">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-needs-wrapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What needs wrapping
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-blocking-call-that-fans-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A blocking call that fans out
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-failure-that-carries-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A failure that carries data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#state-shared-between-fibers-and-blocking-workers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State shared between fibers and blocking workers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-blocking-warning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The blocking warning
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#registering-a-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registering a service
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-of-the-same-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two of the same type
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking-a-shared-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking a shared service
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storing-request-text-in-a-service" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storing request text in a service
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Storing request text in a service">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#one-arena-per-row" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One arena per row
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#returning-text-a-service-owns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Returning text a service owns
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#converting-deeply-nested-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Converting deeply nested types
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#handlers-must-not-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Handlers must not block
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Handlers must not block">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-needs-wrapping" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What needs wrapping
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-blocking-call-that-fans-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A blocking call that fans out
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#a-failure-that-carries-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A failure that carries data
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#state-shared-between-fibers-and-blocking-workers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State shared between fibers and blocking workers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-blocking-warning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The blocking warning
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/services.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="services">Services<a class="headerlink" href="#services" title="Permanent link">&para;</a></h1>
+<p><strong>A service is a long-lived thing (a database connection, config, a logger) registered once when the App is built, then asked for by handlers by its type.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/app.md#app"><code>app.provide</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/app.md#concurrency"><code>nilo.blocking</code> and <code>nilo.Mutex</code></a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/lifecycle.md">Lifecycle</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/memory.md">Memory</a></p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">Db</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="s">"app.sqlite"</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">db</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">getUser</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1">// matched by type, no name anywhere</span>
+</code></pre></div>
+<h2 id="registering-a-service">Registering a service<a class="headerlink" href="#registering-a-service" title="Permanent link">&para;</a></h2>
+<p><strong>Registration order doesn't matter, and a service nobody asks for costs nothing.</strong> A service a handler asks for that nobody registered stops <code>listen()</code> before the socket opens:</p>
+<div class="highlight"><pre><span></span><code>error: service *main.Db was never registered, but 4 routes need it
+("/users", "/users/:id", "/admin/stats", …) — call app.provide() before app.listen()
+</code></pre></div>
+<p><code>*const Config</code> and <code>*Config</code> are different types and are looked up separately, so a read-only service can say so. From a handler that took no typed arguments, <code>c.service(*Db)</code> does the same lookup. A middleware takes a service as an argument after <code>Next</code>, like a handler, and <code>listen()</code> refuses to start when it is missing; <code>c.service</code> inside a middleware is a <code>?*Db</code>, which fails open if it is written <code>orelse return next.run(c)</code> (<a href="../middleware/#giving-a-middleware-what-it-needs">Middleware</a>).</p>
+<p>The App is a service like any other (<code>try app.provide(&amp;app)</code>), which is how an admin endpoint gets at <code>app.shutdown()</code>.</p>
+<p>See <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/005-services-via-a-runtime-registry.md">ADR 005</a>.</p>
+<h2 id="two-of-the-same-type">Two of the same type<a class="headerlink" href="#two-of-the-same-type" title="Permanent link">&para;</a></h2>
+<p><strong>A service is found by its type, so a second one of the same type is refused when it is provided.</strong> A primary and a replica, or two upstream clients, are both a <code>Db</code> or a <code>Client</code>; the way round it is a struct of its own per instance, which is a different type and so a different service:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Primary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="n">Db</span><span class="w"> </span><span class="p">};</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">Replica</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="n">Db</span><span class="w"> </span><span class="p">};</span>
+
+<span class="kr">var</span><span class="w"> </span><span class="n">primary</span><span class="o">:</span><span class="w"> </span><span class="n">Primary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">Db</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="s">"primary.sqlite"</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="kr">var</span><span class="w"> </span><span class="n">replica</span><span class="o">:</span><span class="w"> </span><span class="n">Replica</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">Db</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="s">"replica.sqlite"</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">primary</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">replica</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">getUser</span><span class="p">(</span><span class="n">r</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Replica</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">db</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">id</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">saveUser</span><span class="p">(</span><span class="n">p</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Primary</span><span class="p">,</span><span class="w"> </span><span class="n">body</span><span class="o">:</span><span class="w"> </span><span class="n">NewUser</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">db</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">body</span><span class="p">);</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p>Providing a second <code>Db</code> instead stops with a sentence naming the type and this fix, and <code>app.provide</code> returns <code>error.ServiceAlreadyRegistered</code> for a caller that wants to branch on it. A group's <code>provide</code> is App-wide too, so this holds inside a plugin as well (ADR 002, ADR 005).</p>
+<h2 id="locking-a-shared-service">Locking a shared service<a class="headerlink" href="#locking-a-shared-service" title="Permanent link">&para;</a></h2>
+<p><strong>Handlers run at the same time on several OS threads, so a service that gets written to needs a lock, and it has to be <code>nilo.Mutex</code>, not <code>std.Thread.Mutex</code>.</strong> A service you only read from is fine as it is. <code>std.Thread.Mutex</code> blocks the whole thread and every other request being served on it:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">lock</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Mutex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">,</span>
+<span class="w">    </span><span class="n">users</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">ArrayList</span><span class="p">(</span><span class="n">User</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">empty</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">addUser</span><span class="p">(</span><span class="n">store</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">NewUser</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">    </span><span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>lock()</code> can fail with <code>error.Canceled</code> if the request went away while waiting, and that already maps to a 503. It also works with no server running, so a handler that takes the lock can still be tested as a plain function. See <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/010-shared-services-need-a-lock-from-the-bulkhead.md">ADR 010</a>.</p>
+<h2 id="storing-request-text-in-a-service">Storing request text in a service<a class="headerlink" href="#storing-request-text-in-a-service" title="Permanent link">&para;</a></h2>
+<p><strong>A service must copy request text before storing it.</strong> This is the first problem most people coming from Go or Node hit, and it is worth spelling out because the compiler will not catch it.</p>
+<p>Text from a request is a <a href="../handlers/#request-text-str"><code>Str</code></a>, and it points into memory that is thrown away when the request ends. A service outlives the request. So this compiles, passes every test you write for it, and serves the <em>next</em> request's bytes to the one that asked:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">addTodo</span><span class="p">(</span><span class="n">store</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">NewTodo</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Todo</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">todo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Todo</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">next_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">title</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">title</span><span class="w"> </span><span class="p">};</span><span class="w">  </span><span class="c1">// ✗</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">todos</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">store</span><span class="p">.</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="n">todo</span><span class="p">);</span>
+<span class="w">    </span><span class="err">…</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>In a debug build nilo panics on the read instead, and names the request that did it. The fix is to copy:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Store</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">gpa</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">,</span>
+<span class="w">    </span><span class="n">lock</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Mutex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">,</span>
+<span class="w">    </span><span class="n">todos</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">ArrayList</span><span class="p">(</span><span class="n">Todo</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">empty</span><span class="p">,</span>
+
+<span class="w">    </span><span class="c1">/// Everything a Todo owns, freed in one place. Worth having even for one</span>
+<span class="w">    </span><span class="c1">/// string: the day a `due` is added, this is the only function to change.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">free</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">todo</span><span class="o">:</span><span class="w"> </span><span class="n">Todo</span><span class="p">)</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">.</span><span class="n">free</span><span class="p">(</span><span class="n">todo</span><span class="p">.</span><span class="n">title</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">deinit</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">)</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">todos</span><span class="p">.</span><span class="n">items</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="n">t</span><span class="o">|</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">free</span><span class="p">(</span><span class="n">t</span><span class="p">);</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">todos</span><span class="p">.</span><span class="n">deinit</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Todo</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">defer</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">        </span><span class="c1">// The copy, and the whole of the rule: the store owns its strings.</span>
+<span class="w">        </span><span class="kr">const</span><span class="w"> </span><span class="n">todo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Todo</span><span class="p">{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">next_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">title</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">.</span><span class="n">dupe</span><span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">title</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">todos</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="n">todo</span><span class="p">);</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">next_id</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">todo</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">addTodo</span><span class="p">(</span><span class="n">store</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">NewTodo</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Todo</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">store</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">incoming</span><span class="p">.</span><span class="n">title</span><span class="p">.</span><span class="n">view</span><span class="p">());</span><span class="w">   </span><span class="c1">// ✓ view() to read, add() copies</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Two habits cover the rest:</p>
+<ul>
+<li><strong>The service takes <code>[]const u8</code>, not <code>Str</code>.</strong> <code>Str</code> is a request type, and a service that never names it cannot store one by accident. The handler calls <code>.view()</code> at the boundary, the one line where the lifetime matters. <code>.keep(gpa)</code> makes the same copy when a handler does it itself.</li>
+<li><strong>One <code>free</code> per stored type, called from <code>deinit</code> and from every replace and remove.</strong> When replacing a row, allocate the new string <em>before</em> freeing the old one, so a failed allocation leaves the row as it was instead of pointing at freed memory.</li>
+</ul>
+<p>None of this is specific to nilo: it is what owning memory costs in Zig, and a real part of the work in a CRUD app in this language. What nilo adds is that getting it wrong fails on your laptop, not in production.</p>
+<h3 id="one-arena-per-row">One arena per row<a class="headerlink" href="#one-arena-per-row" title="Permanent link">&para;</a></h3>
+<p><strong>When a row holds nested text, give each row its own arena</strong>, so freeing it is one call that stays correct when the type changes. A <code>free</code> per stored type stops scaling once a row holds a customer, an address and a list of lines, each with text of its own:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">memory</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">heap</span><span class="p">.</span><span class="n">ArenaAllocator</span><span class="p">,</span><span class="w"> </span><span class="n">order</span><span class="o">:</span><span class="w"> </span><span class="n">Order</span><span class="w"> </span><span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">place</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Orders</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="o">:</span><span class="w"> </span><span class="n">NewOrder</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Order</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">.</span><span class="n">create</span><span class="p">(</span><span class="n">Row</span><span class="p">);</span>
+<span class="w">    </span><span class="n">row</span><span class="p">.</span><span class="o">*</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">memory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">),</span><span class="w"> </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">undefined</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">errdefer</span><span class="w"> </span><span class="n">row</span><span class="p">.</span><span class="n">memory</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">mine</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">row</span><span class="p">.</span><span class="n">memory</span><span class="p">.</span><span class="n">allocator</span><span class="p">();</span>
+<span class="w">    </span><span class="n">row</span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">keepCustomer</span><span class="p">(</span><span class="n">mine</span><span class="p">,</span><span class="w"> </span><span class="n">incoming</span><span class="p">.</span><span class="n">customer</span><span class="p">),</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="err">…</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">drop</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Orders</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Row</span><span class="p">)</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">row</span><span class="p">.</span><span class="n">memory</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span><span class="w">       </span><span class="c1">// the customer, the address, every line</span>
+<span class="w">    </span><span class="n">self</span><span class="p">.</span><span class="n">gpa</span><span class="p">.</span><span class="n">destroy</span><span class="p">(</span><span class="n">row</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Hold the rows <strong>by pointer</strong>, not by value: if an <code>ArenaAllocator</code> moves when the list grows, any <code>allocator()</code> handle taken from it points at where the arena used to be.</p>
+<h3 id="returning-text-a-service-owns">Returning text a service owns<a class="headerlink" href="#returning-text-a-service-owns" title="Permanent link">&para;</a></h3>
+<p><strong>A read returns a copy in the request arena, not a view into the store.</strong> A handler returns to nilo, and nilo writes the response <em>after</em> it returns. In between, another request on another thread can delete that row and free the text the response is about to be written from:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">get</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Orders</span><span class="p">,</span><span class="w"> </span><span class="n">into</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">Order</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">row</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">rowFor</span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">orelse</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="kc">null</span><span class="p">;</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">copyOut</span><span class="p">(</span><span class="n">into</span><span class="p">,</span><span class="w"> </span><span class="n">row</span><span class="p">.</span><span class="n">order</span><span class="p">);</span><span class="w">   </span><span class="c1">// under the lock, into the request</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>It costs one walk of a structure that is about to be walked again anyway, and the copy is thrown away with the request. A store that nothing ever deletes from does not need it, but "nothing ever deletes from it" can stop being true without anyone noticing.</p>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.8.0/examples/orders/main.zig"><code>examples/orders</code></a> does all of this on a domain with lines, an address and a customer.</p>
+<h3 id="converting-deeply-nested-types">Converting deeply nested types<a class="headerlink" href="#converting-deeply-nested-types" title="Permanent link">&para;</a></h3>
+<p><strong>Past two levels of nesting, write the converter once, using reflection.</strong> Count the walks: a service takes <code>[]const u8</code> and a handler has <code>Str</code>, so something converts on the way <strong>in</strong>. A row that owns its text copies on the way in as well. A read returns a copy in the request arena, so something walks it on the way <strong>out</strong>. That is three walks of one shape. <code>orders</code> writes all three by hand, because at that size hand-written is clearer.</p>
+<p>That stops being true quickly. A document with an optional <code>meta</code>, a list of <code>sections</code> each holding a list of <code>lines</code>, and a list of <code>tags</code> needs three hand-written recursive walks, and those are three places to forget the field somebody adds next month, silently, with the compiler agreeing.</p>
+<div class="highlight"><pre><span></span><code><span class="c1">/// `source` walked into `Target`, borrowing its text or copying it.</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">into</span><span class="p">(</span><span class="kr">comptime</span><span class="w"> </span><span class="n">Target</span><span class="o">:</span><span class="w"> </span><span class="kt">type</span><span class="p">,</span><span class="w"> </span><span class="n">gpa</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">,</span><span class="w"> </span><span class="n">source</span><span class="o">:</span><span class="w"> </span><span class="n">anytype</span><span class="p">,</span><span class="w"> </span><span class="n">own</span><span class="o">:</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">borrow</span><span class="p">,</span><span class="w"> </span><span class="n">own</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="o">!</span><span class="n">Target</span>
+</code></pre></div>
+<p>It is one function over <code>@typeInfo</code>, about a hundred lines with comments, and it covers every field because it never names one. nilo does not ship it, on purpose: a converter that walks <em>your</em> types has to decide what "the same shape" means (whether a null <code>?T</code> is a field at all, what happens to a <code>Str</code> inside a union), and shipping it would mean owning those decisions in every future version. Yours can just decide.</p>
+<p>The point of this section is to notice when you need it, which is the hard part. The application that went looking for it had already written its fourth <code>dupe</code> loop.</p>
+<h2 id="handlers-must-not-block">Handlers must not block<a class="headerlink" href="#handlers-must-not-block" title="Permanent link">&para;</a></h2>
+<p><strong>Many requests share one OS thread, so a handler that waits stops all of them.</strong> <code>nilo.Mutex</code> is one case of this rule. It is not just the waiting request that stalls: every other request on that thread does too, including ones with no work left to do.</p>
+<p>It is easy to measure. One handler sits in <code>nanosleep</code> for two seconds, and a second request asks for a route that does nothing:</p>
+<div class="highlight"><pre><span></span><code>$ curl localhost:8787/slow &amp;        # 2 seconds of blocking
+$ curl -w '%{time_total}\n' localhost:8787/
+1.701                               # ...paid by a request that had nothing to wait for
+</code></pre></div>
+<p>The fix is <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/app.md#concurrency"><code>nilo.blocking</code></a>, which hands the call to a pool of real threads and parks only this request:</p>
+<div class="highlight"><pre><span></span><code><span class="k">fn</span><span class="w"> </span><span class="n">getUser</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">User</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">blocking</span><span class="p">(</span><span class="n">Db</span><span class="p">.</span><span class="n">query</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="p">});</span><span class="w">   </span><span class="c1">// instead of db.query(id)</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>It takes the same arguments and returns the same value, errors included. It allocates nothing, and outside a running server it just calls the function, so the handler is still an ordinary function a test can call.</p>
+<h3 id="what-needs-wrapping">What needs wrapping<a class="headerlink" href="#what-needs-wrapping" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>a database driver: <code>libpq</code>, SQLite, a socket you opened yourself</td>
+<td><code>nilo.blocking</code></td>
+</tr>
+<tr>
+<td><code>std.fs</code>: reading or writing a file</td>
+<td><code>nilo.blocking</code></td>
+</tr>
+<tr>
+<td>a call out to another service</td>
+<td><a href="../fetch/"><code>nilo_fetch</code></a>, which parks; <code>std.http.Client</code> parks too when it is given <code>c.io()</code> (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/244-a-handler-is-given-the-loop-it-runs-on.md">ADR 244</a>), and needs <code>nilo.blocking</code> only when it is given an <code>Io</code> of its own</td>
+</tr>
+<tr>
+<td>a <code>std.Thread.Mutex</code>, semaphore, or channel from <code>std</code></td>
+<td><code>nilo.Mutex</code></td>
+</tr>
+<tr>
+<td>sleeping, backing off, waiting out a rate limit</td>
+<td><code>try nilo.sleep(ms)</code></td>
+</tr>
+</tbody>
+</table>
+<p>Pure computation does not need it: parsing, JSON, a hash, a loop over a slice. Those <em>use</em> the thread, they do not wait on it. A long computation is a different problem, and <code>nilo.blocking</code> handles that too.</p>
+<p><code>nilo.sleep</code> takes milliseconds and fails with <code>error.Canceled</code> if the request went away while waiting, the same way <code>Mutex.lock</code> does.</p>
+<h3 id="a-blocking-call-that-fans-out">A blocking call that fans out<a class="headerlink" href="#a-blocking-call-that-fans-out" title="Permanent link">&para;</a></h3>
+<p><strong>The pool bounds the calls it runs, not the threads a call starts.</strong> <code>nilo.blocking</code> takes one worker for as long as the function runs, and the Engine's pool has a ceiling on how many it runs at once. A function that then spawns threads of its own, to split a CPU-bound scan across cores, is outside that count: eight searches at four threads each are thirty-two busy threads while the pool shows eight in use. Nothing in nilo sees them, and the blocking warning does not either, since the handler is parked the whole time.</p>
+<p><strong>So the fan-out is the caller's to bound</strong>, and there are two ways that keep a number on it:</p>
+<ul>
+<li><strong>A per-call thread cap read from configuration</strong>, passed into the function as an argument, so one request can use at most that many. It bounds one call, not a burst of them: the total is the pool's ceiling times the cap, and the cap should be chosen with that product in mind.</li>
+<li><strong>Several <code>nilo.blocking</code> calls instead of one with threads inside.</strong> The handler splits the work and issues each part as its own call, which the pool's limit holds the way it holds any other. The parts of one request run one after another, which is slower for that request and is the price of the pool's limit meaning something.</li>
+</ul>
+<p><strong>The threads may allocate their results from <code>c.arena()</code>.</strong> It is a <code>std.heap.ArenaAllocator</code> over the App's allocator, which is thread-safe when its child is, so a handler can pass it to the function it hands <code>nilo.blocking</code>, join its threads there, and return a typed value that borrows from it: the arena is reset after the response is written, not when the handler returns. An arena of the function's own, freed by a <code>defer</code> in the handler, is gone before the return value is serialised.</p>
+<p>Do not reach for <code>nilo.blockingReserved</code> to fan out. It starts a thread whenever it finds none idle, past the pool's ceiling, which is the unbounded growth this section is about (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/064-a-file-has-no-socket-to-wait-on.md#a-statement-under-hop-gets-a-thread-of-its-own">ADR 064</a>). For a call that is expensive rather than slow, a <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/app.md#concurrency"><code>nilo.Gate</code></a> sized to what the machine can afford is the tool, and it is what password hashing does.</p>
+<p><strong>On glibc, cap malloc's arenas when calls spawn threads and allocate with <code>std.heap.c_allocator</code>.</strong> glibc gives each new thread an arena of its own, up to eight per core, and keeps what is freed in it, so memory allocated on one thread and freed on another fragments across them. The photon port saw RSS climb from 204 MiB past 500 MiB under repeated identical queries while its own accounting returned to zero; with two arenas the same load settled at 35 to 50 MiB between requests, and the peak under 16 clients fell from 708 to 403 MiB, with no change in latency. One call at the top of <code>main</code> does it, and <code>MALLOC_ARENA_MAX</code> in the environment still overrides it:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">extern</span><span class="w"> </span><span class="s">"c"</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">mallopt</span><span class="p">(</span><span class="n">param</span><span class="o">:</span><span class="w"> </span><span class="kt">c_int</span><span class="p">,</span><span class="w"> </span><span class="n">value</span><span class="o">:</span><span class="w"> </span><span class="kt">c_int</span><span class="p">)</span><span class="w"> </span><span class="kt">c_int</span><span class="p">;</span>
+<span class="kr">const</span><span class="w"> </span><span class="n">M_ARENA_MAX</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="mi">8</span><span class="p">;</span>
+
+<span class="kr">pub</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="n">main</span><span class="p">()</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">mallopt</span><span class="p">(</span><span class="n">M_ARENA_MAX</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// ...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A program that allocates with Zig's own allocators (<code>std.heap.smp_allocator</code>, a <code>DebugAllocator</code>), or links musl, has no such arenas and nothing to cap.</p>
+<h3 id="a-failure-that-carries-data">A failure that carries data<a class="headerlink" href="#a-failure-that-carries-data" title="Permanent link">&para;</a></h3>
+<p><strong>An error union does cross <code>nilo.blocking</code>, and an error carries only its name.</strong> <code>nilo.blocking(f, args)</code> returns whatever <code>f</code> returns, error set included (<code>ReturnType(func)</code> in <code>http/bulkhead.zig</code>). <code>error.InvalidQuery</code> arrives intact, and so does nothing else: a message, a byte offset or a list of what was wrong has nowhere to ride on it.</p>
+<p><strong>Two cases, and nilo already answers the first.</strong> When the data is a status and a sentence, call a <code>fail</code> function inside the blocking call: it works there, because the request travels to the worker with the call, and the handler gets <code>error.Failed</code> with the message as if it had failed on the fiber (<a href="../errors/#failing-a-request">Errors</a>). When the data is structured and the handler decides what to do with it, <strong>return a value instead of an error</strong>: a union of the result and the failure with its data, and map it to a nilo failure in the handler, on the fiber.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Found</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">union</span><span class="p">(</span><span class="k">enum</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">ok</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">invalid</span><span class="o">:</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">at</span><span class="o">:</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">why</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">},</span>
+<span class="p">};</span>
+
+<span class="c1">/// The kernel runs on a pool thread and reports a bad query as a value.</span>
+<span class="k">fn</span><span class="w"> </span><span class="n">kernel</span><span class="p">(</span><span class="n">text</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="n">Found</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">text</span><span class="p">.</span><span class="n">len</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">invalid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">at</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">why</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"the query is empty"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">ok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@intCast</span><span class="p">(</span><span class="n">text</span><span class="p">.</span><span class="n">len</span><span class="p">)</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">search</span><span class="p">(</span><span class="n">q</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">u32</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">blocking</span><span class="p">(</span><span class="n">kernel</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">q</span><span class="p">.</span><span class="n">view</span><span class="p">()}))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">ok</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="o">|</span><span class="n">count</span><span class="o">|</span><span class="w"> </span><span class="n">count</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">invalid</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="o">|</span><span class="n">bad</span><span class="o">|</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">fail</span><span class="p">.</span><span class="n">unprocessable</span><span class="p">(</span><span class="s">"{s} (at byte {d})"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">bad</span><span class="p">.</span><span class="n">why</span><span class="p">,</span><span class="w"> </span><span class="n">bad</span><span class="p">.</span><span class="n">at</span><span class="w"> </span><span class="p">}),</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>That is the intended shape, not a workaround: the kernel stays a plain function with no request and no <code>nilo</code> in it, a test calls it directly and matches on the union, and the handler is the one place that knows what a failure means to a client. A kernel used by six handlers gets one <code>switch</code> in each and nothing more. Passing a diagnostic out-parameter (<code>diag: *Diag</code>) into the call works too, and is the same recipe with the data in a place the caller owns; what to avoid is an error the handler has to guess the details of.</p>
+<h3 id="state-shared-between-fibers-and-blocking-workers">State shared between fibers and blocking workers<a class="headerlink" href="#state-shared-between-fibers-and-blocking-workers" title="Permanent link">&para;</a></h3>
+<p><strong><code>nilo.Mutex</code> is the lock for state that fibers and blocking workers both touch.</strong> It is zio's mutex behind the watchdog wrapper in <code>http/bulkhead.zig</code>, and the engine documents that it also works from a plain thread with no fiber, which is what a <code>nilo.blocking</code> worker is. A fiber that waits on it parks and the thread keeps serving; a worker that waits on it holds only its own pool thread. It needs no <code>Io</code>, so it is the one lock that is the same in both places:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Manifest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">lock</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Mutex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">,</span>
+<span class="w">    </span><span class="n">files</span><span class="o">:</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+
+<span class="w">    </span><span class="c1">/// Called from a handler, and from inside `nilo.blocking`.</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="n">add</span><span class="p">(</span><span class="n">self</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">Manifest</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="k">try</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">lock</span><span class="p">();</span>
+<span class="w">        </span><span class="k">defer</span><span class="w"> </span><span class="n">self</span><span class="p">.</span><span class="n">lock</span><span class="p">.</span><span class="n">unlock</span><span class="p">();</span>
+<span class="w">        </span><span class="n">self</span><span class="p">.</span><span class="n">files</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">};</span>
+</code></pre></div>
+<p>Two rules go with it:</p>
+<ul>
+<li><strong>Hold it for the copy or the swap, not across the slow part.</strong> A compactor that holds the manifest lock across an <code>fsync</code> makes every search that wants the manifest wait for the disk. Take it to read or replace the list, release it, then do the long work on the copy; a second lock for writers, taken across the <code>fsync</code>, keeps them in order without holding readers up.</li>
+<li><strong><code>lock()</code> fails with <code>error.Canceled</code> when the request went away</strong>, so a cleanup path with no one to report to uses <code>lockUncancelable()</code> for a short section that does not itself wait.</li>
+</ul>
+<p><strong>A spin lock is for a module that has no loop at all.</strong> <code>nilo_cache</code> spins because <code>std.Io.Mutex.lock</code> takes an <code>Io</code> that layer does not have, and it is safe there only because the lock is held across a <code>memcpy</code> and nothing else, ever. A program on nilo has <code>nilo.Mutex</code>, so it does not need to copy that.</p>
+<p><strong>A blocking worker is an ordinary thread, so a blocking file call is fine in it.</strong> That is the point of handing it there. What the call needs is an <code>std.Io</code>, because Zig 0.16's file API (<code>std.Io.Dir</code>) takes one: a program that wants the worker's file work independent of the server's loop owns a <code>std.Io.Threaded</code> and passes its <code>io()</code>, which is what nilo's own static file loader does (<code>http/static.zig</code>, <code>load</code>). Plain libc calls (<code>open</code>, <code>pread</code>, <code>fsync</code>, <code>mkdir</code>) need none and are what a program that already links libc may use. <code>nilo.io()</code> can be read from a pool thread (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/244-a-handler-is-given-the-loop-it-runs-on.md">ADR 244</a>), but nothing here has measured file calls through the server's <code>Io</code> from a worker, so this guide does not recommend it for them. nilo ships no file helpers for workers (<code>mkdirAll</code>, <code>listDir</code>, <code>writeFileAtomic</code>); a program that needs the same forty lines in two modules writes them once.</p>
+<h3 id="the-blocking-warning">The blocking warning<a class="headerlink" href="#the-blocking-warning" title="Permanent link">&para;</a></h3>
+<p><strong>A handler that blocks its thread is reported in the log, on the first request.</strong> Nothing <em>forces</em> you to wrap a call: Zig has no way to mark a function as blocking, so a handler that calls the driver directly still compiles and still passes its tests. But it does not go unnoticed. The server times each handler, minus the time it spent legitimately waiting, and says so:</p>
+<div class="highlight"><pre><span></span><code>handler GET /users/7 held its thread for 2003ms. Every other request being
+served on that thread waited the whole time. Hand the call that waits to
+nilo.blocking (ADR 013).
+</code></pre></div>
+<p>The useful part is <em>when</em>: on the first request, with nobody else on the server. That is what makes this bug hard. One <code>curl</code> against a handler that queries the database synchronously gives the right answer at the right speed, and looks correct in every way you can check. It only misbehaves once there is a second request, which usually means production.</p>
+<p>The default threshold is a quarter of a second. <code>listen(.{ .block_warning_ms = … })</code> changes it and <code>0</code> turns it off. A handler that keeps doing it is logged once a second with a count of the rest, not once per request.</p>
+<p>It measures the longest stretch the fiber ran <strong>without parking</strong>, not the total. That is what lets it watch a handler that never returns: a stream, a body reader and a WebSocket used to be excused entirely, because a total has no upper bound on a connection that stays open for an hour. One stretch means the same thing on a request that lasts a millisecond and on a connection that lasts a day, so a blocking call inside a WebSocket loop is now reported. That is where the mistake costs the most, since a stalled fiber there holds its executor against every other socket that executor serves (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/013-handlers-must-not-block-the-thread.md">ADR 013</a>).</p>
+<p>A handler that yields every 30ms is not holding its thread, however long the request takes overall, and is not reported.</p>
+<p>See <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/013-handlers-must-not-block-the-thread.md">ADR 013</a> for the rule and what enforces it.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../middleware/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Middleware and resolved values">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Middleware and resolved values
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../static-files/" class="md-footer__link md-footer__link--next" aria-label="Next: Static files">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Static files
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,2628 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="An HTTP framework for Zig 0.17, and the toolkit it is built from">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.8/sql/shapes/">
+      
+      
+        <link rel="prev" href="../reading/">
+      
+      
+        <link rel="next" href="../writing/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Parents, children and aggregates - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#parents-children-and-aggregates" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Parents, children and aggregates
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-example-tables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The example tables
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#joining-a-parent-row" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Joining a parent row
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Joining a parent row">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-parents-column-as-a-flat-field" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a parent's column as a flat field
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-child-rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading child rows
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading child rows">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ordering-filtering-and-counting-children" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering, filtering and counting children
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#grouping-and-aggregates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Grouping and aggregates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Grouping and aggregates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#filtering-one-aggregate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Filtering one aggregate
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-total-over-all-rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A total over all rows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-still-needs-raw" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What still needs raw
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../jwt/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-example-tables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The example tables
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#joining-a-parent-row" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Joining a parent row
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Joining a parent row">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reading-a-parents-column-as-a-flat-field" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading a parent's column as a flat field
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-child-rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading child rows
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading child rows">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ordering-filtering-and-counting-children" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ordering, filtering and counting children
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#grouping-and-aggregates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Grouping and aggregates
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Grouping and aggregates">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#filtering-one-aggregate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Filtering one aggregate
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-total-over-all-rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A total over all rows
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-still-needs-raw" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What still needs raw
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/sql/shapes.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="parents-children-and-aggregates">Parents, children and aggregates<a class="headerlink" href="#parents-children-and-aggregates" title="Permanent link">&para;</a></h1>
+<p><strong>A Row can carry its parent row, its child rows, or sums over a group, so a list screen that shows more than one table is still <code>db.select</code>, <code>db.page</code> or <code>db.find</code>, not <code>db.raw</code>.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/sql.md#a-parent-children-a-group">A parent, children, a group</a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/sql-query.md">The query builder</a></p>
+<p>A list screen almost never shows one table. An invoice is listed with its customer's name, opened with its lines, and summed by customer on the dashboard. None of that needs <code>db.raw</code>. This page follows <a href="../reading/">reading</a>.</p>
+<p>A Row can declare three more things about itself:</p>
+<ul>
+<li><strong>a parent</strong>: a field whose type is a Row of another table, joined in the same statement;</li>
+<li><strong>children</strong>: a field <code>[]const C</code> of rows that point back at this one, read by one extra statement for all rows at once;</li>
+<li><strong>a sum</strong>: <code>nilo_aggregate</code>, which makes the Row one row per group.</li>
+</ul>
+<p>All three go on a narrower Row, one with <code>pub const nilo_table = &lt;TheTablesRow&gt;</code>. The Row that describes the table keeps only the table's columns, because that is what migrations read (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md">ADR 218</a>).</p>
+<h2 id="the-example-tables">The example tables<a class="headerlink" href="#the-example-tables" title="Permanent link">&para;</a></h2>
+<p><strong>The links between tables come from <code>.references</code></strong>, which the tables already declare for their foreign keys:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Customer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"customers"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">region</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Staff</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"staff"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">full_name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Invoice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"invoices"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">            </span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Customer</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">            </span><span class="p">.</span><span class="n">owner_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Staff</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">            </span><span class="p">.</span><span class="n">approver_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Staff</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customer_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">owner_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">approver_id</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">year</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">InvoiceLine</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"invoice_lines"</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">references</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">invoice_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Invoice</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">invoice_id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">sku</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">qty</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<span class="p">};</span>
+</code></pre></div>
+<h2 id="joining-a-parent-row">Joining a parent row<a class="headerlink" href="#joining-a-parent-row" title="Permanent link">&para;</a></h2>
+<p><strong>A field whose type is a Row of another table holds the row a reference points at</strong>, joined in the same statement:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">CustomerName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Customer</span><span class="p">;</span>
+<span class="w">    </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">StaffName</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Staff</span><span class="p">;</span>
+<span class="w">    </span><span class="n">full_name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">InvoiceCard</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_via</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">owner</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">owner_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">approver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">approver_id</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customer</span><span class="o">:</span><span class="w"> </span><span class="n">CustomerName</span><span class="p">,</span>
+<span class="w">    </span><span class="n">owner</span><span class="o">:</span><span class="w"> </span><span class="n">StaffName</span><span class="p">,</span>
+<span class="w">    </span><span class="n">approver</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">StaffName</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">invoices</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">search</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">.</span><span class="n">Page</span><span class="p">(</span><span class="n">InvoiceCard</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">page</span><span class="p">(</span><span class="n">InvoiceCard</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">icontains</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">search</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"id"</span><span class="p">,</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"total"</span><span class="p">,</span>
+<span class="w">       </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"name"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"customer.name"</span><span class="p">,</span><span class="w"> </span><span class="ss">"owner"</span><span class="p">.</span><span class="ss">"full_name"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"owner.full_name"</span><span class="p">,</span>
+<span class="w">       </span><span class="p">(</span><span class="ss">"approver"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"approver.#"</span><span class="p">,</span><span class="w"> </span><span class="ss">"approver"</span><span class="p">.</span><span class="ss">"full_name"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"approver.full_name"</span><span class="p">,</span>
+<span class="w">       </span><span class="k">count</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"#total"</span>
+<span class="k">FROM</span><span class="w"> </span><span class="ss">"invoices"</span>
+<span class="k">JOIN</span><span class="w"> </span><span class="ss">"customers"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"customer"</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"customer_id"</span>
+<span class="k">JOIN</span><span class="w"> </span><span class="ss">"staff"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"owner"</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="ss">"owner"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"owner_id"</span>
+<span class="k">LEFT</span><span class="w"> </span><span class="k">JOIN</span><span class="w"> </span><span class="ss">"staff"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"approver"</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="ss">"approver"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"approver_id"</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"name"</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="s1">'%'</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="err">…</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="s1">'%'</span><span class="w"> </span><span class="k">ESCAPE</span><span class="w"> </span><span class="s1">'\'</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="ss">"customer.name"</span><span class="w"> </span><span class="k">ASC</span><span class="p">,</span><span class="w"> </span><span class="ss">"id"</span><span class="w"> </span><span class="k">DESC</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">20</span>
+</code></pre></div>
+<p><strong>The join is taken from the schema.</strong> The one <code>.references</code> from <code>invoices</code> to <code>customers</code> is the join for <code>customer</code>. Two references pointing at <code>staff</code> are a compile error until <code>nilo_via</code> says which column each field follows, because which one <code>staff</code> means is a question only you can answer. <code>nilo_via</code> can also name a column that no <code>.references</code> covers, and then it joins to the other table's key.</p>
+<p><strong><code>?</code> means the parent can be missing, and the schema has to agree.</strong> <code>approver_id</code> may be null, so <code>approver</code> has to be <code>?StaffName</code>, and it becomes a <code>LEFT JOIN</code>. <code>customer_id</code> is never null, so <code>customer: ?CustomerName</code> is rejected too: the <code>?</code> would be a branch that never runs. A missing approver is <code>null</code>, not a <code>StaffName</code> full of nulls.</p>
+<p><strong>Conditions and ordering reach into a parent through its field</strong>, as in <code>.customer = .{ .name = … }</code>. They take the same operators as a column of the table. A parent can have parents of its own; nest them the same way.</p>
+<p>A parent never changes how many rows come back, because a reference points at one row or none. So <code>.limit = 20</code> is still twenty invoices, and <code>db.count</code> over <code>InvoiceCard</code> joins only the parents its condition names.</p>
+<h3 id="reading-a-parents-column-as-a-flat-field">Reading a parent's column as a flat field<a class="headerlink" href="#reading-a-parents-column-as-a-flat-field" title="Permanent link">&para;</a></h3>
+<p><strong><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/sql.md#a-parent-children-a-group"><code>nilo_through</code></a> reads a column of another table into a field of its own, so the response stays flat.</strong> A parent is a nested object in the response, <code>customer: { name }</code>. When the API has always served <code>customerName</code> beside <code>total</code>, <code>nilo_through</code> gives you that shape:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">InvoiceFlat</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_through</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">customer_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">approver_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">approver_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">full_name</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customer_name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">approver_name</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">flatInvoices</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">search</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">InvoiceFlat</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">InvoiceFlat</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">icontains</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">search</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">approver_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc_nulls_last</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Each entry lists the reference columns to follow and, last, the column to read, so <code>.{ .org_unit_id, .customer_id, .kind }</code> goes two tables away. The join is the same one a parent would use, under an alias of its own (<code>"#t/customer_id"</code>), and two fields that go the same way share it. <code>approver_id</code> may be null, so <code>approver_name</code> is <code>?Str</code>. The rule is the same as for a parent: the field is optional exactly when a reference on the way, or the column itself, may be null. In <code>.where</code> and <code>.order</code> you name the field like a column.</p>
+<p><strong>A row the path does not reach reads null.</strong> When the response should have no null there, the entry says what to do instead, and becomes a struct with the path in it:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">InvoiceApproved</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_through</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">customer_region</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">region</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">otherwise</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"unassigned"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">approver_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">approver_id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">full_name</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">join</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">inner</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customer_region</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">approver_name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">approvedInvoices</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">InvoiceApproved</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">InvoiceApproved</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer_region</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">asc</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>.otherwise</code> is <code>COALESCE(column, 'unassigned')</code>, and the condition and the order use the same expression, so a filter on <code>"unassigned"</code> finds exactly the rows the answer shows that way. <code>.join = .inner</code> leaves out the invoices nobody approved, and a count and a page's total leave them out too. Both fields are <code>Str</code>, because neither can be null any more. Two fields through the same reference share its join, so a second field through <code>approver_id</code> on this Row is never null either.</p>
+<p>A raw statement can read into a Row like this one: a through field is one column of the <code>SELECT</code> list, filled by position like the rest (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/235-a-column-of-another-table-may-be-read-flat.md">ADR 235</a>).</p>
+<h2 id="reading-child-rows">Reading child rows<a class="headerlink" href="#reading-child-rows" title="Permanent link">&para;</a></h2>
+<p><strong>A field <code>[]const C</code>, where <code>C</code> reads a table that points back here, holds every row that points at this one:</strong></p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">LineBrief</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">InvoiceLine</span><span class="p">;</span>
+<span class="w">    </span><span class="n">sku</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">qty</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">InvoiceDetail</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">total</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customer</span><span class="o">:</span><span class="w"> </span><span class="n">CustomerName</span><span class="p">,</span>
+<span class="w">    </span><span class="n">lines</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">LineBrief</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">invoice</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span><span class="w"> </span><span class="o">!?</span><span class="n">InvoiceDetail</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">InvoiceDetail</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>Children are never joined.</strong> After the invoices are read, one more statement reads the lines of all of them at once, so a page of twenty invoices is two statements, not twenty-one:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="ss">"invoice_lines"</span><span class="p">.</span><span class="ss">"sku"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"sku"</span><span class="p">,</span><span class="w"> </span><span class="ss">"invoice_lines"</span><span class="p">.</span><span class="ss">"qty"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"qty"</span><span class="p">,</span><span class="w"> </span><span class="ss">"#k"</span><span class="p">.</span><span class="ss">"key"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"#parent"</span>
+<span class="k">FROM</span><span class="w"> </span><span class="k">unnest</span><span class="p">(</span><span class="err">$</span><span class="mi">1</span><span class="p">::</span><span class="nb">int8</span><span class="p">[])</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="k">ORDINALITY</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"#k"</span><span class="p">(</span><span class="ss">"value"</span><span class="p">,</span><span class="w"> </span><span class="ss">"key"</span><span class="p">)</span>
+<span class="k">JOIN</span><span class="w"> </span><span class="ss">"invoice_lines"</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="ss">"invoice_lines"</span><span class="p">.</span><span class="ss">"invoice_id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"#k"</span><span class="p">.</span><span class="ss">"value"</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="ss">"#k"</span><span class="p">.</span><span class="ss">"key"</span><span class="p">,</span><span class="w"> </span><span class="ss">"invoice_lines"</span><span class="p">.</span><span class="ss">"id"</span>
+</code></pre></div>
+<p>Each invoice gets its own lines, in the lines' key order, and an invoice with none gets an empty slice. <code>.limit</code> has already counted the invoices by then, so a page is twenty invoices however many lines they have.</p>
+<p>The Row has to read <code>id</code>, the column the lines point at, because that is how each line finds its invoice. Leaving it out is a compile error that says so.</p>
+<p><strong>Two statements see two snapshots unless a transaction makes them one.</strong> Outside a <code>Tx</code>, a line added between the two statements can appear under an invoice read before the line existed. Inside a <code>Tx</code>, <code>tx.select</code> and <code>tx.find</code> are the same calls and cannot see that.</p>
+<p>Children go one level deep. A child can have parents, which are joined into the second statement, but it cannot have children of its own. <code>db.stream</code> rejects a Row with children, because a stream never holds the rows the children would be attached to.</p>
+<h3 id="ordering-filtering-and-counting-children">Ordering, filtering and counting children<a class="headerlink" href="#ordering-filtering-and-counting-children" title="Permanent link">&para;</a></h3>
+<p><strong><code>pub const nilo_children</code> sets the rest, keyed by field name:</strong></p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">InvoiceSummary</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_children</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">lines</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">line_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">InvoiceLine</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">bulk_lines</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">InvoiceLine</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">lines</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="n">LineBrief</span><span class="p">,</span>
+<span class="w">    </span><span class="n">line_count</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">bulk_lines</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">busiest</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">InvoiceSummary</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">InvoiceSummary</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">line_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">line_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">childrenFor</span><span class="p">(</span><span class="n">InvoiceSummary</span><span class="p">,</span><span class="w"> </span><span class="s">"lines"</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong>A list of children takes <code>.order</code> and <code>.where</code>.</strong> The order uses columns of the child's table, and the child's key is always added last, so two lines with the same <code>qty</code> come back in the same order every time. A key minted as a v7 id follows the order rows were created in, which is not the order a user just set by dragging lines around, so a list with a <code>position</code> column wants <code>.order = .{ .position = .asc }</code>.</p>
+<p><strong>A count is an <code>i64</code> field that reads no child rows.</strong> It is a subquery on each row, in the same statement:</p>
+<div class="highlight"><pre><span></span><code><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="k">count</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="ss">"invoice_lines"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"#c"</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="ss">"#c"</span><span class="p">.</span><span class="ss">"invoice_id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"id"</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"line_count"</span>
+</code></pre></div>
+<p>So a badge that says <em>12 lines</em> costs one index lookup per invoice on the page, instead of reading every line into memory to take <code>.len</code>. Put an index on the column that points back: Postgres does not create one for a foreign key. A count can be used in <code>.order</code> and <code>.where</code> like a column, and it can be on a parent's Row too.</p>
+<p><strong>A <code>.max</code> or <code>.min</code> is the same subquery with a different function.</strong> It names the Row and the column together, <code>.{ .max = .{ Invoice, .total } }</code>, because a column alone does not say which table it is on. The field is an optional of the column's type, because a customer with no invoices has no biggest one:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">CustomerPulse</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Customer</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_children</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">biggest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="n">Invoice</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">budi_approved</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">approver_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">full_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"Budi"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="o">:</span><span class="w"> </span><span class="n">Str</span><span class="p">,</span>
+<span class="w">    </span><span class="n">biggest</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">budi_approved</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">selectFor</span><span class="p">(</span><span class="n">CustomerPulse</span><span class="p">,</span><span class="w"> </span><span class="nb">@TypeOf</span><span class="p">(.{</span><span class="w"> </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">biggest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc_nulls_last</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>A <code>.max</code> or <code>.min</code> (here and in <code>nilo_aggregate</code>) is rejected over a <code>bool</code>, a <code>sql.Uuid</code>, <code>sql.Bytes</code> and <code>sql.Json</code>: Postgres has no such aggregate, and SQLite would answer in an order nobody chose.</p>
+<p>The second entry's <code>.where</code> goes through <code>approver_id</code> into the staff row it points at, the same way an aggregate's does below. That table is joined once, inside the subquery, and a reference points at one row or none, so what is counted is still invoices.</p>
+<p>Every <code>.where</code> here has its values written in, because it is part of the Row, not of a request. It accepts a value, <code>null</code>, <code>.eq</code>, <code>.ne</code>, <code>.gt</code>, <code>.gte</code>, <code>.lt</code>, <code>.lte</code>, <code>.in</code> and <code>.not_in</code>, <code>.now</code> and <code>.today</code>, and a path through a reference. A filter that comes from the request goes in the read's own <code>.where</code>. A <code>.limit</code> on a list of children is rejected, because one statement reads the children of every row and a limit there would cut across rows.</p>
+<h2 id="grouping-and-aggregates">Grouping and aggregates<a class="headerlink" href="#grouping-and-aggregates" title="Permanent link">&para;</a></h2>
+<p><strong><code>nilo_aggregate</code> names the fields that are computed; every other field is a group key:</strong></p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">ByCustomer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_aggregate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">invoices</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">revenue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">sum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">largest</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">mean</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">avg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">customer</span><span class="o">:</span><span class="w"> </span><span class="n">CustomerName</span><span class="p">,</span>
+<span class="w">    </span><span class="n">invoices</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">revenue</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">largest</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">mean</span><span class="o">:</span><span class="w"> </span><span class="kt">f64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">bestCustomers</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">year</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="p">[]</span><span class="n">ByCustomer</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">select</span><span class="p">(</span><span class="n">ByCustomer</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">year</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">year</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">revenue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="n">_000_000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">order</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">revenue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">desc</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">limit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"name"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"customer.name"</span><span class="p">,</span><span class="w"> </span><span class="k">count</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">,</span>
+<span class="w">       </span><span class="k">sum</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="p">)::</span><span class="nb">int8</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"revenue"</span><span class="p">,</span><span class="w"> </span><span class="k">max</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"largest"</span><span class="p">,</span>
+<span class="w">       </span><span class="k">avg</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="p">)::</span><span class="n">float8</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"mean"</span>
+<span class="k">FROM</span><span class="w"> </span><span class="ss">"invoices"</span><span class="w"> </span><span class="k">JOIN</span><span class="w"> </span><span class="ss">"customers"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"customer"</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"customer_id"</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"year"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">$</span><span class="mi">1</span>
+<span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"name"</span><span class="p">,</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"id"</span>
+<span class="k">HAVING</span><span class="w"> </span><span class="k">sum</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="err">$</span><span class="mi">2</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="ss">"revenue"</span><span class="w"> </span><span class="k">DESC</span><span class="p">,</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"name"</span><span class="w"> </span><span class="k">DESC</span><span class="p">,</span><span class="w"> </span><span class="ss">"customer"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="k">DESC</span><span class="w"> </span><span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span>
+</code></pre></div>
+<p><strong>A group with a parent is grouped by the parent's key as well as its columns</strong>, so two customers named Acme are two rows and not one summed together. A <code>.limit</code> or an <code>.offset</code> makes the order end in every column the Row groups by that it did not name, running the way its last term runs, so a page of groups has one order and the next page picks up where it stopped (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/218-a-row-may-carry-its-parent-its-children-or-a-sum.md">ADR 218</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/150-a-page-knows-what-it-left-out.md">ADR 150</a>).</p>
+<p><code>year</code> is not a field of <code>ByCustomer</code>, yet it is in the condition. <strong>A grouped Row's condition can name any column of the table, not only the Row's fields</strong>, because the rows being grouped are the table's rows. A term on a column or a parent's column becomes <code>WHERE</code>, applied before grouping; a term on an aggregate field becomes <code>HAVING</code>, applied after. You do not mark which is which at the call site, because the Row already says.</p>
+<p>The aggregate words are <code>.count</code>, <code>.{ .count = .col }</code>, <code>.{ .count_distinct = .col }</code>, <code>.{ .sum = .col }</code>, <code>.{ .min = .col }</code>, <code>.{ .max = .col }</code> and <code>.{ .avg = .col }</code>. <strong>Each has a required field type, and a wrong type is a compile error that names the right one:</strong></p>
+<table>
+<thead>
+<tr>
+<th>word</th>
+<th>field</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>any count</td>
+<td><code>i64</code>, never null</td>
+</tr>
+<tr>
+<td><code>sum</code></td>
+<td><code>i64</code> over whole numbers, <code>f64</code> over floating ones, the column's own type over a <code>Decimal</code> (Postgres only; SQLite refuses an aggregate over a <code>Decimal</code>)</td>
+</tr>
+<tr>
+<td><code>min</code>, <code>max</code></td>
+<td>the column's type</td>
+</tr>
+<tr>
+<td><code>avg</code></td>
+<td><code>f64</code></td>
+</tr>
+</tbody>
+</table>
+<p>A field is <code>?</code> exactly when the result can be null: over a nullable column, where a group of nulls sums to null. <code>db.page</code> on a grouped Row counts groups, and so does <code>db.count</code>.</p>
+<h3 id="filtering-one-aggregate">Filtering one aggregate<a class="headerlink" href="#filtering-one-aggregate" title="Permanent link">&para;</a></h3>
+<p><strong>An aggregate entry can carry its own <code>.where</code>, which limits only the rows that one aggregate reads.</strong> It becomes <code>FILTER (WHERE …)</code>, on both databases:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">RevenueByCustomer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_aggregate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">this_year</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">sum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">year</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2026</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">large</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">gte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="n">_000_000</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">customer</span><span class="o">:</span><span class="w"> </span><span class="n">CustomerName</span><span class="p">,</span>
+<span class="w">    </span><span class="n">this_year</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">large</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">selectFor</span><span class="p">(</span><span class="n">RevenueByCustomer</span><span class="p">,</span><span class="w"> </span><span class="nb">@TypeOf</span><span class="p">(.{}));</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="k">sum</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="p">)</span><span class="w"> </span><span class="n">FILTER</span><span class="w"> </span><span class="p">(</span><span class="k">WHERE</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"year"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2026</span><span class="p">)::</span><span class="nb">int8</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"this_year"</span><span class="p">,</span>
+<span class="k">count</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"id"</span><span class="p">)</span><span class="w"> </span><span class="n">FILTER</span><span class="w"> </span><span class="p">(</span><span class="k">WHERE</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">1000000</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"large"</span>
+</code></pre></div>
+<p>The values are written into the statement as given, using the same operators a children entry's <code>.where</code> accepts, over the table's columns. <strong>A column with a <code>.references</code> also lets the filter look at the row it points at</strong>, which is how you count by a category that lives in another table:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">RevenueByRegion</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_aggregate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">west</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">sum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">region</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"west"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">unapproved</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">approver_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">};</span>
+<span class="w">    </span><span class="n">year</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<span class="w">    </span><span class="n">west</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">unapproved</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="kr">comptime</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span><span class="p">.</span><span class="n">selectFor</span><span class="p">(</span><span class="n">RevenueByRegion</span><span class="p">,</span><span class="w"> </span><span class="nb">@TypeOf</span><span class="p">(.{}));</span>
+<span class="p">}</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="k">sum</span><span class="p">(</span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"total"</span><span class="p">)</span><span class="w"> </span><span class="n">FILTER</span><span class="w"> </span><span class="p">(</span><span class="k">WHERE</span><span class="w"> </span><span class="ss">"#f.customer_id"</span><span class="p">.</span><span class="ss">"region"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">'west'</span><span class="p">)::</span><span class="nb">int8</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"west"</span>
+<span class="err">…</span><span class="w"> </span><span class="k">JOIN</span><span class="w"> </span><span class="ss">"customers"</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="ss">"#f.customer_id"</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="ss">"#f.customer_id"</span><span class="p">.</span><span class="ss">"id"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ss">"invoices"</span><span class="p">.</span><span class="ss">"customer_id"</span>
+</code></pre></div>
+<p>The other table is joined once, however many aggregates read it, and a reference that may be null becomes a <code>LEFT JOIN</code>, so a row without one still counts for the other aggregates. References can chain: <code>.org_unit_id = .{ .customer_id = .{ .kind = .government } }</code> is two joins. <strong>A filtered <code>sum</code>, <code>min</code>, <code>max</code> or <code>avg</code> is always <code>?</code>, whatever its column</strong>, because a customer with no invoice this year has nothing to sum. A filtered count is zero in that case. To count the matching rows, name a column that is never null, usually the key: <code>.{ .count = .id, .where = … }</code>.</p>
+<h2 id="a-total-over-all-rows">A total over all rows<a class="headerlink" href="#a-total-over-all-rows" title="Permanent link">&para;</a></h2>
+<p><strong>A grouped Row with no group keys is one row over everything the condition matched.</strong> Read it with <code>db.exactlyOne</code>, which returns the Row itself rather than a list or a <code>?</code>:</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Totals</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_table</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Invoice</span><span class="p">;</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_aggregate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">invoices</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">count</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">revenue</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">sum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.</span><span class="n">total</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">};</span>
+<span class="w">    </span><span class="n">invoices</span><span class="o">:</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span>
+<span class="w">    </span><span class="n">revenue</span><span class="o">:</span><span class="w"> </span><span class="o">?</span><span class="kt">i64</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">totals</span><span class="p">(</span><span class="n">db</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">sql</span><span class="p">.</span><span class="n">Db</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">year</span><span class="o">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Totals</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">db</span><span class="p">.</span><span class="n">exactlyOne</span><span class="p">(</span><span class="n">Totals</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">where</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">year</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">year</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>revenue</code> is <code>?i64</code> here even though <code>total</code> is never null: a year with no invoices still returns one row, and the sum of no rows is null. <code>invoices</code> is zero in that case.</p>
+<h2 id="what-still-needs-raw">What still needs <code>raw</code><a class="headerlink" href="#what-still-needs-raw" title="Permanent link">&para;</a></h2>
+<p><strong>A Row with a parent, children or aggregates is read-only.</strong> It is a result, so an insert, an update or a <code>.lock</code> through one is rejected, and so is <code>db.raw</code> into one that has a parent or children. <code>DISTINCT</code>, window functions, CTEs, a join on a condition rather than a reference, and an aggregate over an expression still need <a href="../raw/">raw SQL</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../reading/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Reading">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Reading
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../writing/" class="md-footer__link md-footer__link--next" aria-label="Next: Writing">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Writing
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

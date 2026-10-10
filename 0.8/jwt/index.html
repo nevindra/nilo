@@ -1,0 +1,2646 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="An HTTP framework for Zig 0.17, and the toolkit it is built from">
+      
+      
+      
+        <link rel="canonical" href="https://nevindra.github.io/nilo/0.8/jwt/">
+      
+      
+        <link rel="prev" href="../cache/">
+      
+      
+        <link rel="next" href="../proto/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Checking somebody else's token - nilo</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#checking-somebody-elses-token" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="nilo" class="md-header__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            nilo
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Checking somebody else's token
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="indigo"  aria-label="Light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="nilo" class="md-nav__button md-logo" aria-label="nilo" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    nilo
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/nevindra/nilo" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    nevindra/nilo
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start here
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start here
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../handlers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handlers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Routing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Handling a request
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Handling a request
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../requests/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Requests
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../forms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Responses
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cookies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cookies
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../websocket/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebSocket
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grpc/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    gRPC
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building an application
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Building an application
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../middleware/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Middleware and resolved values
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../services/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Services
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../static-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Static files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../errors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../background/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Background work
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../idempotency/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Idempotency keys
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The other modules
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    The other modules
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5_1" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../sql/" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Talking to a database
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5_1" id="__nav_5_1_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_5_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Talking to a database
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/tables/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A table is a struct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/reading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/shapes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parents, children and aggregates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/writing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/transactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Transactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/raw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Raw SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/sqlite/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQLite
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/migrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migrations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/running/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Running a database: checks, logging and errors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fetch/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Calling somebody else's API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../s3/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Object storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Work that runs later, again, or on a schedule
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cache/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A cache in this process
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking somebody else's token
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#a-complete-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A complete example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-checks-that-are-always-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security checks that are always on
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#getting-the-issuers-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Getting the issuer's keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#es256-signatures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ES256 signatures
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-signed-in-user-as-a-handler-argument" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The signed-in user as a handler argument
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-rotation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key rotation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-will-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it will not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../proto/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Protobuf messages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../id/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Identifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shipping it
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Shipping it
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openapi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAPI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Metrics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tracing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tracing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deploying/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deploying
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#a-complete-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A complete example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-checks-that-are-always-on" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security checks that are always on
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#getting-the-issuers-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Getting the issuer's keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#es256-signatures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ES256 signatures
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-signed-in-user-as-a-handler-argument" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The signed-in user as a handler argument
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#key-rotation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key rotation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-costs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-will-not-do" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it will not do
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#see-also" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        See also
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/nevindra/nilo/edit/main/docs/guide/jwt.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="checking-somebody-elses-token">Checking somebody else's token<a class="headerlink" href="#checking-somebody-elses-token" title="Permanent link">&para;</a></h1>
+<p><strong><code>nilo_jwt</code> verifies a JWT that an identity provider signed, with RS256 or ES256, and reads its claims into a struct of your own.</strong></p>
+<p><strong>Reference:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/jwt.md#nilo_jwt"><code>nilo_jwt</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/jwt.md#jwtkeyring"><code>jwt.Keyring</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/jwt.md#jwtverifierclaims-client"><code>jwt.Verifier</code></a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#verifiedv"><code>Verified(V)</code></a> · <strong>Design:</strong> <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/design/jwt.md">JWT verification</a></p>
+<p><code>nilo_jwt</code> verifies tokens such as a Google ID token, an Auth0 or Clerk access token, a Keycloak or Cognito bearer token, or a Supabase session. It supports RS256 and ES256, which between them are what those issuers sign with. It is a tool module: no event loop, no allocator of its own, and it imports nothing, so <code>zig test jwt/jwt.zig</code> runs all of it (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md">ADR 111</a>).</p>
+<p><strong>It is for a token somebody else issued.</strong> A sign-in that your own server keeps track of is a <a href="../sessions/"><code>Session(T)</code></a>, sealed into a cookie, and needs no token at all. In nilo, the word <em>token</em> only ever means a credential that arrived from outside (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/CONTEXT.md#tokens"><code>CONTEXT.md</code></a>).</p>
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">jwt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_jwt"</span><span class="p">);</span>
+</code></pre></div>
+<p>and one line in <code>build.zig</code>, beside the <code>nilo_http</code> one:</p>
+<div class="highlight"><pre><span></span><code><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"nilo_jwt"</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">module</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">module</span><span class="p">(</span><span class="s">"nilo_jwt"</span><span class="p">)</span><span class="w"> </span><span class="p">},</span>
+</code></pre></div>
+<h2 id="a-complete-example">A complete example<a class="headerlink" href="#a-complete-example" title="Permanent link">&para;</a></h2>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">jwt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_jwt"</span><span class="p">);</span>
+
+<span class="kr">const</span><span class="w"> </span><span class="n">Claims</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">sub</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email_verified</span><span class="o">:</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">whoIsThis</span><span class="p">(</span><span class="n">gpa</span><span class="o">:</span><span class="w"> </span><span class="n">std</span><span class="p">.</span><span class="n">mem</span><span class="p">.</span><span class="n">Allocator</span><span class="p">,</span><span class="w"> </span><span class="n">keys</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="kr">const</span><span class="w"> </span><span class="n">jwt</span><span class="p">.</span><span class="n">Keys</span><span class="p">,</span><span class="w"> </span><span class="n">token</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">Claims</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">jwt</span><span class="p">.</span><span class="n">verify</span><span class="p">(</span><span class="n">Claims</span><span class="p">,</span><span class="w"> </span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="n">token</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">        </span><span class="p">.</span><span class="n">keys</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span>
+<span class="w">        </span><span class="p">.</span><span class="n">issuer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">is</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://accounts.google.com"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">audience</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">is</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"1234-abcd.apps.googleusercontent.com"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="p">.</span><span class="n">now_s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@divFloor</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">nowMillis</span><span class="p">(),</span><span class="w"> </span><span class="mi">1000</span><span class="p">),</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong><code>verify</code> does every check, in a safe order, and returns the claims or one of the <a href="#errors">errors below</a>.</strong> Three things shape the call:</p>
+<ul>
+<li><strong><code>Claims</code> is yours.</strong> Add one field per thing the application wants from the token; fields the token carries that the struct does not name are ignored. The registered claims (<code>iss</code>, <code>aud</code>, <code>exp</code>, <code>nbf</code>) are checked whether or not the struct mentions them, so a <code>Claims</code> with only <code>sub</code> in it still gets a full check.</li>
+<li><strong>Strings in the result point into <code>gpa</code>.</strong> Pass <code>c.arena()</code> inside a request and there is nothing to free. Pass a real allocator and the strings are yours to free.</li>
+<li><strong>The clock is an argument.</strong> A module with no loop has no clock, and a test that cannot choose the time cannot test an expiry. Inside a request, pass <code>nilo.nowMillis()</code>.</li>
+</ul>
+<h2 id="options">Options<a class="headerlink" href="#options" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>keys</code></td>
+<td>none</td>
+<td><code>*const jwt.Keys</code>, the issuer's: <a href="#getting-the-issuers-keys">below</a></td>
+</tr>
+<tr>
+<td><code>issuer</code></td>
+<td>none</td>
+<td><code>.{ .is = "…" }</code> rejects a token whose <code>iss</code> is not exactly this. <code>.unchecked</code> skips the check, which is right when one key set serves several issuers</td>
+</tr>
+<tr>
+<td><code>audience</code></td>
+<td>none</td>
+<td><code>.{ .is = "…" }</code> rejects a token whose <code>aud</code> does not include this (your client id). <code>.unchecked</code> skips it, and then a token minted for another application passes</td>
+</tr>
+<tr>
+<td><code>now_s</code></td>
+<td>none</td>
+<td>seconds since the epoch, for <code>exp</code> and <code>nbf</code></td>
+</tr>
+<tr>
+<td><code>leeway_s</code></td>
+<td><code>0</code></td>
+<td>how far the two clocks may disagree, in both directions. Sixty is the usual value when the issuer is somebody else's machine</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>issuer</code> and <code>audience</code> have no default, so you cannot forget them.</strong> A call or a ring that leaves one out does not compile: <code>error: missing struct field: audience</code>, at the line that builds the options. This is what a Google ID token minted for <em>somebody else's</em> application would otherwise get through, because it is signed by the same keys as one minted for yours and <code>aud</code> is the only thing that tells them apart (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md">ADR 111</a>).</p>
+<p><strong>Skipping a check is a word you write: <code>.unchecked</code>.</strong> There is one case where it is the right word. Some issuers put no <code>aud</code> in their access tokens, and name your application in another claim instead:</p>
+<table>
+<thead>
+<tr>
+<th>Issuer</th>
+<th>The token has</th>
+<th>Write</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Amazon Cognito, access token</td>
+<td><code>client_id</code>, and an <code>aud</code> only if the app asked for a resource binding</td>
+<td><code>.audience = .unchecked</code>, and <code>client_id: []const u8</code> in your <code>Claims</code>, compared to your app client</td>
+</tr>
+<tr>
+<td>Clerk, session token</td>
+<td><code>azp</code> (the page's origin), no <code>aud</code></td>
+<td><code>.audience = .unchecked</code>, and compare <code>azp</code></td>
+</tr>
+<tr>
+<td>Keycloak, access token</td>
+<td><code>aud</code> only for the clients the user holds a role in, unless you add an Audience mapper</td>
+<td>add the mapper and use <code>.{ .is = … }</code>, or <code>.unchecked</code> and compare <code>azp</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>.unchecked</code> there is not "safe", it is "checked in the next line": a token minted for another app client in the same pool is signed by the same keys, and the claim that names the client is what stops it. For <code>issuer</code>, the same word is for a key set shared by several issuers, such as Microsoft's multi-tenant endpoints, where the tenant is in <code>iss</code> and you read <code>tid</code> yourself.</p>
+<h2 id="security-checks-that-are-always-on">Security checks that are always on<a class="headerlink" href="#security-checks-that-are-always-on" title="Permanent link">&para;</a></h2>
+<p><strong>Each of these is a mistake that would give you a verifier that passes every test and leaves the endpoint open</strong>, and preventing them is the reason this module exists rather than a paragraph pointing at <code>std.crypto</code>:</p>
+<ul>
+<li><strong>The algorithm comes from the key, never from the token's <code>alg</code>.</strong> A JWKS key that says <code>RSA</code> is checked as RS256, and one that says <code>EC</code> on <code>P-256</code> as ES256; nothing in the token header can change that. The header's <code>alg</code> is only compared. A header saying <code>none</code>, or <code>HS256</code> with your published RSA modulus used as the HMAC secret, is rejected before any key is looked up. A header saying <code>ES256</code> over an RSA key, or <code>RS256</code> over an EC key, returns <code>error.WrongAlgorithm</code> before any arithmetic runs. So a key set holding both kinds, which is what an issuer publishes in the middle of a migration, cannot be tricked into checking one kind with the other (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md">ADR 111</a>).</li>
+<li><strong>Nothing in the payload is read until the signature has passed.</strong> An <code>exp</code> from an unverified token is a number somebody chose.</li>
+<li><strong><code>exp</code> is required.</strong> A credential with no end is not a credential, so a token without <code>exp</code> returns <code>error.NoExpiry</code> however well it is signed.</li>
+</ul>
+<h2 id="errors">Errors<a class="headerlink" href="#errors" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Error</th>
+<th>When</th>
+<th>What to answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>error.NotAToken</code></td>
+<td>not three base64url segments, or the header is not JSON</td>
+<td>401</td>
+</tr>
+<tr>
+<td><code>error.WrongAlgorithm</code></td>
+<td>the header says anything but <code>RS256</code> or <code>ES256</code> (<code>none</code> included), or names one over a key of the other kind</td>
+<td>401</td>
+</tr>
+<tr>
+<td><code>error.NoSuchKey</code></td>
+<td>the <code>kid</code> is not in the set, or no <code>kid</code> was named and the set has more than one key</td>
+<td>the issuer may have rotated: <a href="#key-rotation">refresh</a>, then 401</td>
+</tr>
+<tr>
+<td><code>error.BadSignature</code></td>
+<td>the key is right and the signature is not</td>
+<td>401</td>
+</tr>
+<tr>
+<td><code>error.NoExpiry</code>, <code>error.Expired</code>, <code>error.NotYetValid</code></td>
+<td><code>exp</code> missing, <code>exp</code> passed, <code>nbf</code> not reached</td>
+<td>401</td>
+</tr>
+<tr>
+<td><code>error.WrongIssuer</code>, <code>error.WrongAudience</code></td>
+<td><code>iss</code> or <code>aud</code> is not what you set</td>
+<td>401</td>
+</tr>
+<tr>
+<td><code>error.ClaimsNotReadable</code></td>
+<td>the signature passed and the payload does not fit your struct</td>
+<td>401, or a 500 if your struct is what is wrong</td>
+</tr>
+<tr>
+<td><code>error.KeySizeNotSupported</code></td>
+<td>a modulus that is not 2048, 3072 or 4096 bits</td>
+<td>500, and an entry on the <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/todo.md">todo list</a> under <code>nilo_jwt</code></td>
+</tr>
+<tr>
+<td><code>error.CurveNotSupported</code></td>
+<td>an EC key whose <code>crv</code> is not <code>P-256</code></td>
+<td>the same 500, and the same todo entry</td>
+</tr>
+<tr>
+<td><code>error.SignatureWrongLength</code></td>
+<td>a signature that is not the size of its key (for ES256, sixty-four bytes of <code>r \|\| s</code>)</td>
+<td>401. If it is <em>your</em> test token, the signer wrote DER: <a href="#es256-signatures">below</a></td>
+</tr>
+<tr>
+<td><code>error.KeyNotUsable</code></td>
+<td>the set carried a key the arithmetic cannot use: an even exponent, a point that is not on the curve</td>
+<td>500. The key document is wrong, and no token will pass</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Every one of these is a 401 to the client, and the reason belongs in your log, not in the response.</strong> Telling a caller which check failed tells them what to fix on the next attempt. The one worth a different answer is <code>NoSuchKey</code>, because that is what a key rotation looks like from here.</p>
+<h2 id="getting-the-issuers-keys">Getting the issuer's keys<a class="headerlink" href="#getting-the-issuers-keys" title="Permanent link">&para;</a></h2>
+<p><strong>You supply the HTTP client that fetches the key set.</strong> This is deliberate: it is an HTTPS GET that <a href="../fetch/"><code>nilo_fetch</code></a> already sends, and this module imports nothing. A <code>Keyring</code> takes that client, fetches the keys at startup, and fetches again on an unknown <code>kid</code>, at most once per interval. If you would rather a miss be rejected than trigger a fetch, call <code>verify</code> instead of <code>verifyOrRefresh</code>; the choice is yours (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/decided.md#answered-and-kept-to-one-line-each">decided</a>). What the module does with the key document is parse it:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>jwt.parseKeys(gpa, bytes)</code></td>
+<td><code>!Keys</code>: a JWKS document read into the keys it can verify with, <code>RSA</code> as <code>n</code> and <code>e</code>, <code>EC</code> as <code>crv</code>, <code>x</code> and <code>y</code>. Keys of another type (Ed25519, a key marked <code>"use":"enc"</code>) are skipped, not rejected</td>
+</tr>
+<tr>
+<td><code>keys.find(kid)</code></td>
+<td><code>?Key</code>. A set with exactly one key answers for a token that named no <code>kid</code></td>
+</tr>
+<tr>
+<td><code>key.material</code></td>
+<td><code>.rsa</code> or <code>.ec</code>, and the key's own <code>algorithm()</code> is <code>RS256</code> or <code>ES256</code> accordingly</td>
+</tr>
+<tr>
+<td><code>keys.deinit()</code></td>
+<td>frees everything</td>
+</tr>
+<tr>
+<td><code>jwt.key_sizes</code></td>
+<td>the supported modulus lengths: 256, 384 and 512 bytes</td>
+</tr>
+<tr>
+<td><code>jwt.curves</code></td>
+<td>the supported curves: <code>P-256</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>parseKeys</code> returns <code>error.NotAKeySet</code> for bytes that are not a JSON object with a <code>keys</code> array, and <code>error.KeyNotUsable</code> for a key that says RSA but has no <code>n</code> and <code>e</code>, or says EC but has no <code>crv</code>, <code>x</code> or <code>y</code>. An EC key on a curve other than <code>P-256</code> is <em>kept</em>, so that a token naming it returns <code>error.CurveNotSupported</code> rather than a <code>NoSuchKey</code> that sends you looking for a rotation.</p>
+<p>The issuer publishes the document's address. Google's is <code>https://www.googleapis.com/oauth2/v3/certs</code>, and for any OIDC issuer it is the <code>jwks_uri</code> in <code>/.well-known/openid-configuration</code>. <strong>The usual setup is a <code>Keyring</code></strong>: the key URL, issuer and audience written once, the document fetched at startup, and the key set swapped safely when the issuer rotates (<a href="#key-rotation">below</a>).</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">fetch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">@import</span><span class="p">(</span><span class="s">"nilo_fetch"</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">fetchKeys</span><span class="p">(</span><span class="n">run</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Run</span><span class="p">,</span><span class="w"> </span><span class="n">google</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">jwt</span><span class="p">.</span><span class="n">Keyring</span><span class="p">,</span><span class="w"> </span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="kt">void</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">try</span><span class="w"> </span><span class="n">google</span><span class="p">.</span><span class="n">refresh</span><span class="p">(</span><span class="n">run</span><span class="p">,</span><span class="w"> </span><span class="n">api</span><span class="p">,</span><span class="w"> </span><span class="nb">@divFloor</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">nowMillis</span><span class="p">(),</span><span class="w"> </span><span class="mi">1000</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>and in <code>main</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">google</span><span class="o">:</span><span class="w"> </span><span class="n">jwt</span><span class="p">.</span><span class="n">Keyring</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">gpa</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span>
+<span class="w">    </span><span class="p">.</span><span class="n">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://www.googleapis.com/oauth2/v3/certs"</span><span class="p">,</span>
+<span class="w">    </span><span class="p">.</span><span class="n">issuer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">is</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"https://accounts.google.com"</span><span class="w"> </span><span class="p">},</span>
+<span class="w">    </span><span class="p">.</span><span class="n">audience</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">is</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cfg</span><span class="p">.</span><span class="n">google_client_id</span><span class="w"> </span><span class="p">},</span>
+<span class="p">});</span>
+<span class="k">defer</span><span class="w"> </span><span class="n">google</span><span class="p">.</span><span class="n">deinit</span><span class="p">();</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">google</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">before</span><span class="p">(</span><span class="n">fetchKeys</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="o">&amp;</span><span class="n">google</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">api</span><span class="w"> </span><span class="p">});</span>
+</code></pre></div>
+<p><code>run</code> there is a <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/core.md#run"><code>nilo.Run</code></a>, the Scope for work that is not a request, such as startup. <code>nilo_fetch</code> is finished by <code>listen()</code> like any other service, so the fetch goes in <code>app.before</code>, which runs inside <code>listen()</code> once the client is ready and before the first request, the same way a database migration does (<a href="../sql/reading/#queries-outside-a-request">A query with no server</a>, <a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/180-work-that-needs-the-services-runs-on-their-loop.md">ADR 180</a>). The ring needs only one call from the client, <code>get(scope, url, .{})</code>, which keeps the module free of imports: the client is an argument, the same way a <a href="../jobs/"><code>job.Table</code></a> takes your Db.</p>
+<p>A program that only wants to parse the bytes can still use <code>parseKeys</code>: <code>jwt.parseKeys(gpa, res.body.view())</code> on the result of a <code>client.get</code>, held as a <code>*const Keys</code> for a key set that never rotates.</p>
+<h2 id="es256-signatures">ES256 signatures<a class="headerlink" href="#es256-signatures" title="Permanent link">&para;</a></h2>
+<p><strong>ES256 keys need nothing different in the call: the key's type picks the arithmetic, and the same <code>verify</code> handles both.</strong> Supabase, Apple and a growing number of issuers sign with ES256 (ECDSA over P-256 with SHA-256), and their JWKS carries <code>{"kty":"EC","crv":"P-256","x":…,"y":…}</code> instead of <code>n</code> and <code>e</code>.</p>
+<p>One thing matters if you ever <em>create</em> an ES256 token for a test. A JWS signature is the two integers <code>r</code> and <code>s</code> back to back, thirty-two bytes each, sixty-four in total (RFC 7518 §3.4). Every tool outside JOSE (<code>openssl dgst</code>, a certificate, a <code>.sig</code> file) writes the DER <code>SEQUENCE { INTEGER r, INTEGER s }</code> instead, around seventy bytes with a variable length. A token whose last segment is DER is rejected here as <code>error.SignatureWrongLength</code>, by name, rather than as a <code>BadSignature</code> you spend an afternoon on. The module's own test vector is the one from RFC 7515, which avoids the problem.</p>
+<h2 id="the-signed-in-user-as-a-handler-argument">The signed-in user as a handler argument<a class="headerlink" href="#the-signed-in-user-as-a-handler-argument" title="Permanent link">&para;</a></h2>
+<p><strong>Once the keys are loaded, the claims behind a bearer token are one handler argument</strong> (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/191-verified-claims-are-a-handler-argument.md">ADR 191</a>):</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">Google</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jwt</span><span class="p">.</span><span class="n">Verifier</span><span class="p">(</span><span class="n">Claims</span><span class="p">,</span><span class="w"> </span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">);</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">me</span><span class="p">(</span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Verified</span><span class="p">(</span><span class="n">Google</span><span class="p">))</span><span class="w"> </span><span class="n">Claims</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">user</span><span class="p">.</span><span class="n">claims</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>and beside the ring in <code>main</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="kr">var</span><span class="w"> </span><span class="n">verifier</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Google</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="o">&amp;</span><span class="n">google</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">api</span><span class="p">);</span>
+<span class="k">try</span><span class="w"> </span><span class="n">app</span><span class="p">.</span><span class="n">provide</span><span class="p">(</span><span class="o">&amp;</span><span class="n">verifier</span><span class="p">);</span>
+</code></pre></div>
+<p><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/jwt.md#jwtverifierclaims-client"><code>jwt.Verifier(Claims, Client)</code></a> bundles the ring, the client its refresh needs, and the claims type into one service, which is what lets an argument name one type and reach all three. Before <code>me</code> runs, nilo:</p>
+<ol>
+<li>reads the <code>Authorization</code> header and requires the <code>Bearer</code> scheme;</li>
+<li>verifies the token through the ring, with the issuer, the audience and the clock;</li>
+<li>fetches the keys once if the <code>kid</code> was missing;</li>
+<li>hands over the claims, parsed into the request arena.</li>
+</ol>
+<p>Anything that fails is a 401 with <code>WWW-Authenticate: Bearer</code> and the reason in the body (<code>Expired</code>, <code>WrongAudience</code>). The one exception is when the issuer cannot be reached while a refresh was needed: that is a 503, because the token was never judged. <code>listen()</code> refuses to start if the verifier was not provided, the same as for a <code>*Db</code>. The OpenAPI document includes the bearer scheme and the 401.</p>
+<p>To reject a user after the token passes (the account is closed, the role is wrong), return <code>nilo.Verified(Google).refuse("that account is closed", .{})</code>, which is the same 401 with the same header. <code>user.token</code> is the token exactly as the client sent it, for a handler that forwards it to another service. A middleware guarding a prefix reads the same thing with <code>c.verified(Google)</code>, but a handler under it that asks again verifies again, so the signature is checked twice. A resolved value, below, avoids that.</p>
+<p><strong>When the handler needs more than the claims</strong> (the database row behind <code>sub</code>, a struct of your own), make the token check a <a href="../middleware/#resolved-values">resolved value</a>. The type says how the value is worked out, a handler asks for it by writing it in its argument list, and it is worked out once per request however many things ask for it.</p>
+<!-- compiles -->
+<div class="highlight"><pre><span></span><code><span class="kr">const</span><span class="w"> </span><span class="n">CurrentUser</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">pub</span><span class="w"> </span><span class="kr">const</span><span class="w"> </span><span class="n">nilo_resolve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">authenticate</span><span class="p">;</span>
+
+<span class="w">    </span><span class="n">id</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span>
+<span class="w">    </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">authenticate</span><span class="p">(</span><span class="n">c</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">nilo</span><span class="p">.</span><span class="n">Ctx</span><span class="p">,</span><span class="w"> </span><span class="n">google</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">jwt</span><span class="p">.</span><span class="n">Keyring</span><span class="p">,</span><span class="w"> </span><span class="n">api</span><span class="o">:</span><span class="w"> </span><span class="o">*</span><span class="n">fetch</span><span class="p">.</span><span class="n">Client</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">CurrentUser</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">auth</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">try</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">authorization</span><span class="p">(.</span><span class="n">bearer</span><span class="p">);</span>
+
+<span class="w">    </span><span class="kr">const</span><span class="w"> </span><span class="n">claims</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">google</span><span class="p">.</span><span class="n">verifyOrRefresh</span><span class="p">(</span>
+<span class="w">        </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sub</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="o">:</span><span class="w"> </span><span class="p">[]</span><span class="kr">const</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">},</span>
+<span class="w">        </span><span class="n">c</span><span class="p">.</span><span class="n">arena</span><span class="p">(),</span>
+<span class="w">        </span><span class="n">auth</span><span class="p">.</span><span class="n">value</span><span class="p">.</span><span class="n">view</span><span class="p">(),</span>
+<span class="w">        </span><span class="nb">@divFloor</span><span class="p">(</span><span class="n">nilo</span><span class="p">.</span><span class="n">nowMillis</span><span class="p">(),</span><span class="w"> </span><span class="mi">1000</span><span class="p">),</span>
+<span class="w">        </span><span class="n">c</span><span class="p">,</span>
+<span class="w">        </span><span class="n">api</span><span class="p">,</span>
+<span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="o">|</span><span class="n">err</span><span class="o">|</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">std</span><span class="p">.</span><span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="s">"token refused: {t}"</span><span class="p">,</span><span class="w"> </span><span class="p">.{</span><span class="n">err</span><span class="p">});</span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">nilo</span><span class="p">.</span><span class="n">Authorization</span><span class="p">(.</span><span class="n">bearer</span><span class="p">).</span><span class="n">refuse</span><span class="p">(</span><span class="s">"that token is not valid here"</span><span class="p">,</span><span class="w"> </span><span class="p">.{});</span>
+<span class="w">    </span><span class="p">};</span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="p">.{</span><span class="w"> </span><span class="p">.</span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">claims</span><span class="p">.</span><span class="n">sub</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">claims</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="p">};</span>
+<span class="p">}</span>
+
+<span class="k">fn</span><span class="w"> </span><span class="n">profile</span><span class="p">(</span><span class="n">user</span><span class="o">:</span><span class="w"> </span><span class="n">CurrentUser</span><span class="p">)</span><span class="w"> </span><span class="o">!</span><span class="n">CurrentUser</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">user</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><code>c.authorization(.bearer)</code> reads the <code>Authorization</code> header as one scheme (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/handlers.md#authorizationscheme">the reference</a>). The scheme is matched case-insensitively and whitespace is trimmed. A missing header or a different scheme gets a 401 that carries <code>WWW-Authenticate: Bearer</code>, the header every 401 must carry and the one a hand-written <code>startsWith(value, "Bearer ")</code> forgets. <code>Authorization(.bearer).refuse</code> is <code>fail.unauthorized</code> with that same header, for a rejection after reading. A handler that wants the raw token rather than the user asks for <code>nilo.Authorization(.bearer)</code> in its argument list, and also gets a security scheme in the OpenAPI document.</p>
+<p><code>profile</code> is still an ordinary function: in a test, call <code>profile(.{ .id = "7", .email = "…" })</code> with no token anywhere. To guard a whole prefix, use the same <code>c.resolve</code> the middleware page shows: <code>try app.useOn("/api", requireUser)</code> with <code>_ = try c.resolve(CurrentUser)</code> inside it. The handler behind it then reuses that result instead of verifying a second time.</p>
+<p><code>c.arena()</code> is the right allocator there. The claims live exactly as long as the request, and nothing needs freeing. A resolver that takes a <code>*Google</code> and calls <code>google.verify(c.arena(), auth.value.view(), now_s, c)</code> is the same five lines with the client already included.</p>
+<h2 id="key-rotation">Key rotation<a class="headerlink" href="#key-rotation" title="Permanent link">&para;</a></h2>
+<p><strong>When an issuer rotates keys, a valid token arrives signed with a key you do not have yet, and <code>verify</code> returns <code>error.NoSuchKey</code>.</strong> An issuer publishes a new key, signs with it, and keeps the old one in the document for a while. This guide used to say the fix was three lines: fetch again, hold a <code>*const Keys</code>, swap under a mutex. Each of the three was wrong in a way no test catches:</p>
+<ul>
+<li>no refetch means every sign-in fails until a restart;</li>
+<li>an unbounded refetch means one GET to the issuer per forged <code>kid</code>;</li>
+<li>swapping a set that another thread is reading is a use-after-free that the Debug build has no trap for.</li>
+</ul>
+<p>The last one is a concurrency problem, not a policy choice, and it is why the ring lives in the module (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md">ADR 111</a>).</p>
+<p><strong><code>verifyOrRefresh</code> is <code>verify</code>, plus at most one fetch per <code>refresh_interval_s</code> on <code>NoSuchKey</code></strong>, then <code>verify</code> again. The first request that sees the miss does the fetch. Other requests within that interval still get <code>NoSuchKey</code>. During a real rotation that means a handful of 401s in the second the first new-key token arrives; under a flood of forged tokens it is the limit doing its job. A <a href="../background/">ticker</a> can also call <code>refresh</code> on a schedule. Any refresh that ran, scheduled or not, counts as the last one, so a miss straight after it does not fetch again.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ring.load(bytes)</code></td>
+<td>parses a document and makes it current. The old set is freed once the verifies reading it are done, and a document that does not parse leaves the old set in place</td>
+</tr>
+<tr>
+<td><code>ring.refresh(scope, client, now_s)</code></td>
+<td><code>client.get(scope, url, .{})</code> then <code>load</code>. Returns <code>error.KeysNotAvailable</code> for anything but a 2xx, with the old set still held</td>
+</tr>
+<tr>
+<td><code>ring.verify(Claims, gpa, token, now_s)</code></td>
+<td><code>jwt.verify</code> against the current set, with the ring's issuer, audience and leeway. Never fetches</td>
+</tr>
+<tr>
+<td><code>ring.verifyOrRefresh(Claims, gpa, token, now_s, scope, client)</code></td>
+<td>the above, plus one bounded refresh on a missing <code>kid</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>The swap is safe because each verify pins the set it reads.</strong> A verify increments a count on the set, reads, and decrements it. A swap publishes the new set, then waits for the old set's count to reach zero before freeing it. Readers never wait. Only the writer waits, with a spin that lasts at most one verify, once per rotation. It spins because a <code>std.Io.Mutex</code> needs an <code>Io</code>, which a tool module does not have; the <a href="../cache/">cache</a> spins for the same reason. <code>nilo_cache</code> solves the same lifetime problem with a copy and a generation number (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/152-a-lookup-asks-the-cursor-afterwards-instead-of-taking-a-lock.md">ADR 152</a>). A key set is not flat data, so here it is a pin.</p>
+<p>Whether a <code>kid</code> miss should <em>reject</em> rather than <em>fetch</em> is still your decision: call <code>verify</code> and decide. The interval limits how often a fetch can happen; it is not a policy about whether to fetch.</p>
+<h2 id="testing">Testing<a class="headerlink" href="#testing" title="Permanent link">&para;</a></h2>
+<p><strong><code>now_s</code> is an argument, so you test an expiry by choosing the time instead of waiting.</strong> Create a key you hold (<code>openssl genrsa</code> or <code>openssl ecparam -name prime256v1 -genkey</code>), publish its public half as a JWKS document, and sign a token with any JOSE library. Then call <code>verify</code> at the second before its <code>exp</code>, at <code>exp</code>, and the second after. That is a complete test, and it runs under <code>zig test</code> with no server.</p>
+<p>The module's own suite does exactly that against two fixed vectors in <code>jwt/vector.zig</code> (an RSA token signed elsewhere, and RFC 7515's own ES256 example). Copy the shape from that file.</p>
+<h2 id="what-it-costs">What it costs<a class="headerlink" href="#what-it-costs" title="Permanent link">&para;</a></h2>
+<p><strong>Nothing per request beyond what you ask for.</strong> The module allocates only what the claims need, from the allocator you passed, and holds nothing between calls.</p>
+<p><strong>The cost of one verification has not been measured.</strong> An RSA verify at 2048 bits is a modular exponentiation, which is not cheap. An ES256 verify is two scalar multiplications on P-256 and is usually the cheaper of the two, but neither has been measured here. Whether a busy endpoint should cache the result or simply verify each time is a question the roadmap is waiting on a measurement for. Until then, a resolved value is already the cheapest setup (once per request, not once per handler), and setting a session cookie after the first verified request is the usual way to stop paying the cost at all.</p>
+<h2 id="what-it-will-not-do">What it will not do<a class="headerlink" href="#what-it-will-not-do" title="Permanent link">&para;</a></h2>
+<p><strong>Not supported: HS256, any curve but P-256, encrypted tokens (JWE), signing, discovery, PKCE and the nonce.</strong> Signing is missing because a server that issues its own sessions has <a href="../sessions/"><code>Session(T)</code></a> and needs no token. HS256 is missing because a module that verifies both a shared secret and a public key has to defend against an algorithm-confusion attack that a module verifying only one cannot fall for (<a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/decided.md#accepted">decided</a>). The rest is the sign-in flow (redirecting to the provider, exchanging a code), which is yours.</p>
+<h2 id="see-also">See also<a class="headerlink" href="#see-also" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/reference/jwt.md#nilo_jwt">The reference</a>: the full list of calls.</li>
+<li><a href="../sessions/">Sessions</a>: what a signed-in user becomes after the first verified request.</li>
+<li><a href="../fetch/">Calling somebody else's API</a>: the fetch that gets the key set.</li>
+<li><a href="https://github.com/nevindra/nilo/blob/v0.8.0/docs/adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md">ADR 111</a>: why verifying is in this module and fetching is not, why the key picks the algorithm, and what ES256 costs.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../cache/" class="md-footer__link md-footer__link--prev" aria-label="Previous: A cache in this process">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                A cache in this process
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../proto/" class="md-footer__link md-footer__link--next" aria-label="Next: Protobuf messages">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Protobuf messages
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "navigation.footer", "navigation.indexes", "search.highlight", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "latest", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
