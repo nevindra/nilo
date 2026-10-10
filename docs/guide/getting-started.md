@@ -4,7 +4,7 @@
 
 **Reference:** [`App`](../reference/app.md#app), [`listen` options](../reference/app.md#listen-options), [root wiring](../reference/README.md#declarations-in-the-root-file) · **Design:** [nilo's design principles](../design/principles.md)
 
-nilo needs **Zig 0.17**. Nothing else: no C library, no system package. **v0.7.0, the tag pinned below, and every tag before it build on Zig 0.16.0**, and this page describes `main`: with 0.16, pin the tag and read the page at that tag.
+nilo needs **Zig 0.17**. Nothing else: no C library, no system package. **v0.8.0, the tag pinned below, is the first to build on Zig 0.17**; v0.7.0 and every tag before it build on Zig 0.16.0, so with 0.16 pin one of those and read this page at that tag.
 
 ## Start a project
 
@@ -12,8 +12,8 @@ nilo needs **Zig 0.17**. Nothing else: no C library, no system package. **v0.7.0
 
 ```
 mkdir hello && cd hello
-curl -L https://github.com/nevindra/nilo/archive/e1b859f8230a4cffd09d8e84411f7bcd7524258a.tar.gz | tar -xz --strip-components=2 nilo-e1b859f8230a4cffd09d8e84411f7bcd7524258a/template
-zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
+curl -L https://github.com/nevindra/nilo/archive/d3ab2f33bbb8fc2281605c33a12fe3619c63f42d.tar.gz | tar -xz --strip-components=2 nilo-d3ab2f33bbb8fc2281605c33a12fe3619c63f42d/template
+zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.8.0#d3ab2f33bbb8fc2281605c33a12fe3619c63f42d'
 zig build dev
 ```
 
@@ -22,7 +22,7 @@ $ curl localhost:8787/greet/wati
 wati
 ```
 
-The first command takes the template directory of that commit and nothing else. The second writes nilo into the `build.zig.zon` it brought, pinned to the commit the tag points at. **Keep the `#commit`.** The `?ref=` on its own is not a pin: nilo's tags are annotated, `zig fetch` does not resolve an annotated tag (checked again on 0.17.0), and what it gives you for `?ref=v0.7.0` alone is whatever `main` was that day. Two people installing a week apart would get two different versions, and neither asked for one. The commit for each tag is on [its release page](https://github.com/nevindra/nilo/releases).
+The first command takes the template directory of that commit and nothing else. The second writes nilo into the `build.zig.zon` it brought, pinned to the commit the tag points at. **Keep the `#commit`.** The `?ref=` on its own is not a pin: nilo's tags are annotated, `zig fetch` does not resolve an annotated tag (checked again on 0.17.0), and what it gives you for `?ref=v0.8.0` alone is whatever `main` was that day. Two people installing a week apart would get two different versions, and neither asked for one. The commit for each tag is on [its release page](https://github.com/nevindra/nilo/releases).
 
 `zig build test` runs the template's test, and `.name = .hello` in `build.zig.zon` and `"hello"` in `build.zig` are the two places to rename it (after changing the name, delete `.fingerprint` and Zig prints the one to use).
 

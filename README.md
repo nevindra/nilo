@@ -57,11 +57,11 @@ Those three lines are a complete route. From them you get:
 
 ## ⚡ Quickstart
 
-You need Zig 0.17 and nothing else: no C library, no system package. **v0.7.0, the tag below, and every tag before it build on Zig 0.16.0**, so pin one of them with 0.16, or follow `main` with 0.17 until the next tag.
+You need Zig 0.17 and nothing else: no C library, no system package. **v0.8.0, the tag below, is the first to build on Zig 0.17**; v0.7.0 and every tag before it build on Zig 0.16.0, so pin one of those with 0.16.
 
 ```console
 $ zig init                                                          # only if you have no build.zig.zon yet
-$ zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a4cffd09d8e84411f7bcd7524258a'
+$ zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.8.0#d3ab2f33bbb8fc2281605c33a12fe3619c63f42d'
 ```
 
 [`template/`](./template/) is a working project to start from: [Getting started](./docs/guide/getting-started.md#start-a-project) has the four commands.
