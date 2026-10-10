@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://ziglang.org/"><img alt="Zig 0.17" src="https://img.shields.io/badge/zig-0.17-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
-  <a href="./CHANGELOG.md"><img alt="version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-3b82f6?style=flat-square"></a>
+  <a href="./CHANGELOG.md"><img alt="version 0.8.0" src="https://img.shields.io/badge/version-0.8.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference/"><img alt="12 modules" src="https://img.shields.io/badge/modules-12-8957e5?style=flat-square"></a>
   <a href="./refusals/README.md"><img alt="597 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-597-e05d44?style=flat-square"></a>
   <a href="./docs/adr/"><img alt="272 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-272-6b7280?style=flat-square"></a>
@@ -66,7 +66,7 @@ $ zig fetch --save 'git+https://github.com/nevindra/nilo?ref=v0.7.0#e1b859f8230a
 
 [`template/`](./template/) is a working project to start from: [Getting started](./docs/guide/getting-started.md#start-a-project) has the four commands.
 
-**Keep the `#commit` part.** The tag is annotated, and `zig fetch` doesn't peel it (still true on 0.17), so `?ref=v0.7.0` on its own gives you whatever `main` is that day.
+**Keep the `#commit` part.** The tag is annotated, and `zig fetch` doesn't peel it (still true on 0.17), so `?ref=v0.8.0` on its own gives you whatever `main` is that day.
 
 ```zig
 const std = @import("std");
@@ -115,7 +115,7 @@ Run `zig build run` and it's serving. [Getting started](./docs/guide/getting-sta
 
 The package is `nilo`, and each module is its own import: `nilo_http`, `nilo_sql`, `nilo_s3`, `nilo_fetch`, `nilo_job`, `nilo_cache`, `nilo_jwt`, `nilo_proto`, `nilo_config`, `nilo_pw`, `nilo_id` and `nilo_core`. **There is no module called `nilo`**, so alias the one you use: `const nilo = @import("nilo_http");`.
 
-> **Upgrading from 0.6.0?** [Read this before you deploy](https://github.com/nevindra/nilo/releases/tag/v0.7.0#read-this-before-you-deploy): each change, and how to fix it. From 0.5.0, read [v0.6.0's](https://github.com/nevindra/nilo/releases/tag/v0.6.0#read-this-before-you-deploy) first.
+> **Upgrading from 0.7.0?** [Read this before you deploy](https://github.com/nevindra/nilo/releases/tag/v0.8.0#read-this-before-you-deploy): each change, and how to fix it. From 0.6.0, read [v0.7.0's](https://github.com/nevindra/nilo/releases/tag/v0.7.0#read-this-before-you-deploy) first.
 
 ## ✨ A route is just a function
 

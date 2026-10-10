@@ -25,7 +25,7 @@ Inside a tier, entries sit under their module, because **two modules touch no fi
 
 **An entry waiting on somebody else's repository is the line to distrust.** This repository has been wrong about a blocker seven times, and each time the code it was waiting for already did the thing ([history](./history.md)): the latest was the pg.zig pin, whose two commits had reached lalinsky's `master` while the pull request that asked for them sat open. Nothing downstream ever re-tests a blocker, so each such entry names the pin it was last checked at, and is re-tested before it is repeated.
 
-**Ranked at 0.7.0.** The tiers were last set against the code and the numbers at that version, by what each entry costs ([ADR 255](./adr/255-the-todo-list-is-ranked-by-evidence-and-the-roadmap-is-written-from-it.md)), and [rule 9](#how-this-file-is-written) says when they are set again.
+**Ranked at 0.8.0.** The tiers were last set against the code and the numbers at that version, by what each entry costs ([ADR 255](./adr/255-the-todo-list-is-ranked-by-evidence-and-the-roadmap-is-written-from-it.md)), and [rule 9](#how-this-file-is-written) says when they are set again.
 
 ---
 

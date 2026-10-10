@@ -464,10 +464,11 @@ def main():
         if shutil.which(tool) is None:
             raise SystemExit(f"{tool} is not installed")
     # Every module this checkout ships has a program, or the report would be
-    # silent about one; `dev` is a tool and not a module (ADR 190).
+    # silent about one; `dev` is a tool and `template` the project `nilo.app`
+    # is shown on, neither of them a module (ADR 190, ADR 263).
     with open(os.path.join(ROOT, "build.zig")) as f:
         shipped = re.search(r"const shipped_roots = \[_\]\[\]const u8\{([^}]*)\}", f.read())
-    unmeasured = set(re.findall(r'"(\w+)"', shipped.group(1))) - {"dev"} - {m[0] for m in MODULES}
+    unmeasured = set(re.findall(r'"(\w+)"', shipped.group(1))) - {"dev", "template"} - {m[0] for m in MODULES}
     if unmeasured:
         raise SystemExit(f"no program in bench/release/ for {', '.join(sorted(unmeasured))}; add one and a row in MODULES")
     if args.only:
