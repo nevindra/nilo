@@ -1636,8 +1636,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             opening(c, "db.select");
             comptime assertUnlocked(Row, @TypeOf(options), "db.select", "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
                 "and then `tx.select(…)`.");
-            const stmt = comptime statement.select(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, self, null, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+            return self.selectIn(null, Row, c, options);
         }
 
         /// The plan of the statement `db.select(Row, c, options)` sends, with
@@ -1752,9 +1751,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             opening(c, "db.one");
             comptime assertUnlocked(Row, @TypeOf(options), "db.one", "Begin one and ask there: `var tx = try db.begin(c, .{}); defer tx.deinit();` " ++
                 "and then `tx.one(…)`.");
-            const stmt = comptime statement.one(D, Row, @TypeOf(options));
-            const found = try fill(Row, stmt.reserve, self, null, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
-            return if (found.len == 0) null else found[0];
+            return self.oneIn(null, Row, c, options);
         }
 
         /// The row a key identifies, or null.
@@ -1785,12 +1782,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// key, and a tuple are all Refusals.
         pub fn find(self: *Self, comptime Row: type, c: anytype, key: anytype) !?Row {
             opening(c, "db.find");
-            // A narrower Row that does not carry its table's key is found the
-            // way `one` finds it with the key in `.where` (item 103).
-            if (comptime !statement.carriesKey(Row)) return self.one(Row, c, statement.keyWhere(Row, key));
-            const stmt = comptime statement.find(D, Row, @TypeOf(key));
-            const found = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, key, c));
-            return if (found.len == 0) null else found[0];
+            return self.findIn(null, Row, c, key);
         }
 
         /// How many rows match `options`.
@@ -1801,12 +1793,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// drift from the query it is counting. No `.where` counts the table.
         pub fn count(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             opening(c, "db.count");
-            const stmt = comptime statement.count(D, Row, @TypeOf(options));
-            const n = try only(i64, self, null, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
-            // `count(*)` is a `bigint` and never negative. A negative one
-            // would mean the column read as something else entirely.
-            if (n < 0) return error.QueryFailed;
-            return @intCast(n);
+            return self.countIn(null, Row, c, options);
         }
 
         /// A page of rows, and how many the condition matched before the
@@ -1843,22 +1830,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// statement.
         pub fn page(self: *Self, comptime Row: type, c: anytype, options: anytype) !Page(Row) {
             opening(c, "db.page");
-            const stmt = comptime statement.page(D, Row, @TypeOf(options));
-            var total: i64 = 0;
-            const rows = try filling(
-                Row,
-                stmt.reserve,
-                self,
-                null,
-                c,
-                try textOf(stmt, options, c),
-                self.planFor(stmt, options),
-                try valuesOf(stmt, Row, options, c),
-                &total,
-            );
-            // Past the last row the window has no row to ride on (ADR 150).
-            if (rows.len == 0 and skippedRows(options)) total = try countBehind(self, Row, null, c, options);
-            return .{ .rows = rows, .total = total };
+            return self.pageIn(null, Row, c, options);
         }
 
         /// Rows up to `.limit`, and whether any came after them: the list a
@@ -1898,8 +1870,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// question the first settles.
         pub fn exists(self: *Self, comptime Row: type, c: anytype, options: anytype) !bool {
             opening(c, "db.exists");
-            const stmt = comptime statement.exists(D, Row, @TypeOf(options));
-            return only(bool, self, null, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+            return self.existsIn(null, Row, c, options);
         }
 
         /// The one row a Row grouped by nothing answers: every aggregate it
@@ -1923,9 +1894,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// `db.select` would hand back a list that always holds one.
         pub fn exactlyOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !Row {
             opening(c, "db.exactlyOne");
-            const stmt = comptime shape.exactlyOne(D, Row, @TypeOf(options));
-            const found = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
-            return if (found.len == 0) error.QueryFailed else found[0];
+            return self.exactlyOneIn(null, Row, c, options);
         }
 
         /// Rows read one at a time, for a result set too big to hold.
@@ -1961,10 +1930,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const started = self.timing();
             var problem: ?wire_mod.Problem = null;
             const given = try valuesOf(stmt, Row, options, c);
-            const rows = bounded(self.armer, c, W.run, .{ w, arena, text, given, plan, &problem }) catch |err| {
-                self.told(c, started, text, plan, null, true, problem);
-                return err;
-            };
+            const rows = try self.openResult(null, w, c, started, text, given, plan, &problem);
             // **What a watcher is told here is the statement opening**, with
             // no row count: the rows are pulled by the handler afterwards and
             // nothing in this call sees the last one. A stream that is slow to
@@ -2023,25 +1989,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) ![]Row {
             opening(c, "db.raw");
-            const text = comptime rawText(sql, @TypeOf(values), "db.raw");
-            // One column and no Row: `db.raw([]const u8, …)`, `db.raw(i64, …)`
-            // ([ADR 125](../docs/adr/125-a-row-that-owns-no-table.md)).
-            if (comptime scalarColumn(Row)) {
-                comptime rawcheck.assertOne(Row, sql, "db.raw");
-                try self.vetRaw(Row, text, "db.raw", true, false, c, text);
-                return fillScalar(Row, self, null, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
-            }
-            comptime rawcheck.assertList(D, Row, sql, "db.raw");
-            try self.vetRaw(Row, text, "db.raw", false, false, c, text);
-            // No ceiling: this module did not write the statement and so has
-            // nothing to say about how many rows it can answer with.
-            //
-            // The values still go through the same conversion a Row's do
-            // (ADR 116). This module did not write the *statement*; it is
-            // still the one holding a `Uuid`, a `Str` and a `Timestamp`, and a
-            // parameter that meant something different here than in
-            // `db.select` would be two rules for one type.
-            return fill(Row, null, self, null, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
+            return self.rawIn(null, "db.raw", Row, c, sql, values);
         }
 
         /// `db.raw` with its `ORDER BY` chosen per request, from a closed set
@@ -2079,12 +2027,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             order: anytype,
         ) ![]Row {
             opening(c, "db.rawOrdered");
-            comptime rawcheck.assertList(D, Row, sql, "db.rawOrdered");
-            comptime ordering.assertFor(@TypeOf(order), Row, "`db.rawOrdered`", false);
-            const parts = comptime ordering.split(rawText(sql, @TypeOf(values), "db.rawOrdered"), "`db.rawOrdered`");
-            const text = try spliced(parts.head, order, parts.tail, c);
-            try self.vetRaw(Row, sql, "db.rawOrdered", false, false, c, text);
-            return fill(Row, null, self, null, c, text, null, try rawValuesOf(values, c));
+            return self.rawOrderedIn(null, "db.rawOrdered", Row, c, sql, values, order);
         }
 
         /// `db.raw` for a statement whose `WHERE` holds a key: the first row,
@@ -2118,16 +2061,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) !?Row {
             opening(c, "db.rawOne");
-            const text = comptime rawText(sql, @TypeOf(values), "db.rawOne");
-            if (comptime scalarColumn(Row)) {
-                comptime rawcheck.assertOne(Row, sql, "db.rawOne");
-                try self.vetRaw(Row, text, "db.rawOne", true, false, c, text);
-                const found = try fillScalar(Row, self, null, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
-                return if (found.len == 0) null else found[0];
-            }
-            comptime rawcheck.assertList(D, Row, sql, "db.rawOne");
-            try self.vetRaw(Row, text, "db.rawOne", false, false, c, text);
-            const found = try fill(Row, null, self, null, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
+            const found = try self.rawIn(null, "db.rawOne", Row, c, sql, values);
             return if (found.len == 0) null else found[0];
         }
 
@@ -2160,16 +2094,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) !Row {
             opening(c, "db.rawExactlyOne");
-            const text = comptime rawText(sql, @TypeOf(values), "db.rawExactlyOne");
-            if (comptime scalarColumn(Row)) {
-                comptime rawcheck.assertOne(Row, sql, "db.rawExactlyOne");
-                try self.vetRaw(Row, text, "db.rawExactlyOne", true, false, c, text);
-                const found = try fillScalar(Row, self, null, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
-                return if (found.len == 0) error.QueryFailed else found[0];
-            }
-            comptime rawcheck.assertList(D, Row, sql, "db.rawExactlyOne");
-            try self.vetRaw(Row, text, "db.rawExactlyOne", false, false, c, text);
-            const found = try fill(Row, null, self, null, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
+            const found = try self.rawIn(null, "db.rawExactlyOne", Row, c, sql, values);
             return if (found.len == 0) error.QueryFailed else found[0];
         }
 
@@ -2209,19 +2134,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) !Page(Row) {
             opening(c, "db.rawPage");
-            comptime rawcheck.assertPaged(D, Row, sql, "db.rawPage");
-            const paged = comptime rawcheck.paging(sql, @TypeOf(values), "db.rawPage");
-            const text = comptime rawText(sql, @TypeOf(values), "db.rawPage");
-            try self.vetRaw(Row, text, "db.rawPage", false, true, c, text);
-            const bound = try rawValuesOf(values, c);
-            var total: i64 = 0;
-            const rows = try filling(Row, null, self, null, c, text, self.rawPlanOf(text), bound, &total);
-            if (comptime paged.asksAgain()) {
-                if (rows.len == 0 and rawSkipped(paged, bound)) {
-                    total = try rawTotalBehind(Row, paged, self, null, c, text, self.rawPlanOf(text), bound);
-                }
-            }
-            return .{ .rows = rows, .total = total };
+            return self.rawPageIn(null, "db.rawPage", Row, c, sql, values);
         }
 
         /// `db.rawPage` with its `ORDER BY` chosen per request: the `{order}`
@@ -2252,19 +2165,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             order: anytype,
         ) !Page(Row) {
             opening(c, "db.rawPageOrdered");
-            comptime rawcheck.assertPaged(D, Row, sql, "db.rawPageOrdered");
-            const paged = comptime rawcheck.paging(sql, @TypeOf(values), "db.rawPageOrdered");
-            comptime ordering.assertFor(@TypeOf(order), Row, "`db.rawPageOrdered`", false);
-            const parts = comptime ordering.split(rawText(sql, @TypeOf(values), "db.rawPageOrdered"), "`db.rawPageOrdered`");
-            const text = try spliced(parts.head, order, parts.tail, c);
-            try self.vetRaw(Row, sql, "db.rawPageOrdered", false, true, c, text);
-            const bound = try rawValuesOf(values, c);
-            var total: i64 = 0;
-            const rows = try filling(Row, null, self, null, c, text, null, bound, &total);
-            if (comptime paged.asksAgain()) {
-                if (rows.len == 0 and rawSkipped(paged, bound)) total = try rawTotalBehind(Row, paged, self, null, c, text, null, bound);
-            }
-            return .{ .rows = rows, .total = total };
+            return self.rawPageOrderedIn(null, "db.rawPageOrdered", Row, c, sql, values, order);
         }
 
         /// An empty `Composed` that spells its placeholders the way this Db's
@@ -2315,12 +2216,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             values: anytype,
         ) ![]Row {
             opening(c, "db.composed");
-            comptime rawcheck.assertFlat(Row, "db.composed");
-            try checkComposed(stmt, @TypeOf(values));
-            if (comptime scalarColumn(Row)) {
-                return fillScalar(Row, self, null, c, stmt.view(), null, try rawValuesOf(values, c));
-            }
-            return fill(Row, null, self, null, c, stmt.view(), null, try rawValuesOf(values, c));
+            return self.composedIn(null, "db.composed", Row, c, stmt, values);
         }
 
         /// `db.composed` with the unwrap done, as `rawOne` is to `raw`.
@@ -2393,16 +2289,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// say about. A name that is not a column is a Refusal.
         pub fn insert(self: *Self, comptime Row: type, c: anytype, values: anytype) !Row {
             opening(c, "db.insert");
-            const stmt = comptime statement.insert(D, Row, @TypeOf(values));
-            // `RETURNING` on a successful insert answers with exactly one
-            // row, so the list is sized for one and never grows.
-            const back = try fill(Row, 1, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
-            // `RETURNING` on a successful insert answers with exactly one
-            // row. Reaching here with none would mean the driver and
-            // Postgres disagree about what happened, which is not something
-            // to paper over with an optional.
-            if (back.len == 0) return error.QueryFailed;
-            return back[0];
+            return self.insertIn(null, Row, c, values);
         }
 
         /// Insert many rows in one statement, and give back what the database
@@ -2426,22 +2313,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// the database would have said after a round trip.
         pub fn insertMany(self: *Self, comptime Row: type, c: anytype, rows: anytype) ![]Row {
             opening(c, "db.insertMany");
-            const V = comptime batchElement(Row, @TypeOf(rows));
-            const stmt = comptime statement.insertMany(D, Row, V);
-            const items: []const V = rows;
-            // Nothing to store is nothing to send: `unnest` of empty arrays
-            // would answer no rows after a round trip (ADR 017's floor).
-            if (items.len == 0) return &.{};
-            return fill(
-                Row,
-                items.len,
-                self,
-                null,
-                c,
-                stmt.sql,
-                self.planOf(stmt),
-                try batchValuesOf(stmt, Row, V, items, c),
-            );
+            return self.batchIn(null, Row, statement.insertMany, c, rows);
         }
 
         /// Change many rows in one statement, and give back the ones that
@@ -2465,20 +2337,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// matters.
         pub fn updateMany(self: *Self, comptime Row: type, c: anytype, rows: anytype) ![]Row {
             opening(c, "db.updateMany");
-            const V = comptime batchElement(Row, @TypeOf(rows));
-            const stmt = comptime statement.updateMany(D, Row, V);
-            const items: []const V = rows;
-            if (items.len == 0) return &.{};
-            return fill(
-                Row,
-                items.len,
-                self,
-                null,
-                c,
-                stmt.sql,
-                self.planOf(stmt),
-                try batchValuesOf(stmt, Row, V, items, c),
-            );
+            return self.batchIn(null, Row, statement.updateMany, c, rows);
         }
 
         /// Store the row, or leave the one that is already there alone —
@@ -2522,9 +2381,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime on: anytype,
         ) !?Row {
             opening(c, "db.insertOrIgnore");
-            const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
-            const back = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
-            return if (back.len == 0) null else back[0];
+            return self.insertOrIgnoreIn(null, Row, c, values, on);
         }
 
         /// Store the row, or write these values over the one that is already
@@ -2554,13 +2411,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             comptime on: anytype,
         ) !Row {
             opening(c, "db.insertOrUpdate");
-            const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
-            const back = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
-            // `DO UPDATE` always touches a row, so an empty answer here means
-            // the driver and Postgres disagree — the same reasoning as
-            // `insert`, and the reason this one is not an optional.
-            if (back.len == 0) return error.QueryFailed;
-            return back[0];
+            return self.insertOrUpdateIn(null, Row, c, values, on);
         }
 
         /// Change every row matching `.where`, and say how many there were.
@@ -2571,8 +2422,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn update(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             opening(c, "db.update");
             try narrowing(Row, "db.update", options);
-            const stmt = comptime statement.update(D, Row, @TypeOf(options));
-            return self.execTold(null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return self.changeIn(null, Row, statement.update, c, options);
         }
 
         /// Change every row matching `.where` and give back what the database
@@ -2590,8 +2440,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn updateReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             opening(c, "db.updateReturning");
             try narrowing(Row, "db.updateReturning", options);
-            const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return self.returningIn(null, Row, statement.updateReturning, c, options);
         }
 
         /// The same, for a `.where` that holds a key: the row as it now is, or
@@ -2622,8 +2471,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn updateReturningOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             opening(c, "db.updateReturningOne");
             try narrowing(Row, "db.updateReturningOne", options);
-            const stmt = comptime statement.updateReturningOne(D, Row, @TypeOf(options));
-            const changed = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            const changed = try self.returningIn(null, Row, statement.updateReturningOne, c, options);
             return if (changed.len == 0) null else changed[0];
         }
 
@@ -2631,8 +2479,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn delete(self: *Self, comptime Row: type, c: anytype, options: anytype) !usize {
             opening(c, "db.delete");
             try narrowing(Row, "db.delete", options);
-            const stmt = comptime statement.delete(D, Row, @TypeOf(options));
-            return self.execTold(null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return self.changeIn(null, Row, statement.delete, c, options);
         }
 
         /// The same, answering with the rows that were removed.
@@ -2644,8 +2491,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn deleteReturning(self: *Self, comptime Row: type, c: anytype, options: anytype) ![]Row {
             opening(c, "db.deleteReturning");
             try narrowing(Row, "db.deleteReturning", options);
-            const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
-            return fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return self.returningIn(null, Row, statement.deleteReturning, c, options);
         }
 
         /// Delete the one row the `.where` pins and give it back, or null
@@ -2662,8 +2508,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         pub fn deleteReturningOne(self: *Self, comptime Row: type, c: anytype, options: anytype) !?Row {
             opening(c, "db.deleteReturningOne");
             try narrowing(Row, "db.deleteReturningOne", options);
-            const stmt = comptime statement.deleteReturningOne(D, Row, @TypeOf(options));
-            const gone = try fill(Row, stmt.reserve, self, null, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            const gone = try self.returningIn(null, Row, statement.deleteReturningOne, c, options);
             return if (gone.len == 0) null else gone[0];
         }
 
@@ -2958,90 +2803,47 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
 
             pub fn select(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 opening(c, "tx.select");
-                const stmt = comptime statement.select(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.db, &self.inner, c, try textOf(stmt, options, c), self.db.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+                return self.db.selectIn(&self.inner, Row, c, options);
             }
 
             pub fn one(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 opening(c, "tx.one");
-                const stmt = comptime statement.one(D, Row, @TypeOf(options));
-                const found = try fill(Row, stmt.reserve, self.db, &self.inner, c, try textOf(stmt, options, c), self.db.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
-                return if (found.len == 0) null else found[0];
+                return self.db.oneIn(&self.inner, Row, c, options);
             }
 
             pub fn find(self: *Tx, comptime Row: type, c: anytype, key: anytype) !?Row {
                 opening(c, "tx.find");
-                if (comptime !statement.carriesKey(Row)) return self.one(Row, c, statement.keyWhere(Row, key));
-                const stmt = comptime statement.find(D, Row, @TypeOf(key));
-                const found = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, key, c));
-                return if (found.len == 0) null else found[0];
+                return self.db.findIn(&self.inner, Row, c, key);
             }
 
             pub fn count(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 opening(c, "tx.count");
-                const stmt = comptime statement.count(D, Row, @TypeOf(options));
-                const n = try only(i64, self.db, &self.inner, c, try textOf(stmt, options, c), self.db.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
-                if (n < 0) return error.QueryFailed;
-                return @intCast(n);
+                return self.db.countIn(&self.inner, Row, c, options);
             }
 
             pub fn exists(self: *Tx, comptime Row: type, c: anytype, options: anytype) !bool {
                 opening(c, "tx.exists");
-                const stmt = comptime statement.exists(D, Row, @TypeOf(options));
-                return only(bool, self.db, &self.inner, c, try textOf(stmt, options, c), self.db.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+                return self.db.existsIn(&self.inner, Row, c, options);
             }
 
             pub fn exactlyOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !Row {
                 opening(c, "tx.exactlyOne");
-                const stmt = comptime shape.exactlyOne(D, Row, @TypeOf(options));
-                const found = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
-                return if (found.len == 0) error.QueryFailed else found[0];
+                return self.db.exactlyOneIn(&self.inner, Row, c, options);
             }
 
             pub fn insert(self: *Tx, comptime Row: type, c: anytype, values: anytype) !Row {
                 opening(c, "tx.insert");
-                const stmt = comptime statement.insert(D, Row, @TypeOf(values));
-                // `RETURNING` on a successful insert answers with exactly one
-                // row, so the list is sized for one and never grows.
-                const back = try fill(Row, 1, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
-                if (back.len == 0) return error.QueryFailed;
-                return back[0];
+                return self.db.insertIn(&self.inner, Row, c, values);
             }
 
             pub fn insertMany(self: *Tx, comptime Row: type, c: anytype, rows: anytype) ![]Row {
                 opening(c, "tx.insertMany");
-                const V = comptime batchElement(Row, @TypeOf(rows));
-                const stmt = comptime statement.insertMany(D, Row, V);
-                const items: []const V = rows;
-                if (items.len == 0) return &.{};
-                return fill(
-                    Row,
-                    items.len,
-                    self.db,
-                    &self.inner,
-                    c,
-                    stmt.sql,
-                    self.db.planOf(stmt),
-                    try batchValuesOf(stmt, Row, V, items, c),
-                );
+                return self.db.batchIn(&self.inner, Row, statement.insertMany, c, rows);
             }
 
             pub fn updateMany(self: *Tx, comptime Row: type, c: anytype, rows: anytype) ![]Row {
                 opening(c, "tx.updateMany");
-                const V = comptime batchElement(Row, @TypeOf(rows));
-                const stmt = comptime statement.updateMany(D, Row, V);
-                const items: []const V = rows;
-                if (items.len == 0) return &.{};
-                return fill(
-                    Row,
-                    items.len,
-                    self.db,
-                    &self.inner,
-                    c,
-                    stmt.sql,
-                    self.db.planOf(stmt),
-                    try batchValuesOf(stmt, Row, V, items, c),
-                );
+                return self.db.batchIn(&self.inner, Row, statement.updateMany, c, rows);
             }
 
             /// A page of rows and the total behind it, inside the
@@ -3051,21 +2853,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             /// transaction where this costs a clause.
             pub fn page(self: *Tx, comptime Row: type, c: anytype, options: anytype) !Page(Row) {
                 opening(c, "tx.page");
-                const stmt = comptime statement.page(D, Row, @TypeOf(options));
-                var total: i64 = 0;
-                const rows = try filling(
-                    Row,
-                    stmt.reserve,
-                    self.db,
-                    &self.inner,
-                    c,
-                    try textOf(stmt, options, c),
-                    self.db.planFor(stmt, options),
-                    try valuesOf(stmt, Row, options, c),
-                    &total,
-                );
-                if (rows.len == 0 and skippedRows(options)) total = try countBehind(self.db, Row, &self.inner, c, options);
-                return .{ .rows = rows, .total = total };
+                return self.db.pageIn(&self.inner, Row, c, options);
             }
 
             /// `db.feed` inside the transaction.
@@ -3082,9 +2870,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 comptime on: anytype,
             ) !?Row {
                 opening(c, "tx.insertOrIgnore");
-                const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
-                const back = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
-                return if (back.len == 0) null else back[0];
+                return self.db.insertOrIgnoreIn(&self.inner, Row, c, values, on);
             }
 
             pub fn insertOrUpdate(
@@ -3095,54 +2881,45 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 comptime on: anytype,
             ) !Row {
                 opening(c, "tx.insertOrUpdate");
-                const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
-                const back = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, values, c));
-                if (back.len == 0) return error.QueryFailed;
-                return back[0];
+                return self.db.insertOrUpdateIn(&self.inner, Row, c, values, on);
             }
 
             pub fn update(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 opening(c, "tx.update");
                 try narrowing(Row, "tx.update", options);
-                const stmt = comptime statement.update(D, Row, @TypeOf(options));
-                return self.db.execTold(&self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return self.db.changeIn(&self.inner, Row, statement.update, c, options);
             }
 
             pub fn updateReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 opening(c, "tx.updateReturning");
                 try narrowing(Row, "tx.updateReturning", options);
-                const stmt = comptime statement.updateReturning(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return self.db.returningIn(&self.inner, Row, statement.updateReturning, c, options);
             }
 
             /// `db.updateReturningOne` inside the transaction (ADR 146).
             pub fn updateReturningOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 opening(c, "tx.updateReturningOne");
                 try narrowing(Row, "tx.updateReturningOne", options);
-                const stmt = comptime statement.updateReturningOne(D, Row, @TypeOf(options));
-                const changed = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                const changed = try self.db.returningIn(&self.inner, Row, statement.updateReturningOne, c, options);
                 return if (changed.len == 0) null else changed[0];
             }
 
             pub fn delete(self: *Tx, comptime Row: type, c: anytype, options: anytype) !usize {
                 opening(c, "tx.delete");
                 try narrowing(Row, "tx.delete", options);
-                const stmt = comptime statement.delete(D, Row, @TypeOf(options));
-                return self.db.execTold(&self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return self.db.changeIn(&self.inner, Row, statement.delete, c, options);
             }
 
             pub fn deleteReturning(self: *Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
                 opening(c, "tx.deleteReturning");
                 try narrowing(Row, "tx.deleteReturning", options);
-                const stmt = comptime statement.deleteReturning(D, Row, @TypeOf(options));
-                return fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                return self.db.returningIn(&self.inner, Row, statement.deleteReturning, c, options);
             }
 
             pub fn deleteReturningOne(self: *Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
                 opening(c, "tx.deleteReturningOne");
                 try narrowing(Row, "tx.deleteReturningOne", options);
-                const stmt = comptime statement.deleteReturningOne(D, Row, @TypeOf(options));
-                const gone = try fill(Row, stmt.reserve, self.db, &self.inner, c, stmt.sql, self.db.planOf(stmt), try valuesOf(stmt, Row, options, c));
+                const gone = try self.db.returningIn(&self.inner, Row, statement.deleteReturningOne, c, options);
                 return if (gone.len == 0) null else gone[0];
             }
 
@@ -3159,13 +2936,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) ![]Row {
                 opening(c, "tx.raw");
-                const text = comptime rawText(sql, @TypeOf(values), "tx.raw");
-                if (comptime scalarColumn(Row)) {
-                    comptime rawcheck.assertOne(Row, sql, "tx.raw");
-                    return fillScalar(Row, self.db, &self.inner, c, text, self.db.rawPlanOf(text), try rawValuesOf(values, c));
-                }
-                comptime rawcheck.assertList(D, Row, sql, "tx.raw");
-                return fill(Row, null, self.db, &self.inner, c, text, self.db.rawPlanOf(text), try rawValuesOf(values, c));
+                return self.db.rawIn(&self.inner, "tx.raw", Row, c, sql, values);
             }
 
             /// `db.compose` inside the transaction (ADR 208).
@@ -3182,12 +2953,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) ![]Row {
                 opening(c, "tx.composed");
-                comptime rawcheck.assertFlat(Row, "tx.composed");
-                try checkComposed(stmt, @TypeOf(values));
-                if (comptime scalarColumn(Row)) {
-                    return fillScalar(Row, self.db, &self.inner, c, stmt.view(), null, try rawValuesOf(values, c));
-                }
-                return fill(Row, null, self.db, &self.inner, c, stmt.view(), null, try rawValuesOf(values, c));
+                return self.db.composedIn(&self.inner, "tx.composed", Row, c, stmt, values);
             }
 
             /// `db.composedOne` inside the transaction (ADR 208).
@@ -3213,11 +2979,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 order: anytype,
             ) ![]Row {
                 opening(c, "tx.rawOrdered");
-                comptime rawcheck.assertList(D, Row, sql, "tx.rawOrdered");
-                comptime ordering.assertFor(@TypeOf(order), Row, "`tx.rawOrdered`", false);
-                const parts = comptime ordering.split(rawText(sql, @TypeOf(values), "tx.rawOrdered"), "`tx.rawOrdered`");
-                const text = try spliced(parts.head, order, parts.tail, c);
-                return fill(Row, null, self.db, &self.inner, c, text, null, try rawValuesOf(values, c));
+                return self.db.rawOrderedIn(&self.inner, "tx.rawOrdered", Row, c, sql, values, order);
             }
 
             /// `db.rawOne` inside the transaction: the first row of a statement
@@ -3230,14 +2992,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) !?Row {
                 opening(c, "tx.rawOne");
-                const text = comptime rawText(sql, @TypeOf(values), "tx.rawOne");
-                if (comptime scalarColumn(Row)) {
-                    comptime rawcheck.assertOne(Row, sql, "tx.rawOne");
-                    const found = try fillScalar(Row, self.db, &self.inner, c, text, self.db.rawPlanOf(text), try rawValuesOf(values, c));
-                    return if (found.len == 0) null else found[0];
-                }
-                comptime rawcheck.assertList(D, Row, sql, "tx.rawOne");
-                const found = try fill(Row, null, self.db, &self.inner, c, text, self.db.rawPlanOf(text), try rawValuesOf(values, c));
+                const found = try self.db.rawIn(&self.inner, "tx.rawOne", Row, c, sql, values);
                 return if (found.len == 0) null else found[0];
             }
 
@@ -3252,14 +3007,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) !Row {
                 opening(c, "tx.rawExactlyOne");
-                const text = comptime rawText(sql, @TypeOf(values), "tx.rawExactlyOne");
-                if (comptime scalarColumn(Row)) {
-                    comptime rawcheck.assertOne(Row, sql, "tx.rawExactlyOne");
-                    const found = try fillScalar(Row, self.db, &self.inner, c, text, self.db.rawPlanOf(text), try rawValuesOf(values, c));
-                    return if (found.len == 0) error.QueryFailed else found[0];
-                }
-                comptime rawcheck.assertList(D, Row, sql, "tx.rawExactlyOne");
-                const found = try fill(Row, null, self.db, &self.inner, c, text, self.db.rawPlanOf(text), try rawValuesOf(values, c));
+                const found = try self.db.rawIn(&self.inner, "tx.rawExactlyOne", Row, c, sql, values);
                 return if (found.len == 0) error.QueryFailed else found[0];
             }
 
@@ -3274,18 +3022,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 values: anytype,
             ) !Page(Row) {
                 opening(c, "tx.rawPage");
-                comptime rawcheck.assertPaged(D, Row, sql, "tx.rawPage");
-                const paged = comptime rawcheck.paging(sql, @TypeOf(values), "tx.rawPage");
-                const text = comptime rawText(sql, @TypeOf(values), "tx.rawPage");
-                const bound = try rawValuesOf(values, c);
-                var total: i64 = 0;
-                const rows = try filling(Row, null, self.db, &self.inner, c, text, self.db.rawPlanOf(text), bound, &total);
-                if (comptime paged.asksAgain()) {
-                    if (rows.len == 0 and rawSkipped(paged, bound)) {
-                        total = try rawTotalBehind(Row, paged, self.db, &self.inner, c, text, self.db.rawPlanOf(text), bound);
-                    }
-                }
-                return .{ .rows = rows, .total = total };
+                return self.db.rawPageIn(&self.inner, "tx.rawPage", Row, c, sql, values);
             }
 
             /// `db.rawPageOrdered` inside the transaction: the caller's paged
@@ -3299,18 +3036,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
                 order: anytype,
             ) !Page(Row) {
                 opening(c, "tx.rawPageOrdered");
-                comptime rawcheck.assertPaged(D, Row, sql, "tx.rawPageOrdered");
-                const paged = comptime rawcheck.paging(sql, @TypeOf(values), "tx.rawPageOrdered");
-                comptime ordering.assertFor(@TypeOf(order), Row, "`tx.rawPageOrdered`", false);
-                const parts = comptime ordering.split(rawText(sql, @TypeOf(values), "tx.rawPageOrdered"), "`tx.rawPageOrdered`");
-                const text = try spliced(parts.head, order, parts.tail, c);
-                const bound = try rawValuesOf(values, c);
-                var total: i64 = 0;
-                const rows = try filling(Row, null, self.db, &self.inner, c, text, null, bound, &total);
-                if (comptime paged.asksAgain()) {
-                    if (rows.len == 0 and rawSkipped(paged, bound)) total = try rawTotalBehind(Row, paged, self.db, &self.inner, c, text, null, bound);
-                }
-                return .{ .rows = rows, .total = total };
+                return self.db.rawPageOrderedIn(&self.inner, "tx.rawPageOrdered", Row, c, sql, values, order);
             }
 
             /// `db.exec` inside the transaction: a statement that answers with
@@ -3582,6 +3308,277 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
         /// with text in it, because each row's `dupe` lands after the list.
         /// The number the caller wrote is believed rather than second-guessed;
         /// a cap on it would be an unstated magic number.
+        // -- the bodies `Db` and `Tx` share ----------------------------------
+        //
+        // A `Db` call and the `Tx` call of the same name differ in the
+        // connection the statement goes down (`tx`, null for the pool's), the
+        // name the call is spoken of by, and nothing else, so each operation
+        // is written once here and both types are wrappers that check their
+        // Scope, say their name and hand over. Taking `tx` at run time rather
+        // than the call as a comptime string is what lets a `Row` that is read
+        // both ways instantiate its body once; only the raw statements, whose
+        // refusals name the call, carry it.
+
+        fn selectIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, options: anytype) ![]Row {
+            const stmt = comptime statement.select(D, Row, @TypeOf(options));
+            return fill(Row, stmt.reserve, self, tx, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+        }
+
+        fn oneIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, options: anytype) !?Row {
+            const stmt = comptime statement.one(D, Row, @TypeOf(options));
+            const found = try fill(Row, stmt.reserve, self, tx, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+            return if (found.len == 0) null else found[0];
+        }
+
+        fn findIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, key: anytype) !?Row {
+            // A narrower Row that does not carry its table's key is found the
+            // way `one` finds it with the key in `.where` (item 103).
+            if (comptime !statement.carriesKey(Row)) return self.oneIn(tx, Row, c, statement.keyWhere(Row, key));
+            const stmt = comptime statement.find(D, Row, @TypeOf(key));
+            const found = try fill(Row, stmt.reserve, self, tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, key, c));
+            return if (found.len == 0) null else found[0];
+        }
+
+        fn countIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, options: anytype) !usize {
+            const stmt = comptime statement.count(D, Row, @TypeOf(options));
+            const n = try only(i64, self, tx, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+            // `count(*)` is a `bigint` and never negative. A negative one
+            // would mean the column read as something else entirely.
+            if (n < 0) return error.QueryFailed;
+            return @intCast(n);
+        }
+
+        fn existsIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, options: anytype) !bool {
+            const stmt = comptime statement.exists(D, Row, @TypeOf(options));
+            return only(bool, self, tx, c, try textOf(stmt, options, c), self.planFor(stmt, options), try valuesOf(stmt, Row, options, c));
+        }
+
+        fn exactlyOneIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, options: anytype) !Row {
+            const stmt = comptime shape.exactlyOne(D, Row, @TypeOf(options));
+            const found = try fill(Row, stmt.reserve, self, tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+            return if (found.len == 0) error.QueryFailed else found[0];
+        }
+
+        fn insertIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, values: anytype) !Row {
+            const stmt = comptime statement.insert(D, Row, @TypeOf(values));
+            // `RETURNING` on a successful insert answers with exactly one row,
+            // so the list is sized for one and never grows, and reaching here
+            // with none would mean the driver and Postgres disagree about what
+            // happened, which is not something to paper over with an optional.
+            const back = try fill(Row, 1, self, tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
+            if (back.len == 0) return error.QueryFailed;
+            return back[0];
+        }
+
+        /// `insertMany` and `updateMany`, which differ in the statement alone.
+        fn batchIn(self: *Self, tx: ?*W.Tx, comptime Row: type, comptime build: anytype, c: anytype, rows: anytype) ![]Row {
+            const V = comptime batchElement(Row, @TypeOf(rows));
+            const stmt = comptime build(D, Row, V);
+            const items: []const V = rows;
+            // Nothing to store is nothing to send: `unnest` of empty arrays
+            // would answer no rows after a round trip (ADR 017's floor).
+            if (items.len == 0) return &.{};
+            return fill(Row, items.len, self, tx, c, stmt.sql, self.planOf(stmt), try batchValuesOf(stmt, Row, V, items, c));
+        }
+
+        fn pageIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, options: anytype) !Page(Row) {
+            const stmt = comptime statement.page(D, Row, @TypeOf(options));
+            var total: i64 = 0;
+            const rows = try filling(
+                Row,
+                stmt.reserve,
+                self,
+                tx,
+                c,
+                try textOf(stmt, options, c),
+                self.planFor(stmt, options),
+                try valuesOf(stmt, Row, options, c),
+                &total,
+            );
+            // Past the last row the window has no row to ride on (ADR 150).
+            if (rows.len == 0 and skippedRows(options)) total = try countBehind(self, Row, tx, c, options);
+            return .{ .rows = rows, .total = total };
+        }
+
+        fn insertOrIgnoreIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, values: anytype, comptime on: anytype) !?Row {
+            const stmt = comptime statement.insertOrIgnore(D, Row, @TypeOf(values), on);
+            const back = try fill(Row, stmt.reserve, self, tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
+            return if (back.len == 0) null else back[0];
+        }
+
+        fn insertOrUpdateIn(self: *Self, tx: ?*W.Tx, comptime Row: type, c: anytype, values: anytype, comptime on: anytype) !Row {
+            const stmt = comptime statement.insertOrUpdate(D, Row, @TypeOf(values), on);
+            const back = try fill(Row, stmt.reserve, self, tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, values, c));
+            // `DO UPDATE` always touches a row, so an empty answer here means
+            // the driver and Postgres disagree, the same reasoning as
+            // `insert`, and the reason this one is not an optional.
+            if (back.len == 0) return error.QueryFailed;
+            return back[0];
+        }
+
+        /// `update` and `delete`: the count of rows changed.
+        fn changeIn(self: *Self, tx: ?*W.Tx, comptime Row: type, comptime build: anytype, c: anytype, options: anytype) !usize {
+            const stmt = comptime build(D, Row, @TypeOf(options));
+            return self.execTold(tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+        }
+
+        /// The four `…Returning` and `…ReturningOne` calls: the rows changed.
+        fn returningIn(self: *Self, tx: ?*W.Tx, comptime Row: type, comptime build: anytype, c: anytype, options: anytype) ![]Row {
+            const stmt = comptime build(D, Row, @TypeOf(options));
+            return fill(Row, stmt.reserve, self, tx, c, stmt.sql, self.planOf(stmt), try valuesOf(stmt, Row, options, c));
+        }
+
+        /// **Only a `Db` vets a raw statement** (`tx == null`): the vetting
+        /// asks the server to describe it on a connection of its own, and a
+        /// transaction's one connection is busy.
+        fn rawIn(
+            self: *Self,
+            tx: ?*W.Tx,
+            comptime call: []const u8,
+            comptime Row: type,
+            c: anytype,
+            comptime sql: []const u8,
+            values: anytype,
+        ) ![]Row {
+            const text = comptime rawText(sql, @TypeOf(values), call);
+            // One column and no Row: `db.raw([]const u8, …)`, `db.raw(i64, …)`
+            // ([ADR 125](../docs/adr/125-a-row-that-owns-no-table.md)).
+            if (comptime scalarColumn(Row)) {
+                comptime rawcheck.assertOne(Row, sql, call);
+                if (tx == null) try self.vetRaw(Row, text, call, true, false, c, text);
+                return fillScalar(Row, self, tx, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
+            }
+            comptime rawcheck.assertList(D, Row, sql, call);
+            if (tx == null) try self.vetRaw(Row, text, call, false, false, c, text);
+            // No ceiling: this module did not write the statement and so has
+            // nothing to say about how many rows it can answer with.
+            //
+            // The values still go through the same conversion a Row's do
+            // (ADR 116). This module did not write the *statement*; it is
+            // still the one holding a `Uuid`, a `Str` and a `Timestamp`, and a
+            // parameter that meant something different here than in
+            // `db.select` would be two rules for one type.
+            return fill(Row, null, self, tx, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
+        }
+
+        fn rawOrderedIn(
+            self: *Self,
+            tx: ?*W.Tx,
+            comptime call: []const u8,
+            comptime Row: type,
+            c: anytype,
+            comptime sql: []const u8,
+            values: anytype,
+            order: anytype,
+        ) ![]Row {
+            comptime rawcheck.assertList(D, Row, sql, call);
+            comptime ordering.assertFor(@TypeOf(order), Row, "`" ++ call ++ "`", false);
+            const parts = comptime ordering.split(rawText(sql, @TypeOf(values), call), "`" ++ call ++ "`");
+            const text = try spliced(parts.head, order, parts.tail, c);
+            if (tx == null) try self.vetRaw(Row, sql, call, false, false, c, text);
+            return fill(Row, null, self, tx, c, text, null, try rawValuesOf(values, c));
+        }
+
+        fn rawPageIn(
+            self: *Self,
+            tx: ?*W.Tx,
+            comptime call: []const u8,
+            comptime Row: type,
+            c: anytype,
+            comptime sql: []const u8,
+            values: anytype,
+        ) !Page(Row) {
+            comptime rawcheck.assertPaged(D, Row, sql, call);
+            const paged = comptime rawcheck.paging(sql, @TypeOf(values), call);
+            const text = comptime rawText(sql, @TypeOf(values), call);
+            if (tx == null) try self.vetRaw(Row, text, call, false, true, c, text);
+            return self.pagedIn(tx, Row, paged, c, text, self.rawPlanOf(text), try rawValuesOf(values, c));
+        }
+
+        fn rawPageOrderedIn(
+            self: *Self,
+            tx: ?*W.Tx,
+            comptime call: []const u8,
+            comptime Row: type,
+            c: anytype,
+            comptime sql: []const u8,
+            values: anytype,
+            order: anytype,
+        ) !Page(Row) {
+            comptime rawcheck.assertPaged(D, Row, sql, call);
+            const paged = comptime rawcheck.paging(sql, @TypeOf(values), call);
+            comptime ordering.assertFor(@TypeOf(order), Row, "`" ++ call ++ "`", false);
+            const parts = comptime ordering.split(rawText(sql, @TypeOf(values), call), "`" ++ call ++ "`");
+            const text = try spliced(parts.head, order, parts.tail, c);
+            if (tx == null) try self.vetRaw(Row, sql, call, false, true, c, text);
+            return self.pagedIn(tx, Row, paged, c, text, null, try rawValuesOf(values, c));
+        }
+
+        /// The window of a raw page, and the total behind it when the window
+        /// is past the last row and the statement can be asked again.
+        fn pagedIn(
+            self: *Self,
+            tx: ?*W.Tx,
+            comptime Row: type,
+            comptime paged: anytype,
+            c: anytype,
+            text: []const u8,
+            plan: ?[]const u8,
+            bound: anytype,
+        ) !Page(Row) {
+            var total: i64 = 0;
+            const rows = try filling(Row, null, self, tx, c, text, plan, bound, &total);
+            if (comptime paged.asksAgain()) {
+                if (rows.len == 0 and rawSkipped(paged, bound)) {
+                    total = try rawTotalBehind(Row, paged, self, tx, c, text, plan, bound);
+                }
+            }
+            return .{ .rows = rows, .total = total };
+        }
+
+        fn composedIn(
+            self: *Self,
+            tx: ?*W.Tx,
+            comptime call: []const u8,
+            comptime Row: type,
+            c: anytype,
+            stmt: composed_mod.Composed,
+            values: anytype,
+        ) ![]Row {
+            comptime rawcheck.assertFlat(Row, call);
+            try checkComposed(stmt, @TypeOf(values));
+            if (comptime scalarColumn(Row)) {
+                return fillScalar(Row, self, tx, c, stmt.view(), null, try rawValuesOf(values, c));
+            }
+            return fill(Row, null, self, tx, c, stmt.view(), null, try rawValuesOf(values, c));
+        }
+
+        /// Opens a statement's result on the transaction's connection, or on
+        /// the pool's when there is no transaction, bounded by what the
+        /// route has left, and tells the watcher if it was refused. The one
+        /// place a read begins, so a failure to open is told the same way
+        /// from every call that reads.
+        fn openResult(
+            db: *Self,
+            tx: ?*W.Tx,
+            w: *W,
+            c: anytype,
+            started: ?i64,
+            sql: []const u8,
+            values: anytype,
+            plan: ?[]const u8,
+            problem: *?wire_mod.Problem,
+        ) @typeInfo(@TypeOf(W.run)).@"fn".return_type.? {
+            const arena = c.arena();
+            return (if (tx) |t|
+                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, problem })
+            else
+                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, problem })) catch |err| {
+                db.told(c, started, sql, plan, null, true, problem.*);
+                return err;
+            };
+        }
+
         fn fill(
             comptime Row: type,
             reserve: ?usize,
@@ -3647,16 +3644,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const started = db.timing();
             var problem: ?wire_mod.Problem = null;
 
-            var rows = if (tx) |t|
-                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                }
-            else
-                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                };
+            var rows = try db.openResult(tx, w, c, started, sql, values, plan, &problem);
             // Whatever happens below, the connection goes back usable —
             // including a handler's own error on the way past (`wire.zig`).
             // Told after the result set is given back (`Verdict`).
@@ -3782,16 +3770,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const started = db.timing();
             var problem: ?wire_mod.Problem = null;
 
-            var rows = if (tx) |t|
-                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                }
-            else
-                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                };
+            var rows = try db.openResult(tx, w, c, started, sql, values, plan, &problem);
             // Told after the result set is given back (`Verdict`).
             var verdict: Verdict = .{};
             defer verdict.send(db, c, started, sql, plan);
@@ -3847,16 +3826,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const started = db.timing();
             var problem: ?wire_mod.Problem = null;
 
-            var rows = if (tx) |t|
-                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                }
-            else
-                bounded(db.armer, c, W.run, .{ w, arena, sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                };
+            var rows = try db.openResult(tx, w, c, started, sql, values, plan, &problem);
             // Told after the result set is given back (`Verdict`).
             var verdict: Verdict = .{};
             defer verdict.send(db, c, started, sql, plan);
@@ -4018,16 +3988,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             var problem: ?wire_mod.Problem = null;
             const again = fromTheTop(paged, values);
 
-            var rows = if (tx) |t|
-                bounded(db.armer, c, W.Tx.run, .{ t, arena, sql, again, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                }
-            else
-                bounded(db.armer, c, W.run, .{ w, arena, sql, again, plan, &problem }) catch |err| {
-                    db.told(c, started, sql, plan, null, true, problem);
-                    return err;
-                };
+            var rows = try db.openResult(tx, w, c, started, sql, again, plan, &problem);
             // Told after the result set is given back (`Verdict`).
             var verdict: Verdict = .{};
             defer verdict.send(db, c, started, sql, plan);
@@ -4210,16 +4171,7 @@ pub fn DbOf(comptime W: type, comptime D: type, comptime name: []const u8) type 
             const w = try db.wireOf();
             const started = db.timing();
             var problem: ?wire_mod.Problem = null;
-            var rows = if (tx) |t|
-                bounded(db.armer, c, W.Tx.run, .{ t, arena, stmt.sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, stmt.sql, plan, null, true, problem);
-                    return err;
-                }
-            else
-                bounded(db.armer, c, W.run, .{ w, arena, stmt.sql, values, plan, &problem }) catch |err| {
-                    db.told(c, started, stmt.sql, plan, null, true, problem);
-                    return err;
-                };
+            var rows = try db.openResult(tx, w, c, started, stmt.sql, values, plan, &problem);
             // Told after the result set is given back (`Verdict`).
             var verdict: Verdict = .{};
             defer verdict.send(db, c, started, stmt.sql, plan);

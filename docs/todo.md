@@ -179,10 +179,6 @@ Nothing is open at this tier.
 
 **Needs:** whether the SQLite half is refused for non-ASCII text or the difference is written on both pages.
 
-**`Tx` repeats `Db` body by body.** Twenty-eight of `Tx`'s methods (`db.zig:2563` to `:2923`, about 360 lines) copy `Db`'s, differing in `self.db`, `&self.inner` for `null`, and `"tx."` for `"db."`. Opening a result and telling the watcher on failure is written out six times (`:1009`, `:1606`, `:3231`, `:3363`, `:3425`, `:3579`). `raw`, `rawOne` and `rawExactlyOne` repeat their scalar and Row branches on both types (`:1664` to `:1820`, `:2756` to `:2866`), and the four `rawPage` bodies are near copies (`:1850`, `:2871`). One private body per operation taking `tx: ?*W.Tx` and the call's name removes about 350 lines, and halves the instantiations each call site costs.
-
-**Needs:** a yes.
-
 **`ddl.zig` writes most statements twice, once while compiling and once at run time.** `addColumn` and `columnClause`, `writeLiteral` and `valueList`, `writeCheckIdent` and `checkName`, `createTrigger` and `triggerStatement`, `createView` and `viewStatement`, `createExtension` and `createExtensionIfMissing` are pairs, and `addColumn` already disagrees with `columnClause`. The desired side is comptime whole, so only a drop or rename, whose name comes from the snapshot, needs the run-time writer. About 150 lines.
 
 **Needs:** a yes.
