@@ -142,3 +142,7 @@ No mechanism holds these yet. Each says what it needs; until that arrives the co
 The failure gives nothing away at the place it happens: the loop writes into memory that has been handed on, and what arrives is a spinning thread somewhere else entirely, after a shutdown that has already logged success. Only the Engine may name zio, so the whole surface is one file — but one file is what the threadlocal entry above says too.
 
 **Needs:** a design that makes it a rule rather than a `defer` somebody has to remember. This particular one is guarded — a test in the Engine parks a `Wake` and checks the queue is empty after `deinit` — but the guard names `Wake`, and the next `submit` will not be in `Wake`.
+
+**The `RateLimit` and `RateLimit-Policy` fields follow an IETF draft (draft-ietf-httpapi-ratelimit-headers), not an RFC.** A change to the draft's syntax changes `announce` in `http/allowance.zig` and ADR 264.
+
+**Needs:** the fields checked against the draft at each release, and against the RFC when it is published.

@@ -26,7 +26,8 @@ const AdrCheck = @import("adr.zig").AdrCheck;
 /// lines, so a direction never lists an entry that has left. The todo list
 /// says on its `**Ranked at X.**` line which version it was last ranked at,
 /// and a release that bumps `build.zig.zon` past it fails here until the list
-/// is ranked again.
+/// is ranked again, and no entry's closing line waits for a caller (ADR
+/// 255).
 ///
 /// Anchors are GitHub's, lowercase with punctuation dropped, because the
 /// reference and the design pages are read on GitHub (ADR 219). A scan rather
@@ -104,6 +105,7 @@ pub const DocsCheck = struct {
             try r.addError("nilo: {s}'s lists of todo entries are out of step with the Direction lines in {s}; `zig build docs-index` rewrites them.", .{ roadmap, todo });
         }
         refused += try ranked(r, pageAt(known.items, todo).?.text, try root.readFileAlloc(io, "build.zig.zon", gpa, .limited(1 << 16)));
+        refused += try waiting(r, pageAt(known.items, todo).?.text);
 
         // An anchor named from anywhere else: an ADR, the changelog, the roadmap.
         var repo = try root.openDir(io, ".", .{ .iterate = true });
@@ -478,6 +480,35 @@ pub const DocsCheck = struct {
             try r.addError("nilo: {s}'s direction #{s} has no list of the todo entries that serve it; put `{s}` and `{s}` under it, and `zig build docs-index` fills them.", .{ roadmap, anchor.*, gathered_open, gathered_close });
         }
         return out.items;
+    }
+
+    /// No todo entry waits for a caller (ADR 255): nilo's users are few, so a
+    /// closing line that waits for somebody to turn up waits for ever. A scan
+    /// for the ways such a line has been written, so it is a floor and not a
+    /// proof; `the caller's`, a value a caller passes, is not one of them.
+    fn waiting(r: *Report, todo_text: []const u8) !usize {
+        const closings = [_][]const u8{ "**Needs:**", "**What would settle it:**" };
+        const waits = [_][]const u8{
+            "a caller",       "caller who",            "caller whose",      "caller for whom",
+            "caller with",    "a deployment whose",    "a deployment that", "a program that",
+            "an issuer that", "the service mesh that", "somebody asks",     "someone asks",
+        };
+        var refused: usize = 0;
+        var number: usize = 0;
+        var lines = std.mem.splitScalar(u8, todo_text, '\n');
+        while (lines.next()) |line| {
+            number += 1;
+            const closing = for (closings) |c| {
+                if (std.mem.startsWith(u8, line, c)) break true;
+            } else false;
+            if (!closing) continue;
+            for (waits) |w| if (std.ascii.findIgnoreCase(line, w) != null) {
+                refused += 1;
+                try r.addError("nilo: {s}:{d} closes on \"{s}\": an entry never waits for a caller (ADR 255). Name the work, the design or the measurement, instead.", .{ todo, number, w });
+                break;
+            };
+        }
+        return refused;
     }
 
     /// The todo list was last ranked at the version `build.zig.zon` names,

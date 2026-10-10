@@ -67,4 +67,4 @@ Related topics: why a Scope is a shape checked while compiling instead of an int
 
 ## Open questions
 
-- **A service argument is found by scanning the registry on every request**, 1.2 ns per entry: 1.6% of a request with four services, rising to 13.4% with thirty-two. This is accepted under ADR 017's limit for every app in `examples/`. The fix, resolving services into the route at `listen()`, is for when someone has more than about sixteen services. Recorded in [`docs/decided.md`](../decided.md).
+- **A service argument is found by scanning the registry on every request**, 1.2 ns per entry: 1.6% of a request with four services, rising to 13.4% with thirty-two. This is accepted under ADR 017's limit for every app in `examples/`. The fix, resolving services into the route at `listen()`, is open in [`docs/todo.md`](../todo.md).

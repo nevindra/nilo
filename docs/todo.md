@@ -8,16 +8,16 @@ What this document is measured against is [ADR 014](./adr/014-what-nilo-borrows-
 
 ## How to read this
 
-**One list in four tiers, by how much an entry costs the people who use nilo or the project's own development, never by who has asked for it and never by what kind of finding it is.** A narrow defect a probe reproduced is not above a trap every user meets because it is easier to prove. A caller is evidence, but not the only evidence and not a reason to wait: an entry whose cost is on the record is ranked by the cost, and nothing here sits still because nobody has written in about it.
+**One list in four tiers, on one measure: how many services meet an entry and how hard it hits them, or the project's own development, never by who has asked for it and never by what kind of finding it is.** A cost a service pays and a use case it cannot have are weighed alike, because a service nilo cannot serve pays the whole of it. A narrow defect a probe reproduced is not above a trap every user meets because it is easier to prove. **Nothing here waits for a caller.** nilo is young and its users are few, so nobody asking says nothing about whether a thing is needed: the users of a service nilo cannot serve went somewhere else, and do not write in. An entry is judged by what it does: the use case it opens, a kind of service that can be written on nilo with it and cannot be without it, or the cost it takes away from somebody who pays it now. Then it is ranked like every other entry. A caller who arrives is evidence for the rank, never the condition for the work.
 
 | Tier | What is in it |
 |---|---|
 | [**P0**](#p0-blocks-the-next-release) | blocks the next release: a crash or a panic a request can reach, memory read after it is freed, data lost, a wrong answer with no error, or something handed to a stranger |
-| [**P1**](#p1-a-large-cost-and-a-real-one) | a cost that is large and real, to users or to the project: a trap that compiles and gives a wrong answer to the users of a common feature, a shipped feature that does not do its job, an outage a common action causes in production, a cost on a hard axis, a design many later things will be built on ([principle 5](../CLAUDE.md#guiding-principles)), or a suspicion one probe settles that would be P0 if true. Its bold claim says who meets it and what happens to them |
-| [**P2**](#p2-a-real-cost-and-a-smaller-one) | a real cost, and a smaller one: fewer users meet it, a way round it is on record, or it is below P1's line. It is work that is meant to be done. **Every defect the code was checked for is at least here**, however small, because a defect taken off the list is found again by the next audit |
-| [**P3**](#p3-what-may-cost-users-kept-in-view) | not work put off for later: something important that may cost users and has no evidence yet that it does, kept so it is not forgotten. Its closing line names the sign that would raise it. A feature somebody might like and a number nobody would act on are not P3 |
+| [**P1**](#p1-most-services-meet-it-and-it-hurts) | most services built on nilo meet it, or every one that uses a common feature does, and it hurts: a trap that compiles and gives a wrong answer, a shipped feature that does not do its job, an outage a common action causes, a cost on a hard axis, a use case most services of their kind need and cannot have here, a design many later things will be built on ([principle 5](../CLAUDE.md#guiding-principles)), or a suspicion one probe settles that would be P0 if true. Its bold claim says who meets it and what happens to them |
+| [**P2**](#p2-a-real-cost-or-a-use-case-many-services-have) | many services meet it: a real cost with a way round on record, a use case many kinds of service have that cannot be written on nilo or only by a fragile way round, a rule of the project's own a shipped feature breaks, or a gap in the gate that lets defects through. **Every defect the code was checked for is at least here**, however small, because a defect taken off the list is found again by the next audit |
+| [**P3**](#p3-a-narrower-use-case-or-a-cost-not-yet-measured) | few services meet it: a use case of one kind of service or one with a reasonable way round, or a cost that may matter and is not measured yet. It is not work put off for later. Its closing line names the work that would settle it, the design or the measurement, never a person who has to arrive first |
 
-**A small thing nobody needs now is not on the list at all**, in any tier. It is deleted rather than deferred: git keeps the text, [`bench/result/`](../bench/result/) keeps any number behind it, and when it is needed it is written again with the evidence that made it needed. A defect is never one of these.
+**A small thing that opens no use case and is not needed now is not on the list at all**, in any tier. It is deleted rather than deferred: git keeps the text, [`bench/result/`](../bench/result/) keeps any number behind it, and when it is needed it is written again with the evidence that made it needed. A defect is never one of these, and neither is a feature that opens a use case, however few ask for it yet.
 
 Inside a tier, entries sit under their module, because **two modules touch no file in common** ([ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)): two entries under different modules can be worked at the same time, by two people or by one person on two days. Every entry closes with what it needs: `Needs:` when the shape of the work is known and something is missing (the fix, a decision, a design, somebody else's commit), `What would settle it:` when the entry is a question or a number. **A box** means a benchmark machine rather than the shared two-core vCPU most of the numbers so far were taken on; **an afternoon** is a run on the machine at hand.
 
@@ -35,13 +35,25 @@ Nothing is open at this tier.
 
 ---
 
-## P1: a large cost, and a real one
+## P1: most services meet it, and it hurts
 
 ### `nilo_http`
 
+**The metrics page takes one number a name: no labels, no histogram of the application's own, no process series, and counters nilo keeps already go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig:1255`). "Orders by status" is three names, a business latency cannot be written at all, resident memory and open descriptors are missing, and the cache's hit counts, the watchdog's catches and the tracer's drops are numbers nobody scrapes. prom-client and the Go client give all of it.
+
+**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
+
+**Signing in with an identity provider is put together by hand, and the steps it needs are the ones that fail silently.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) stops at verifying the ID token. Discovery, `state`, PKCE, the code exchange and the `nonce` are the caller's, and leaving any one out still signs the user in. Every part is here (`nilo_fetch`, `jwt.Verifier`, `Session(T)`, `c.entropy`), so what is missing is the order, and ADR 111's own reason for owning verification, that being wrong is silent, holds for the order too. `golang.org/x/oauth2` with go-oidc and passport are the habit.
+
+**What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
+
+**The live test that crosses a Room post with a WebSocket frame waits past its five-second bound in 3 to 5 runs of 12 or 14, so a frame or a post may be lost since frames were received in the peek wait.** "a post that crosses a frame arriving loses neither, however often they cross" (`http/live.zig`) panicked with `programmer bug caused syscall error: AGAIN` in `Io.Threaded.netReadPosix` on 2026-10-10: when its test binary was run directly beside eight busy loops, before and after the `.follow` fix, in three Debug runs of another change, and as the one failure of 3,865 in a `zig build test-all`; it crashed the same way on an untouched `git archive HEAD` export of `0bcc0e3`, so no change in flight brought it. The client's socket carries a 5 s `SO_RCVTIMEO`, and std's `Threaded` reads the `EAGAIN` that bound returns as a programmer bug (`errnoBug`), so every panic is the client having waited five seconds for a frame or a post that did not come. Losing one is what the test exists to catch, and `2622234` moved a WebSocket's next frame into the peek wait ([ADR 284](./adr/284-a-connection-in-conversation-waits-by-receiving.md)); one executor starved for five seconds by the busy loops is the other reading. Ranked here and not P0 until it is known which. The bound panicking is a defect of its own: the same `SO_RCVTIMEO` is set by three helpers in `live.zig`, two in `grpc_live.zig` and one in `grpc_tls_live.zig`, and none of them can fail with a sentence.
+
+**What would settle it:** the test binary run in the same loop under the same load at `2622234` and at its parent, interleaved, which says whether the change brought it; and each client bound made one that returns an error naming what was waited for, so the next stall is a failed test that says so.
+
 ---
 
-## P2: a real cost, and a smaller one
+## P2: a real cost, or a use case many services have
 
 ### Every module
 
@@ -95,6 +107,16 @@ Nothing is open at this tier.
 
 **Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
 
+**A row another process pushed waits up to `poll_ms` for a worker, a second by default, because nothing tells the workers it arrived.** `push` wakes a worker in its own process only, so a web process pushing to a separate worker process reaches it on the next poll, and lowering `poll_ms` buys the latency with one claim per worker per interval on an idle queue (`job.Settings`). river listens on Postgres `LISTEN/NOTIFY` and polls as a fallback. The roadmap already wants a `LISTEN/NOTIFY` listener measured for the Room bridge, and one held connection serving both is the shape to price.
+
+**What would settle it:** the cost of one held `LISTEN` connection measured beside the poll, on a web process and a worker process split the way most deployments split them, with the listener shaped so the Room bridge can share it.
+
+**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
+
+**Finished rows are kept for ever unless the program sweeps them, so a queue table grows without bound by default.** `Table.sweep` and `sweepDead` exist and nothing calls them; a program that does not write a scheduled job of its own finds out from its disk. river deletes completed jobs after a day by default.
+
+**Needs:** a retention on `job.Settings` with a default, run by the workers that already poll, and what it costs a claim on Postgres and on SQLite.
+
 ### `nilo_sql`
 
 **The SQLite half has no live test against contention.** The Wire's own tests run one process, so the case the reader and writer split exists for has a design and no test: two writers meeting, `busy_timeout` expiring, `Locked` coming back.
@@ -125,19 +147,11 @@ Nothing is open at this tier.
 
 **Needs:** a shape that does not become a second metrics registry. `app.metrics` is the shape and a `Db` is a Service, which knows nothing about an App — so where the numbers meet is the question, not how to count them.
 
-**A Row over an attached SQLite database has nowhere to `ATTACH` it.** A schema in `nilo_table` means an attached database there ([ADR 055](./adr/055-the-second-dialect-is-the-test-of-the-seam.md)), and `ATTACH` is per connection — but the Wire holds a writer and a pool of readers, opens them itself, and `db.exec("ATTACH …")` reaches the writer alone. The introspection then asks a reader that has never heard the name, which is how the test for the schema-qualified `sqlite_master` found this: it attaches on every `conns[i].handle` by hand, and a program cannot.
-
-**Needs:** a statement list run on every connection at open — which is also where a `PRAGMA` of the caller's own would go.
-
 **A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.** The migrator compares a unique `ignoring_case` and not its operator class, so an existing database never gets the new index and its prefix search still scans on Postgres.
 
 **Needs:** the operator class in the snapshot's index and a step that rebuilds it, or a `db check` finding that names it.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
-
-**On SQLite, only a unique can serve `istarts_with`.** A `.unique` with `.ignoring_case` is a `NOCASE` index, and a plain `.index` is a `BINARY` one, which a folding `LIKE` cannot read a range off; a prefix search over a column that is not unique reads every row ([sql.md §21](../bench/result/sql.md#21-where-a-prefix-pattern-is-built)).
-
-**Needs:** an `.index` entry that ignores case, `COLLATE NOCASE` on SQLite and `lower(…)` on Postgres, and what the diff does with one that changes.
 
 **A transaction that loses a serialization or deadlock race is retried by hand.** Both come back as `error.RolledBack`, and `live.zig` shows the loop every caller writes around it. A runner that takes the transaction's body and a bound is the shape the rest of the module would expect.
 
@@ -171,17 +185,13 @@ Nothing is open at this tier.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
-**`.min` and `.max` over an enum answer differently on the two databases.** Postgres orders an enum by its declaration and SQLite by its text, so the same grouped Row names a different label on each, with no error.
+**`.min` and `.max` over an enum column that is a Postgres `ENUM` answer differently on the two databases.** An enum that names no database type is `text` on both, ordered by its text (`dialect.zig`, ADR 181); one declared with `nilo_column` as a Postgres `ENUM`, or a column somebody else made one, is ordered by its declaration there and by its text on SQLite, so the same grouped Row names a different label on each, with no error.
 
 **Needs:** a refusal on SQLite, or the SQLite column ordered by the enum's position.
 
 **Case folding outside ASCII differs between the two databases.** SQLite's `LIKE` and `NOCASE` fold ASCII only (`dialect.zig:1110`, `:1199`); Postgres's `ILIKE` and `lower()` fold Unicode (`:613`). `.ieq = "ÉLISE@x.id"` matches `élise@x.id` on Postgres and not on SQLite, and a `NOCASE` unique keeps both. ADR 055 asks for a difference like this to be refused or written down, and the reference says only that SQLite folds ASCII.
 
 **Needs:** whether the SQLite half is refused for non-ASCII text or the difference is written on both pages.
-
-**`ddl.zig` writes most statements twice, once while compiling and once at run time.** `addColumn` and `columnClause`, `writeLiteral` and `valueList`, `writeCheckIdent` and `checkName`, `createTrigger` and `triggerStatement`, `createView` and `viewStatement`, `createExtension` and `createExtensionIfMissing` are pairs, and `addColumn` already disagrees with `columnClause`. The desired side is comptime whole, so only a drop or rename, whose name comes from the snapshot, needs the run-time writer. About 150 lines.
-
-**Needs:** a yes.
 
 **Helpers are copied between files.** A backticked name list is written seven times (`shape.zig:673`, `where.zig:1498`, `table.zig:1293`, `row.zig:220`, `:950`, `:1266`, `statement.zig:568`); an unordered set comparison three (`statement.zig:1507`, `db.zig:395`, `table.zig:202`); `columnTuple` is `tupleOf` (`statement.zig:1520`, `db.zig:415`); `writtenValue` is `fieldValue` (`statement.zig:2147`, `where.zig:1676`); `relation` is `relationOf` (`statement.zig:122`, `where.zig:1490`); `snapshot.sameSchema` is `table.sameSchema`; the SQL literal escape is in `ddl.zig:770` and `migrations.zig:670`; and an optional is unwrapped by an inline `switch` 33 times across ten files. Inside `migrate.zig`, `findUnique`, `findIndex`, `findReference` and `findNamed`, and the six `carried*` and `renamed*` functions, are one generic each. In `shape.zig`, `parentLink` and `backLink`, and `throughColumn` and `throughOf`, resolve the same path twice, and the second pair is where the `.through` defect above came from. A direction with its `NULLS` is written in three places (`shape.zig:1331`, `:1531`, `statement.zig:2125`). About 400 lines in all, with name helpers in `row.zig` and type helpers in `types.zig`, which every file already imports.
 
@@ -190,6 +200,22 @@ Nothing is open at this tier.
 **Whether `describe` still pays five round trips on a raw call behind a pooler when its `EXPLAIN` fails.** `DEALLOCATE nilo_describe` goes inside the transaction now; when the `EXPLAIN` aborted the transaction the server refuses it there, so it is sent again after the `ROLLBACK`, in a transaction of its own, which pgbouncer in transaction mode may route to another server connection. The statement is left behind on the first, the next describe there fails on `42P05`, and `vetRaw` (`db.zig:770`) keeps trying. ADR 233 says it costs a round trip only while the statement beside it is failing too.
 
 **What would settle it:** a run behind pgbouncer in transaction mode. The `DEALLOCATE` is now sent inside the transaction, before the `ROLLBACK`, and again after it only when a failed `EXPLAIN` aborted the transaction, which no test reaches.
+
+**The pg.zig pin is a fork, `nevindra/pg.zig`, until its Zig 0.17 port reaches lalinsky's.** lalinsky's `master` builds its tls.zig on 0.17 and nothing else of it: the driver still reads `@typeInfo` the 0.16 way, its metrics.zig pin reads `b.args`, and xsync calls a `mutexLock` that 0.17 made cancelable. The fork is that `master` plus one commit, and points at a fork of xsync with one commit of its own. `test-sql` passes on it, the live Postgres tests included.
+
+**Needs:** [lalinsky/pg.zig#23](https://github.com/lalinsky/pg.zig/pull/23) and [lalinsky/xsync.zig#1](https://github.com/lalinsky/xsync.zig/pull/1) merged. Last checked at `c205ebd`.
+
+**A route's deadline bounds a `nilo_sql` call up to its first answer, not the rows read after, and Postgres finishes a statement the client gave up on.** The armed bound covers acquiring, `BEGIN`, sending and the first response (ADR 105); rows pulled from a `db.stream` afterwards are not bounded, and no cancel request is sent, so a slow statement keeps its server backend busy after the request has answered 504. And a shutdown that lands in the few instructions between a fired bound's `finish()` and the drain in `armed` is drained with it, because zio's `AutoCancel.check` spends its count and not the pending error it accounts for (`sql/db.zig`).
+
+**What would settle it:** a cancel request sent on a timed-out statement, measured against what it costs a pool connection, a stream's reads bounded by the same deadline, and `AutoCancel.check` clearing the error it accounts for upstream, so the drain can go.
+
+**An upsert cannot target a partial unique index, so a table that soft-deletes cannot upsert on the column that is unique among its live rows.** `ON CONFLICT (email) WHERE deleted_at IS NULL` is the statement; `db.raw` cannot put `RETURNING` into a Row beside a conflict target without giving up the column check, and a constraint name is a string the module would take on trust.
+
+**Needs:** the conflict target named by a unique the Row's table already declares, its predicate included, so nothing is taken on trust; and whether `nilo_table` can declare a partial unique yet.
+
+**A key moved onto a new column, with the old key column dropped in the same change, is added as a plain column and the table is left with no key, with no Problem raised.** `diffTable` raises "the key moved" when a column that is still there stops or starts being the key (`migrate.zig`, `c.key != was.key`), but a column that is new goes to `add_column` without its `key` being read, and `ddl.addColumn` writes it `NOT NULL` and no more, where `columnClause` would have written `PRIMARY KEY`. The drop needs `--drop`, so nothing is lost; the table that results has no primary key, and the startup check, which reads columns only, does not see it. Found by reading, not reproduced.
+
+**Needs:** the same Problem raised for a new column that is the key, and a test that drops the old key column and adds a new one in one change, failing before the fix on both databases.
 
 ### `nilo_http`
 
@@ -228,12 +254,6 @@ Nothing is open at this tier.
 **A tagged union cannot be a handler's body argument (feedback from the photon port).** photon's alert rule condition is one of several shapes picked by a field (`{"signal": "metrics", ...}`). Inside a struct it reads, answers named 400s and gets a `oneOf` with a `discriminator` in the API description; as the whole body, `fn create(cond: Condition)` is refused with "nilo does not recognise", so the handler takes a `*Ctx` and calls `c.json(Condition)`, and the description loses the body. The 400s for a top-level union already match the nested ones (`describeBadBody` hands it to `describeTagged`); the typed argument and its schema are what is missing.
 
 **Needs:** the rule that makes a union value argument the body (the one struct a route takes today, widened to an internally tagged union), its description through the `oneOf` and `discriminator` the nested case already renders (ADR 016), and a refusal for a union nilo cannot tell apart while reading (no tag field).
-
-**A TLS listener that reloads its certificate without a restart.** `listen(.{ .tls = … })` reads the two files once ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)), and a certificate that renews every sixty days is a restart every sixty days. The shape that costs nothing per connection is a second `CertKeyPair` swapped in under the acceptors on a signal or a file's mtime, with the old one freed once the last handshake that took it is over, which is a count the Engine does not keep yet.
-
-**Needs:** the swap built behind a signal, with the count of handshakes still holding the old pair, and its cost on the idle axis stated. Until then `certbot --deploy-hook 'systemctl restart …'` is the answer.
-
-**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
 **A gRPC listener answers unary calls only.** A call with a second message is refused as `INTERNAL` ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)). Server, client and bidirectional streaming are the shape that holds a fiber and its stack for the whole call, and the shape a unary call goes through (one request handed over whole, one answer collected whole) has no place for a second message; a streaming method would be a handler that reads and writes messages on the stream, much as a WebSocket handler does its frames.
 
@@ -279,19 +299,11 @@ Nothing is open at this tier.
 
 **Needs:** a design that bounds a read and a write without a timer each, dusty's published deadline and one watcher or a tick per executor that looks at the waits it holds, held to ADR 017 for the bytes a connection carries and to ADR 062 for where it parks; then `echo-ws`, `baseline` and `echo-ws-limited` measured against it.
 
-**Whether zio 0.19 lowers the CPU nilo spends a request on HttpArena's fixed-rate profiles has not been measured.** Those profiles hold the rate and score the CPU it took, and the entry's last reading, on zio 0.18.0, is 33.7 µs a request on `latency-10k` (19th of 101 entries, the lowest at 24.1), 31.2 µs on `latency-1m` (15th of 48, the lowest at 22.5) and 78.0 µs on `8gbit` (29th of 83, the lowest at 43.6); `baseline` spent 66.4 cores for 2.96M req/s, about 22.4 µs a request ([the board's result files](https://github.com/MDA2AV/HttpArena/tree/5809ff76adb98e1f822445734c62ad20ae3e7b9b/site/data/results)). At 10k req/s the request work is nearly nothing, so `latency-10k`'s figure is the standing cost of a running server. zio 0.19.0's release notes say idle executors park sooner and the event loop takes fewer syscalls and atomics, and main now builds zio 0.19 with `.pinned` scheduling ([ADR 199](./adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md)); what either did to these four figures is unknown, and so is what is left once they are counted.
-
-**What would settle it:** the entry at main and at `224a507` built the same way and run interleaved through `latency-10k`, `latency-1m` and `baseline` on one machine, CPU a request read from the cgroup as the board reads it; then, if a gap to the lowest entries is left, a profile of the idle server naming where its CPU goes.
-
 **The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.** It is upstream's `main`, the Zig 0.17 line, plus two commits: one signs an RSA key through its CRT form, 13.7 ms of handshake CPU down to 2.6 ([the run](../bench/result/http.md#what-an-rsa-certificate-costs-a-handshake)), and one adds the server's `offload` option, which runs the signature off the executor ([ADR 217](./adr/217-a-handshakes-signature-is-computed-off-the-executor.md)). The first was merged into `zig-0.16.x` as #59 and not into `main`. Once both merge into `main`, the pin moves to upstream's commit and the fork is not used again.
 
 **Needs:** [ianic/tls.zig#61](https://github.com/ianic/tls.zig/pull/61) and [#62](https://github.com/ianic/tls.zig/pull/62) merged. Last checked at `1d1dda2`.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
-
-**The pg.zig pin is a fork, `nevindra/pg.zig`, until its Zig 0.17 port reaches lalinsky's.** lalinsky's `master` builds its tls.zig on 0.17 and nothing else of it: the driver still reads `@typeInfo` the 0.16 way, its metrics.zig pin reads `b.args`, and xsync calls a `mutexLock` that 0.17 made cancelable. The fork is that `master` plus one commit, and points at a fork of xsync with one commit of its own. `test-sql` passes on it, the live Postgres tests included.
-
-**Needs:** [lalinsky/pg.zig#23](https://github.com/lalinsky/pg.zig/pull/23) and [lalinsky/xsync.zig#1](https://github.com/lalinsky/xsync.zig/pull/1) merged. Last checked at `c205ebd`.
 
 **Should a 500 from a fail function carry its message to the client?** `fail.internal("…")` sends what it is given (`http/fail.zig:186`, `http/serve.zig:1350`), as Go's `http.Error` does, while an unnamed error that reaches the mapping table becomes `internal server error`. A message written for the operator, `fail.internal("db: {s}", .{@errorName(e)})`, then reaches whoever asked. The guide now says so; what is open is whether the safer default is a 500 that never says what broke, with the message logged instead.
 
@@ -327,22 +339,6 @@ Nothing is open at this tier.
 
 **Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
 
-**A JSON body could be read 2.2 to 2.8 times faster by a reader written for its type, with no `std.json.Scanner` under it, and nothing about it is decided.** A prototype that goes from the body's bytes straight to the caller's struct read a plain object in 45 ns where the shipped reader takes 125, and a tagged one in 58 where it takes 150; a whole request with a 13-byte body went from 380 to 300 ns, because the body is about 85 ns of it. Its differential run of 800,000 reads against `std.json` found no input one accepted and the other refused. It costs 3.2 to 3.5 KB in a program that reads JSON and a second JSON grammar that has to agree with std's for ever, which is the cost `jsonmark.zig`'s header names ([`spike/json-reader/`](../spike/json-reader/README.md), [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md)).
-
-**What would settle it:** a decision on the prototype in `spike/json-reader/`; then the three tests it fails on the current tree (two tagged-union refusals and a message's allocation count, named in its README) passing, the differential test made a build step on `test`, the 400 sentences of `ctx.zig` run against it, `use_first` and `use_last` rebuilt, and the compile time of the examples measured before and after.
-
-**The figures of the second HTTP optimisation round were measured with two other benchmarks on the same machine.** The fiber reuse on HTTP/2, the idle connection's 512 bytes, the tagged union read once and the TLS page margin were each timed under a shared lock and pinned to their own cores, but beside builds and tests that shared the L3; the first round's figures were measured again serially before they went on the record, and these were not ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting), [`http.md`](../bench/result/http.md#a-tagged-union-is-read-once-when-its-tag-comes-first)). The idle bytes are counts, not timings, and do not depend on it.
-
-**What would settle it:** the `h2load -m 10` rows, the gRPC rows at 32 to 1,024 connections and the tagged-union profile rows run again on a quiet machine, before (`514e8c1`) against after, interleaved, each binary from one path.
-
-**The metrics page takes one number a name: no labels, no histogram of the application's own, no process series, and counters nilo keeps already go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig:1255`). "Orders by status" is three names, a business latency cannot be written at all, resident memory and open descriptors are missing, and the cache's hit counts, the watchdog's catches and the tracer's drops are numbers nobody scrapes. prom-client and the Go client give all of it.
-
-**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
-
-**Signing in with an identity provider is put together by hand, and the steps it needs are the ones that fail silently.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) stops at verifying the ID token. Discovery, `state`, PKCE, the code exchange and the `nonce` are the caller's, and leaving any one out still signs the user in. Every part is here (`nilo_fetch`, `jwt.Verifier`, `Session(T)`, `c.entropy`), so what is missing is the order, and ADR 111's own reason for owning verification, that being wrong is silent, holds for the order too. `golang.org/x/oauth2` with go-oidc and passport are the habit.
-
-**What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
-
 **Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.** `Path(T)`, typed middleware, the one log sink, `Bearer(T)`, the deadline that reaches the toolkit, `nilo.app` and the startup warnings each have tests, and each test was written by the people who built it. The direction's own closing condition is a reader who did not: every mistake they make is either a compile error or a refusal at `listen()` naming the fix, or it is the next entry here.
 
 **What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from `docs/guide/getting-started.md` with a database, a login middleware and a container, and their mistakes are written down, each either refused in a sentence or filed.
@@ -353,17 +349,49 @@ Nothing is open at this tier.
 
 **Needs:** the two told apart where an operator looks: a count of cookies that failed to open on `/metrics`, or one `warn` line an interval while it keeps happening.
 
-**`.tls` compiles in a build without `-Dtls`, and is refused when `listen()` runs.** `Options.tls` is `?Tls` in every build (`http/bulkhead.zig:297`, `:433`), and [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) chose a one-line refusal at `listen()`, before the port is taken. That keeps the port from serving plain HTTP, and still turns a mistake the build could name into one a deploy finds, which principle 2 asks the other way round.
+**No CI job runs on Linux aarch64 or on Windows**, so the platforms table in the deploying guide calls both untested, and an ARM server (Graviton, Ampere, a Raspberry Pi at the edge) is a deploy target nilo has never been run on; CI runs `zig build test` on Linux x86-64 and macOS.
 
-**Needs:** a decision on making the field's type depend on `nilo_build.tls`, so `.tls = …` without the flag is a compile error naming it, with ADR 212 edited whichever way it goes.
+**What would settle it:** a job on an aarch64 runner running `zig build test`, and a decision on whether Windows is supported at all.
+
+**A security scheme or a path parameter's type that a resolver or a middleware needs does not reach the API description.** A route whose handler takes `Bearer(T)` is described with `bearerAuth`, and one whose resolver takes it is not; a resolver's `Path(T)` field types do not refine the parameter's schema, which stays text unless the handler's own argument types it.
+
+**What would settle it:** the document read from the same comptime needs `listen()` checks, so a scheme a resolver or a typed middleware requires is on every operation it covers.
 
 **Two of the three things that keep a stop safe for the calls a reused HTTP/2 fiber has queued have no test that fails without them.** A fiber that finishes a call takes the next one waiting ([ADR 260](./adr/260-a-request-on-http2-runs-from-its-headers.md)), and three things keep that safe at a stop. The calls still queued when a stop is requested are turned away rather than run, and the test "a stop that lands while calls are queued behind a running one turns them away unrun and ends the connection" (`http/grpc_live.zig`) fails with that taken out. It passes with either of the other two taken out: a yield that hands its cancel back (zio's `yield` consumes a pending cancel), because the stop flag alone sends GOAWAY and ends the connection once no stream is in flight; and a spawn that fails at a stop answering every queued call, because that branch sits between the stop flag and the connection fiber's own cancel, where a fiber holding the thread cannot place a stop. The fallback for `InvalidPlacement` (a work-stealing configuration) is run by no test, because the suite cannot build one, and the second review of `h2conn.zig`'s `runner`, `finishNext`, `rendezvous` and `spawnRunner` was not finished.
 
 **What would settle it:** a connection that blocks after a swallowed cancel (a write to a client that never reads, with a stream still in flight), seen to hang with the yield's handback taken out; a spawn that can be made to fail, or a unit test of `spawnRunner`, which is a design decision; and the second review.
 
+### `nilo_fetch`
+
+**`nilo_fetch` speaks HTTP/1.1 only, so a nilo service can answer gRPC and cannot call it.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)), and a service between other gRPC services, which is where most gRPC servers sit, needs both halves; a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both.
+
+**Needs:** a design for an outbound connection carrying many calls, and where its framing comes from: `nilo_fetch` may not import `nilo_http` ([ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)), so `h2.zig` and `hpack.zig` move down a layer or are written again; then the idle bytes of an outbound HTTP/2 connection measured before it ships.
+
+**A route's deadline does not bound the wait for a `nilo_fetch` permit, nor the credential source's `fetch_timeout_ms`.** A call's own timeout and its dial take the shorter of their bound and the route's (ADR 105), but `client.gate.wait` queues before either, so a saturated client holds a request past its deadline.
+
+**What would settle it:** a test with a client whose permits are all taken, under a route deadline shorter than the queue's wait.
+
+**What a handler parked in `fetch.WebSocket.receive` holds per inbound connection is not measured.** A `fetch.WebSocket` is 1,200 bytes on the frame of the fiber that uses it, and a fiber holds its stack at its high-water mark for as long as it is parked ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)), so a route that opens a feed and waits on it costs every connection it serves the deepest frame the open reached, the TLS handshake included on `wss://`. ADR 281 does not state that number, which ADR 017 asks of a feature that costs per-connection memory.
+
+**What would settle it:** a bench server like `bench/ws_server.zig` with a route that opens a socket to a canned feed and parks in `receive`, over `ws://` and `wss://`, read with `bench/mem.py --hold` at 1,000 and 10,000 connections, and the figure written into ADR 281.
+
+### `nilo_proto`
+
+**A service whose contract is a `.proto` file writes its structs by hand, because nothing turns one into them.** The structs are the schema ([ADR 245](./adr/245-protobuf-is-read-from-the-struct-that-declares-it.md)) and gRPC is served ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)), but most gRPC services are specified and shared as `.proto` files, so a project joining one transcribes every message, and a transcription that drifts from the file compiles. `protoc-gen-go`, tonic's `prost-build` and connect's generators are what a migrant has used.
+
+**Needs:** a build step that emits the structs, reading the descriptor set `protoc --descriptor_set_out` writes or a `.proto` reader of nilo's own, weighed against making `protoc` a build dependency; and a refusal naming a construct the structs cannot say.
+
+### `nilo_jwt`
+
+**A service that calls an API asking for a JWT it signed itself has nothing here to sign one with.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) refuses signing because a server issuing its own sessions has `Session(T)`, and that holds for every client of its own, bearer ones included (the P2 entry on a session as a bearer token). It does not hold when the verifier is somebody else: a Google service account's assertion and a GitHub App's token are RS256, APNs and Sign in with Apple's `client_secret` are ES256, a LiveKit access token is HS256. Signing alone widens nothing `verify` checks, as long as `verify` keeps refusing `HS256`. ES256 and HS256 are std's `EcdsaP256Sha256` and `HmacSha256`; RS256 is not, because std 0.17 carries RSA verification only, so it would be private-key arithmetic this module says it does not write.
+
+**Needs:** ADR 111 extended to signing for a verifier that is somebody else, with `verify` still refusing `HS256`; ES256 and HS256 first, over std's `EcdsaP256Sha256` and `HmacSha256`, and a decision on RS256, which needs the private-key RSA this module says it does not write.
+
+**Direction:** [The toolkit grows by the jobs people have](./roadmap.md#the-toolkit-grows-by-the-jobs-people-have)
+
 ---
 
-## P3: what may cost users, kept in view
+## P3: a narrower use case, or a cost not yet measured
 
 ### `nilo_cache`
 
@@ -375,23 +403,17 @@ Nothing is open at this tier.
 
 **Only 2048, 3072 and 4096 bits of RSA, and only P-256 of EC.** A key size with no branch is `error.KeySizeNotSupported` and a curve with none is `error.CurveNotSupported`, rather than a best effort. ES384 is the same twenty lines over `EcdsaP384Sha384`; ES512 wants P-521, which std does not carry; Ed25519 (`EdDSA`) is a different key type again.
 
-**Needs:** an issuer that publishes one, which none in the comparison does.
-
-**A service that calls an API asking for a JWT it signed itself has nothing here to sign one with.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) refuses signing because a server issuing its own sessions has `Session(T)`, and that holds for every client of its own, bearer ones included (the P2 entry on a session as a bearer token). It does not hold when the verifier is somebody else: a Google service account's assertion and a GitHub App's token are RS256, APNs and Sign in with Apple's `client_secret` are ES256, a LiveKit access token is HS256. Signing alone widens nothing `verify` checks, as long as `verify` keeps refusing `HS256`. ES256 and HS256 are std's `EcdsaP256Sha256` and `HmacSha256`; RS256 is not, because std 0.17 carries RSA verification only, so it would be private-key arithmetic this module says it does not write.
-
-**What would settle it:** a program that calls such an API, brought with which algorithm it asks for; ES256 or HS256 first, and RS256 only with a reason to own the RSA it needs.
-
-**Direction:** [The toolkit grows by the jobs people have](./roadmap.md#the-toolkit-grows-by-the-jobs-people-have)
+**Needs:** ES384 over std's `EcdsaP384Sha384`, about twenty lines beside ES256, and `EdDSA` over std's Ed25519, each held by a token and key set an issuer publishes; P-521 waits on std, which does not carry it.
 
 **Whether a token with no `aud` can be checked by the claim that does name the application.** `audience = .unchecked` is what a Cognito access token (`client_id`), a Clerk session token and a Keycloak token for a user with no client role (`azp`) need, and the check then moves to the caller's own `Claims`. A by-name claim check inside `nilo_jwt` would parse the payload into a `std.json.Value` tree on every verify, an allocation on the request path ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)).
 
-**What would settle it:** a measured allocation count for a registered-claims struct with one extra optional field, or a caller who forgot the comparison in their `Claims` and shipped it.
+**What would settle it:** a measured allocation count for a registered-claims struct with one extra optional field, which decides whether a check by claim name can live in `nilo_jwt` without an allocation on the request path.
+
+**A token signed HS256 by somebody else cannot be verified.** HS256 is absent so that a module verifying asymmetric keys cannot be talked into the algorithm-confusion attack ([ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md)), and a token a service issues to itself is `nilo.Bearer(T)` ([ADR 265](./adr/265-a-bearer-token-is-a-session-sealed-for-a-header.md)). An issuer that signs with a shared secret is the case that leaves: a Supabase project on its legacy secret, an Auth0 application set to HS256, a partner's webhook token.
+
+**Needs:** a decision on a verifier that takes only a secret and only HS256, with the algorithm taken from the key and never from the token's header, so the two kinds of key cannot meet in one `verify`; ADR 111 edited whichever way it goes.
 
 ### `nilo_fetch`
-
-**`nilo_fetch` speaks HTTP/1.1 only, so a service that answers gRPC cannot call one.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)); a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both halves.
-
-**What would settle it:** a caller of a gRPC service, and the idle bytes of an outbound HTTP/2 connection measured before it ships.
 
 **Whether a `Target` should stop calling a service that is failing, rather than wait out its timeout on every call.** A `Target`'s `max_in_flight` is a bulkhead: it bounds how many calls wait on a sick service, but each still waits its whole `timeout_ms`, and the handler behind it holds its fiber and its stack meanwhile ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)). A breaker answers at once while the service is down; sony/gobreaker and failsafe-go are what a Go migrant used. A retry budget takes away much of the reason for one, because it stops the load multiplying, so this stays open until the budget has met an outage.
 
@@ -399,25 +421,17 @@ Nothing is open at this tier.
 
 **A streamed call cannot be made through a `Target`, and when one can, a `.stream` body under a `.retry` has to be a compile error.** `Exchange.begin` takes a client and a URL, so a target's standing headers, its gate and its `.retry` do not reach a streamed call ([ADR 061](./adr/061-a-fitting-borrows-the-loop.md)). [ADR 271](./adr/271-a-retry-is-the-callers-numbers-and-nilos-mechanism.md) decided that a reader is spent by the first try and so is never retried, and the Refusal that says it has nothing to refuse until a call can carry both: today the guard is that `nilo_s3` routes none of its reader-taking calls through the retry loop, held by a test.
 
-**Needs:** a caller who streams from a service that has standing headers; then the call on `Target`, with the Refusal beside it (a file in `fetch/refusals/` and a row in its table), written together.
+**Needs:** the streamed call on `Target`, so its standing headers, its gate and the route's deadline reach it, with the Refusal beside it (a file in `fetch/refusals/` and a row in its table), written together.
 
 **Direction:** [A call to another service survives that service's bad minute](./roadmap.md#a-call-to-another-service-survives-that-services-bad-minute)
-
-**A route's deadline does not bound the wait for a `nilo_fetch` permit, nor the credential source's `fetch_timeout_ms`.** A call's own timeout and its dial take the shorter of their bound and the route's (ADR 105), but `client.gate.wait` queues before either, so a saturated client holds a request past its deadline.
-
-**What would settle it:** a test with a client whose permits are all taken, under a route deadline shorter than the queue's wait.
 
 **`nilo_fetch` lays out a unix socket's `Connection` by hand, because `std.http.Client.connectUnix` does not compile at 0.17.0.** It names `std.posix.SocketError`, which is gone, and a pool API that has moved, and the `Plain.create` that a connection is built through is private; lazy analysis hides all of it until something calls it. So `Exchange.dialUnix` dials `std.Io.net.UnixAddress` and builds the `Connection` the way `Plain` does, behind a `@compileError` that fires on any Zig but 0.17 ([ADR 272](./adr/272-a-call-names-the-socket-it-goes-over.md)). A std that changes the layout without changing the version would free the wrong bytes; the tests free under the testing allocator, which is what would notice.
 
 **Needs:** `connectUnix` fixed upstream (its `ConnectUnixError` and its call into the pool), or a std release where it builds; then `dialUnix` and its version pin go. Last checked at 0.17.0.
 
-**What a handler parked in `fetch.WebSocket.receive` holds per inbound connection is not measured.** A `fetch.WebSocket` is 1,200 bytes on the frame of the fiber that uses it, and a fiber holds its stack at its high-water mark for as long as it is parked ([ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md)), so a route that opens a feed and waits on it costs every connection it serves the deepest frame the open reached, the TLS handshake included on `wss://`. ADR 281 does not state that number, which ADR 017 asks of a feature that costs per-connection memory.
-
-**What would settle it:** a bench server like `bench/ws_server.zig` with a route that opens a socket to a canned feed and parks in `receive`, over `ws://` and `wss://`, read with `bench/mem.py --hold` at 1,000 and 10,000 connections, and the figure written into ADR 281.
-
 **`nilo_fetch` cannot present a client certificate, so it cannot call a service that requires mutual TLS, and neither std nor a flag fixes it today.** `std.crypto.tls.Client` at 0.17.0 has no arm for `CertificateRequest` (its handshake loop ends `else => return error.TlsUnexpectedMessage`) and sends no `Certificate` or `CertificateVerify`; tls.zig, behind `-Dtls`, takes a key pair (`config.Client.auth`), but `std.http.Client.Connection` can only hold std's own TLS client (a `.tls` connection is read and written through `&tls.client.reader` and `.writer`, found by `@fieldParentPtr`, and freed by a length std computes from its own buffers), so a tls.zig connection cannot be handed to it ([ADR 276](./adr/276-an-https-call-goes-through-a-proxy-in-a-tunnel-nilo-opens.md), last section). The cheapest honest fix is client authentication in `std.crypto.tls.Client`, which would serve the default build with no flag; the alternative is an HTTP/1.1 client of nilo's own on tls.zig behind `-Dtls`, a module of its own. reqwest shows the trap to keep out: which `Identity` constructors compile depends on the TLS backend a feature picked. Go's `GetClientCertificate` is the shape for a certificate that rotates.
 
-**Needs:** an upstream issue or patch for client authentication in `std.crypto.tls.Client`, or a decision to own an HTTP/1.1 client; a caller with a mutual-TLS service.
+**Needs:** an upstream issue or patch for client authentication in `std.crypto.tls.Client`, or a decision to own an HTTP/1.1 client on tls.zig behind `-Dtls`; either held by a live test against a listener that requires a certificate.
 
 ### `nilo_job`
 
@@ -425,17 +439,11 @@ Nothing is open at this tier.
 
 **What would settle it:** both shapes on Postgres at a backlog of 1, 50k and 200k due rows beside 300k done ones, into [`job.md`](../bench/result/job.md), and ADR 214 edited in place with the result. An afternoon.
 
-**A row another process pushed waits up to `poll_ms` for a worker, a second by default, because nothing tells the workers it arrived.** `push` wakes a worker in its own process only, so a web process pushing to a separate worker process reaches it on the next poll, and lowering `poll_ms` buys the latency with one claim per worker per interval on an idle queue (`job.Settings`). river listens on Postgres `LISTEN/NOTIFY` and polls as a fallback. The roadmap already wants a `LISTEN/NOTIFY` listener measured for the Room bridge, and one held connection serving both is the shape to price.
-
-**What would settle it:** a deployment whose web and worker processes are split and whose users wait on a job, and the cost of one held `LISTEN` connection measured beside the poll.
-
-**Direction:** [A queue needs no second system](./roadmap.md#a-queue-needs-no-second-system)
-
 ### `nilo_s3`
 
 **A file over 5 GiB, or one sent over a connection that drops, cannot be uploaded from a browser straight to the bucket.** `presignPost` is one POST, which S3 caps at 5 GiB and which starts again from nothing when it fails, and `putMultipart` streams through this process. Uppy's S3 multipart plugin and the AWS SDKs hand the browser a presigned `UploadPart` URL a part, so a large upload resumes from its last part and never touches the server. The server's half is four calls: create the upload, presign a part, list the parts, complete. A presigned part carries no size condition, so the bound has to be checked at completion, from the parts' sizes, before the object exists.
 
-**What would settle it:** a caller whose users upload video or archives from a browser, with the completion-time check designed first.
+**Needs:** the four calls (create the upload, presign a part, list the parts, complete), with the completion-time check designed first: the bound read from the parts' sizes before the object exists.
 
 **A large object is uploaded one part at a time.** `putMultipart` holds one `part_bytes` buffer and one stream share for its whole life ([`s3.md`](./reference/s3.md#bucket-calls)), so it moves at one connection's speed, where the AWS SDK's upload manager sends five parts at once by default. Parts in flight cost a buffer each, 8 MiB times their count. Whether one connection is the bound on a real uplink is not measured.
 
@@ -463,9 +471,17 @@ Nothing is open at this tier.
 
 **What would settle it:** both, unloaded and behind the pool ([`sql.md` §2](../bench/result/sql.md) is why both); `bench-sql` has the unloaded `.in_fiber` half, and `bench/sql_server.zig` on a SQLite `Db` is the rest, on a box.
 
-**A route's deadline bounds a `nilo_sql` call up to its first answer, not the rows read after, and Postgres finishes a statement the client gave up on.** The armed bound covers acquiring, `BEGIN`, sending and the first response (ADR 105); rows pulled from a `db.stream` afterwards are not bounded, and no cancel request is sent, so a slow statement keeps its server backend busy after the request has answered 504. And a shutdown that lands in the few instructions between a fired bound's `finish()` and the drain in `armed` is drained with it, because zio's `AutoCancel.check` spends its count and not the pending error it accounts for (`sql/db.zig`).
+**A `Timestamp` on SQLite is always an integer, so a SQLite file another program made, whose times are text, is read through a column type of the program's own.** ([ADR 067](./adr/067-a-value-is-whatever-the-database-stores.md)); Rails, Django and most tools write dates there as text, and `sql.AsText("timestamptz")` is the way round today. [ADR 127](./adr/127-what-a-server-prints-it-can-read.md) already gave `Timestamp` the RFC 3339 parser a `time_form` would need.
 
-**What would settle it:** a cancel request sent on a timed-out statement, measured against what it costs a pool connection, a stream's reads bounded by the same deadline, and `AutoCancel.check` clearing the error it accounts for upstream, so the drain can go.
+**Needs:** a `time_form` beside `uuid_form`, and which text forms it reads besides RFC 3339.
+
+**A Row over an attached SQLite database has nowhere to `ATTACH` it.** A schema in `nilo_table` means an attached database there ([ADR 055](./adr/055-the-second-dialect-is-the-test-of-the-seam.md)), and `ATTACH` is per connection — but the Wire holds a writer and a pool of readers, opens them itself, and `db.exec("ATTACH …")` reaches the writer alone. The introspection then asks a reader that has never heard the name, which is how the test for the schema-qualified `sqlite_master` found this: it attaches on every `conns[i].handle` by hand, and a program cannot.
+
+**Needs:** a statement list run on every connection at open — which is also where a `PRAGMA` of the caller's own would go.
+
+**On SQLite, only a unique can serve `istarts_with`.** A `.unique` with `.ignoring_case` is a `NOCASE` index, and a plain `.index` is a `BINARY` one, which a folding `LIKE` cannot read a range off; a prefix search over a column that is not unique reads every row ([sql.md §21](../bench/result/sql.md#21-where-a-prefix-pattern-is-built)).
+
+**Needs:** an `.index` entry that ignores case, `COLLATE NOCASE` on SQLite and `lower(…)` on Postgres, and what the diff does with one that changes.
 
 ### `nilo_http`
 
@@ -495,23 +511,23 @@ Nothing is open at this tier.
 
 **A HEADERS frame on an HTTP/2 stream the connection has already forgotten ends the connection.** A stream at or below the highest id seen and no longer in the table is answered with a connection `PROTOCOL_ERROR` (`h2conn.zig`, `onHeaders`). RFC 9113 §5.1 allows that for a stream closed long ago, but a client's trailers in flight when the server answered early and forgot the stream would take every other stream on the connection down with it. With the dynamic table at 0 the block costs nothing to decode and ignore, which a stream reset but still running already does (stage 6.1).
 
-**What would settle it:** a client seen sending trailers after an early answer. Neither h2spec over TLS (142 of 146, the four constant failures) nor Chromium loading a page of nineteen subresources tripped it.
+**What would settle it:** a test in which a client sends trailers after the server has answered early and forgotten the stream, which a gRPC client stream does; if the connection ends, the block decoded and ignored the way a reset stream's already is. Neither h2spec over TLS (142 of 146, the four constant failures) nor Chromium loading a page of nineteen subresources tripped it.
 
 **Client certificates on a TLS listener.** The library has `client_auth` with a CA bundle and `.require`/`.request`; nothing in `Options.tls` names it, and nothing on `Ctx` would say who the client was. The second half is the design question: a verified subject is request data, so it wants to be a typed argument the way `Session(T)` is, not a header. **The modes are where the others leave a trap**: Go has five (`RequestClientCert` and `RequireAnyClientCert` hand the handler a chain nobody verified, and only `r.TLS.VerifiedChains` is to be believed), rustls has two (`WebPkiClientVerifier`, with `allow_unauthenticated()` turning "require" into "request"), fiber has one (`CertClientFile` forces require-and-verify), and actix reaches the certificate through an `on_connect` downcast to one TLS crate's type at one version. The shape that fits here is the two modes rustls has, a subject that exists only once verified, and nothing that names the library.
 
-**Needs:** the service mesh that wants it, and the answer to what a handler is handed. The client half is the `nilo_fetch` entry on presenting a certificate.
+**Needs:** the answer to what a handler is handed (a subject that exists only once verified, as a typed argument), the two modes, and an option on `Options.tls` that names nothing of the library. The client half is the `nilo_fetch` entry on presenting a certificate.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
 **Session resumption on a TLS listener.** Every connection is a full handshake, about 300 µs of CPU on the machine in [`http.md`](../bench/result/http.md), and a client that reconnects per request pays it per request. The library has no session tickets; when it does, the option is a key to encrypt them with and a lifetime, and the number to re-measure is that one.
 
-**Needs:** the library first (the HelloRetryRequest entry), then a deployment whose clients reconnect and cannot sit behind a proxy.
+**Needs:** the library first (the HelloRetryRequest entry), then a ticket key and a lifetime on `Options.tls`, and the handshake CPU of a reconnection measured again.
 
 **Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
 
 **A stream is never compressed, and neither is an event stream; and gzip is the only coding.** `app.compress` gzips a whole body on a compressor borrowed for the CPU it takes and handed back before the socket is written, which is what keeps one compressor per thread enough ([ADR 211](./adr/211-a-response-is-compressed-on-a-compressor-borrowed-from-a-pool.md)). A stream has no whole body and would hold its compressor across every write, so its shape is a second pool larger than the thread count and chunked framing. **That an event stream must stay out because it must never be buffered is not what the others found**: actix (since actix-http 3.18.12), async-compression under tower-http, gzhttp, Caddy and nginx all compress a stream and flush the compressor with a sync flush whenever the producer stops writing (nginx's `Z_SYNC_FLUSH` on a buffer marked `flush`, actix's flush when the source is pending), which puts each event on the wire whole. What they disagree on is the default: tower-http skips `text/event-stream`, the other four compress it. Each also has a way for one response to opt out (an explicit `Content-Encoding: identity`, gzhttp's `No-Gzip-Compression` header), drops `Accept-Ranges` and `Content-Length`, and weakens or suffixes a strong `ETag`. Brotli and zstd were measured and refused ([`decided.md`](./decided.md)); a faster `std.flate` is the entry waiting on zig.
 
-**Needs:** a caller streaming something text and large enough that the bandwidth matters; then the per-stream compressor's bytes measured, since it is held for the stream's life, and a flush at every `Stream.flush` and every event.
+**Needs:** the per-stream compressor's bytes measured, since it is held for the stream's life, a flush at every `Stream.flush` and every event, and the default for `text/event-stream` decided.
 
 **Direction:** [A stream is one shape](./roadmap.md#a-stream-is-one-shape)
 
@@ -533,11 +549,11 @@ Nothing is open at this tier.
 
 **A gRPC connection's message budget is not an option.** The budget is `max_body`, or the largest limit a route raised to with `nilo.maxBody` (at least 64 KiB), and a call is charged its compressed bytes, its inflated copy and the copy its route reads it into, so a Collector sending 4 MB batches gets about two running at a time per connection at `max_body` 16 MiB and the rest wait ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md#what-the-budget-does-to-an-opentelemetry-collector)). Waiting replaced the refusal and made a small budget slow rather than lossy; a budget sized from the caller's batches is what would let more run at once.
 
-**Needs:** a caller whose throughput per connection is held back by how many calls run at once, rather than by its own work, with the batch size and consumer count that show it.
+**Needs:** the budget as an option on the gRPC listener, its cost per connection on the memory axis stated ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)), and calls in flight measured with a Collector's 4 MB batches at the default and at a larger budget.
 
 **nilo decodes no `zstd` request body itself, so `c.json` and a typed body cannot read one.** A route that receives `zstd` (an OpenTelemetry exporter can send it) names it with `nilo.bodyEncodings(.{"zstd"})` and decodes the bytes with a library of its own ([ADR 283](./adr/283-a-route-can-read-a-content-encoding-itself.md)), so no caller is blocked; every other route still answers 415. What stays open is whether nilo decodes it, so the readers that parse work too. Its shape would be the `-Dlibdeflate` one ([ADR 248](./adr/248-gzip-is-libdeflate-when-a-build-asks-for-it.md)): a build flag, the library compiled `ReleaseFast` from its release tarball so a build without the flag fetches and links none of it, the same `max_body` check against the announced size before a byte is decoded, and the binary cost written into ADR 017's running total. Whether the compiled library is also exported as a module applications can import (one list of libzstd's files instead of one in every consumer's `build.zig`) is part of that decision. This is the request side only; zstd for responses was measured and refused ([`decided.md`](./decided.md)).
 
-**Needs:** a caller for whom decoding in the handler through `bodyEncodings` is not acceptable; then the flag's cost in stripped `ReleaseFast` bytes and the allocation the decoded body takes, measured the way ADR 248 measured libdeflate.
+**Needs:** the flag built the `-Dlibdeflate` way, its cost in stripped `ReleaseFast` bytes and the allocation the decoded body takes measured the way ADR 248 measured libdeflate, and the decision on exporting the compiled library as a module.
 
 **A ClientHello split across two records is refused by the TLS listener rather than reassembled** ([tls.zig#36](https://github.com/ianic/tls.zig/issues/36)). Every client ADR 212 tried sends it whole; the one that does not, or a middlebox that fragments, gets a failed handshake rather than a slow one.
 
@@ -563,25 +579,77 @@ Nothing is open at this tier.
 
 **Needs:** a hook a middleware can give `listen()`, or a decision that the three cases are enough to leave to the first request.
 
-**A security scheme or a path parameter's type that a resolver or a middleware needs does not reach the API description.** A route whose handler takes `Bearer(T)` is described with `bearerAuth`, and one whose resolver takes it is not; a resolver's `Path(T)` field types do not refine the parameter's schema, which stays text unless the handler's own argument types it.
-
-**What would settle it:** the document read from the same comptime needs `listen()` checks, so a scheme a resolver or a typed middleware requires is on every operation it covers.
-
-**The `RateLimit` and `RateLimit-Policy` fields follow an IETF draft (draft-ietf-httpapi-ratelimit-headers), not an RFC.** A change to the draft's syntax changes `announce` in `http/allowance.zig` and ADR 264.
-
-**What would settle it:** the draft published as an RFC, and the fields checked against it.
-
-**No CI job runs on Linux aarch64 or on Windows**, so the platforms table in the deploying guide calls both untested; CI runs `zig build test` on Linux x86-64 and macOS.
-
-**What would settle it:** a job on an aarch64 runner running `zig build test`, and a decision on whether Windows is supported at all.
-
-**A project started from `template/` is copied out of a release tarball, where Go and Node start from a template repository.** `docs/guide/getting-started.md` fetches `template/` with one `curl | tar` line pinned to a release, and every copy shares one `.fingerprint` until it is renamed (ADR 263).
-
-**Needs:** a decision on a separate `nilo-template` repository generated from `template/` at each release.
-
 **Whether a misspelt `nilo_*` declaration is refused has not been checked, and nothing found by reading refuses one.** The markers are looked up by name (`nilo_table`, `nilo_json`, `nilo_parse`, `nilo_service` and the rest), and the only place found that reads a declaration by its `nilo_` prefix is `http/metrics.zig:467`, which refuses a metric name. A type declaring `nilo_jsn` would then behave as one with no marker, and compile.
 
 **What would settle it:** a refusal file declaring a misspelt marker on a Row and on a body type. If it compiles, a check listing the known names that answers with the nearest one, and this entry moves to P2.
+
+**The figures of the second HTTP optimisation round were measured with two other benchmarks on the same machine.** The fiber reuse on HTTP/2, the idle connection's 512 bytes, the tagged union read once and the TLS page margin were each timed under a shared lock and pinned to their own cores, but beside builds and tests that shared the L3; the first round's figures were measured again serially before they went on the record, and these were not ([`http.md`](../bench/result/http.md#a-fiber-that-finishes-a-call-takes-the-next-one-waiting), [`http.md`](../bench/result/http.md#a-tagged-union-is-read-once-when-its-tag-comes-first)). The idle bytes are counts, not timings, and do not depend on it.
+
+**What would settle it:** the `h2load -m 10` rows, the gRPC rows at 32 to 1,024 connections and the tagged-union profile rows run again on a quiet machine, before (`514e8c1`) against after, interleaved, each binary from one path.
+
+**A response whose text is not ASCII is checked a byte at a time, 2,404 ns a kilobyte against 10 ns for ASCII, which a service answering in Japanese, Chinese, Arabic or Russian pays on every answer.** ([ADR 096](./adr/096-a-byte-that-is-not-text-is-not-a-string.md), [`http.md`](../bench/result/http.md)). `std.json` pays the same; a Keiser–Lemire validator is the known fix.
+
+**Needs:** the validator over the 32-lane scan the escape already uses, held by a differential test against `std.unicode.utf8ValidateSlice`, and the kilobyte of `é` measured again.
+
+**`Room.handOut` holds the roster lock for a whole broadcast, so a `join` or a `leave` waits behind it, and nothing measures how long.** `bench/ws_server.zig` runs the chat loop with the Room taken out, and shortening the hold means draining in `takeSeat` as well.
+
+**What would settle it:** a harness with a Room of a thousand sockets broadcasting while others join and leave, the wait for `join` read at p99; then, if it shows, the hold shortened.
+
+**A service argument is found by scanning the registry on every request, 13.4% of a request at thirty-two services.** 1.2 ns an entry, 1.6% at four ([`http.md`](../bench/result/http.md)); under [ADR 017](./adr/017-the-trade-budget-has-four-axes.md)'s bar for every app in `examples/`, and past it for an application with many services.
+
+**Needs:** the service resolved into the route at `listen()`, and the request measured at four and thirty-two services before and after.
+
+**A listener cannot be handed over from the process before it, so a deploy with nothing in front drops the connections in flight.** `unix:` addresses ship ([ADR 103](./adr/103-a-path-is-an-address-to-listen-on.md)); an inherited descriptor is one more `address` variant in the Engine, plus a way to name it. systemd's socket activation (`LISTEN_FDS`) is the spelling most supervisors speak.
+
+**Needs:** the inherited-descriptor address, `LISTEN_FDS` first, and a live test that restarts a server under load and counts the requests lost.
+
+**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
+**Every method nilo does not name is one tag, `.other`, so two of them cannot be routed apart.** `PROPFIND`, `PURGE`, `LINK`, `CONNECT` and `TRACE` are the same to the router, which leaves out a WebDAV server and a cache purge beside another unnamed method; a method carrying its own text would cost a string compare on the request path that an enum tag does not.
+
+**Needs:** the text of an unnamed method kept beside `.other` and a route on it, at no cost to a named method's match.
+
+**A route cannot be scoped by host, so one listener cannot serve two names differently.** `useOn` and `group` scope by path; with a proxy in front, two processes are the answer, and a TLS listener facing the internet with nothing in front ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)) has no such proxy.
+
+**Needs:** a host on a group, matched before the path, and its cost on the match of a route that names no host.
+
+**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
+**A TLS listener that reloads its certificate without a restart.** `listen(.{ .tls = … })` reads the two files once ([ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md)), and a certificate that renews every sixty days is a restart every sixty days. The shape that costs nothing per connection is a second `CertKeyPair` swapped in under the acceptors on a signal or a file's mtime, with the old one freed once the last handshake that took it is over, which is a count the Engine does not keep yet.
+
+**Needs:** the swap built behind a signal, with the count of handshakes still holding the old pair, and its cost on the idle axis stated. Until then `certbot --deploy-hook 'systemctl restart …'` is the answer.
+
+**Direction:** [A listener can face the internet with nothing in front](./roadmap.md#a-listener-can-face-the-internet-with-nothing-in-front)
+
+**Whether zio 0.19 lowers the CPU nilo spends a request on HttpArena's fixed-rate profiles has not been measured.** Those profiles hold the rate and score the CPU it took, and the entry's last reading, on zio 0.18.0, is 33.7 µs a request on `latency-10k` (19th of 101 entries, the lowest at 24.1), 31.2 µs on `latency-1m` (15th of 48, the lowest at 22.5) and 78.0 µs on `8gbit` (29th of 83, the lowest at 43.6); `baseline` spent 66.4 cores for 2.96M req/s, about 22.4 µs a request ([the board's result files](https://github.com/MDA2AV/HttpArena/tree/5809ff76adb98e1f822445734c62ad20ae3e7b9b/site/data/results)). At 10k req/s the request work is nearly nothing, so `latency-10k`'s figure is the standing cost of a running server. zio 0.19.0's release notes say idle executors park sooner and the event loop takes fewer syscalls and atomics, and main now builds zio 0.19 with `.pinned` scheduling ([ADR 199](./adr/199-a-connection-is-served-by-the-thread-it-was-dealt-to.md)); what either did to these four figures is unknown, and so is what is left once they are counted.
+
+**What would settle it:** the entry at main and at `224a507` built the same way and run interleaved through `latency-10k`, `latency-1m` and `baseline` on one machine, CPU a request read from the cgroup as the board reads it; then, if a gap to the lowest entries is left, a profile of the idle server naming where its CPU goes.
+
+**A JSON body could be read 2.2 to 2.8 times faster by a reader written for its type, with no `std.json.Scanner` under it, and nothing about it is decided.** A prototype that goes from the body's bytes straight to the caller's struct read a plain object in 45 ns where the shipped reader takes 125, and a tagged one in 58 where it takes 150; a whole request with a 13-byte body went from 380 to 300 ns, because the body is about 85 ns of it. Its differential run of 800,000 reads against `std.json` found no input one accepted and the other refused. It costs 3.2 to 3.5 KB in a program that reads JSON and a second JSON grammar that has to agree with std's for ever, which is the cost `jsonmark.zig`'s header names ([`spike/json-reader/`](../spike/json-reader/README.md), [ADR 084](./adr/084-a-number-in-a-request-is-not-a-zig-literal.md)).
+
+**What would settle it:** a decision on the prototype in `spike/json-reader/`; then the three tests it fails on the current tree (two tagged-union refusals and a message's allocation count, named in its README) passing, the differential test made a build step on `test`, the 400 sentences of `ctx.zig` run against it, `use_first` and `use_last` rebuilt, and the compile time of the examples measured before and after.
+
+**`.tls` compiles in a build without `-Dtls`, and is refused when `listen()` runs.** `Options.tls` is `?Tls` in every build (`http/bulkhead.zig:297`, `:433`), and [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) chose a one-line refusal at `listen()`, before the port is taken. That keeps the port from serving plain HTTP, and still turns a mistake the build could name into one a deploy finds, which principle 2 asks the other way round.
+
+**Needs:** a decision on making the field's type depend on `nilo_build.tls`, so `.tls = …` without the flag is a compile error naming it, with ADR 212 edited whichever way it goes.
+
+### `nilo_id`
+
+**A v7 made in the same millisecond as another is not ordered after it, so rows inserted in a loop and read back by id come back out of insertion order.** RFC 9562 allows a counter in `rand_a` (§6.2, method 1) and `nilo_id` has none, decided once on the grounds that nobody had asked. An outbox, an audit log or an event table that pages by id is the use case it closes.
+
+**Needs:** the counter in `rand_a`, seeded at random each millisecond and incremented within it, with the threadlocal it takes and its cost per id in `bench/release/`.
+
+### `nilo_pw`
+
+**Argon2id from std hashes a password 19% slower than the same code with its permutation in four vector lanes, and the patch has not been sent.** As four `@Vector(4, u64)` lanes the hash is 11.19 ms instead of 13.78, and 8.98 out of `pw.huge_pages`, byte-identical; nilo carries no copy of std's crypto to get it ([ADR 044](./adr/044-a-password-hash-is-gated-because-forgetting-is-silent.md)), so a login pays the difference until std has it.
+
+**Needs:** the patch sent to Zig against `std.crypto.pwhash.argon2`, with the numbers. Last checked at 0.17.0.
+
+### `nilo_proto`
+
+**A message decoded and encoded again loses the fields its struct does not name, so a proxy that forwards messages copies them by hand.** Keeping them on every decode would put a list and an allocation on every message ([ADR 245](./adr/245-protobuf-is-read-from-the-struct-that-declares-it.md)); a struct that declares a field for them could keep them at no cost to one that does not.
+
+**Needs:** the declaration (a marker field of raw bytes), the encoder writing it back after the named fields, and a test with a message from a newer schema passed through unchanged.
 
 ## How this file is written
 
@@ -591,9 +659,9 @@ Nine rules. They are why the file has the shape it has, and adding to it means m
 
 **2. Nothing decided is in here either.** An answer that is the answer, a question closed so it is not re-derived, a feature refused with its reason, goes to [`decided.md`](./decided.md), and a risk with no mechanism under it yet goes to [`risks.md`](./risks.md#open). This file is what is still open.
 
-**3. An entry is in one tier, by what it costs, and under its module.** The tiers are the table in [How to read this](#how-to-read-this). An entry is ranked by who meets it and what it does to them or to the project, and never by whether somebody has asked or by how it was found. Before an entry is added, ask whether it is needed now: if it is not, and it is neither a defect nor something important that may cost users, it is not added. A module with nothing in a tier has no heading there, because an empty heading says nothing; a tier with nothing in it keeps its heading and says so, because an empty P0 is news.
+**3. An entry is in one tier, by what it costs, and under its module.** The tiers are the table in [How to read this](#how-to-read-this). An entry is ranked by who meets it and what it does to them or to the project, and never by whether somebody has asked or by how it was found. Before an entry is added, ask what it opens or what it costs: if it opens no use case, costs nobody much, and is not needed now, it is not added, and if it does, whether anybody has asked yet does not enter into it. A module with nothing in a tier has no heading there, because an empty heading says nothing; a tier with nothing in it keeps its heading and says so, because an empty P0 is news.
 
-**4. An entry opens with the whole claim, in bold**, and closes with one line: `Needs:` when the shape of the work is known, `What would settle it:` when the entry is a question or a number. An entry waiting on somebody else's repository names it, and the pin it was last checked at, on that line. Somebody who reads only the bold lines has to come away with the right idea of what is outstanding, and somebody who reads only the closing lines has to know what to bring. Neither is optional and neither is prose.
+**4. An entry opens with the whole claim, in bold**, and closes with one line: `Needs:` when the shape of the work is known, `What would settle it:` when the entry is a question or a number. An entry waiting on somebody else's repository names it, and the pin it was last checked at, on that line. **A closing line never waits for a caller**, a deployment or a program to turn up: it names the work, and `docs-check` refuses one that names a caller to wait for. Somebody who reads only the bold lines has to come away with the right idea of what is outstanding, and somebody who reads only the closing lines has to know what to bring. Neither is optional and neither is prose.
 
 **5. An entry that serves a roadmap direction says so on one more line**, after its closing one: `**Direction:**` and a link to the direction's heading in [`roadmap.md`](./roadmap.md). `zig build docs-index` writes each direction's list of entries from these lines, and `zig build docs-check` refuses a link to no direction and a list out of step, so an entry that leaves this file leaves the roadmap too. Most entries serve no direction, and that is fine: the roadmap is where the framework is going, not everything that is open.
 

@@ -22,15 +22,14 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · The public surface has not been read back against the reference, except for `nilo_fetch`'s.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · A limit is named, and defaulted, differently in each module, and 1.0 freezes the names.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · Two public types are called `Bound`.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · Five pages say what the code no longer does.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A module header's code example is not compiled, so one can rot.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A rule a build step holds against the patterns the audit kept finding.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A mutation pass over the request path.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · The multipart parser is the one parser of untrusted bytes that no fuzzer reaches.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · The public surface has not been read back against the reference, except for `nilo_fetch`'s.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · A limit is named, and defaulted, differently in each module, and 1.0 freezes the names.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · Two public types are called `Bound`.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · Five pages say what the code no longer does.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A module header's code example is not compiled, so one can rot.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A rule a build step holds against the patterns the audit kept finding.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A mutation pass over the request path.
 
 <!-- /gathered -->
 
@@ -42,9 +41,9 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · The `-Dhttp2` build parked 64 bytes under a page boundary when it was last read, and which commit gave the `-Dtls` build its page back is not known.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · What a connection inside a request holds now that `read_buffer` is 16 KiB is arithmetic, not a reading.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · The `-Dhttp2` build parked 64 bytes under a page boundary when it was last read, and which commit gave the `-Dtls` build its page back is not known.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · An idle HTTP/1.1 connection that has no fiber costs about 700 to 770 bytes in a prototype, where one with a fiber costs 4,678, and nothing about it is decided.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · What a connection inside a request holds now that `read_buffer` is 16 KiB is arithmetic, not a reading.
 
 <!-- /gathered -->
 
@@ -58,13 +57,13 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · Migration steps and their words disagree with what runs.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `reset` and `squash` are missing from the migrations, and they are the debt that forward-only creates.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · A table cannot be renamed, and a foreign key has no `ON UPDATE`.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · The SQLite rebuild is a recipe in a Problem rather than a step.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · `expect` compares the ledger's head only, and the startup check reads columns only.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_sql` · Migrations write more statements, and take more locks, than the change needs.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · Migration steps and their words disagree with what runs.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · `reset` and `squash` are missing from the migrations, and they are the debt that forward-only creates.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · A case-folding unique made before `text_pattern_ops` keeps the index `istarts_with` cannot read.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · A table cannot be renamed, and a foreign key has no `ON UPDATE`.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · The SQLite rebuild is a recipe in a Problem rather than a step.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · `expect` compares the ledger's head only, and the startup check reads columns only.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_sql` · Migrations write more statements, and take more locks, than the change needs.
 
 <!-- /gathered -->
 
@@ -76,10 +75,10 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · `within` remembers a push in one process, so the same push sent to two instances inside the window runs twice.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · `allowance` keeps its table in the process and has no seam for a shared one
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A Room belongs to one process and has no hook a bridge could use, so a chat served from two instances is two chats.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · Whether a pre-fork worker mode is worth what it costs is not known.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_job` · `within` remembers a push in one process, so the same push sent to two instances inside the window runs twice.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · `allowance` keeps its table in the process and has no seam for a shared one
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A Room belongs to one process and has no hook a bridge could use, so a chat served from two instances is two chats.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · Whether a pre-fork worker mode is worth what it costs is not known.
 
 <!-- /gathered -->
 
@@ -91,8 +90,8 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_job` · A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_job` · A row another process pushed waits up to `poll_ms` for a worker, a second by default, because nothing tells the workers it arrived.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_job` · A kind cannot say how many of it run at once, so a job that calls a rate-limited service either takes every worker or waits inside one.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_job` · A row another process pushed waits up to `poll_ms` for a worker, a second by default, because nothing tells the workers it arrived.
 
 <!-- /gathered -->
 
@@ -104,9 +103,9 @@ Independent of the order: each touches files no stage of the direction above doe
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A failure is one sentence, so a client cannot mark the field that failed.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · An error from code that does not know about HTTP cannot be given a status once, for the whole App.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A handler answers one body type, so a second status with a different shape is a sentence the document never sees.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A failure is one sentence, so a client cannot mark the field that failed.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · An error from code that does not know about HTTP cannot be given a status once, for the whole App.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A handler answers one body type, so a second status with a different shape is a sentence the document never sees.
 
 <!-- /gathered -->
 
@@ -120,9 +119,9 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A gRPC listener answers unary calls only.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · Multipart, streamed: an upload holds the whole body in the arena, so a route raised to `maxBody(50 << 20)` holds up to 50 MB for each upload in flight.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · A stream is never compressed, and neither is an event stream; and gzip is the only coding.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A gRPC listener answers unary calls only.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · Multipart, streamed: an upload holds the whole body in the arena, so a route raised to `maxBody(50 << 20)` holds up to 50 MB for each upload in flight.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · A stream is never compressed, and neither is an event stream; and gzip is the only coding.
 
 <!-- /gathered -->
 
@@ -134,7 +133,7 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_fetch` · A streamed call cannot be made through a `Target`, and when one can, a `.stream` body under a `.retry` has to be a compile error.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_fetch` · A streamed call cannot be made through a `Target`, and when one can, a `.stream` body under a `.retry` has to be a compile error.
 
 <!-- /gathered -->
 
@@ -146,7 +145,7 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.
 
 <!-- /gathered -->
 
@@ -160,13 +159,14 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A WebSocket over TLS has no test of its own for a second frame that arrived with the first.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A TLS listener that reloads its certificate without a restart.
-- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · Client certificates on a TLS listener.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · Session resumption on a TLS listener.
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_http` · A ClientHello split across two records is refused by the TLS listener rather than reassembled
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · The TLS pin is a fork, `nevindra/tls.zig`, until two commits reach upstream's `main`.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · A client whose first key share is not X25519 is refused rather than asked again, because the TLS listener has no HelloRetryRequest.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · Client certificates on a TLS listener.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · Session resumption on a TLS listener.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · A ClientHello split across two records is refused by the TLS listener rather than reassembled
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · A listener cannot be handed over from the process before it, so a deploy with nothing in front drops the connections in flight.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · A route cannot be scoped by host, so one listener cannot serve two names differently.
+- [P3](./todo.md#p3-a-narrower-use-case-or-a-cost-not-yet-measured) · `nilo_http` · A TLS listener that reloads its certificate without a restart.
 
 <!-- /gathered -->
 
@@ -174,7 +174,7 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 ### The toolkit grows by the jobs people have
 
-**A module gets built because the job is common, and the evidence for that is a program that needs it, one of the examples here as much as a stranger's** ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md), [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)). The bar is what a caller cannot already do, and mail is the example of failing it: transactional mail is an HTTPS POST to a provider, which `nilo_fetch` sends today. A JWT signed for somebody else's API is the example of a job that would pass it and has no program behind it yet.
+**A module gets built because the job is common, and the evidence for that is the use case it opens: a kind of service that cannot be written on nilo without it, never whether somebody has asked yet** ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md), [ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md), [ADR 255](./adr/255-the-todo-list-is-ranked-by-evidence-and-the-roadmap-is-written-from-it.md)). nilo's users are few, so the service it cannot serve is the one whose author went elsewhere. The bar is what a program cannot already do, and mail is the example of failing it: transactional mail is an HTTPS POST to a provider, which `nilo_fetch` sends today. A JWT signed for somebody else's API is the example of a job that passes it: a service calling Google, GitHub or APNs as itself has nothing here to sign with.
 
 **`nilo_redis` is the next module, and the job that would show it is the chat example served from two instances.** A Service rather than a tool module, and deliberately not the one built first ([ADR 110](./adr/110-an-in-process-cache-and-a-redis-client-are-two-modules.md)). Two of the three usual reasons to reach for a Redis are already gone here, a session is sealed into a cookie and an allowance is a table in this process, and the first case of several instances having to agree, a queue shared by several servers, was answered by the database they already share ([ADR 160](./adr/160-a-queue-is-a-table-in-the-database-you-already-have.md)). What is left is a message one instance has to hand to the sockets another holds, which is pub/sub. **The two will not share an interface**: what can fail differs, and hiding that turns "the cache is down" into "the cache is cold". Both existing Zig clients are alpha and neither has pub/sub; ADR 110 records what each one does have.
 
@@ -182,7 +182,7 @@ It builds on the HTTP/2 framing that has landed: the two pipes of [ADR 260](./ad
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P3](./todo.md#p3-what-may-cost-users-kept-in-view) · `nilo_jwt` · A service that calls an API asking for a JWT it signed itself has nothing here to sign one with.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_jwt` · A service that calls an API asking for a JWT it signed itself has nothing here to sign one with.
 
 <!-- /gathered -->
 

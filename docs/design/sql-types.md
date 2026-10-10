@@ -55,5 +55,5 @@ Related topics: [ADR 181](../adr/181-the-marker-has-two-kinds-of-word.md), whose
 
 ## Open questions
 
-- **Storing `Timestamp` as text on SQLite.** Reading RFC 3339 text back needs a parser, which now exists (`Timestamp.nilo_parse`, built for ADR 127), but no `time_form` has been built. A program that wants text timestamps on SQLite today uses `sql.AsText("timestamptz")`. Recorded in [ADR 067](../adr/067-a-value-is-whatever-the-database-stores.md) and [`docs/decided.md`](../decided.md).
+- **Storing `Timestamp` as text on SQLite.** Reading RFC 3339 text back needs a parser, which now exists (`Timestamp.nilo_parse`, built for ADR 127), but no `time_form` has been built. A program that wants text timestamps on SQLite today uses `sql.AsText("timestamptz")`. Recorded in [ADR 067](../adr/067-a-value-is-whatever-the-database-stores.md) and open in [`docs/todo.md`](../todo.md).
 - **An array of a declared column type**, such as `[]const Decimal`. It is not checked by `accepts` and cannot be read; writing one works through `arrayOf`. Named as still unsupported in [ADR 049](../adr/049-a-column-type-can-come-from-outside-this-module.md).

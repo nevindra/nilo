@@ -125,5 +125,5 @@ can be handed an open descriptor can take the socket over from the process it
 replaces, so a deploy with nothing in front of it stops dropping the
 connections in flight. It is not here. An inherited descriptor has to be put
 into non-blocking mode before the event loop may have it, and how it is named
-is a protocol decision — systemd's `LISTEN_FDS` convention, or a bare number —
-that wants a caller with a deploy to point at. The roadmap keeps a sentence.
+is a protocol decision, systemd's `LISTEN_FDS` convention or a bare number, and
+`LISTEN_FDS` is the one most supervisors speak. It is open in the todo list.
