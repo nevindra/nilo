@@ -1776,8 +1776,17 @@ fn outerNulls(
         if (!cut_off) {
             const was = io.swapCancelProtection(.blocked);
             defer _ = io.swapCancelProtection(was);
+            // **Dropped before the ROLLBACK**, inside the transaction, so that
+            // behind a pooler in transaction mode it goes down the one server
+            // connection the PREPARE went down; after the ROLLBACK it was a
+            // transaction of its own, which such a pooler may route elsewhere,
+            // leaving the name behind for the next describe to meet. A
+            // transaction the EXPLAIN aborted refuses it, and then it is
+            // dropped after the ROLLBACK on the same connection, as before.
+            const dropped = prepared and
+                if (conn.execOpts("DEALLOCATE nilo_describe", .{}, .{})) |_| true else |_| false;
             conn.rollback() catch {};
-            if (prepared) _ = conn.execOpts("DEALLOCATE nilo_describe", .{}, .{}) catch {};
+            if (prepared and !dropped) _ = conn.execOpts("DEALLOCATE nilo_describe", .{}, .{}) catch {};
         }
     }
     _ = conn.execOpts("SET LOCAL plan_cache_mode = force_generic_plan", .{}, .{}) catch |err|

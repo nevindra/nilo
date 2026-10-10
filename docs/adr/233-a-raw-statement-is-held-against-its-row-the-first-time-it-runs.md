@@ -117,8 +117,12 @@ is tested on plans a server answered.
 The plan has to be one that holds for every value. So the statement is
 prepared under a name, with `plan_cache_mode = force_generic_plan` set for the
 transaction, and explained with every parameter NULL. A custom plan could use
-the value to drop a join; a generic one cannot. The transaction is rolled back,
-the name dropped after it, since a `PREPARE` outlives a rollback. Five round
+the value to drop a join; a generic one cannot. The name is dropped before the
+transaction is rolled back, since a `PREPARE` outlives a rollback and, behind a
+pooler in transaction mode, a statement sent after the `ROLLBACK` is a
+transaction of its own that may reach another server connection and leave the
+name behind. A transaction the `EXPLAIN` aborted refuses the `DEALLOCATE`, and
+it is sent again after the `ROLLBACK`, on the same connection. Five round
 trips, planning only, once.
 
 **Only what is certain is said.** The planner has already turned an outer join

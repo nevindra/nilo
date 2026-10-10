@@ -187,9 +187,9 @@ Nothing is open at this tier.
 
 **Needs:** a yes.
 
-**Whether `describe` pays five round trips on every raw call behind a pooler.** `DEALLOCATE nilo_describe` is sent after the `ROLLBACK` (`postgres.zig:1476`), in a transaction of its own, which pgbouncer in transaction mode may route to another server connection. The statement is left behind on the first, the next describe there fails on `42P05`, and `vetRaw` (`db.zig:770`) keeps trying. ADR 233 says it costs a round trip only while the statement beside it is failing too.
+**Whether `describe` still pays five round trips on a raw call behind a pooler when its `EXPLAIN` fails.** `DEALLOCATE nilo_describe` goes inside the transaction now; when the `EXPLAIN` aborted the transaction the server refuses it there, so it is sent again after the `ROLLBACK`, in a transaction of its own, which pgbouncer in transaction mode may route to another server connection. The statement is left behind on the first, the next describe there fails on `42P05`, and `vetRaw` (`db.zig:770`) keeps trying. ADR 233 says it costs a round trip only while the statement beside it is failing too.
 
-**What would settle it:** a run behind pgbouncer in transaction mode, or the `DEALLOCATE` sent before the `ROLLBACK`.
+**What would settle it:** a run behind pgbouncer in transaction mode. The `DEALLOCATE` is now sent inside the transaction, before the `ROLLBACK`, and again after it only when a failed `EXPLAIN` aborted the transaction, which no test reaches.
 
 ### `nilo_http`
 
