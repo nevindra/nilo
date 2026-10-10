@@ -78,7 +78,7 @@ fn addTodo(store: *Store, incoming: NewTodo) !Todo {
 }
 ```
 
-In a debug build nilo panics on the read instead, and names the request that did it. The fix is to copy:
+In a debug build nilo panics on the read instead, and names the request that did it when the root file declares `pub const panic = nilo.panic;`. The fix is to copy:
 
 ```zig
 const Store = struct {
@@ -295,7 +295,7 @@ Two rules go with it:
 
 **A spin lock is for a module that has no loop at all.** `nilo_cache` spins because `std.Io.Mutex.lock` takes an `Io` that layer does not have, and it is safe there only because the lock is held across a `memcpy` and nothing else, ever. A program on nilo has `nilo.Mutex`, so it does not need to copy that.
 
-**A blocking worker is an ordinary thread, so a blocking file call is fine in it.** That is the point of handing it there. What the call needs is an `std.Io`, because Zig 0.16's file API (`std.Io.Dir`) takes one: a program that wants the worker's file work independent of the server's loop owns a `std.Io.Threaded` and passes its `io()`, which is what nilo's own static file loader does (`http/static.zig`, `load`). Plain libc calls (`open`, `pread`, `fsync`, `mkdir`) need none and are what a program that already links libc may use. `nilo.io()` can be read from a pool thread ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)), but nothing here has measured file calls through the server's `Io` from a worker, so this guide does not recommend it for them. nilo ships no file helpers for workers (`mkdirAll`, `listDir`, `writeFileAtomic`); a program that needs the same forty lines in two modules writes them once.
+**A blocking worker is an ordinary thread, so a blocking file call is fine in it.** That is the point of handing it there. What the call needs is an `std.Io`, because Zig's file API (`std.Io.Dir`) takes one: a program that wants the worker's file work independent of the server's loop owns a `std.Io.Threaded` and passes its `io()`, which is what nilo's own static file loader does (`http/static.zig`, `load`). Plain libc calls (`open`, `pread`, `fsync`, `mkdir`) need none and are what a program that already links libc may use. `nilo.io()` can be read from a pool thread ([ADR 244](../adr/244-a-handler-is-given-the-loop-it-runs-on.md)), but nothing here has measured file calls through the server's `Io` from a worker, so this guide does not recommend it for them. nilo ships no file helpers for workers beyond `nilo.Dir`'s `writeFileAtomic` (no `mkdirAll`, no `listDir`); a program that needs the same forty lines in two modules writes them once.
 
 ### The blocking warning
 

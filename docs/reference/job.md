@@ -154,4 +154,4 @@ The next tick is a row with the unique key `"schedule"`, so several instances se
 
 ### What it does not do
 
-**Not included:** a priority queue with numbers (a kind has one of three `priority` levels, and a push cannot override it: [ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)), a workflow engine, a rate limiter per kind (use `nilo.Gate` inside `run` for that), exactly-once delivery (a transactional `run` commits its database writes with its `done`, and does nothing for an effect outside the database), or time zones.
+**Not included:** a priority queue with numbers (a kind has one of three `priority` levels, and a push cannot override it: [ADR 214](../adr/214-a-job-says-how-urgent-it-is.md)), a workflow engine, a rate limiter per kind (use `nilo.Gate` inside `run` for that), exactly-once delivery (a transactional `run` commits its database writes with its `done`, and does nothing for an effect outside the database).

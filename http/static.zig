@@ -85,7 +85,7 @@ pub const Options = struct {
     /// error on line 1 of something that is not JavaScript, and a `fetch()`
     /// into a JSON parse error, neither of which names the file.
     ///
-    /// `.any_path` is what shipped before 0.2.0 and is kept for an app that
+    /// `.any_path` is what shipped through 0.2.0 and is kept for an app that
     /// depends on it. It answers every path under the prefix, which is the
     /// behaviour above.
     spa_fallback_for: Fallback = .navigations,
@@ -2015,7 +2015,7 @@ test "the fetch metadata decides when the browser sent it, and Accept decides wh
     try testing.expect(!navigational(.{ .accept = "text/html;q=0, */*" }));
 }
 
-test "a set told to answer any path does what it did before 0.2.0" {
+test "a set told to answer any path does what it did through 0.2.0" {
     var set = try fakeSet(testing.allocator, "/", &.{ "/index.html", "/app.js" });
     defer set.deinit();
     set.fallback = set.lookup("/index.html").?;

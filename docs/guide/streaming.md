@@ -18,6 +18,8 @@ fn report(c: *nilo.Ctx, db: *Db) !void {
 
 [`c.stream`](../reference/streaming.md#stream) handles `Transfer-Encoding: chunked` for you, and the connection stays open for another request. An HTTP/1.0 client has no chunked encoding, so it gets the body unframed with `Connection: close`: there, the end of the connection marks the end of the body.
 
+In a build with `.http2 = true`, the same handler streams over HTTP/2 to a client that spoke it: each piece leaves as `DATA` frames under the client's flow-control windows instead of as chunks, and an event stream does the same ([ADR 260](../adr/260-a-request-on-http2-runs-from-its-headers.md)).
+
 | | |
 |---|---|
 | `body.writeAll(bytes)` | append |

@@ -540,7 +540,7 @@ const Contact = struct {
 };
 ```
 
-It also makes such a response 33% faster whether or not anything is renamed: `covers` is decided for the *whole* value, so one leaf used to send every string next to it to `std.json` as well. That was 250 ns and is now 165 ns, on a 305-byte row with three uuids ([`bench/result/http.md`](../../bench/result/http.md)). Your own type gets the same by adding the same two declarations.
+It also makes such a response take about a third less time whether or not anything is renamed: `covers` is decided for the *whole* value, so one leaf used to send every string next to it to `std.json` as well. That was 250 ns and is now 165 ns, on a 305-byte row with three uuids ([`bench/result/http.md`](../../bench/result/http.md)). Your own type gets the same by adding the same two declarations.
 
 #### Skipping the keys a body struct does not know
 

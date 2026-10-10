@@ -45,6 +45,8 @@ Postgres undoes the setting when the transaction ends, however it ends, so the c
 
 **Only a transaction can have a deadline.** A deadline is always a separate command, because SQL cannot attach one to a statement in the same message. So it has to go down the same connection as the statement it limits. `db.select` takes whichever connection is free and hands it straight back, so there is nothing to set a deadline on ([ADR 043](../../adr/043-a-deadline-needs-a-connection-you-hold.md)).
 
+**A route's [`nilo.deadline`](../../reference/middleware.md#nilodeadline) bounds every `db.` and `tx.` call made with its `*Ctx`, outside a transaction too**, because nilo keeps that one on its own side instead of sending it to the database. A call that runs out of time is `error.TimedOut`, and one made after the time is up is not sent at all. Postgres is sent no cancel, so the statement keeps running until it finds the socket closed, and a write the deadline cut off may still have committed; `tx.deadline` is what stops a statement inside the database ([reference](../../reference/sql.md#a-routes-deadline)).
+
 For a limit on *every* query, including the ones outside a transaction, set it on the database role instead of in your code:
 
 ```sql

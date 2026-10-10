@@ -29,7 +29,7 @@ The path is relative to the working directory the server runs in. A directory th
 | `cache_control` | sent on every file. Default `"public, max-age=3600"` |
 | `cache_rules` | exceptions to `cache_control` by where a file sits in the tree, so hashed bundles and the page that names them take different headers ([below](#one-tree-two-cache-policies)). Default none |
 | `spa_fallback` | served for a path under the prefix that names no file and could be a browser opening a page. Empty (the default) turns it off |
-| `spa_fallback_for` | which requests that covers. `.navigations` (the default) or `.any_path`, which is how it worked before 0.2.0 ([below](#the-spa-fallback)) |
+| `spa_fallback_for` | which requests that covers. `.navigations` (the default) or `.any_path`, which is how it worked through 0.2.0 ([below](#the-spa-fallback)) |
 | `max_file_bytes` | the size above which a file is opened per request instead of held in memory. Default 8 MB |
 | `max_total_bytes` | the most one tree may hold in memory, gzipped copies included. Default 64 MB |
 | `dotfiles` | whether to load names starting with `.`. Off by default |
@@ -195,7 +195,7 @@ try app.embeddedWith("/", &.{
 
 You can write the `@embedFile` calls yourself, because the path is relative to the file it is written in and nilo cannot know where your `dist/` is. Most programs let `embedDir` write the list from a directory instead ([below](#a-vue-or-react-build-in-the-binary)).
 
-The options are `static`'s minus every one that is about a disk: `index`, `cache_control`, `spa_fallback`, `spa_fallback_for`, `compress` and `compress_min_bytes`, with the same defaults. There is no `max_file_bytes`, because nothing here can be served from disk; no `max_total_bytes`, because the bytes are part of the binary whether or not they are served, so counting them would count memory that is not spent twice; no `dotfiles`, because you wrote every name; and no `reload`, because there is no disk.
+The options are `static`'s minus every one that is about a disk: `index`, `cache_control`, `cache_rules`, `spa_fallback`, `spa_fallback_for`, `compress`, `compress_min_bytes` and `precompressed`, with the same defaults. There is no `max_file_bytes`, because nothing here can be served from disk; no `max_total_bytes`, because the bytes are part of the binary whether or not they are served, so counting them would count memory that is not spent twice; no `dotfiles`, because you wrote every name; and no `reload`, because there is no disk.
 
 Two mistakes a directory cannot make are refused at startup, in one line: a path listed twice (the second entry could never be reached) and a `spa_fallback` that names no entry. There is no `tryEmbedded`: the list was fixed when the program was compiled, so there is nothing the program can do about it at run time but stop.
 

@@ -47,7 +47,7 @@ const Carts = cache.Space("cart", Cart, .{ .ttl_s = 300 });
 | `space.getInto(key, buf)` | reads the bytes the way `get` does, but into a buffer you choose instead of a `Held`, for a caller whose buffer is an arena |
 | `store.stats()` | hits, and the three different kinds of miss |
 | `store.bytesHeld()` | every byte it will ever hold. This number never changes |
-| `store.shardCount()` | how many shards it got, at most the `shards` asked for |
+| `store.shardCount()` | how many shards it got: `shards` rounded up to a power of two, then cut to what the budget holds at 4 KiB a shard and to 65,536 |
 | `store.clear()` | remove everything |
 
 ### `space.get` and `Held`

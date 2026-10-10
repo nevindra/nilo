@@ -84,7 +84,7 @@ The third argument to `cache.Space`:
 | `ttl_s` | `0` | seconds an entry lives. Zero means until the ring overwrites it, which is a perfectly good answer for a cache, since nothing here sweeps for expired entries |
 | `max_bytes` | 4096 | the largest value a `[]const u8` Space will hold, and the size of its `Held`. **Only used for that kind of Space** |
 
-An empty name is a compile error, because the name is what keeps one Space's keys apart from another's. So is a `[]const u8` Space with a `max_bytes` of zero, or of more than 65,535: the length is stored in sixteen bits so that four slots of a bucket fit in one cache line.
+An empty name is a compile error, because the name is what keeps one Space's keys apart from another's. So is a `[]const u8` Space with a `max_bytes` of zero, or of more than 65,535: the length is stored in sixteen bits so that eight slots of a bucket fit in one cache line.
 
 ## Storing structs, bytes and JSON
 

@@ -111,7 +111,8 @@ For text, give it a fixed size (`name: [32]u8`), or better, keep an id in the se
 
 ```zig
 try s.set(.{ .user = id });     // ✅
-s.value.user = id;              // ❌ compiles, and does nothing
+var copy = s.value.?;
+copy.user = id;                 // ❌ compiles, and does nothing
 ```
 
 **To change a session, call `set`; assigning to a field does nothing.** A session is a [resolved value](./middleware.md#resolved-values), handed to the handler by value. A changed copy goes nowhere and looks exactly like it worked, so writing is a call: `set` becomes one `Set-Cookie` on this response.
@@ -265,7 +266,7 @@ fn whoAmI(b: nilo.Bearer(Signed)) !Signed {
 
 `require()` answers a 401 with `WWW-Authenticate: Bearer`, and with `error="invalid_token"` when a token was sent and did not open, which tells the client to sign in again (RFC 6750). `get()` returns `?T` for a route that works signed out. The token opens under `session_secret` and its fallbacks, so [rotating the secret](#rotating-the-secret) covers tokens too, and a token expires at its `max_age` inside the seal. A session cookie's value does not open as a token, and the reverse.
 
-Send the token as `Authorization: Bearer <token>`. A request that carries only that header has no cookie to borrow, so the CSRF middleware does not stop it; one that carries a session cookie is checked as before. Like a session, a token cannot be revoked before it expires: keep `max_age` short and put a version number of your own in `Signed` to sign everybody out. Give the sign-in response `Cache-Control: no-store` if anything between you and the client caches.
+Send the token as `Authorization: Bearer <token>`. The CSRF middleware reads `Sec-Fetch-Site` and `Origin`, which a mobile application does not send, so its requests pass; a browser's cross-site request is refused whatever it carries. Like a session, a token cannot be revoked before it expires: keep `max_age` short and put a version number of your own in `Signed` to sign everybody out. Give the sign-in response `Cache-Control: no-store` if anything between you and the client caches.
 
 ## Password reset tokens and API keys
 

@@ -39,7 +39,7 @@ That gives you an OpenAPI 3.1 document at `/openapi.json`, and a page for readin
 | `!Status(201, T)` | a `"201"` response, named |
 | `!Response(T)` | `default`, because the status is picked at runtime |
 | a `*Ctx` and no return value | `default`, because nilo cannot tell whether the handler wrote a response of its own |
-| anything nilo can reject before the handler runs | a 400 |
+| anything nilo can reject before the handler runs | a 400; a 401 behind `Authorization` or a guard; a 409 and a 422 under an idempotency key; a 422 for `.misfit` |
 
 ## Operation names (`operationId`)
 

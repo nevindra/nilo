@@ -1,6 +1,6 @@
 # Reference
 
-**Every public name in nilo, one page per module and seven pages for the HTTP server.**
+**Every public name in nilo, one page per module and six pages for the HTTP server.**
 
 **Guide:** [the guide](../guide/README.md) · **Design:** [design, one page per topic](../design/README.md)
 
@@ -12,12 +12,12 @@ Twelve modules ship, and a project links only the ones it imports ([ADR 038](../
 
 | Module | What it is | Page |
 |---|---|---|
-| `nilo_http` | the HTTP server, covered by the seven pages listed first below | [`app.md`](./app.md) first |
+| `nilo_http` | the HTTP server, covered by the six pages listed first below, with `nilo_core`'s among them | [`app.md`](./app.md) first |
 | `nilo_sql` | Postgres and [SQLite](./sql.md#sqlite) | [`sql.md`](./sql.md) |
 | `nilo_s3` | object storage: S3, MinIO, R2, or anything that speaks the same API | [`s3.md`](./s3.md) |
 | `nilo_id` | UUIDs | [`id.md`](./id.md) |
-| `nilo_config` | settings read from the environment | [`config.md`](./config.md) |
-| `nilo_pw` | password hashing | [`pw.md`](./pw.md) |
+| `nilo_config` | settings read into a struct from the environment, a `.env` file's text or pairs of your own | [`config.md`](./config.md) |
+| `nilo_pw` | password hashing, and tokens for a reset link or an API key | [`pw.md`](./pw.md) |
 | `nilo_cache` | an expiring cache in this process | [`cache.md`](./cache.md) |
 | `nilo_jwt` | verifying a token someone else signed | [`jwt.md`](./jwt.md) |
 | `nilo_proto` | protobuf messages read and written as plain structs | [`proto.md`](./proto.md) |
@@ -35,6 +35,7 @@ const pw = @import("nilo_pw");        // only if you hash passwords or mint a to
 const cache = @import("nilo_cache");  // only if you cache something
 const jwt = @import("nilo_jwt");      // only if you verify somebody else's tokens
 const proto = @import("nilo_proto");  // only if you speak protobuf
+const fetch = @import("nilo_fetch");  // only if you call another service's API
 const job = @import("nilo_job");      // only if some work runs later, or on a schedule
 ```
 

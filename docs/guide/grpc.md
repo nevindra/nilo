@@ -82,11 +82,15 @@ A call's metadata arrives as request headers, so `c.header("x-tenant")` reads it
 | 401 | `UNAUTHENTICATED` (16) |
 | 403 | `PERMISSION_DENIED` (7) |
 | 404 | `NOT_FOUND` (5) |
+| 405, 501 | `UNIMPLEMENTED` (12) |
+| 408, 504 | `DEADLINE_EXCEEDED` (4) |
 | 409 | `ABORTED` (10) |
 | 412, any other 4xx | `FAILED_PRECONDITION` (9) |
 | 413, 429 | `RESOURCE_EXHAUSTED` (8) |
+| 499 | `CANCELLED` (1) |
 | 503 | `UNAVAILABLE` (14) |
 | 500 | `INTERNAL` (13) |
+| any other 5xx | `UNKNOWN` (2) |
 
 So `return fail.notFound("no order {d}", .{id})` becomes `NOT_FOUND` with that message, and the handler does not need to know gRPC is involved. For a code no error names, answer with the code yourself, as a trailer: `try c.setTrailer("grpc-status", "5")`. A `grpc-status` trailer the route set wins over the one nilo would have chosen.
 
@@ -117,4 +121,4 @@ The same connection serves any other request, a `GET` or a `POST` with a JSON bo
 
 **An idle gRPC connection costs under a page more than an HTTP/1.1 one, about 5.8 KB**, and the HTTP/1.1 listeners of the same build cost what they did without it. A call in flight is a fiber, 4,547 bytes plus the stack the route touches, and a connection holds at most 100 calls at once, which it tells the client when it connects. From the second call on a connection onward, a call allocates nothing on the heap.
 
-On four cores a unary call runs at about 770,000 a second, against grpc-go's 590,000 and tonic's 900,000, and the slowest call is slower than either's. The difference comes from where the call's fiber is scheduled, not from HTTP/2, and it is written up with the rest of the numbers in [`bench/result/http.md`](../../bench/result/http.md#a-grpc-listener-built).
+On four cores a unary call runs at about 770,000 a second, against grpc-go's 590,000 and tonic's 900,000, and its slowest call at 1,024 connections, 0.87 to 1.06 s, is tonic's 1.07 s ([where the tail comes from](../../bench/result/http.md#where-a-grpc-calls-worst-latency-comes-from)). The difference comes from where the call's fiber is scheduled, not from HTTP/2, and it is written up with the rest of the numbers in [`bench/result/http.md`](../../bench/result/http.md#a-grpc-listener-built).

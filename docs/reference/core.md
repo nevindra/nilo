@@ -54,7 +54,7 @@ const rows = try db.select(User, &run, .{ .where = .{ .age = .{ .gt = 18 } } });
 
 ```zig
 fn create(db: *Db, scope: anytype, title: []const u8) !Doc {
-    const key = id.Uuid.v7(try scope.entropy(id.Uuid.v7_entropy), nilo.nowMillis());
+    const key = id.Uuid.v7(try scope.entropy(id.Uuid.v7_entropy), @intCast(nilo.nowMillis()));
     return db.insert(Doc, scope, .{ .id = key, .title = title });
 }
 ```

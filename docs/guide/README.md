@@ -60,7 +60,7 @@ const nilo = @import("nilo_http");
 
 ## The other modules
 
-**Each module has one page, except the database, which has a folder.** Every page covers what the module is for, a complete example, every option with its default, what it returns instead of a value, what it costs, and what it will not do.
+**Each module has one page, except the database, which has a folder.** Every page covers what the module is for and a complete example, and most add every option with its default, what it returns instead of a value, what it costs, and what it will not do.
 
 19. [Talking to a database](./sql/README.md): `nilo_sql`. Your struct is the table, the query is a constant, and a misspelled column is a build error. Postgres and SQLite are written the same way. Nine pages, in order: [tables](./sql/tables.md), [reading](./sql/reading.md), [parents, children and aggregates](./sql/shapes.md), [writing](./sql/writing.md), [transactions](./sql/transactions.md), [raw SQL](./sql/raw.md), [SQLite](./sql/sqlite.md), [migrations](./sql/migrations.md) and [running a database](./sql/running.md).
 20. [Calling somebody else's API](./fetch.md): `nilo_fetch`. One client for the whole program, a deadline on every call, a response body in the request's own memory, and an `Exchange` for a body too big to hold.

@@ -77,11 +77,11 @@ This page covers the App and its groups, the options `listen()` takes, the concu
 
 ### Which calls fail
 
-**Every call above returns an error union and needs a `try`, except these**, which return a value or nothing: `App.init`, `app.deinit`, `app.group`, `app.without`, `app.with`, `app.named`, `app.onListener`, `app.docs`, `app.routes`, `app.boundPort` and `app.shutdown`. Three fail in one named way: `app.guard` with `error.GuardAlreadyDeclared`, `app.failures` with `error.FailureShapeAlreadySet`, `app.compress` with `error.CompressionAlreadyEnabled`, and `app.trace` with `error.TracingAlreadyEnabled` beside the option errors in its row. `app.listen`, `app.route` and the `static` calls stop the process on the errors they can explain in one line, and their `try*` versions return the same errors instead ([ADR 207](../adr/207-a-try-call-hands-back-the-error-and-says-nothing.md)).
+**Every call above returns an error union and needs a `try`, except these**, which return a value or nothing: `App.init`, `app.deinit`, `app.group`, `app.without`, `app.with`, `app.named`, `app.onListener`, `app.docs`, `app.routes`, `app.boundPort` and `app.shutdown`. Four fail in one named way: `app.guard` with `error.GuardAlreadyDeclared`, `app.failures` with `error.FailureShapeAlreadySet`, `app.compress` with `error.CompressionAlreadyEnabled`, and `app.trace` with `error.TracingAlreadyEnabled` beside the option errors in its row. `app.listen`, `app.route` and the `static` calls stop the process on the errors they can explain in one line, and their `try*` versions return the same errors instead ([ADR 207](../adr/207-a-try-call-hands-back-the-error-and-says-nothing.md)).
 
 ### `Group`
 
-**`app.group("/api")` returns a group.** It has `group`, `use`, `useOn`, `without`, `with`, `named`, `onListener`, `provide`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `route`, `tryRoute`, `static`, `staticWith`, `tryStatic` and `tryStaticWith`: the same as an App, minus `listen`, `docs` and `shutdown`. The prefix is compile-time text and must be a literal; the type is `nilo.Group("/api")`.
+**`app.group("/api")` returns a group.** It has `group`, `use`, `useOn`, `without`, `with`, `named`, `onListener`, `provide`, `get`, `post`, `put`, `delete`, `patch`, `head`, `options`, `route`, `tryRoute`, `static`, `staticWith`, `tryStatic`, `tryStaticWith`, `embedded`, `embeddedWith` and `rpc`: what registers routes, middleware and services. What is about the whole server (`listen`, `docs`, `shutdown`, `spawn`, `trace`, `compress`, `metrics`, `health`, `guard`, `failures` and the like) is the App's alone. The prefix is compile-time text and must be a literal; the type is `nilo.Group("/api")`.
 
 `@TypeOf(g).mounted_at` is where it is mounted: `"/api"`, or `""` for an App, so a plugin taking `anytype` can ask either.
 
@@ -218,7 +218,7 @@ A 206, a 416, a `Content-Range` and `Cache-Control: no-transform` are never comp
 | `cache_control` | `"public, max-age=3600"` |
 | `cache_rules` | none. A list of `.{ .prefix, .suffix, .cache_control }`, the first match by a file's path in the tree giving its header instead of `cache_control` |
 | `spa_fallback` | `""` (off) |
-| `spa_fallback_for` | `.navigations`, or `.any_path`, which was the behaviour before 0.2.0 |
+| `spa_fallback_for` | `.navigations`, or `.any_path`, which was the behaviour through 0.2.0 |
 | `max_file_bytes` | `8 * 1024 * 1024` |
 | `max_total_bytes` | `64 * 1024 * 1024` |
 | `dotfiles` | `false` |

@@ -13,8 +13,8 @@
   <a href="https://ziglang.org/"><img alt="Zig 0.17" src="https://img.shields.io/badge/zig-0.17-f7a41d?style=flat-square&logo=zig&logoColor=white"></a>
   <a href="./CHANGELOG.md"><img alt="version 0.8.0" src="https://img.shields.io/badge/version-0.8.0-3b82f6?style=flat-square"></a>
   <a href="./docs/reference/"><img alt="12 modules" src="https://img.shields.io/badge/modules-12-8957e5?style=flat-square"></a>
-  <a href="./refusals/README.md"><img alt="597 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-597-e05d44?style=flat-square"></a>
-  <a href="./docs/adr/"><img alt="272 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-272-6b7280?style=flat-square"></a>
+  <a href="./refusals/README.md"><img alt="620 refusals" src="https://img.shields.io/badge/mistakes%20refused%20while%20compiling-620-e05d44?style=flat-square"></a>
+  <a href="./docs/adr/"><img alt="283 ADRs" src="https://img.shields.io/badge/decisions%20on%20file-283-6b7280?style=flat-square"></a>
   <a href="./LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-16a34a?style=flat-square"></a>
 </p>
 
@@ -51,7 +51,7 @@ Those three lines are a complete route. From them you get:
 - 🏁 **#2 of 79** on [HttpArena](https://www.http-arena.com/frameworks/nilo/)'s HTTP/1.1 board, and **#1 of 22** on WebSocket, among untuned entries.
 - 🪶 **1 allocation** per request. A test fails if it ever becomes 2.
 - 💾 **4,669 bytes** per idle connection.
-- 🧯 **597 mistakes caught while compiling**, each with a sentence that tells you the fix.
+- 🧯 **620 mistakes caught while compiling**, each with a sentence that tells you the fix.
 - 🔌 **Zero glue.** Routing, errors, OpenAPI and SQL all read the same struct.
 - 🔀 **HTTP/1.1, HTTP/2 and gRPC on one port**, every route on each, when you build with `.http2 = true`.
 
@@ -302,13 +302,13 @@ Against eight other servers returning the same JSON, nilo is 1st on throughput, 
 | **`nilo_http`** | Routing, typed handlers and typed middleware, cookies, sessions and bearer tokens, static files (and the `.br` and `.gz` your build already made), streaming, WebSocket, rooms that broadcast to sockets and event streams and reach one user by key, OpenAPI, idempotency keys, metrics, logs as text or JSON, OpenTelemetry tracing ([guide](./docs/guide/tracing.md)), rate limiting, CSRF, security headers, gzip. Behind a flag: TLS 1.3, HTTP/2 for every route, and gRPC and Connect calls answered by a struct of plain functions ([guide](./docs/guide/grpc.md)) | Templates, WebSocket over HTTP/2, streaming gRPC |
 | **`nilo_sql`** | Postgres and SQLite: reads, writes, transactions, streaming, schema and migrations, an index built on a busy table without stopping its writes, and idempotency keys every instance shares ([guide](./docs/guide/idempotency.md#once-across-instances-sqlreplays)). Window functions, CTEs and any other join go through `db.raw`, which still fills your struct, counts its columns while compiling and checks their types the first time it runs ([guide](./docs/guide/sql/raw.md)) | Window functions and CTEs written in Zig rather than SQL, `down` migrations |
 | **`nilo_s3`** | S3, MinIO and R2: get, put, multipart upload, copy and compose inside the store, ranges read whole or streamed, list, presigned URLs, and retries when the store says slow down | A `list` that follows its own cursor |
-| **`nilo_fetch`** | Calling another HTTP API from inside a request: JSON and form bodies, a `Target` that retries under a budget ([guide](./docs/guide/fetch.md#retrying)), the route's deadline carried into the call, an egress proxy, a private certificate authority, a unix socket, HTTPS through a proxy, a WebSocket to consume a feed ([guide](./docs/guide/fetch.md#consuming-a-feed-websocket)) | Circuit breaker, permessage-deflate, HTTP/2 and gRPC calls, a client certificate |
-| **`nilo_job`** | Background and scheduled work, queued in the database you already have, with three levels of urgency, cron schedules and retries spread out by jitter | Exactly-once, time zones |
+| **`nilo_fetch`** | Calling another HTTP API from inside a request: a service as a `Target` type with its base URL, headers and limits, retrying under a budget ([guide](./docs/guide/fetch.md#retrying)); JSON and form bodies, and a body too large to hold streamed through an `Exchange`; the route's deadline carried into the call, and a client span with `traceparent` when the App traces; credentials dropped on a redirect to another origin; an egress proxy, a private certificate authority and a unix socket; a WebSocket to consume a feed ([guide](./docs/guide/fetch.md#consuming-a-feed-websocket)); and a canned server for your tests | Circuit breaker, permessage-deflate, HTTP/2 and gRPC calls, a client certificate |
+| **`nilo_job`** | Background and scheduled work, queued in the database you already have: three levels of urgency, cron schedules read in a time zone, retries spread out by jitter, and a run whose writes to that database commit together with its completion, or not at all ([guide](./docs/guide/jobs.md#a-run-that-writes-to-the-same-database)) | Exactly once for work outside the database, such as a call to a mail provider |
 | **`nilo_cache`** | An expiring in-process cache on a fixed memory budget | Pointers in cached values |
 | **`nilo_jwt`** | Verifying tokens: RS256, ES256 and rotating JWKS | Signing tokens, HS256 |
 | **`nilo_proto`** | Protobuf as plain structs: decode, encode, OTLP-sized messages in a handful of allocations ([guide](./docs/guide/proto.md)) | A `.proto` compiler, proto2 |
-| **`nilo_config`** | Settings from the environment | Config files |
-| **`nilo_pw`** | Password hashing with argon2id | |
+| **`nilo_config`** | Settings read into a struct of your own from the environment, a `.env` file's text or pairs you parsed yourself, layered in priority order, with every bad one named at once before the server starts ([guide](./docs/guide/config.md)) | Opening the file for you, TOML, YAML or JSON |
+| **`nilo_pw`** | Password hashing with argon2id, and a token that is not a password (a reset link, an email check, an API key) stored as its digest and compared in constant time | |
 | **`nilo_id`** | UUID v4 and v7 | |
 | **`nilo_core`** | The types the other modules share | |
 
@@ -319,7 +319,7 @@ A build that serves plain HTTP fetches one dependency, [zio](https://github.com/
 | Flag | What it turns on |
 |---|---|
 | `.sql = true` | `nilo_sql`, with its Postgres and SQLite drivers |
-| `.tls = true` | TLS 1.3 on a listener, for a server with nothing in front of it ([guide](./docs/guide/deploying.md#tls-without-a-proxy)) |
+| `.tls = true` | TLS 1.3 on a listener, for a server with nothing in front of it ([guide](./docs/guide/deploying.md#tls-without-a-proxy)). With `.tls_own = true` beside it, nilo uses a tls.zig you bring instead of fetching its own |
 | `.http2 = true` | HTTP/2 beside HTTP/1.1 on every listener, every route on either, and gRPC on top. With `.tls` too, a browser is offered it by ALPN ([guide](./docs/guide/deploying.md#http2-for-a-browser)) |
 | `.libdeflate = true` | libdeflate's compressor in place of the standard library's, for gzip ([guide](./docs/guide/responses.md#compression)) |
 
@@ -366,7 +366,7 @@ Nilo was my cat. She was quick, the kind of quick you notice from across a room,
 
 ## 🤝 Contributing
 
-Questions, issues and "why on earth is it like this?" are all welcome. [CONTRIBUTING.md](./CONTRIBUTING.md) covers where to start, and [the roadmap](./docs/roadmap.md) says where it is going and [the todo list](./docs/todo.md) has what's open. Mail is the most useful module nobody has written yet.
+Questions, issues and "why on earth is it like this?" are all welcome. [CONTRIBUTING.md](./CONTRIBUTING.md) covers where to start, and [the roadmap](./docs/roadmap.md) says where it is going and [the todo list](./docs/todo.md) has what's open.
 
 nilo borrows from FastAPI, Elysia, Elm and Drizzle; [ADR 014](./docs/adr/014-what-nilo-borrows-and-from-whom.md) says what came from where.
 

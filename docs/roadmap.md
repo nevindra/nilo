@@ -25,7 +25,7 @@ Independent of the order: each touches files no stage of the direction above doe
 - [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · The public surface has not been read back against the reference, except for `nilo_fetch`'s.
 - [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · A limit is named, and defaulted, differently in each module, and 1.0 freezes the names.
 - [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · Two public types are called `Bound`.
-- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · Five pages say what the code no longer does.
+- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · Every module · Four pages say what the code no longer does.
 - [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
 - [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A module header's code example is not compiled, so one can rot.
 - [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A rule a build step holds against the patterns the audit kept finding.

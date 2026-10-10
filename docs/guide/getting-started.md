@@ -90,7 +90,7 @@ error: fatal linker error: unhandled relocation type R_X86_64_PC64 at offset 0x1
     note: in /usr/lib/…/crt1.o:.sframe
 ```
 
-This is Zig 0.16's self-hosted linker meeting a section the system's `crt1.o` did not have before, and has nothing to do with nilo. There are two fixes, both verified:
+This is Zig's self-hosted linker meeting a section the system's `crt1.o` did not have before, and has nothing to do with nilo. There are two fixes, both verified:
 
 - **`-Dtarget=x86_64-linux-gnu`** on the `zig build` line. Zig then links against the glibc it ships instead of the host's, the self-hosted linker is still used, and a Debug build is as fast as before. The binary still runs on the host.
 - **`.use_llvm = true`** on the `addExecutable`, or a `-Dllvm` option that sets it, the way nilo's own `zig build examples -Dllvm` does. LLVM's linker handles the section, but a Debug build is slower.

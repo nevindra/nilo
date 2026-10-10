@@ -34,7 +34,7 @@ nilo_requests_in_flight 3
 
 **Requests are counted per route, not per path.** `/users/1` and `/users/2` both count as `/users/:id`, because the counter belongs to the route's place in the route table, not to the path that arrived. So a crawler cannot create a million series, and counting a request costs no allocation ([ADR 079](../adr/079-the-route-table-is-the-registry.md)).
 
-**The status class is counted per route, and the exact code per service.** Whether *this* route is failing is a question about the route, and the class (4xx, 5xx) answers it. Which codes the server hands out overall (how many 401s, how many 429s) is a question about the service, and `nilo_responses_total` answers that. Exact codes per route as well would cost four kilobytes a route instead of the 128 bytes a route costs now, for a table that is nearly all zeroes.
+**The status class is counted per route, and the exact code per service.** Whether *this* route is failing is a question about the route, and the class (4xx, 5xx) answers it. Which codes the server hands out overall (how many 401s, how many 429s) is a question about the service, and `nilo_responses_total` answers that. Exact codes per route as well would cost four kilobytes a route instead of the 160 bytes a route costs now, for a table that is nearly all zeroes.
 
 ## Requests that matched no route
 

@@ -214,7 +214,7 @@ The line is drawn where the compiler stops being able to check. `CHECK (age > 18
 
 ### SQLite
 
-**The same `Db`, over a file instead of a server.** Everything after this section (Rows, queries, batches, upserts, conditions, streaming, transactions) is the same code and the same types. What changes is the five things SQLite refuses, listed at the end.
+**The same `Db`, over a file instead of a server.** Everything after this section (Rows, queries, batches, upserts, conditions, streaming, transactions) is the same code and the same types. What changes is the six things SQLite refuses, listed at the end.
 
 ```zig
 const Db = sql.Sqlite(.{ .threading = .{ .hop = nilo } });
@@ -945,7 +945,7 @@ const SharedReplays = sql.Replays(Db, .{ .name = "orders", .ttl_s = 86_400, .max
 | `sweep(scope) !usize` | delete this store's rows that have run out, and say how many. Nothing calls it: run it from a [scheduled job](../guide/background.md) |
 | `takes_scope` | `true`, which tells `Idempotent` to call every method with the Scope first and to treat a failure as a database's. A `cache.Space` does not have it |
 
-`slot` longer than 1,024 bytes or a value longer than `max_bytes` is `error.TooLarge`. Every other error is the `Db`'s, and `Idempotent` turns it into a 503 at the claim (the handler does not run) and a logged `warn` after the handler ran. A `Cached` over this type is a compile error: a page is read on every GET, which is a cache's job. Three more are refused while compiling: a type that is not a `Db`, an empty `name`, and a `max_bytes` of 0. The guide is [Once across instances](../guide/idempotency.md#once-across-instances-sqlreplays); the cost is in [`bench/result/sql.md`](https://github.com/nevindra/nilo/blob/main/bench/result/sql.md) §27.
+`slot` longer than 1,024 bytes or a value longer than `max_bytes` is `error.TooLarge`. Every other error is the `Db`'s, and `Idempotent` turns it into a 503 at the claim (the handler does not run) and a logged `warn` after the handler ran. A `Cached` over this type is a compile error: a page is read on every GET, which is a cache's job. Four more are refused while compiling: a type that is not a `Db`, an empty `name`, an empty `table`, and a `max_bytes` of 0. The guide is [Once across instances](../guide/idempotency.md#once-across-instances-sqlreplays); the cost is in [`bench/result/sql.md`](https://github.com/nevindra/nilo/blob/main/bench/result/sql.md) §27.
 
 ### Migrations
 

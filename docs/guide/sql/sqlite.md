@@ -45,7 +45,7 @@ Everything else nilo talks to is on a socket. When a request waits for Postgres,
 
 So writes queue. They wait on a lock that *parks the fiber* instead of holding its thread (the one thing the event loop is still useful for here), so a write that has to wait simply waits, rather than returning a `SQLITE_BUSY` you have to handle. If a write waits for five seconds you get `error.Locked`. `busy_timeout_ms` sets that number, and it can only be reached when **another process** uses the same file, since inside one process there is exactly one writer and it waits its turn.
 
-The first keyword of a statement decides which connection it goes to: `SELECT` and `PRAGMA` go to a reader, everything else goes to the writer. For every statement this module writes, that is exact. For `db.raw` it is a guess, and the guess is made safe by opening readers read-only: a `raw` statement that writes but looks like a read fails loudly instead of reading a stale snapshot.
+The first keyword of a statement decides which connection it goes to: `SELECT`, `PRAGMA` and `EXPLAIN` go to a reader, everything else goes to the writer. For every statement this module writes, that is exact. For `db.raw` it is a guess, and the guess is made safe by opening readers read-only: a `raw` statement that writes but looks like a read fails loudly instead of reading a stale snapshot.
 
 ## Durability after a power cut
 
