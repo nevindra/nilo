@@ -71,6 +71,14 @@ pub const Options = struct {
     /// would change what those tests assert without changing a line of them.
     /// A test that wants the jar says so, and says it once.
     cookies: bool = false,
+
+    /// The size of a request head the client's reader holds, which is the
+    /// server's `Options.read_buffer`. A head that does not fit is answered
+    /// 431 here as it is there; without it the reader was the whole request
+    /// and a test sending a head of any size passed where a server refused.
+    /// A test of a route that takes a bigger head sets the same number it
+    /// gives `listen()`.
+    read_buffer: usize = (bulkhead.Options{}).read_buffer,
 };
 
 /// Whether the answer ran past `response_bytes`.
@@ -423,6 +431,8 @@ pub const Client = struct {
     /// The cookies the answers have set, when `Options.cookies` is on.
     jar: std.ArrayList(Header) = .empty,
     keep_cookies: bool = false,
+    /// The reader's buffer, the size of a head it will take (`Options.read_buffer`).
+    read_buffer: usize,
     /// How many requests this client has answered. Each `Answer` carries the
     /// number it was, and refuses its body once the two differ (ADR 171).
     made: u32 = 0,
@@ -448,6 +458,7 @@ pub const Client = struct {
                 break :peer p;
             },
             .keep_cookies = options.cookies,
+            .read_buffer = options.read_buffer,
         };
     }
 
@@ -631,13 +642,19 @@ pub const Client = struct {
         // answers with a bus error and Linux happened not to.
         const writable = try self.gpa.dupe(u8, raw_request);
         defer self.gpa.free(writable);
-        var in = std.Io.Reader.fixed(writable);
+        // Read through a buffer of the server's size, as a socket is, so a head
+        // that does not fit gets the 431 a server gives. `Reader.fixed` over
+        // the request was a buffer as long as the request itself.
+        var underlying = std.Io.Reader.fixed(writable);
+        const read_buf = try self.gpa.alloc(u8, self.read_buffer);
+        defer self.gpa.free(read_buf);
+        var limited = std.Io.Reader.Limited.init(&underlying, .unlimited, read_buf);
         var out = std.Io.Writer.fixed(self.buffer);
         const keep_alive = app.handleRequest(
             self.arena.allocator(),
             &self.lifetime,
             &self.in_flight,
-            &in,
+            &limited.interface,
             &out,
             // There is no socket here, so there is nothing to time out.
             .off,
@@ -666,12 +683,16 @@ pub const Client = struct {
     /// A copy, because `answer` points into the response buffer and the next
     /// request writes over it.
     ///
-    /// **Attributes are read for one thing only: whether the cookie is being
-    /// removed.** `Max-Age` of zero or less is what `Cookie.remove` sends
-    /// (ADR 029), and it is the whole of what a test can produce. `Path`,
-    /// `Domain` and `Secure` are ignored, which a browser would not do — this
-    /// is a jar for driving one App on one host, and a jar that guessed at
-    /// scope would be a second implementation of a browser to be wrong in.
+    /// **Attributes are read for two things: whether the cookie is being
+    /// removed, and whether a name prefix is kept.** `Max-Age` of zero or
+    /// less removes it (ADR 029), and so does an `Expires` already past when
+    /// there is no `Max-Age`, which wins as it does in a browser (RFC 6265
+    /// §5.3). A `__Secure-` cookie needs `Secure`, and a `__Host-` one
+    /// `Secure`, `Path=/` and no `Domain`; a `Set-Cookie` that breaks them is
+    /// dropped whole, removals included. `Path`, `Domain` and `Secure` are
+    /// otherwise ignored, which a browser would not do: this is a jar for
+    /// driving one App on one host, and a jar that guessed at scope would be a
+    /// second implementation of a browser to be wrong in.
     fn takeCookies(self: *Client, answer: Answer) !void {
         var n: usize = 0;
         while (answer.headerAt("Set-Cookie", n)) |line| : (n += 1) {
@@ -680,6 +701,7 @@ pub const Client = struct {
             const rest = line[equals + 1 ..];
             const semi = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
 
+            if (!prefixesHold(name, rest[semi..])) continue;
             if (removes(rest[semi..])) {
                 self.forget(name);
                 continue;
@@ -830,17 +852,80 @@ pub const Wired = struct {
     }
 };
 
-/// Whether a `Set-Cookie`'s attributes say the cookie is going away.
+/// Whether a `Set-Cookie`'s attributes say the cookie is going away: a
+/// `Max-Age` of zero or less, or, with no readable `Max-Age`, an `Expires`
+/// that is not in the future.
 fn removes(attributes: []const u8) bool {
+    var expires: ?i64 = null;
     var parts = std.mem.splitScalar(u8, attributes, ';');
     while (parts.next()) |part| {
         const one = std.mem.trim(u8, part, " \t");
         const equals = std.mem.indexOfScalar(u8, one, '=') orelse continue;
-        if (!std.ascii.eqlIgnoreCase(one[0..equals], "Max-Age")) continue;
-        const seconds = std.fmt.parseInt(i64, one[equals + 1 ..], 10) catch continue;
-        return seconds <= 0;
+        const attribute = one[0..equals];
+        if (std.ascii.eqlIgnoreCase(attribute, "Max-Age")) {
+            const seconds = std.fmt.parseInt(i64, one[equals + 1 ..], 10) catch continue;
+            return seconds <= 0;
+        }
+        if (std.ascii.eqlIgnoreCase(attribute, "Expires")) {
+            expires = httpDate(one[equals + 1 ..]) orelse expires;
+        }
     }
-    return false;
+    const at = expires orelse return false;
+    return at <= @divFloor(str_mod.nowMicros(), std.time.us_per_s);
+}
+
+/// Unix seconds of an IMF-fixdate (`Thu, 01 Jan 1970 00:00:00 GMT`), or null
+/// when it is anything else. The one form nilo writes (`date.zig`); a jar
+/// that read the older ones would be guessing.
+fn httpDate(text: []const u8) ?i64 {
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const t = std.mem.trim(u8, text, " \t");
+    if (t.len != 29 or !std.mem.endsWith(u8, t, " GMT")) return null;
+    if (t[3] != ',' or t[4] != ' ' or t[7] != ' ' or t[11] != ' ' or t[16] != ' ' or t[19] != ':' or t[22] != ':') return null;
+    const day = std.fmt.parseInt(u8, t[5..7], 10) catch return null;
+    const year = std.fmt.parseInt(u16, t[12..16], 10) catch return null;
+    const hour = std.fmt.parseInt(u8, t[17..19], 10) catch return null;
+    const minute = std.fmt.parseInt(u8, t[20..22], 10) catch return null;
+    const second = std.fmt.parseInt(u8, t[23..25], 10) catch return null;
+    const month: u4 = for (months, 0..) |m, i| {
+        if (std.mem.eql(u8, m, t[8..11])) break @intCast(i + 1);
+    } else return null;
+    if (year < 1970 or day < 1 or day > 31 or hour > 23 or minute > 59 or second > 60) return null;
+
+    var days: i64 = 0;
+    var y: u16 = 1970;
+    while (y < year) : (y += 1) days += std.time.epoch.getDaysInYear(y);
+    var m: u4 = 1;
+    while (m < month) : (m += 1) {
+        days += std.time.epoch.getDaysInMonth(year, @enumFromInt(m));
+    }
+    days += day - 1;
+    return days * std.time.s_per_day + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
+}
+
+/// The rules a browser applies to a cookie's name (RFC 6265bis §4.1.3):
+/// `__Secure-` needs `Secure`, and `__Host-` needs `Secure`, `Path=/` and no
+/// `Domain`. The prefix is read without regard to case, as browsers do.
+fn prefixesHold(name: []const u8, attributes: []const u8) bool {
+    const host = std.ascii.startsWithIgnoreCase(name, "__Host-");
+    const secure_prefix = std.ascii.startsWithIgnoreCase(name, "__Secure-");
+    if (!host and !secure_prefix) return true;
+
+    var secure = false;
+    var path_is_root = false;
+    var domain = false;
+    var parts = std.mem.splitScalar(u8, attributes, ';');
+    while (parts.next()) |part| {
+        const one = std.mem.trim(u8, part, " \t");
+        const equals = std.mem.indexOfScalar(u8, one, '=');
+        const attribute = if (equals) |e| one[0..e] else one;
+        const value = if (equals) |e| one[e + 1 ..] else "";
+        if (std.ascii.eqlIgnoreCase(attribute, "Secure")) secure = true;
+        if (std.ascii.eqlIgnoreCase(attribute, "Path")) path_is_root = std.mem.eql(u8, value, "/");
+        if (std.ascii.eqlIgnoreCase(attribute, "Domain")) domain = true;
+    }
+    if (!secure) return false;
+    return !host or (path_is_root and !domain);
 }
 
 fn parse(raw: []const u8, keep_alive: bool) !Answer {
@@ -1787,6 +1872,104 @@ test "a client with a jar signs in once and stays signed in" {
     _ = try client.post(&app, "/sign-out", "");
     try testing.expect(client.cookie("session") == null);
     try testing.expectEqualStrings("nobody", (try client.get(&app, "/me")).body);
+}
+
+/// A handler that answers with one `Set-Cookie` line written as given, which
+/// the typed `setCookie` would not let a test write wrong.
+fn writes(comptime line: []const u8) *const fn (*@import("ctx.zig").Ctx) anyerror!void {
+    return struct {
+        fn handle(c: *@import("ctx.zig").Ctx) anyerror!void {
+            try c.setHeader("Set-Cookie", line);
+            try c.sendText(200, "ok");
+        }
+    }.handle;
+}
+
+test "a cookie deleted by Expires alone leaves the jar, and one that expires later stays" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/set", writes("session=abc; Path=/"));
+    try app.get("/past", writes("session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT"));
+    try app.get("/future", writes("session=later; Path=/; Expires=Fri, 01 Jan 2100 00:00:00 GMT"));
+    try app.get("/both", writes("session=kept; Path=/; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT"));
+    try app.get("/me", whoami);
+
+    var client = try Client.init(testing.allocator, .{ .cookies = true });
+    defer client.deinit();
+
+    _ = try client.get(&app, "/set");
+    try testing.expectEqualStrings("abc", client.cookie("session").?);
+    _ = try client.get(&app, "/past");
+    try testing.expect(client.cookie("session") == null);
+    try testing.expectEqualStrings("nobody", (try client.get(&app, "/me")).body);
+
+    _ = try client.get(&app, "/future");
+    try testing.expectEqualStrings("later", client.cookie("session").?);
+
+    // Max-Age wins over Expires when both are there (RFC 6265 section 5.3).
+    _ = try client.get(&app, "/both");
+    try testing.expectEqualStrings("kept", client.cookie("session").?);
+}
+
+test "a jar drops a __Secure- or __Host- cookie that breaks the rules a browser holds it to" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/secure-without", writes("__Secure-a=1; Path=/"));
+    try app.get("/secure-with", writes("__Secure-a=1; Path=/; Secure"));
+    try app.get("/host-without-secure", writes("__Host-b=1; Path=/"));
+    try app.get("/host-with-domain", writes("__Host-b=1; Path=/; Secure; Domain=example.dev"));
+    try app.get("/host-off-root", writes("__Host-b=1; Path=/admin; Secure"));
+    try app.get("/host-whole", writes("__Host-b=1; Path=/; Secure; HttpOnly"));
+    try app.get("/host-gone", writes("__Host-b=; Path=/; Secure; Max-Age=0"));
+    try app.get("/host-gone-insecurely", writes("__Host-b=; Path=/; Max-Age=0"));
+
+    var client = try Client.init(testing.allocator, .{ .cookies = true });
+    defer client.deinit();
+
+    _ = try client.get(&app, "/secure-without");
+    try testing.expect(client.cookie("__Secure-a") == null);
+    _ = try client.get(&app, "/secure-with");
+    try testing.expectEqualStrings("1", client.cookie("__Secure-a").?);
+
+    _ = try client.get(&app, "/host-without-secure");
+    _ = try client.get(&app, "/host-with-domain");
+    _ = try client.get(&app, "/host-off-root");
+    try testing.expect(client.cookie("__Host-b") == null);
+    _ = try client.get(&app, "/host-whole");
+    try testing.expectEqualStrings("1", client.cookie("__Host-b").?);
+
+    // A removal that breaks the rules is dropped like any other write, so the
+    // cookie stays until one that keeps them removes it.
+    _ = try client.get(&app, "/host-gone-insecurely");
+    try testing.expectEqualStrings("1", client.cookie("__Host-b").?);
+    _ = try client.get(&app, "/host-gone");
+    try testing.expect(client.cookie("__Host-b") == null);
+}
+
+fn countsCookies(c: *@import("ctx.zig").Ctx) anyerror!void {
+    try c.sendText(200, "reached");
+}
+
+test "the client's reader holds the server's read buffer, so a head that does not fit is a 431" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/", countsCookies);
+
+    var client = try Client.init(testing.allocator, .{ .read_buffer = 1024 });
+    defer client.deinit();
+
+    try testing.expectEqual(@as(u16, 200), (try client.get(&app, "/")).status);
+
+    const big = try testing.allocator.alloc(u8, 2048);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    const refused = try client.sendRequest(&app, .{ .headers = &.{.{ .name = "Cookie", .value = big }} });
+    try testing.expectEqual(@as(u16, 431), refused.status);
+
+    // The same head fits the default, which is the server's.
+    var roomy = try Client.init(testing.allocator, .{});
+    defer roomy.deinit();
+    try testing.expectEqual(@as(u16, 200), (try roomy.sendRequest(&app, .{ .headers = &.{.{ .name = "Cookie", .value = big }} })).status);
 }
 
 test "a client without a jar sends no cookie, which is what shipped" {

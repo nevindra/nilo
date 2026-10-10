@@ -12,7 +12,8 @@
 |---|---|
 | `testing.Client.init(gpa, .{ .response_bytes = 64 * 1024 })` | an answer larger than this is `error.ResponseTooLarge` |
 | `.{ .client_address = "203.0.113.7" }` | what `c.peer()` and `c.clientIp()` return |
-| `.{ .cookies = true }` | keeps the cookies responses set and sends them back, like a browser's cookie jar. Off by default |
+| `.{ .cookies = true }` | keeps the cookies responses set and sends them back, like a browser's cookie jar: a cookie removed by `Max-Age` or by a past `Expires` leaves it, and one named `__Secure-` or `__Host-` that breaks the rules a browser holds it to is dropped. Off by default |
+| `.{ .read_buffer = 16 * 1024 }` | the largest request head the client's reader takes, the server's `read_buffer`: a head that does not fit is the 431 a server gives. Set the number given to `listen()` |
 | `client.get(&app, path)` / `post(&app, path, body)` / `put(&app, path, body)` / `patch(&app, path, body)` / `delete(&app, path)` | each sends its method, with `Content-Length` set when there is a body. `delete` carries none; `request` sends one under any method |
 | `client.postWith(&app, path, content_type, body)` | a POST that states its content type, which a form needs |
 | `client.request(&app, method, path, body)` | |

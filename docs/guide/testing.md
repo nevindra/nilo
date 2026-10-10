@@ -121,6 +121,8 @@ const answer = try client.get(&app, "/me");
 
 It is off by default so that suites written before it existed keep testing what they always tested ([ADR 086](../adr/086-the-test-client-can-do-what-a-client-does.md)). `client.cookie(nilo.session.host_cookie_name)` returns what the jar holds for a `Session(T)` (`__Host-session` with the default options), for a test that wants to look at it rather than only send it.
 
+The jar follows the rules of a browser that a test can be wrong about: a cookie set with a past `Expires` (and no `Max-Age`) is a removal, and a `__Secure-` cookie without `Secure`, or a `__Host-` cookie without `Secure`, with a `Domain`, or off `Path=/`, is dropped as a browser drops it. `Path`, `Domain` and the other attributes are not otherwise applied.
+
 ### Reading the response
 
 | | |
@@ -166,7 +168,7 @@ try testing.expectEqual(@as(u16, 201), answer.status);
 
 `Client` is still there for a test that needs two clients against one App: two addresses, two cookie jars.
 
-Use `Client.init(gpa, .{ .response_bytes = 1 << 20 })` for a stream that produces a lot. **A response that does not fit is `error.ResponseTooLarge`** from the call that sent the request, where it used to be cut short with its status intact, so a 200 with half a body passed every assertion on the status.
+Use `Client.init(gpa, .{ .response_bytes = 1 << 20 })` for a stream that produces a lot. The client reads a request through a buffer of the server's `read_buffer` size (16 KiB by default, `.read_buffer` to change it), so a test that sends a head that does not fit gets the 431 a server gives. **A response that does not fit is `error.ResponseTooLarge`** from the call that sent the request, where it used to be cut short with its status intact, so a 200 with half a body passed every assertion on the status.
 
 **What `listen()` would have set, a test sets on the App.** A Client never calls `listen()`, so the App has the default limits; `wired.app.limits.max_body = 4096` is what `listen(.{ .max_body = 4096 })` copies there, and `max_in_flight` and `request_deadline_ms` sit beside it. `app.session_key` is the same kind of field ([Sessions](./sessions.md)).
 
