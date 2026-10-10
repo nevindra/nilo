@@ -18,11 +18,14 @@ Independent of the order: each touches files no stage of the direction above doe
 
 ### Defects are caught by a build step before a reader
 
-**The audits keep finding the same kinds of defect, so each kind becomes a rule the build refuses rather than a finding the next audit repeats.** A decision written in several places that stopped agreeing (whether a field may be absent is decided in six), an error swallowed on a connection path, an `unreachable` a request can reach, and a code example in a header that no longer compiles: three of those four are spellable, and the first is a fix that closes its defects for good where a patch to each copy closes them until the next copy. The public surface read back against the reference belongs here too, because a name that should not be public is a break before 1.0 and a promise after it.
+**The audits keep finding the same kinds of defect, so each kind becomes a rule the build refuses rather than a finding the next audit repeats.** A decision written in several places that stopped agreeing (whether a field may be absent is decided in six), an error swallowed on a connection path, an `unreachable` a request can reach, and a code example in a header that no longer compiles: three of those four are spellable, and the first is a fix that closes its defects for good where a patch to each copy closes them until the next copy. The public surface read back against the reference belongs here too, because a name that should not be public is a break before 1.0 and a promise after it, and so do the names that disagree across modules: two public types called `Bound`, and a `timeout_ms` or an `idle_ms` that bounds a different wait, with a different default, in each module that has one.
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · The public surface has not been read back against the reference, except for `nilo_fetch`'s.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · A limit is named, and defaulted, differently in each module, and 1.0 freezes the names.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · Two public types are called `Bound`.
+- [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · Every module · Five pages say what the code no longer does.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A module header's code example is not compiled, so one can rot.
 - [P2](./todo.md#p2-a-real-cost-and-a-smaller-one) · `nilo_http` · A rule a build step holds against the patterns the audit kept finding.

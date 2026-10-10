@@ -55,6 +55,24 @@ Nothing is open at this tier.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
+**A limit is named, and defaulted, differently in each module, and 1.0 freezes the names.** `idle_ms` is thirty seconds on a server WebSocket (`http/websocket.zig:130`) and off on a client one (`fetch/websocket.zig:152`). `timeout_ms` is the whole call in `nilo_fetch` (`fetch/fetch.zig:203`, thirty seconds) and the wait for a pool connection in `nilo_sql` (`sql/db.zig:697`, ten). `max_message` caps a WebSocket message at 16 KiB on the server (`http/websocket.zig:159`) and 1 MiB on the client (`fetch/websocket.zig:88`). `listen()` spells the same idea `header_timeout_ms`, `idle_timeout_ms` and `request_deadline_ms`, and there `0` is "no deadline" (`http/bulkhead.zig:591`). Each default has its reason in its own ADR; what no page has is the list, so somebody who has learnt one module's `idle_ms` has learnt nothing about the next one's.
+
+**Needs:** one table of every time and size limit across the modules, saying what it bounds, its default and what `0` means, and a decision on each row: renamed to agree, or the difference written on both pages. Before 1.0, because after it a rename is a break.
+
+**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
+
+**Two public types are called `Bound`.** `core.Limits.Bound` (`core/limits.zig:169`) is the time a Service's wait has left ([ADR 105](./adr/105-a-route-can-say-how-long-it-has.md)), and `nilo.Bound(W)` (`http/bound.zig:209`, re-exported from `http/http.zig`) is a request bound to a struct with its failures kept ([ADR 034](./adr/034-a-binding-hands-its-failures-to-the-handler.md)). A Service author meets both in one afternoon, and the reference lists both under one word.
+
+**Needs:** a decision on which is renamed, and a `CHANGELOG.md` line for it.
+
+**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
+
+**Five pages say what the code no longer does.** `docs/design/id-clock-entropy.md` rule 6 says a `Run` gets no entropy call of its own, and its rule 8 and `core/scope.zig:177` give it two. `docs/design/deadlines.md` rule 5 says a WebSocket has no read deadline and that a ping is not part of it, where `idle_ms` pings after thirty seconds and closes ([ADR 021](./adr/021-a-websocket-is-a-handler-that-does-not-return.md)). `docs/comparison.md` gives 8,767 bytes and two pages of stack for an idle connection (lines 140 to 171), from before [ADR 062](./adr/062-where-a-connection-waits-is-what-it-costs.md) brought it to 4,669 and one page. `CLAUDE.md`'s layout table says path params match by position, which [ADR 002](./adr/002-typed-handlers-are-a-thin-layer-over-ctx.md) narrowed to a route with one param. And the README's last line calls mail "the most useful module nobody has written yet", where the roadmap's [toolkit direction](./roadmap.md#the-toolkit-grows-by-the-jobs-people-have) uses mail as the example of a module that fails the bar.
+
+**Needs:** each sentence made true, and `comparison.md`'s table run again rather than edited, because its other columns were measured on the same day.
+
+**Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
+
 ### `nilo_config`
 
 **Settings that are not scalars: a list, and a group switched on by presence.** A field is text, a number, a `bool`, an enum or any of those in `?`, and the port of a service with real deployment rules found what that leaves out: a comma-separated list (`PROMOTED_ATTRIBUTES=a,b`); a group of settings that turns on when one variable is present (`DURABLE_ENDPOINT` set means `DURABLE_BUCKET` and `DURABLE_REGION` are now required, inheriting what the file set); and two spellings of `bool` in one program. The first two would be a list type and a "set by presence" section in `Read(T)`. The third is not proposed: `bool` is `true` or `false` and nothing else, and the module keeps its four `Reason`s ([the reference](./reference/config.md#failure)). The program reads its rules by hand today, about sixty lines tested case by case, and says what it gains from the module only for the scalars.
@@ -107,7 +125,7 @@ Nothing is open at this tier.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
-**Nothing reports how the pool is doing.** `app.metrics` counts requests, statuses and durations ([ADR 079](./adr/079-the-route-table-is-the-registry.md)); a `Db` counts nothing. Connections in use, how long a caller waited for one, statements run, and how many the pool threw away are the questions an operator asks first when a service slows down, and the last of them is already reachable — `postgres.dirtyConnections()` parses it out of pg.zig's own metrics text and is marked test-facing because nothing else reveals it.
+**How the pool is doing does not reach `app.metrics`.** `db.poolStats()` answers it in the program ([ADR 279](./adr/279-a-pool-says-how-full-it-is.md), `sql/db.zig:1574`), and `/metrics` counts requests, statuses and durations only ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), so an operator scraping the service sees nothing of the pool unless the program copies the numbers out by hand.
 
 **Needs:** a shape that does not become a second metrics registry. `app.metrics` is the shape and a `Db` is a Service, which knows nothing about an App — so where the numbers meet is the question, not how to count them.
 
@@ -151,7 +169,7 @@ Nothing is open at this tier.
 
 **Direction:** [A migration history a project can keep for years](./roadmap.md#a-migration-history-a-project-can-keep-for-years)
 
-**Migrations write more statements, and take more locks, than the change needs.** Two column changes on one table are two `ALTER TABLE`s (`migrate.zig:1084`, `ddl.zig:494`), so `int4` to `int8` on two columns rewrites the table and rebuilds its indexes twice, and a `SET NOT NULL` beside them scans it again, all under `ACCESS EXCLUSIVE`; Postgres takes them as one statement with commas. `createMissing` sends its DDL on every boot (`migrate.zig:2057`): `CREATE INDEX IF NOT EXISTS` takes its table's SHARE lock before it finds the index there, and `CREATE OR REPLACE` takes a trigger's or view's lock, in one transaction with no `lock_timeout`, so each boot queues behind running writes and holds new ones behind it.
+**Migrations write more statements, and take more locks, than the change needs.** Two column changes on one table are two `ALTER TABLE`s (`migrate.zig:1084`, `ddl.zig:494`), so `int4` to `int8` on two columns rewrites the table and rebuilds its indexes twice, and a `SET NOT NULL` beside them scans it again, all under `ACCESS EXCLUSIVE`; Postgres takes them as one statement with commas. `createMissing` sends its DDL on every boot (`migrate.zig:2551`): `CREATE INDEX IF NOT EXISTS` takes its table's SHARE lock before it finds the index there, and `CREATE OR REPLACE` takes a trigger's or view's lock. Each acquisition is now bounded by `default_lock_timeout_ms`, five seconds (`migrate.zig:2557`), so a boot behind running writes fails rather than queueing for ever; what is left is that every boot takes those locks for DDL that changes nothing.
 
 **Needs:** a table's column steps joined into one statement where Postgres allows it, and whether `createMissing` reads the catalog first or is bounded like a version.
 
@@ -362,6 +380,18 @@ Nothing is open at this tier.
 **What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from `docs/guide/getting-started.md` with a database, a login middleware and a container, and their mistakes are written down, each either refused in a sentence or filed.
 
 **Direction:** [A developer from Go or Node meets no silent trap in the first week](./roadmap.md#a-developer-from-go-or-node-meets-no-silent-trap-in-the-first-week)
+
+**A session cookie that does not open reads as no session, and nothing is logged, so a wrong `session_secret` after a deploy signs everybody out with no sign of why.** `session.open` returns null for a cookie that fails to decode, unseal or parse (`http/session.zig:444`, `:479` to `:508`), the same null an anonymous visitor gives, and the guide's answer to a leaked secret is to rotate it ([ADR 033](./adr/033-a-session-is-sealed-into-the-cookie.md)). An operator who rotated it wrong finds out from support tickets.
+
+**Needs:** the two told apart where an operator looks: a count of cookies that failed to open on `/metrics`, or one `warn` line an interval while it keeps happening.
+
+**`spawn` could refuse a `Str` argument and does not.** [`risks.md`](./risks.md) says spawned work capturing a `Str` cannot be caught, but `App.spawn` takes its arguments as `std.meta.ArgsTuple(@TypeOf(func))` (`http/app.zig:777`), a type known while compiling, so a `Str`, a `Ctx` or a `*Ctx` in it, or in a struct in it, can be refused the way a handler's argument list is. Only a capture through a container-level variable stays the staleness trap's, which in ReleaseSafe watches nothing.
+
+**Needs:** the refusal, a file and a row in the framework's refusal table, and the risk narrowed to the capture that is still unrefusable.
+
+**`.tls` compiles in a build without `-Dtls`, and is refused when `listen()` runs.** `Options.tls` is `?Tls` in every build (`http/bulkhead.zig:297`, `:433`), and [ADR 212](./adr/212-tls-is-an-option-a-build-asks-for.md) chose a one-line refusal at `listen()`, before the port is taken. That keeps the port from serving plain HTTP, and still turns a mistake the build could name into one a deploy finds, which principle 2 asks the other way round.
+
+**Needs:** a decision on making the field's type depend on `nilo_build.tls`, so `.tls = …` without the flag is a compile error naming it, with ADR 212 edited whichever way it goes.
 
 ---
 
@@ -580,6 +610,10 @@ Nothing is open at this tier.
 **A project started from `template/` is copied out of a release tarball, where Go and Node start from a template repository.** `docs/guide/getting-started.md` fetches `template/` with one `curl | tar` line pinned to a release, and every copy shares one `.fingerprint` until it is renamed (ADR 263).
 
 **Needs:** a decision on a separate `nilo-template` repository generated from `template/` at each release.
+
+**Whether a misspelt `nilo_*` declaration is refused has not been checked, and nothing found by reading refuses one.** The markers are looked up by name (`nilo_table`, `nilo_json`, `nilo_parse`, `nilo_service` and the rest), and the only place found that reads a declaration by its `nilo_` prefix is `http/metrics.zig:467`, which refuses a metric name. A type declaring `nilo_jsn` would then behave as one with no marker, and compile.
+
+**What would settle it:** a refusal file declaring a misspelt marker on a Row and on a body type. If it compiles, a check listing the known names that answers with the nearest one, and this entry moves to P2.
 
 ## How this file is written
 
