@@ -39,10 +39,6 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
-**A directory that follows the disk crashes the suite in `Allocator.free` now and then, after the teardown fix in `a172a04`.** The test "a directory that follows the disk answers a file replaced, added or removed, and one that does not follow keeps what it read" (`http/static.zig`) aborted with a general protection fault in `Allocator.free` in three of five `zig build test` runs on 2026-10-09, each while another build loaded the machine, and passed four runs of `test-http` in a row on an idle one. The test asks for files on the calling thread while the follower's thread publishes a new tree and frees the old one ([ADR 277](./adr/277-a-static-directory-can-follow-the-disk-and-a-response-finishes-on-the-tree-it-began-on.md), which promises a response finishes on the tree it began on), so the likeliest reading is a tree freed while a request still reads it, which a server under load would meet too; a free in a teardown the fix did not cover is the other reading. Ranked here and not P0 until it is known which.
-
-**What would settle it:** the test run in a loop under load (`stress` beside `zig build test-http`) until it fails with a stack, and the stack read against how a follower retires an old tree.
-
 ---
 
 ## P2: a real cost, and a smaller one

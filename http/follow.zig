@@ -38,6 +38,13 @@
 //! because a request that lost the race adds one to a header that is already
 //! retired. Headers are therefore kept and reused, never given back, and a
 //! header's count is never reset, only added to and taken from.
+//!
+//! **The chains of a generation have one owner at a time.** `attach` replaces
+//! the live generation's chains and the hooks they are made with, which the
+//! test client does before every request while the thread is running, and the
+//! thread makes a generation's chains, swaps it in and frees retired ones.
+//! `chain_guard` is held across each of those, so a chain is freed once and
+//! never into a generation that has been given back. A request never takes it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -127,6 +134,12 @@ pub const Follower = struct {
     failed: u64 = 0,
     /// Whether the last walk could not be made, so it is said once.
     unreadable: bool = false,
+    /// Held by whoever changes a generation's chains or the hooks they are
+    /// made with: `attach` (the test client calls it before every request,
+    /// with the thread running), the thread making a generation and swapping
+    /// it in, and the thread freeing one. Never held across a wait, and never
+    /// by a request.
+    chain_guard: std.atomic.Value(bool) = .init(false),
 
     /// Take over `first`, the directory as `load` read it at startup.
     pub fn create(
@@ -180,6 +193,8 @@ pub const Follower = struct {
     /// `listen()` where it resolves every other chain, and again if it runs
     /// again.
     pub fn attach(self: *Follower, hooks: Hooks) !void {
+        self.lockChains();
+        defer self.unlockChains();
         const gen = self.live.load(.seq_cst).?;
         const chains = try hooks.chains(hooks.host, &gen.set);
         if (self.hooks) |old| old.free(old.host, gen.chains);
@@ -240,6 +255,17 @@ pub const Follower = struct {
 
     // ---- the thread's side ----
 
+    /// A spin, because what it guards is a few allocations and frees and the
+    /// critical sections are never long (`std.Io.Mutex` would need an `Io`
+    /// from a caller that has none).
+    fn lockChains(self: *Follower) void {
+        while (self.chain_guard.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    }
+
+    fn unlockChains(self: *Follower) void {
+        self.chain_guard.store(false, .release);
+    }
+
     fn makeGen(self: *Follower, set: static_mod.Set) !*Gen {
         var chains: Chains = &.{};
         if (self.hooks) |h| chains = try h.chains(h.host, &set);
@@ -276,6 +302,8 @@ pub const Follower = struct {
     /// counts are looked at only after the swap that retired them was made
     /// (see the header).
     fn reap(self: *Follower) void {
+        self.lockChains();
+        defer self.unlockChains();
         var link = &self.retired;
         while (link.*) |gen| {
             if (gen.lease.held() == 0) {
@@ -286,11 +314,17 @@ pub const Follower = struct {
     }
 
     fn publish(self: *Follower, set: static_mod.Set) !void {
-        const gen = try self.makeGen(set);
-        const old = self.live.swap(gen, .seq_cst).?;
-        old.link = self.retired;
-        self.retired = old;
-        _ = self.swaps.fetchAdd(1, .release);
+        {
+            // From the chains being made to the swap, so an `attach` lands on
+            // the generation that is live and not on the one being replaced.
+            self.lockChains();
+            defer self.unlockChains();
+            const gen = try self.makeGen(set);
+            const old = self.live.swap(gen, .seq_cst).?;
+            old.link = self.retired;
+            self.retired = old;
+            _ = self.swaps.fetchAdd(1, .release);
+        }
         self.reap();
     }
 
@@ -813,4 +847,50 @@ test "a directory that goes away leaves the files held being served, and is foll
     const changed = filled(200, 'r');
     try fx.write("site/page.txt", &changed);
     try waitForBytes(fx.follower, gpa, "/page.txt", &changed);
+}
+
+/// Chains for the test below: one empty chain a file, from the allocator the
+/// host points at, so a chain freed twice or freed while it is set is caught
+/// by the testing allocator.
+fn testChains(host: *anyopaque, set: *const static_mod.Set) anyerror!Chains {
+    const gpa: *const std.mem.Allocator = @ptrCast(@alignCast(host));
+    const chains = try gpa.alloc([]const Link, set.files.len);
+    @memset(chains, &.{});
+    return chains;
+}
+
+fn testFree(host: *anyopaque, chains: Chains) void {
+    const gpa: *const std.mem.Allocator = @ptrCast(@alignCast(host));
+    if (chains.len > 0) gpa.free(chains);
+}
+
+fn attachOften(follower: *Follower, hooks: Hooks, times: u32, failed: *std.atomic.Value(bool)) void {
+    var done: u32 = 0;
+    while (done < times) : (done += 1) follower.attach(hooks) catch failed.store(true, .release);
+}
+
+test "attaching chains while the thread swaps generations frees every chain once" {
+    // The test client resolves the chains before every request, and for a
+    // followed directory that is `attach`, which replaces the live generation's
+    // chains while the thread may be publishing and freeing generations. It
+    // crashed the suite in `Allocator.free` now and then, under load.
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa, &.{ .{ "a.css", "a" }, .{ "b.css", "b" } });
+    defer fx.deinit(gpa);
+    // The swaps below are the test's, not the thread's.
+    fx.follower.halt();
+
+    var allocator = gpa;
+    const hooks: Hooks = .{ .host = &allocator, .chains = testChains, .free = testFree };
+    try fx.follower.attach(hooks);
+
+    var failed: std.atomic.Value(bool) = .init(false);
+    const attacher = try std.Thread.spawn(.{}, attachOften, .{ fx.follower, hooks, 3000, &failed });
+    var swapped: u32 = 0;
+    while (swapped < 300) : (swapped += 1) {
+        const set = try static_mod.load(gpa, "/", fx.path, test_options, .returned);
+        try fx.follower.publish(set);
+    }
+    attacher.join();
+    try testing.expect(!failed.load(.acquire));
 }
