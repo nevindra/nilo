@@ -175,6 +175,8 @@ A `<form>` posted to a handler still works. [`examples/forms`](../examples/forms
 
 **Auth contents.** The mechanism is provided, in middleware and resolved values. The policy is yours.
 
+**A sign-in flow with an identity provider: discovery, `state`, PKCE, the code exchange and the `nonce`.** nilo verifies a token and does not fetch one ([ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md)), and the OpenID Connect code flow stays on the program's side of that line. Every part a program needs to write it is here, `nilo_fetch` for the exchange, `jwt.Verifier` for the ID token, `Session(T)` for the state between the two requests and `c.entropy` for its secrets, and the order is the program's, the same way auth contents are. It was on the todo list at P1 and was taken off by the maintainer. What would reopen it is a decision to move ADR 111's line, made there.
+
 **socket.io's wire protocol.** A Room is WebSockets, and a socket.io client speaks a protocol of its own on top of them (its own handshake, packet types, acknowledgements and a long-polling fallback), so it talks only to a socket.io server. Speaking it would make nilo carry another project's protocol and follow its versions. What a socket.io user wants from it, a room, a message to everybody in it, and a reconnect that catches up, is a Room with history ([ADR 229](./adr/229-a-room-that-keeps-history-catches-a-returning-stream-up.md)). What would reopen it is a front end that cannot change its client.
 
 **Benchmark claims without a benchmark machine.** A figure gets published only alongside what it does *not* mean, and alongside the fact that a handler touching a database flattens the whole comparison ([ADR 017](./adr/017-the-trade-budget-has-four-axes.md)).

@@ -43,10 +43,6 @@ Nothing is open at this tier.
 
 **What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
 
-**Signing in with an identity provider is put together by hand, and the steps it needs are the ones that fail silently.** [ADR 111](./adr/111-nilo-verifies-a-token-and-does-not-fetch-one.md) stops at verifying the ID token. Discovery, `state`, PKCE, the code exchange and the `nonce` are the caller's, and leaving any one out still signs the user in. Every part is here (`nilo_fetch`, `jwt.Verifier`, `Session(T)`, `c.entropy`), so what is missing is the order, and ADR 111's own reason for owning verification, that being wrong is silent, holds for the order too. `golang.org/x/oauth2` with go-oidc and passport are the habit.
-
-**What would settle it:** a decision on extending ADR 111 to the code flow, and if so a start route and a callback argument whose state lives in a short-lived sealed cookie.
-
 ---
 
 ## P2: a real cost, or a use case many services have
