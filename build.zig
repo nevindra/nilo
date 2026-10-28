@@ -2192,6 +2192,10 @@ const refusals = [_]Refusal{
         .says = "an allowance needs a window to count inside — `.window_s = 60`.",
     },
     .{
+        .name = "union_without_a_tag_as_an_argument",
+        .says = "argument 1 of the handler for route \"/area\" is a union_without_a_tag_as_an_argument.Shape, a union with no discriminator to read it by.",
+    },
+    .{
         .name = "argument_not_recognised",
         .says = "argument 1 of the handler for route \"/users/:id\" is a [4]u8, which nilo does not recognise.",
     },

@@ -29,6 +29,8 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ### Added
 
+- **A tagged union is a handler's body argument**: `fn create(condition: Condition)`, where `Condition` is a `union(enum)` carrying `nilo_json = .{ .tag = "signal" }` and its `jsonParse`, is read as the body, answers the same named 400s as a union inside a struct, and is described as `oneOf` with a `discriminator`, so a handler no longer takes a `*Ctx` and calls `c.json` to keep the body in the API document. A union with no `.tag` is a compile error naming the type and the line to add. `Form`, `Query` and `Bound` still read a struct only, and say so. Nothing to change; no allocation is added to a route that does not take one ([ADR 016](docs/adr/016-the-api-description-comes-from-the-signatures.md)).
+
 - **`/metrics` publishes the watchdog's catches, the tracer's drops and the process series**: `nilo_watchdog_caught_total`, `nilo_trace_spans_dropped_total` (only with `app.trace`), and on Linux `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_start_time_seconds` and `process_cpu_seconds_total`, read from `/proc/self` when the page is scraped. Nothing on a request changes and nothing to change in a program ([ADR 079](docs/adr/079-the-route-table-is-the-registry.md)).
 
 - **`/metrics` publishes `nilo_session_rejected_total`**: session cookies and Bearer tokens that were sent and failed to open, so a wrong `session_secret` after a deploy shows as a climb rather than as a quiet hour. An expired one and a request that sent none are not counted, and the series appears once the first is seen. Nothing to change ([ADR 033](docs/adr/033-a-session-is-sealed-into-the-cookie.md)).

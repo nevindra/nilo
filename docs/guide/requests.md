@@ -106,7 +106,7 @@ the request body has a field "condition.metric_nme" the "metrics" variant does n
 the request body is missing "condition.signal", which names the variant: one of metrics, logs
 ```
 
-A tagged union that is the whole body is described the same way, with the discriminator and the variants:
+A tagged union can be the whole body, asked for like a struct (`fn create(condition: Condition) !Rule`). It needs a `.tag` in its `nilo_json` and the `jsonParse` line, which is what tells nilo which key names the variant; a union without a tag is a compile error that says so, since nothing in the bytes would say which variant arrived. The API description lists it as `oneOf` with the `discriminator`. A `Form`, a `Query` or a `Bound` is still read into a struct. Its 400s name the discriminator and the variants the same way:
 
 ```
 the request body is missing "kind", which names the variant: one of loose, tight, off

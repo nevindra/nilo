@@ -72,6 +72,8 @@ const Condition = union(enum) {
 
 **The 400 says what was received and what would have been accepted**, in the second parse a refused body already pays (`describeTagged` in `ctx.zig`, no cost on a body that reads): an unknown variant quotes the tag it was given and lists the variants, an unknown key names itself and the variant it was in and lists what that variant takes, and a missing or non-text discriminator lists the variants. A key beside a variant that has no payload is refused the same way, where it used to be dropped in silence. What is wrong inside the variant is named by its path, `condition.query`, as in a struct.
 
+**A tagged union is a handler's body argument**, in the slot the one struct a route takes held before (ADR 002), and a union with no `.tag` is refused while compiling: nothing in the bytes could say which variant arrived, so the failure would otherwise be a 400 on every request. The body schema is the `oneOf` and `discriminator` below. `Form`, `Query` and `Bound` read a struct's fields and keep refusing a union.
+
 **The document says which encoding.** A tagged union is `oneOf` with `discriminator`, each arm joined to its tag by `allOf` (an arm may already be a named component, and nothing can be merged into a `$ref`), each arm pinning its own value with a one-item `enum`. `rendersTheSame` compares the tag, so the two encodings are two shapes, not two renderings of one, and the lifetime merge above cannot put a client's one name on both.
 
 ### What it will not claim

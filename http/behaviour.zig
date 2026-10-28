@@ -12717,6 +12717,54 @@ test "a tagged union that is the whole body says which variant and which key is 
     for (cases) |case| try expect400(postJson(&h, &app, "/switch", case.body), case.says);
 }
 
+/// The same union asked for as an argument, which is what the photon port
+/// wanted: no `*Ctx`, and the body in the API description.
+fn takeSwitchTyped(incoming: Switch) struct { kind: []const u8 } {
+    return .{ .kind = @tagName(incoming) };
+}
+
+test "a tagged union is a handler's body argument and reaches it as the variant the tag names" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/typed-switch", takeSwitchTyped);
+    var h = Harness.init();
+    defer h.deinit();
+
+    const variants = [_]struct { body: []const u8, tag: []const u8 }{
+        .{ .body = "{\"kind\":\"tight\",\"n\":1}", .tag = "\"kind\":\"tight\"" },
+        .{ .body = "{\"kind\":\"loose\",\"n\":2,\"extra\":[1]}", .tag = "\"kind\":\"loose\"" },
+        .{ .body = "{\"kind\":\"off\"}", .tag = "\"kind\":\"off\"" },
+    };
+    for (variants) |case| {
+        const response = postJson(&h, &app, "/typed-switch", case.body);
+        try expectOk(response);
+        try testing.expect(std.mem.indexOf(u8, response, case.tag) != null);
+    }
+
+    // The 400s are the ones `Ctx.json` gives the same union.
+    try expect400(
+        postJson(&h, &app, "/typed-switch", "{\"kind\":\"nope\"}"),
+        "\"kind\" is not one of the known variants (loose, tight, off): \"nope\"",
+    );
+    try expect400(
+        postJson(&h, &app, "/typed-switch", "{\"n\":1}"),
+        "the request body is missing \"kind\", which names the variant: one of loose, tight, off",
+    );
+}
+
+test "a tagged union body is described as oneOf with its discriminator" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.post("/typed-switch", takeSwitchTyped);
+
+    const json = try docsFor(&app);
+    const op = std.mem.indexOf(u8, json, "\"requestBody\"").?;
+    const body = json[op..];
+    try testing.expect(std.mem.indexOf(u8, body, "\"oneOf\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"discriminator\":{\"propertyName\":\"kind\"") != null);
+}
+
 // ---- a body type that answers its wrong shape with a 422 (ADR 251) ----
 
 /// The request a port of an axum server reads: text that is not JSON is a

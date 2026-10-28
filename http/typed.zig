@@ -2044,6 +2044,18 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
     }
     if (comptime convert_mod.parsesItself(P)) return .{ .param = 0 };
 
+    // Before the switch: a `Patch(T)` is a union too, and the union arm
+    // below would call it a body with no tag.
+    if (comptime patch_mod.isPatch(P)) @compileError(
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" is a `Patch(…)`, which is a field of a request body rather than an " ++
+                "argument of its own.\n" ++
+                "  A Patch says whether the body mentioned one field, so it only means " ++
+                "anything inside the struct that body is read into:\n" ++
+                "    const EditUser = struct { name: nilo.Patch(nilo.Str) = .absent };\n" ++
+                "    fn editUser(id: u32, incoming: EditUser) !?User { … }",
+        );
+
     return switch (@typeInfo(P)) {
         .int, .float, .bool, .@"enum" => .{ .param = 0 },
 
@@ -2065,6 +2077,24 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
 
         .@"struct" => .body,
 
+        // A union by value is the request body when the body itself says
+        // which variant it is: the discriminator is a key beside the
+        // variant's own fields (`nilo_json = .{ .tag = … }`, ADR 016), which
+        // is what `Ctx.json` reads and what the description renders as
+        // `oneOf` + `discriminator`. Any other union has nothing in the
+        // bytes to tell its variants apart, so it is refused here rather
+        // than failing on the first request (ADR 002).
+        .@"union" => if (comptime (@typeInfo(P).@"union".tag_type != null and
+            (mark.of(P) orelse mark.Mark{}).tag != null)) .body else @compileError(
+            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
+                "\" is a " ++ naming.of(P) ++ ", a union with no discriminator to read it by.\n" ++
+                "  A union is the request body when the body says which variant it is, in a key " ++
+                "beside the variant's own fields. Declare that key on the type:\n" ++
+                "    pub const nilo_json = .{ .tag = \"kind\" };\n" ++
+                "  and make it a `union(enum)`. Without a tag, take a `*Ctx` and read the " ++
+                "variant you expect with `c.json(…)`.",
+        ),
+
         .optional => @compileError(
             "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ naming.of(P) ++ ".\n" ++
@@ -2074,22 +2104,14 @@ fn roleOf(comptime pattern: []const u8, comptime P: type, comptime i: usize) Rol
                 "exactly right: put the field in a struct and ask for `nilo.Query(That)`.",
         ),
 
-        else => if (comptime patch_mod.isPatch(P)) @compileError(
-            "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
-                "\" is a `Patch(…)`, which is a field of a request body rather than an " ++
-                "argument of its own.\n" ++
-                "  A Patch says whether the body mentioned one field, so it only means " ++
-                "anything inside the struct that body is read into:\n" ++
-                "    const EditUser = struct { name: nilo.Patch(nilo.Str) = .absent };\n" ++
-                "    fn editUser(id: u32, incoming: EditUser) !?User { … }",
-        ) else @compileError(
+        else => @compileError(
             "nilo: argument " ++ num(i + 1) ++ " of the handler for route \"" ++ pattern ++
                 "\" is a " ++ naming.of(P) ++ ", which nilo does not recognise.\n" ++
                 "  What you can ask for: `*Ctx`, a pointer to a service (`*Db`), a path param " ++
                 "(`u32`, `nilo.Str`, `bool`, an enum, or a type carrying `nilo_parse`), " ++
                 "`nilo.Query(T)` for the query string, `nilo.FromHeader(\"X-Thing\", T)` for " ++
                 "one header, a `std.mem.Allocator` for the request " ++
-                "arena, a `std.Io` for the server's loop, or one struct for the request body.",
+                "arena, a `std.Io` for the server's loop, or one struct (or tagged union) for the request body.",
         ),
     };
 }

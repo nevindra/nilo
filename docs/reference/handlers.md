@@ -620,6 +620,8 @@ Compile errors: `.omit_null` that is not `true`, on a non-struct, or on a struct
 
 **Without a marker, a `union(enum)` is externally tagged**: `{"metrics":{…}}`, which is what `std.json` writes. It is written by nilo's own writer either way. An *untagged* union has nothing saying which variant is active, and is left entirely to `std.json`. A variant with no payload is allowed under `.tag` and is just the discriminator; under the default encoding it is not supported. A tagged object read from a body with its discriminator twice is a 400 naming the key. Every other mistake inside one is a 400 that says what arrived and what would have been taken: `"condition.signal" is not one of the known variants (metrics, logs, off): "traces"`, `a field "condition.metric_nme" the "metrics" variant does not know. It takes: signal, metric_name, agg (optional)`, or a missing discriminator with the variants listed. A key beside a variant that has no fields is refused the same way.
 
+**A tagged union (one with `.tag`) is a handler argument and the request body**, the way a struct is: `fn create(condition: Condition) !Rule`. The reading and the 400s are the ones above. An untagged or externally tagged union as an argument is a compile error naming the type, since nothing in the body says which variant it is; take a `*Ctx` and call `c.json(…)` for those. `Form(T)`, `Query(T)` and `Bound(T)` refuse a union already, because each is read into a struct's fields.
+
 The generated API description follows whichever encoding the type chose: `oneOf` of one-key objects for the default, and `oneOf` with a `discriminator` plus a per-variant `allOf` for a tagged one. See [Responses](../guide/responses.md#json-field-names-and-union-tags).
 
 ### Writing JSON outside a request

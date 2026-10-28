@@ -231,10 +231,6 @@ Nothing is open at this tier.
 
 **Direction:** [Defects are caught by a build step before a reader](./roadmap.md#defects-are-caught-by-a-build-step-before-a-reader)
 
-**A tagged union cannot be a handler's body argument (feedback from the photon port).** photon's alert rule condition is one of several shapes picked by a field (`{"signal": "metrics", ...}`). Inside a struct it reads, answers named 400s and gets a `oneOf` with a `discriminator` in the API description; as the whole body, `fn create(cond: Condition)` is refused with "nilo does not recognise", so the handler takes a `*Ctx` and calls `c.json(Condition)`, and the description loses the body. The 400s for a top-level union already match the nested ones (`describeBadBody` hands it to `describeTagged`); the typed argument and its schema are what is missing.
-
-**Needs:** the rule that makes a union value argument the body (the one struct a route takes today, widened to an internally tagged union), its description through the `oneOf` and `discriminator` the nested case already renders (ADR 016), and a refusal for a union nilo cannot tell apart while reading (no tag field).
-
 **A gRPC listener answers unary calls only.** A call with a second message is refused as `INTERNAL` ([ADR 220](./adr/220-grpc-is-served-over-h2c-behind-a-flag.md)). Server, client and bidirectional streaming are the shape that holds a fiber and its stack for the whole call, and the shape a unary call goes through (one request handed over whole, one answer collected whole) has no place for a second message; a streaming method would be a handler that reads and writes messages on the stream, much as a WebSocket handler does its frames.
 
 **Needs:** the shape the roadmap's stream direction designs, and the per-stream figure for a stream held open measured the way `bench/mem.py --hold` measures an HTTP/1.1 one.
