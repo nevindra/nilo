@@ -6104,7 +6104,11 @@ test "the order a request chose reads into a query field, and the document says 
     try testing.expectEqual(@as(u16, 400), wrong.status);
     try testing.expectEqualStrings(
         "{\"error\":\"?order has to be an ordering by age or email, each with an optional " ++
-            ":asc or :desc, comma-separated, not \\\"height\\\"\",\"status\":400}",
+            ":asc or :desc, comma-separated, not \\\"height\\\"\",\"status\":400," ++
+            "\"fields\":[{\"field\":\"order\",\"code\":\"not_that_type\",\"message\":" ++
+            "\"?order has to be an ordering by age or email, each with an optional " ++
+            ":asc or :desc, comma-separated, not \\\"height\\\"\",\"expected\":" ++
+            "\"an ordering by age or email, each with an optional :asc or :desc, comma-separated\"}]}",
         wrong.body,
     );
 
