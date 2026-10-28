@@ -2,7 +2,7 @@
 
 **One call counts every request per route and serves the numbers at `/metrics` in Prometheus format, with no allocation per request.**
 
-**Reference:** [`app.metrics`, `app.expose`](../reference/app.md#app), [`metrics` options](../reference/app.md#metrics-options) · **Design:** none; the decision is [ADR 079](../adr/079-the-route-table-is-the-registry.md)
+**Reference:** [`app.metrics`, `app.expose`](../reference/app.md#app), [`metrics` options](../reference/app.md#metrics-options), [`nilo.Counter`, `nilo.Gauge`, `nilo.Histogram`](../reference/app.md#metrics-of-your-own) · **Design:** none; the decision is [ADR 079](../adr/079-the-route-table-is-the-registry.md)
 
 [Errors](./errors.md) covers one request at a time: a request id, a log line, the sentence that says what went wrong. Metrics answer a different question: not *what happened to this request* but *what is happening to this service*. How many requests, at what statuses, how long.
 
@@ -78,9 +78,80 @@ try app.metrics(.{ .path = "/internal/metrics" });
 
 Or leave it on `/metrics` and have the proxy in front of you, the one already terminating TLS ([ADR 027](../adr/027-tls-is-terminated-in-front.md)), refuse it from outside.
 
-## Counters of your own
+## Metrics of your own
 
-**There is no registry: you own the counter, and nilo publishes it with [`app.expose`](../reference/app.md#app).** This is deliberate. A counter named at runtime means a string key, a hash on every increment, and a lock or a sharded table underneath, all on the path of every request, for a feature most requests do not use.
+**There is no registry with names you look up at runtime. A metric is a field of the service that counts it, and `app.provide` finds it.** This is deliberate. A counter named at runtime means a string key, a hash on every increment, and a lock or a sharded table underneath, all on the path of every request, for a feature most requests do not use. A field is closed while compiling, so recording is an atomic add on memory that already exists ([ADR 079](../adr/079-the-route-table-is-the-registry.md)).
+
+<!-- compiles -->
+```zig
+const Outcome = enum { pending, paid, refused };
+
+const Shop = struct {
+    orders_total: nilo.Counter(Outcome) = .{},
+    checkout_seconds: nilo.Histogram(void, .{ .buckets = .{ 5_000, 50_000, 500_000 } }) = .{},
+    body_bytes: nilo.Histogram(void, .{ .unit = .none, .buckets = .{ 1024, 65536 } }) = .{},
+    queue_depth: nilo.Gauge(void) = .{},
+
+    pub const nilo_help = .{ .orders_total = "Orders, by outcome." };
+};
+
+const Basket = struct { note: []const u8 };
+const Receipt = struct { paid: bool };
+
+fn checkout(shop: *Shop, incoming: Basket) !Receipt {
+    shop.queue_depth.inc();
+    defer shop.queue_depth.dec();
+    shop.orders_total.inc(.pending);
+    shop.body_bytes.observe(incoming.note.len);
+    shop.checkout_seconds.observe(12_000); // microseconds
+    shop.orders_total.inc(.paid);
+    return .{ .paid = true };
+}
+
+fn assemble(app: *nilo.App, shop: *Shop) !void {
+    try app.provide(shop);
+    try app.post("/checkout", checkout);
+    try app.metrics(.{});
+}
+```
+
+On the page:
+
+```
+# HELP orders_total Orders, by outcome.
+# TYPE orders_total counter
+orders_total{service="Shop",outcome="pending"} 0
+orders_total{service="Shop",outcome="paid"} 0
+orders_total{service="Shop",outcome="refused"} 0
+# TYPE checkout_seconds histogram
+checkout_seconds_bucket{service="Shop",le="0.005"} 0
+…
+checkout_seconds_bucket{service="Shop",le="+Inf"} 0
+checkout_seconds_sum{service="Shop"} 0
+checkout_seconds_count{service="Shop"} 0
+```
+
+**The name is the field's name, exactly**, and the page carries `service="Shop"` on every sample: the last name of the service's type. A counter's name ends `_total`; a histogram in seconds ends `_seconds`. The sentence after `# HELP` is the optional `nilo_help`.
+
+**A label is a type with a closed set of values**, because every value is a series:
+
+| Label | Series | Call |
+|---|---|---|
+| `void` | one | `shop.queue_depth.inc()`, with no argument |
+| an exhaustive enum | one per name | `shop.orders_total.inc(.paid)`; the key is the enum's name in snake case (`Outcome` as `outcome`) |
+| a struct of enums | the product | `.inc(.{ .method = .get, .outcome = .ok })`; the keys are the field names |
+
+A string is not a label. That is the cardinality problem this design refuses, and the compiler says so. A metric holds at most 256 cells, and the services together at most 1,024 series; `listen()` refuses a program over the second and names the service with the most. Both limits are unmeasured: they are where a label has stopped being a label.
+
+**Every series prints from the first scrape, at zero.** A series that appears with its first event loses that event to `rate()`. This is the opposite of a route, which appears once it has answered: the number of routes has no ceiling, and the number of values of an enum does.
+
+**Which type to pick.** `Counter` only climbs: `inc()`, `add(n)`. `Gauge` goes both ways and may go negative: `set(n)`, `inc()`, `dec()`. `Histogram` takes up to sixteen climbing integer boundaries and `observe(v)`; by default `v` is microseconds and the page says seconds, with `.unit = .none` the integers are printed as given (bytes, items). A `Histogram` keeps its own boundaries, unlike the route histogram's shared ones: a checkout time and a body size are not comparable.
+
+A module that cannot depend on nilo reaches the page through a plain table, and `cache.Store` and `jwt.Keyring` use it: a `Store` you provide adds `nilo_cache_hits_total`, `nilo_cache_misses_total`, `nilo_cache_evictions_total` and `nilo_cache_expired_total`; a `Keyring` adds the hit and miss counts of its token memo, and nothing when it has no memo. Two services holding one name print one header with their samples together, told apart by `service`. A name held as two different things (a counter in one service, a gauge in another) is refused at `listen()`.
+
+### A number you already own
+
+**You can also publish an atomic you own with [`app.expose`](../reference/app.md#app).** It has no labels and no service name, which is why a field is what to reach for first.
 
 ```zig
 var orders_placed: std.atomic.Value(u64) = .init(0);
@@ -126,6 +197,8 @@ A counted request reads the clock once at each end, walks the bucket boundaries,
 The table is allocated when the routes are resolved and never grows: 160 bytes a route with the default boundaries, plus 4,000 bytes for the exact status codes, once for the whole process. A server with a hundred routes uses about 20 KB. Nothing is added per connection.
 
 A server that never calls `metrics()` pays a null check per request and 1,984 bytes of binary. One that does pays 17,416 bytes more.
+
+A metric of your own adds no allocation either: the budget test runs a third time with a handler that increments, decrements and observes, and still reads one allocation. Each is one or two atomic adds, and each metric sits on a cache line of its own, 64 bytes at least. The cost of an `inc` or an `observe` in instructions and the binary size of using one were not measured; both are reasoned from the code ([ADR 079](../adr/079-the-route-table-is-the-registry.md)).
 
 The throughput cost was measured as four interleaved pairs and came back inside the noise (the sign changed twice), so it is recorded as unchanged rather than as a figure ([`bench/result/http.md`](../../bench/result/http.md)).
 

@@ -1504,7 +1504,37 @@ pub const Store = struct {
         }
     }
 
-    pub fn stats(self: *Store) Stats {
+    /// What a server with `app.metrics` prints for a Store it was given as a
+    /// service (`nilo_http`'s `metric_types.zig`, ADR 079). **Declared as
+    /// strings, kinds and plain functions** because this module may not
+    /// import `nilo_http` (ADR 038): the framework reads the table when the
+    /// Store is provided, and a program that never provides one links none of
+    /// it. Each reader is the sum `stats()` already makes, so a scrape costs
+    /// what a call to it does and a lookup costs nothing new.
+    ///
+    /// Only the four that say whether the cache is doing its job. `puts`,
+    /// `refused` and `rescued` are in `stats()` for a caller who wants them.
+    pub const nilo_metrics = .{
+        .{ "nilo_cache_hits_total", .counter, "Lookups that found a value.", hitsOf },
+        .{ "nilo_cache_misses_total", .counter, "Lookups that found nothing under the key.", missesOf },
+        .{ "nilo_cache_evictions_total", .counter, "Lookups that found the key and lost its value to the ring: a ring too small.", evictedOf },
+        .{ "nilo_cache_expired_total", .counter, "Lookups that found a value past its time.", expiredOf },
+    };
+
+    fn hitsOf(self: *const Store) u64 {
+        return self.stats().hits;
+    }
+    fn missesOf(self: *const Store) u64 {
+        return self.stats().misses;
+    }
+    fn evictedOf(self: *const Store) u64 {
+        return self.stats().evicted;
+    }
+    fn expiredOf(self: *const Store) u64 {
+        return self.stats().expired;
+    }
+
+    pub fn stats(self: *const Store) Stats {
         var total: Stats = .{};
         for (self.shards) |*shard| {
             // No lock: the counters are atomic and nothing here branches on
@@ -1595,6 +1625,31 @@ test "a value put under a key comes back under that key" {
     try testing.expect(store.put(1, "cart:42", "seven items", 0));
     const n = store.get(1, "cart:42", &out) orelse return error.TestExpectedHit;
     try testing.expectEqualStrings("seven items", out[0..n]);
+}
+
+test "the table the framework reads says what stats() counts, in plain functions" {
+    var store = try openTest();
+    defer store.deinit();
+
+    var out: [64]u8 = undefined;
+    _ = store.put(1, "cart:42", "seven items", 0);
+    _ = store.get(1, "cart:42", &out);
+    _ = store.get(1, "cart:42", &out);
+    _ = store.get(1, "cart:43", &out);
+
+    // Std types only, so `nilo_http` can read it and this module need not
+    // name it (ADR 038): a name, a kind, a sentence and a reader.
+    try testing.expectEqual(@as(usize, 4), Store.nilo_metrics.len);
+    inline for (Store.nilo_metrics) |row| {
+        try testing.expect(std.mem.startsWith(u8, row[0], "nilo_cache_"));
+        try testing.expect(std.mem.endsWith(u8, row[0], "_total"));
+        try testing.expectEqualStrings("counter", @tagName(row[1]));
+        try testing.expect(row[2].len > 0);
+    }
+    try testing.expectEqual(@as(u64, 2), Store.nilo_metrics[0][3](&store));
+    try testing.expectEqual(@as(u64, 1), Store.nilo_metrics[1][3](&store));
+    try testing.expectEqual(@as(u64, 0), Store.nilo_metrics[2][3](&store));
+    try testing.expectEqual(@as(u64, 0), Store.nilo_metrics[3][3](&store));
 }
 
 test "a key nobody wrote is a miss rather than somebody else's value" {

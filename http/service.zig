@@ -15,6 +15,7 @@
 const std = @import("std");
 const naming = @import("names.zig");
 const fail = @import("fail.zig");
+const metric_types = @import("metric_types.zig");
 
 const Limits = @import("nilo_core").Limits;
 const AnyScope = @import("nilo_core").AnyScope;
@@ -96,6 +97,13 @@ pub const Registry = struct {
         /// which is where a check against what that work made belongs
         /// (ADR 180). Null is the ordinary case and costs one branch at boot.
         check: ?*const fn (*anyopaque, std.Io) anyerror!void = null,
+        /// Set only for a service whose type holds a `nilo.Counter`,
+        /// `nilo.Gauge` or `nilo.Histogram` field, or declares
+        /// `nilo_metrics`. A table built while compiling and shared by every
+        /// service of the type; read by a scrape and by `listen()`'s check,
+        /// never by a request, so a service with none costs a null test per
+        /// scrape and nothing else (ADR 079).
+        metrics: ?*const metric_types.Set = null,
     };
 
     /// The `nilo_start` hook, with the type erased so the registry can hold
@@ -342,6 +350,7 @@ pub const Registry = struct {
             .stop = stopHook(info.child),
             .ready = readyHook(info.child),
             .check = checkHook(info.child),
+            .metrics = comptime metric_types.setOf(info.child),
         });
     }
 
@@ -434,6 +443,151 @@ pub const Registry = struct {
             if (e.stop) |hook| hook(e.ptr);
         }
     }
+
+    /// What a service is called on the metrics page: the last name of its
+    /// type, `Shop` for `shop.Shop`, without the arguments of a generic one.
+    /// The label that tells two services' samples of one family apart.
+    pub fn labelName(full: []const u8) []const u8 {
+        var from: usize = 0;
+        var to: usize = full.len;
+        for (full, 0..) |ch, i| {
+            if (ch == '(') {
+                to = i;
+                break;
+            }
+            if (ch == '.') from = i + 1;
+        }
+        return full[from..to];
+    }
+
+    /// Whether any of `entries` holds a metric family called `name`.
+    fn familyHeldBy(entries: []const Entry, name: []const u8) bool {
+        for (entries) |e| {
+            const set = e.metrics orelse continue;
+            for (set.families) |f| {
+                if (std.mem.eql(u8, f.name, name)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Print the metrics of every service that has any, onto the page.
+    ///
+    /// **A family is printed once and whole.** Two services can hold one name
+    /// (two stores, each with its own hit count), and Prometheus rejects a
+    /// page where a `# TYPE` appears twice or a family's samples are split by
+    /// another's. So for each family, in the order services were provided, the
+    /// first service to hold it prints the header and then every service from
+    /// there on prints its samples under it. That is a walk of services times
+    /// families squared per scrape, over a handful of each, and no
+    /// allocation: collecting the names first would need somewhere to put
+    /// them (ADR 079).
+    pub fn writeMetrics(self: *const Registry, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const items = self.entries.items;
+        for (items, 0..) |e, i| {
+            const set = e.metrics orelse continue;
+            for (set.families) |f| {
+                if (familyHeldBy(items[0..i], f.name)) continue;
+                if (f.help.len > 0) {
+                    try w.print("# HELP {s} ", .{f.name});
+                    for (f.help) |ch| switch (ch) {
+                        '\\' => try w.writeAll("\\\\"),
+                        '\n' => try w.writeAll("\\n"),
+                        else => try w.writeByte(ch),
+                    };
+                    try w.writeByte('\n');
+                }
+                try w.print("# TYPE {s} {s}\n", .{ f.name, @tagName(f.kind) });
+                for (items[i..]) |other| {
+                    const theirs = other.metrics orelse continue;
+                    for (theirs.families) |g| {
+                        if (!std.mem.eql(u8, g.name, f.name)) continue;
+                        try g.samples(other.ptr, w, labelName(other.name));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Why the services' metrics cannot go on one page, or null. Run by
+    /// `listen()` before the port is taken (ADR 079), since each of these is a
+    /// page Prometheus rejects whole or a scrape nobody sized.
+    pub fn metricsProblem(self: *const Registry) ?MetricsProblem {
+        const items = self.entries.items;
+        var total: usize = 0;
+        var biggest: []const u8 = "";
+        var biggest_series: usize = 0;
+        for (items, 0..) |e, i| {
+            const set = e.metrics orelse continue;
+            var mine: usize = 0;
+            for (set.families, 0..) |f, j| {
+                mine += f.series;
+                // The same name twice in one service.
+                for (set.families[0..j]) |earlier| {
+                    if (std.mem.eql(u8, earlier.name, f.name)) return .{ .repeated = .{ .service = e.name, .name = f.name } };
+                }
+                // The same name in another service: one family only if it is
+                // the same kind with the same label keys, and only if the
+                // samples can be told apart by `service`.
+                for (items[0..i]) |other| {
+                    const theirs = other.metrics orelse continue;
+                    for (theirs.families) |g| {
+                        if (!std.mem.eql(u8, g.name, f.name)) continue;
+                        if (!f.sameShape(g)) return .{ .shape = .{ .name = f.name, .first = other.name, .second = e.name } };
+                        if (std.mem.eql(u8, labelName(other.name), labelName(e.name))) return .{
+                            .same_label = .{ .name = f.name, .first = other.name, .second = e.name },
+                        };
+                    }
+                }
+            }
+            total += mine;
+            if (mine > biggest_series) {
+                biggest_series = mine;
+                biggest = e.name;
+            }
+        }
+        if (total > metric_types.max_series) return .{ .too_many = .{
+            .total = total,
+            .biggest = biggest,
+            .biggest_series = biggest_series,
+        } };
+        return null;
+    }
+
+    pub const MetricsProblem = union(enum) {
+        repeated: struct { service: []const u8, name: []const u8 },
+        shape: struct { name: []const u8, first: []const u8, second: []const u8 },
+        same_label: struct { name: []const u8, first: []const u8, second: []const u8 },
+        too_many: struct { total: usize, biggest: []const u8, biggest_series: usize },
+
+        pub fn format(self: MetricsProblem, w: *std.Io.Writer) std.Io.Writer.Error!void {
+            switch (self) {
+                .repeated => |p| try w.print(
+                    "{s} holds two metrics called \"{s}\", and one family cannot have two sets of samples. " ++
+                        "Rename one: a metric is named by its field, or by the first string of its `nilo_metrics` row.",
+                    .{ p.service, p.name },
+                ),
+                .shape => |p| try w.print(
+                    "the metric \"{s}\" is held by {s} and by {s} as two different things (a counter and a " ++
+                        "gauge, or different label keys), and Prometheus rejects a page where one name is " ++
+                        "two families. Rename one of them.",
+                    .{ p.name, p.first, p.second },
+                ),
+                .same_label => |p| try w.print(
+                    "the metric \"{s}\" is held by {s} and by {s}, whose type names both end in \"{s}\", so " ++
+                        "the `service` label cannot tell their samples apart and the page would carry the " ++
+                        "same series twice. Give one of the types a different name.",
+                    .{ p.name, p.first, p.second, labelName(p.first) },
+                ),
+                .too_many => |p| try w.print(
+                    "the services' metrics make {d} series, and a page carries at most {d}; the biggest " ++
+                        "contributor is {s} with {d}. Every value of every label is a series Prometheus stores " ++
+                        "and each scrape reads: drop a label, or bucket it into a smaller enum (ADR 079).",
+                    .{ p.total, metric_types.max_series, p.biggest, p.biggest_series },
+                ),
+            }
+        }
+    };
 
     /// Fetch the service of type `P` (a pointer type), or null if it was
     /// never registered — or if it was registered as `*const` while the
@@ -604,4 +758,153 @@ test "a service is stopped even though it never started" {
 
     r.stopAll();
     try testing.expect(never.stopped);
+}
+
+// ---- metrics a service holds (ADR 079) ----
+
+const mt = @import("metric_types.zig");
+
+/// Types that stand in for a module's: a table of std types, as `nilo_cache`
+/// declares one without naming this framework.
+const Hot = struct {
+    n: u64 = 0,
+    pub const nilo_metrics = .{
+        .{ "nilo_store_hits_total", .counter, "Lookups that found a value.", hitsOf },
+    };
+    fn hitsOf(self: *const Hot) u64 {
+        return self.n;
+    }
+};
+const Cold = struct {
+    n: u64 = 0,
+    pub const nilo_metrics = .{
+        .{ "nilo_store_hits_total", .counter, "Lookups that found a value.", hitsOf },
+    };
+    fn hitsOf(self: *const Cold) u64 {
+        return self.n;
+    }
+};
+/// Two types a reader could well write in two files, both called `Store`.
+const north = struct {
+    const Store = struct {
+        pub const nilo_metrics = .{.{ "nilo_store_hits_total", .counter, "Lookups that found a value.", hitsOf }};
+        fn hitsOf(_: *const Store) u64 {
+            return 0;
+        }
+    };
+};
+const south = struct {
+    const Store = struct {
+        pub const nilo_metrics = .{.{ "nilo_store_hits_total", .counter, "Lookups that found a value.", hitsOf }};
+        fn hitsOf(_: *const Store) u64 {
+            return 0;
+        }
+    };
+};
+
+const Orders = enum { pending, paid };
+const Shop = struct {
+    orders_total: mt.Counter(Orders) = .{},
+    pub const nilo_help = .{ .orders_total = "Orders." };
+};
+const Other = struct {
+    orders_total: mt.Gauge(Orders) = .{},
+};
+
+test "a service that holds no metric has no set, and prints nothing" {
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+    var db = Db{};
+    try r.add(&db);
+    try testing.expect(r.entries.items[0].metrics == null);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try r.writeMetrics(&out.writer);
+    try testing.expectEqualStrings("", out.written());
+    try testing.expect(r.metricsProblem() == null);
+}
+
+test "two services holding one family print its header once and its samples together" {
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+    var a = Hot{ .n = 3 };
+    var shop = Shop{};
+    var b = Cold{ .n = 5 };
+    shop.orders_total.inc(.paid);
+    try r.add(&a);
+    try r.add(&shop);
+    try r.add(&b);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try r.writeMetrics(&out.writer);
+    // Both stores under one header, though another service sits between them
+    // in the order they were provided; each sample says whose it is.
+    try testing.expectEqualStrings(
+        "# HELP nilo_store_hits_total Lookups that found a value.\n" ++
+            "# TYPE nilo_store_hits_total counter\n" ++
+            "nilo_store_hits_total{service=\"Hot\"} 3\n" ++
+            "nilo_store_hits_total{service=\"Cold\"} 5\n" ++
+            "# HELP orders_total Orders.\n" ++
+            "# TYPE orders_total counter\n" ++
+            "orders_total{service=\"Shop\",orders=\"pending\"} 0\n" ++
+            "orders_total{service=\"Shop\",orders=\"paid\"} 1\n",
+        out.written(),
+    );
+}
+
+test "two services whose names end alike cannot share a family, because their samples would collide" {
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+    var a = north.Store{};
+    var b = south.Store{};
+    try r.add(&a);
+    try r.add(&b);
+    const problem = r.metricsProblem().?;
+    try testing.expect(problem == .same_label);
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try problem.format(&w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "cannot tell their samples apart") != null);
+}
+
+test "one name held as a counter and as a gauge is refused" {
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+    var shop = Shop{};
+    var other = Other{};
+    try r.add(&shop);
+    try r.add(&other);
+    const problem = r.metricsProblem().?;
+    try testing.expect(problem == .shape);
+    try testing.expectEqualStrings("orders_total", problem.shape.name);
+}
+
+test "a page over the series ceiling is refused, naming the biggest service" {
+    const Wide = enum { a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p };
+    const Pair = struct { x: Wide, y: Wide };
+    const Big = struct {
+        a_total: mt.Counter(Pair) = .{},
+        b_total: mt.Counter(Pair) = .{},
+        c_total: mt.Counter(Pair) = .{},
+        d_total: mt.Counter(Pair) = .{},
+        e_total: mt.Counter(Pair) = .{},
+    };
+    var r = Registry.init(testing.allocator);
+    defer r.deinit();
+    var big = Big{};
+    var shop = Shop{};
+    try r.add(&shop);
+    try r.add(&big);
+    const problem = r.metricsProblem().?;
+    try testing.expect(problem == .too_many);
+    try testing.expectEqual(@as(usize, 5 * 256 + 2), problem.too_many.total);
+    try testing.expectEqual(@as(usize, 5 * 256), problem.too_many.biggest_series);
+}
+
+test "the label of a service is the last name of its type, without a generic's arguments" {
+    try testing.expectEqualStrings("Shop", Registry.labelName("shop.Shop"));
+    try testing.expectEqualStrings("Shop", Registry.labelName("Shop"));
+    try testing.expectEqualStrings("Cached", Registry.labelName("nilo.Cached(a.b.Pages, …)"));
 }

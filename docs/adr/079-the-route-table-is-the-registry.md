@@ -80,28 +80,97 @@ So the clock starts at the top of `serveRequest`, the slot is filled in wherever
 the route was decided, and a `defer` finishes it — which covers all dozen ways
 out, including the three that answer before a `Ctx` exists at all.
 
-### There is no dynamic registry, and `expose` is why that is not a hole
+### There is no dynamic registry, and a service's own metrics are why that is not a hole
 
 A registry means a name per increment: a hash, and a lock or a shard table, on
 the path of every request that counts anything. That is the surface the roadmap
 warned about and it does not fit.
 
-**But refusing it is only sound if a number the application owns can still be
-published**, and the first draft of this decision missed that. Without it, an
-application with an `orders_placed` of its own has a counter Prometheus can never
+**But refusing it is only sound if the application can still publish numbers of
+its own**, and the first draft of this decision missed that. Without it, an
+application with an `orders_total` of its own has a counter Prometheus can never
 see, and it ends up running a second metrics server — at which point nilo's
-metrics are not merely incomplete, they are a decoy.
+metrics are not merely incomplete, they are a decoy. Two answers are in force.
 
-`app.expose("orders_placed", .counter, &orders_placed)` is the answer, and it is
-the `app.docs(opts)` shape applied to this: **registration-time cost only**. You
-declare the atomic, you increment it, and nilo reads it once per scrape. The
-increment is one `fetchAdd` on memory you already had — which is what a registry
-would have cost *plus* the hash it would have added.
+**A service's metrics are fields of its type** (`http/metric_types.zig`). The
+route table is closed when `listen()` resolves it; a service's metrics are
+closed when the program is compiled, so the same argument holds one level down:
+
+```zig
+const Shop = struct {
+    orders_total: nilo.Counter(Status) = .{},
+    checkout_seconds: nilo.Histogram(void, .{ .buckets = .{ 5_000, 50_000, 500_000 } }) = .{},
+    queue_depth: nilo.Gauge(void) = .{},
+    pub const nilo_help = .{ .orders_total = "Orders, by status." };
+};
+```
+
+`app.provide(&shop)` asks the type for fields that carry `nilo_metric` and keeps
+a table of them in the registry entry, built while compiling (`Entry.metrics`,
+null for a service with none, so the ordinary service pays nothing). The
+metric's name is the field's name, exactly. `shop.orders_total.inc(.paid)` is a
+`fetchAdd` on a cell whose address is arithmetic on the label the caller already
+wrote.
+
+- **A label is `void`, an exhaustive enum, or a struct of them.** The enum's
+  names are the label's values and its short type name in snake case is the key
+  (`Status` as `status`); a struct's field names are the keys. The cell is a
+  mixed-radix sum, folded away for a constant. A string is not a label: that is
+  the cardinality this decision exists to refuse.
+- **Counter is `u64`, Gauge is `i64`.** A gauge is read as a difference, and a
+  read between a `dec` landing and its `inc` becoming visible must show -1, not
+  1.8e19.
+- **Histogram boundaries are the metric's own**, up to sixteen integers. The
+  bucket is found by comparing the value against all boundaries as an
+  `@Vector` and counting the ones below it, then two `fetchAdd(.monotonic)`
+  (the bucket, the sum). The count is the cumulative `+Inf` at scrape, so a
+  page cannot disagree with itself. `.unit = .seconds` (the default) takes
+  microseconds and prints seconds through `writeSeconds`, the integer printer
+  of this ADR's binary-size finding; `.unit = .none` prints integers as given.
+- **Every metric is `align(64)`** so two metrics never share a line; cells of
+  one labelled metric are packed, and a histogram pads each row, which is what
+  one `observe` writes twice.
+- **Names are held by compile errors**, each with a file under `refusals/`: a
+  counter ends `_total`, a histogram in seconds ends `_seconds`, a name is
+  Prometheus' alphabet and does not start `nilo_` (nilo's own), a label is an
+  exhaustive enum or a struct of them and does not use the keys `service` or
+  `le`, boundaries are non-empty, integer, strictly climbing, first above zero
+  and at most 16, a metric has at most **256 cells**, and a `nilo_help` key
+  names a metric field that exists.
+- **Every cell prints, zeros included.** A series that first appears with its
+  first event loses that event to `rate()`. This is not the route table's rule
+  (a route prints once reached) because a route table's size is the
+  application's route count with no ceiling, and a metric's is the enum.
+- **Every sample carries `service="<short type name>"`**, merged with the
+  metric's own labels, so two services holding one family print one `# HELP` and
+  `# TYPE` and all samples contiguous, grouped at scrape with no allocation. At
+  `listen()` a program is refused if one name is two different families (a
+  counter in one service and a gauge in another, or different label keys), if
+  two services whose type names end alike share a family (their samples would
+  be the same series), if one service holds a name twice, or if the services
+  make **more than 1,024 series**, naming the biggest contributor. Both
+  ceilings, 256 and 1,024, are **unmeasured**: they are the numbers past which
+  a label has stopped being a label, and raising either needs a number.
+
+**A module that cannot import `nilo_http` declares a table instead**
+(ADR 038): `pub const nilo_metrics = .{ .{ "nilo_cache_hits_total", .counter,
+"Lookups that found a value.", hitsOf } }`, where the reader is `fn (*const T)
+u64`, or `?u64` to print no sample (a `Keyring` with no memo). Only std types, so
+layering holds; the `nilo_` prefix is allowed here, because it is reserved for
+nilo's own modules and the field path refuses it. A table row is one series, a
+counter or a gauge, with the same suffix rule. `cache.Store` and `jwt.Keyring`
+declare one.
+
+**`app.expose("orders_placed", .counter, &orders_placed)` stays**, and it is the
+`app.docs(opts)` shape applied to a number you already own: registration-time
+cost only. You declare the atomic, you increment it, and nilo reads it once per
+scrape. It has to be a `std.atomic.Value(u64)`, and a plain `u64` is a compile
+error: handlers run on several threads and a non-atomic counter loses
+increments without saying so. It has no labels; a service's field is what to
+reach for when the number has a dimension.
 
 The refusal is therefore "no dynamic registry, no keyed hot path", not "no user
-metrics". It has to be a `std.atomic.Value(u64)`, and a plain `u64` is a compile
-error: handlers run on several threads and a non-atomic counter loses increments
-without saying so.
+metrics".
 
 ### Numbers nilo already keeps are read at the scrape, never kept for it
 
@@ -184,6 +253,23 @@ six decimal places of a second and nothing else, so `writeSeconds` does it with
 integer division and a trim. **Nobody would have looked for it**: the axis was
 being checked out of habit, and the habit is what found it.
 
+### What a service's metrics cost
+
+**Allocations per request: zero**, held by `test "recording a service's metric
+adds nothing to the allocation budget"` in `http/behaviour.zig`, the budget
+request with a handler that does an `inc`, a `dec`, another `inc` and an
+`observe`: one allocation (the JSON body), no resizes. **Per operation, as
+reasoned and not measured:** an `inc` is one `lock xadd` on a cell whose address
+is a constant when the label is; an `observe` is a vector compare, a popcount
+and two `lock xadd`s. **Memory per idle connection: unchanged**, nothing is on
+the connection's frame. **Startup memory:** 64 bytes a metric at least, a row
+of a histogram `(buckets + 2) × 8` rounded up to 64. **Binary size: not
+measured.** A program that provides no service with a metric field and no
+`nilo_metrics` table gets a comptime-known null in each registry entry, so the
+printing is not reachable; a program that does pays for the printer of the
+kinds it uses and none of a float formatter. Throughput was not measured and
+the 64-byte alignment is a design, not a result.
+
 ### One bug this found before it shipped
 
 `Table.exposed` is a slice of the App's list, and appending to a list moves it.
@@ -217,11 +303,44 @@ quietly scales with the executor count — paid on the strength of an argument
 rather than a number, which is what
 [ADR 062](./062-where-a-connection-waits-is-what-it-costs.md) was written after.
 
-**Emitting every series whether or not it has been reached.** Prometheus is
-happier with a series that exists at zero, but the table is sized by the route
-count: a five-hundred-route application would scrape most of a megabyte of
-zeroes every fifteen seconds. A route appears the first time it answers, and the
-guide says so.
+**Emitting every route's series whether or not it has been reached.**
+Prometheus is happier with a series that exists at zero, but the table is sized
+by the route count: a five-hundred-route application would scrape most of a
+megabyte of zeroes every fifteen seconds. A route appears the first time it
+answers, and the guide says so. **A service's metrics are the other way round
+and print every cell**, because their count is bounded by an enum in the type
+(at most 256 a metric, 1,024 a page) rather than by the application's size, and
+a series that first appears with its first event loses that event to `rate()`.
+
+**A string-keyed registry for services' metrics** (`registry.counter("orders",
+.{ .status = "paid" })`). It is the library everyone knows and it is the one
+this ADR started by refusing: a hash per increment, a lock or a shard table, and
+a label that can be built from a request. The type-keyed version has the same
+call site and none of the cost.
+
+**Registering a global by name** (`app.family("orders_total", &global)`). It
+works and it is `app.expose` with a label, but it leaves the metric apart from
+the service that owns it, so the service label has nothing to say, a second
+`Store` has nowhere to go, and every program writes the same wiring line. A
+field in the service is found by `provide`, which is already called.
+
+**A hook that writes its raw text** (`nilo_metrics_write(self, w)`). The
+cheapest to build and the one nothing can check: the page would carry whatever
+the service printed, so a duplicate `# TYPE`, a missing `service` label or an
+unescaped quote takes down the whole page, which is the failure `checkExposed`
+exists to prevent. The table of std types gives a module the same reach with the
+header, the escaping and the grouping done once here.
+
+**Per-thread shards for a service's counters.** Nothing has shown the atomics
+cost anything, and a shard per thread per cell scales the memory with the
+executor count. The 64-byte alignment keeps metrics from sharing a line; sharing
+one cell between threads is what a single `Counter` costs, and a program that
+measures it and finds it dear has a number to open this with, as the route
+table's paragraph above says.
+
+**Printing only the cells that have been touched.** The same argument as the
+route table's, and it loses on a bounded set: the page would grow as a service
+ran and `rate()` would miss the first event of each series.
 
 **Authenticating `/metrics`.** nilo does not know what the application's
 authentication is, and a built-in one would be a second, weaker copy of it. It
@@ -229,6 +348,11 @@ is an ordinary route, so `use("/internal", …)` in front of it is the answer, a
 it is the answer the framework already has.
 
 ## What is deliberately not built
+
+**Runtime labels** (a string built from a request) and **summaries**
+(quantiles computed in the process) are not built: the first is the
+cardinality this decision refuses, the second cannot be summed across
+instances, which is what a histogram is for.
 
 **Bytes sent** is one more atomic on the write path and nothing has measured
 what that costs, so it is not there. **Connection counts** belong at the accept

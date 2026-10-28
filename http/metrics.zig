@@ -24,10 +24,11 @@
 //!
 //! **There is no dynamic registry, and that is a decision rather than a gap.**
 //! A counter named at runtime means string keys, a hash per increment and a lock
-//! or a shard table, and none of that fits. What replaces it is `app.expose`:
-//! you declare the atomic, you increment it, and nilo publishes it. The naming
-//! is paid once at startup and the reading once per scrape — never on the path
-//! of a request that is not the scrape (ADR 079).
+//! or a shard table, and none of that fits. What replaces it is the type: a
+//! service declares `nilo.Counter(Status)` as a field and `app.provide` finds it
+//! (`metric_types.zig`), or `app.expose` publishes an atomic you already own.
+//! The naming is paid once at startup and the reading once per scrape — never
+//! on the path of a request that is not the scrape (ADR 079).
 
 const std = @import("std");
 const Ctx = @import("ctx.zig").Ctx;
@@ -36,6 +37,8 @@ const bulkhead = @import("bulkhead.zig");
 const session = @import("session.zig");
 const watchdog = @import("watchdog.zig");
 const process_stats = @import("process_stats.zig");
+const service_mod = @import("service.zig");
+const metric_types = @import("metric_types.zig");
 
 /// The latency boundaries a server gets without asking, in microseconds.
 ///
@@ -147,6 +150,10 @@ pub const Table = struct {
     codes: []Counter = &.{},
     /// What `app.expose` collected. Points at the App's list.
     exposed: []const Exposed = &.{},
+    /// Every service the App holds, for the metrics some of them declare
+    /// (`metric_types.zig`, ADR 079). Set when the table is sized, and read
+    /// only by a scrape.
+    services: ?*const service_mod.Registry = null,
     /// Requests being served right now. The App counts this already, to know
     /// what a stop has to wait for; reading it costs nothing new.
     in_flight: ?*const std.atomic.Value(u32) = null,
@@ -355,6 +362,11 @@ pub const Table = struct {
                 e.value.load(.monotonic),
             });
         }
+
+        // The services' own, last: nothing above depends on them, and a
+        // family a service shares with another is printed once, whole
+        // (ADR 079).
+        if (self.services) |registry| try registry.writeMetrics(w);
     }
 };
 
@@ -364,31 +376,10 @@ fn classOf(status: u16) usize {
     return status / 100;
 }
 
-/// Microseconds as the seconds Prometheus wants. Every tool downstream —
-/// Grafana's own histogram panels included — assumes base units, so a page in
-/// microseconds would be a page every dashboard reads off by a million.
-///
-/// **Written out by hand rather than divided into an `f64`, and the reason is
-/// the binary.** `{d}` on a float links Zig's shortest-round-trip formatter,
-/// and the first version of this file did exactly that: two stripped
-/// `ReleaseFast` builds of `bench/main.zig` put the whole feature at 37,112
-/// bytes with it and **17,416 without**, so more than half the cost of metrics
-/// was a float printer, for a handful of decimal points on a page that is
-/// scraped every fifteen seconds
-/// ([ADR 079](../docs/adr/079-the-route-table-is-the-registry.md)).
-/// A microsecond count is six decimal places of a second and nothing else, so
-/// this is integer division and a trim.
-fn writeSeconds(w: *std.Io.Writer, micros: u64) !void {
-    const whole = micros / std.time.us_per_s;
-    const frac = micros % std.time.us_per_s;
-    if (frac == 0) return w.print("{d}", .{whole});
-
-    var digits: [6]u8 = undefined;
-    _ = std.fmt.bufPrint(&digits, "{d:0>6}", .{frac}) catch unreachable;
-    var end: usize = digits.len;
-    while (end > 1 and digits[end - 1] == '0') end -= 1;
-    try w.print("{d}.{s}", .{ whole, digits[0..end] });
-}
+/// Microseconds as the seconds Prometheus wants, written by `metric_types.zig`
+/// because a service's histograms print the same way and that file may not
+/// name this one (it sits outside the core, `http_core` in `build.zig`).
+const writeSeconds = metric_types.writeSeconds;
 
 /// The two labels every route series carries.
 ///
@@ -405,14 +396,7 @@ fn writeRouteLabels(w: *std.Io.Writer, label: Label) !void {
     try w.writeByte('"');
 }
 
-fn writeLabelValue(w: *std.Io.Writer, text: []const u8) !void {
-    for (text) |ch| switch (ch) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        else => try w.writeByte(ch),
-    };
-}
+const writeLabelValue = metric_types.writeLabelValue;
 
 /// One request in flight, from the point the connection had one to the point
 /// it was answered.

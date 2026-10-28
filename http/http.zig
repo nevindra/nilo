@@ -574,6 +574,25 @@ pub const IdempotentOptions = @import("typed.zig").IdempotentOptions;
 /// is any bytes Space with `putIfAbsent` and `putFor` — a `nilo_cache` one
 /// — provided as a service; `.by` is what the key is made of.
 pub const Cached = @import("cached.zig").Cached;
+
+/// Metrics of your own, as fields of the service that counts them
+/// ([ADR 079](../docs/adr/079-the-route-table-is-the-registry.md)).
+///
+/// ```zig
+/// const Shop = struct {
+///     orders_total: nilo.Counter(Status) = .{},
+///     checkout_seconds: nilo.Histogram(void, .{ .buckets = .{ 5_000, 50_000, 500_000 } }) = .{},
+///     queue_depth: nilo.Gauge(void) = .{},
+/// };
+/// // try app.provide(&shop);   …   shop.orders_total.inc(.paid);
+/// ```
+///
+/// The label is `void` (one series), an exhaustive enum, or a struct of them,
+/// and the field's name is the metric's. A counter ends `_total`, a histogram
+/// in seconds ends `_seconds`. Recording allocates nothing and takes no lock.
+pub const Counter = @import("metric_types.zig").Counter;
+pub const Gauge = @import("metric_types.zig").Gauge;
+pub const Histogram = @import("metric_types.zig").Histogram;
 pub const CachedOptions = @import("cached.zig").Options;
 pub const CachedBy = @import("cached.zig").By;
 
@@ -1150,6 +1169,7 @@ test {
     _ = @import("otlp.zig");
     _ = @import("metrics.zig");
     _ = @import("process_stats.zig");
+    _ = @import("metric_types.zig");
     _ = @import("compress.zig");
     _ = @import("allowance.zig");
     _ = @import("deadline.zig");

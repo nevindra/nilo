@@ -98,6 +98,31 @@ pub const Keyring = struct {
         remember_tokens: u16 = 0,
     };
 
+    /// What a server with `app.metrics` prints for a ring it was given as a
+    /// service (`nilo_http`'s `metric_types.zig`, ADR 079): how often the
+    /// memo of verified tokens spared a signature check. Plain strings, kinds
+    /// and functions, because this module may not import `nilo_http`
+    /// (ADR 038).
+    ///
+    /// **A ring with no memo reports `null`**, which the framework reads as
+    /// "print no sample" rather than a hit rate of zero that would look like
+    /// a memo that never helps. That is the one thing the table asks of a
+    /// reader beyond `u64`: it may answer `?u64`.
+    pub const nilo_metrics = .{
+        .{ "nilo_jwt_memo_hits_total", .counter, "Bearer tokens whose signature check the memo spared.", memoHits },
+        .{ "nilo_jwt_memo_misses_total", .counter, "Bearer tokens the memo did not hold, so the signature was checked.", memoMisses },
+    };
+
+    fn memoHits(self: *const Keyring) ?u64 {
+        const m = if (self.memo) |*m| m else return null;
+        return m.hits.load(.monotonic);
+    }
+
+    fn memoMisses(self: *const Keyring) ?u64 {
+        const m = if (self.memo) |*m| m else return null;
+        return m.misses.load(.monotonic);
+    }
+
     pub const Error = jwks.Error || error{
         /// The issuer answered the fetch with something other than a 2xx.
         /// The set that was held is still held.
@@ -436,6 +461,29 @@ test "a ring that remembers tokens skips the signature the second time, checks t
     try ring.load(vector.jwks);
     _ = try ring.verify(Sub, arena.allocator(), vector.token, 1_500_000_000);
     try testing.expectEqual(@as(u64, 3), ring.memo.?.misses.load(.monotonic));
+}
+
+test "the table the framework reads gives the memo's counts, and nothing for a ring with no memo" {
+    var opts = google;
+    opts.remember_tokens = 8;
+    var remembering: Keyring = try .init(testing.allocator, opts);
+    defer remembering.deinit();
+    try remembering.load(vector.jwks);
+    var plain: Keyring = try .init(testing.allocator, google);
+    defer plain.deinit();
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    _ = try remembering.verify(Sub, arena.allocator(), vector.token, 1_500_000_000);
+    _ = try remembering.verify(Sub, arena.allocator(), vector.token, 1_500_000_000);
+
+    try testing.expectEqual(@as(usize, 2), Keyring.nilo_metrics.len);
+    try testing.expectEqual(@as(?u64, 1), Keyring.nilo_metrics[0][3](&remembering));
+    try testing.expectEqual(@as(?u64, 1), Keyring.nilo_metrics[1][3](&remembering));
+    // A reader that returns null is a sample left out, not a zero that would
+    // read as a memo that never helps.
+    try testing.expectEqual(@as(?u64, null), Keyring.nilo_metrics[0][3](&plain));
+    try testing.expectEqual(@as(?u64, null), Keyring.nilo_metrics[1][3](&plain));
 }
 
 test "a ring over a shared key set refuses a token minted for another application, unless it says .unchecked" {

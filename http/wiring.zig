@@ -118,6 +118,16 @@ pub fn checkServices(self: *const App) error{MissingService}!void {
     return error.MissingService;
 }
 
+/// Refuse a program whose services' metrics cannot go on one page: a name two
+/// services hold as different things, two whose labels cannot be told apart,
+/// or more series than a page carries (ADR 079). Called by `listen()` and
+/// `start()` beside `checkServices`, so it is said before the port is taken.
+pub fn checkMetrics(self: *const App) error{MetricsRefused}!void {
+    const problem = self.services.metricsProblem() orelse return;
+    std.log.err("nilo will not start: {f}", .{problem});
+    return error.MetricsRefused;
+}
+
 /// A typed middleware reads a path param a route it covers does not have.
 pub const PathGap = struct {
     /// "the middleware taking (…)".
@@ -370,6 +380,9 @@ pub fn sizeMetrics(self: *App) !void {
         table.nameRoute(i, @tagName(r.method), r.pattern);
     }
     table.exposed = self.exposed.items;
+    // The services are read at scrape time, so the table holds the registry
+    // and not a copy of what it held (ADR 079).
+    table.services = &self.services;
     // The App counts this already, to know what a stop has to wait for.
     table.in_flight = &self.stop.in_flight;
     table.span_drops = if (self.tracer) |t| &t.dropped else null;

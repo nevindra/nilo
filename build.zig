@@ -2777,6 +2777,86 @@ const refusals = [_]Refusal{
         .says = "the metrics path \"/metrics/:name\" has a `:` in it, which makes it a pattern rather than one address.",
     },
     .{
+        .name = "metrics_label_struct_has_a_field_that_is_not_an_enum",
+        .says = "nilo.Counter was given the label metrics_label_struct_has_a_field_that_is_not_an_enum.Label, and its field `shard` is a u32.",
+    },
+    .{
+        .name = "metrics_label_enum_is_not_exhaustive",
+        .says = "nilo.Counter was given the label metrics_label_enum_is_not_exhaustive.Status, which is not exhaustive.",
+    },
+    .{
+        .name = "metrics_counter_without_total",
+        .says = "metrics_counter_without_total.Shop.orders is a counter, and a counter's name ends `_total`.",
+    },
+    .{
+        .name = "metrics_label_is_not_an_enum",
+        .says = "nilo.Counter was given the label []const u8, which is not `void`, an exhaustive enum or a struct of exhaustive enums.",
+    },
+    .{
+        .name = "metrics_histogram_first_bucket_is_zero",
+        .says = "nilo.Histogram was given a bucket of 0, and the first boundary has to be above zero.",
+    },
+    .{
+        .name = "metrics_histogram_without_buckets",
+        .says = "nilo.Histogram was given no buckets, so it would count nothing.",
+    },
+    .{
+        .name = "metrics_table_kind_is_unknown",
+        .says = "metrics_table_kind_is_unknown.Store.nilo_metrics row 1 has the kind `.histogram`, and a table row is `.counter` or `.gauge`.",
+    },
+    .{
+        .name = "metrics_field_name_is_not_prometheus",
+        .says = "the metric name metrics_field_name_is_not_prometheus.Shop.orders placed_total has a ` ` in it, and Prometheus would refuse the whole page rather than that one line.",
+    },
+    .{
+        .name = "metrics_histogram_bucket_is_a_float",
+        .says = "nilo.Histogram was given a bucket that is a comptime_float, and boundaries are integers.",
+    },
+    .{
+        .name = "metrics_seconds_histogram_without_seconds",
+        .says = "metrics_seconds_histogram_without_seconds.Shop.checkout_time is a histogram in seconds, and its name ends `_seconds`.",
+    },
+    .{
+        .name = "metrics_histogram_buckets_out_of_order",
+        .says = "nilo.Histogram was given the bucket 5000 after 50000, and the boundaries have to climb.",
+    },
+    .{
+        .name = "metrics_help_names_no_metric",
+        .says = "metrics_help_names_no_metric.Shop.nilo_help has `order_total`, and metrics_help_names_no_metric.Shop has no metric field of that name.",
+    },
+    .{
+        .name = "metrics_table_counter_without_total",
+        .says = "metrics_table_counter_without_total.Store.nilo_metrics row 1 is the counter \"nilo_store_hits\", and a counter's name ends `_total`.",
+    },
+    .{
+        .name = "metrics_table_reader_returns_text",
+        .says = "metrics_table_reader_returns_text.Store.nilo_metrics row 1's reader returns something other than `u64` or `?u64`.",
+    },
+    .{
+        .name = "metrics_label_key_is_service",
+        .says = "nilo.Counter was given the label metrics_label_key_is_service.Service, whose key `service` is one nilo writes itself.",
+    },
+    .{
+        .name = "metrics_field_name_is_nilos",
+        .says = "metrics_field_name_is_nilos.Shop.nilo_orders_total starts with `nilo_`, which is what nilo's own metrics are called.",
+    },
+    .{
+        .name = "metrics_table_row_is_the_wrong_shape",
+        .says = "metrics_table_row_is_the_wrong_shape.Store.nilo_metrics row 1 is not a name, a kind, a help and a reader.",
+    },
+    .{
+        .name = "metrics_label_with_too_many_cells",
+        .says = "nilo.Counter(metrics_label_with_too_many_cells.Label) would have more than 256 cells, and a metric holds at most that many.",
+    },
+    .{
+        .name = "metrics_table_reader_takes_the_wrong_thing",
+        .says = "metrics_table_reader_takes_the_wrong_thing.Store.nilo_metrics row 1's reader takes u32, and it has to take `*const metrics_table_reader_takes_the_wrong_thing.Store`.",
+    },
+    .{
+        .name = "metrics_histogram_with_too_many_buckets",
+        .says = "nilo.Histogram was given 17 buckets, and a histogram holds at most 16.",
+    },
+    .{
         .name = "param_is_a_many_pointer",
         .says = "argument 1 of the handler for route \"/greet/:name\" is a [*]const u8, which cannot be matched.",
     },

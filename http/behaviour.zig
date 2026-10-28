@@ -33,6 +33,7 @@ const websocket = @import("websocket.zig");
 const room_mod = @import("room.zig");
 const rooms_mod = @import("rooms.zig");
 const metrics_mod = @import("metrics.zig");
+const metric_types = @import("metric_types.zig");
 const nilo_testing = @import("testing.zig");
 const form_mod = @import("form.zig");
 const bound_mod = @import("bound.zig");
@@ -5927,6 +5928,126 @@ test "counting a request adds nothing to the allocation budget" {
     // exists (ADR 017).
     try testing.expectEqual(@as(usize, 1), counting.allocs);
     try testing.expectEqual(@as(usize, 0), counting.resizes);
+}
+
+const ShopPhase = enum { found, missing };
+
+/// A service that counts its own work (ADR 079).
+const ShopMetrics = struct {
+    lookups_total: metric_types.Counter(ShopPhase) = .{},
+    lookup_seconds: metric_types.Histogram(void, .{ .buckets = .{ 100, 5_000 } }) = .{},
+    in_progress: metric_types.Gauge(void) = .{},
+
+    pub const nilo_help = .{ .lookups_total = "Lookups, by outcome." };
+};
+
+fn countedUser(db: *Db, shop: *ShopMetrics, id: u32) !UserOut {
+    shop.in_progress.inc();
+    defer shop.in_progress.dec();
+    const row = db.find(id) orelse {
+        shop.lookups_total.inc(.missing);
+        return fail.notFound("no user {d}", .{id});
+    };
+    shop.lookups_total.inc(.found);
+    shop.lookup_seconds.observe(250);
+    return .{ .id = row.id, .name = row.name };
+}
+
+test "a service's own metrics, bumped by a handler, show on the page with the service's name" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var shop = ShopMetrics{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.provide(&shop);
+    try app.get("/users/:id", countedUser);
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    // Nothing has happened yet, and every series is already there at zero.
+    const before = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, before, "# HELP lookups_total Lookups, by outcome.\n# TYPE lookups_total counter\n") != null);
+    try testing.expect(std.mem.indexOf(u8, before, "lookups_total{service=\"ShopMetrics\",shop_phase=\"found\"} 0\n") != null);
+    try testing.expect(std.mem.indexOf(u8, before, "lookup_seconds_count{service=\"ShopMetrics\"} 0\n") != null);
+
+    _ = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = h.send(&app, "GET /users/7 HTTP/1.1\r\nHost: x\r\n\r\n");
+    _ = h.send(&app, "GET /users/9 HTTP/1.1\r\nHost: x\r\n\r\n");
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, page, "lookups_total{service=\"ShopMetrics\",shop_phase=\"found\"} 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "lookups_total{service=\"ShopMetrics\",shop_phase=\"missing\"} 1\n") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "lookup_seconds_bucket{service=\"ShopMetrics\",le=\"0.005\"} 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "lookup_seconds_sum{service=\"ShopMetrics\"} 0.0005\n") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "in_progress{service=\"ShopMetrics\"} 0\n") != null);
+    // The route table's own series are still there, and printed before.
+    try testing.expect(std.mem.indexOf(u8, page, "nilo_requests_total") != null);
+}
+
+test "a service that holds no metric adds nothing to the page" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.get("/users/:id", getUser);
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, page, "service=\"") == null);
+}
+
+test "recording a service's metric adds nothing to the allocation budget" {
+    var db = Db{ .rows = &.{.{ .id = 7, .name = "wati" }} };
+    var shop = ShopMetrics{};
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.provide(&db);
+    try app.provide(&shop);
+    try app.get("/users/:id", countedUser);
+    try app.use(cors.permissive);
+    try app.metrics(.{});
+    try app.resolveChains();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var counting = budget.Counting{ .child = arena.allocator() };
+    var lifetime = str_mod.Lifetime{};
+    var in_flight = fail.InFlight{};
+    var buf: [4096]u8 = undefined;
+
+    const request = "GET /users/7 HTTP/1.1\r\nHost: example.dev\r\nUser-Agent: wrk\r\n" ++
+        "Accept: */*\r\nAccept-Encoding: gzip\r\nConnection: keep-alive\r\n\r\n";
+
+    const send = struct {
+        fn once(a: *App, gpa: std.mem.Allocator, l: *str_mod.Lifetime, f: *fail.InFlight, b: []u8) void {
+            var in = std.Io.Reader.fixed(request);
+            var out = std.Io.Writer.fixed(b);
+            _ = a.handleRequest(gpa, l, f, &in, &out, .off, .off, .{});
+            l.end();
+        }
+    }.once;
+
+    for (0..3) |_| {
+        send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+        _ = arena.reset(.{ .retain_with_limit = app_mod.default_arena_keep });
+    }
+
+    counting.reset();
+    send(&app, counting.allocator(), &lifetime, &in_flight, &buf);
+
+    // The same count as without: this handler does an `inc`, a `dec`, another
+    // `inc` and an `observe`, and they are `fetchAdd`s on memory the service
+    // already was (ADR 079, ADR 017).
+    try testing.expectEqual(@as(usize, 1), counting.allocs);
+    try testing.expectEqual(@as(usize, 0), counting.resizes);
+    // And it did run all four times, so the count above is about real work.
+    try testing.expectEqual(@as(u64, 4), shop.lookups_total.get(.found));
+    try testing.expectEqual(@as(u64, 4), shop.lookup_seconds.countOf(0));
 }
 
 test "an allowance adds nothing to the allocation budget" {

@@ -1437,6 +1437,7 @@ pub const App = struct {
     // called as `wiring.name(app, …)`, which says which half of the App's
     // life the call belongs to.
     pub const checkServices = wiring.checkServices;
+    pub const checkMetrics = wiring.checkMetrics;
     pub const checkMiddlewarePaths = wiring.checkMiddlewarePaths;
     pub const middlewarePathGap = wiring.middlewarePathGap;
     pub const resolveChains = wiring.resolveChains;
@@ -1463,6 +1464,7 @@ pub const App = struct {
             // are `tryListen`'s own; the rest are the Engine's.
             if (bulkhead.explained(err) or
                 err == error.MissingService or
+                err == error.MetricsRefused or
                 err == error.MiddlewarePathParam or
                 err == error.TrustedProxyNotAnAddress or
                 err == error.SessionSecretWrongLength or
@@ -1490,6 +1492,7 @@ pub const App = struct {
         wiring.checkRootWiring(options_.log.format);
         wiring.warnLoopbackInContainer(options_.address, options_.also);
         try self.checkServices();
+        try self.checkMetrics();
         // Before the chains are resolved, because that is when the
         // compressors are sized, and they are sized to the threads the
         // Engine is about to start (ADR 211).
@@ -1641,6 +1644,7 @@ pub const App = struct {
     /// it off (ADR 028).
     pub fn start(self: *App, io: std.Io) !void {
         try self.checkServices();
+        try self.checkMetrics();
         try self.resolveChains();
         try self.checkMiddlewarePaths();
         try self.startServices(io, .{}, .start);

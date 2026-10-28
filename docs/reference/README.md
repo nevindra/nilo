@@ -73,6 +73,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
   - [`Group`](./app.md#group)
   - [`listen` options](./app.md#listen-options)
   - [`metrics` options](./app.md#metrics-options)
+  - [Metrics of your own](./app.md#metrics-of-your-own)
   - [`compress` options](./app.md#compress-options)
   - [`trace` options](./app.md#trace-options)
 - [Concurrency](./app.md#concurrency)
