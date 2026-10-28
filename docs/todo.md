@@ -195,6 +195,10 @@ Nothing is open at this tier.
 
 **Needs:** the two counters asserted with messages that name them, the test run in a loop under load in both modes until it fails again, and the cause found from which one it was.
 
+**A gRPC test fails now and then: "a server stop that lands in a burst of calls ends the connection promptly, however many are queued or sleeping" (`http/grpc_live.zig`) found 8 where it expects 0.** It failed twice on the 2-core Xeon on 28 October 2026, once in a subagent's `test-http` and once in `test-all` at `99c7a33` with the next change in the tree, each time with other builds loading the machine, and passed in the run after each on the same tree. The test prints no line saying what the 8 are, calls answered after the stop or calls left unanswered, and those are a different defect each.
+
+**Needs:** the assertion given a message naming what it counted, the test looped under load until it fails again, and the cause found from which count it was.
+
 **One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is now one comptime rule (`http/field.zig`), and a number described in a query and not in JSON is still open. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
 
 **Needs:** the shape of each shared piece decided — one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the prefix matcher next.
@@ -298,12 +302,6 @@ Nothing is open at this tier.
 **Needs:** the hook, designed together with the first bridge (Postgres `LISTEN/NOTIFY` or `nilo_redis`, whichever the roadmap's measurement picks).
 
 **Direction:** [A second instance changes no answer](./roadmap.md#a-second-instance-changes-no-answer)
-
-**A failure shape of the application's own cannot read the fields yet.** nilo's own body lists every field that failed, from a plain `Form(T)`, JSON body or `Query(T)` as well as from `Bound`, kept in the request arena behind a second marker in the 240-byte slot (`Failure.fields()`, [ADR 024](./adr/024-every-failure-answers-as-json.md)). `nilo_failure(status, message)` in `http/failurebody.zig` is still handed the status and the sentence only, so an app that named its own shape with `app.failures(T)` answers a form of five mistakes with the sentence and a client that has to parse English.
-
-**Needs:** `nilo_failure` taking a third parameter, the `[]const nilo.FieldFailure`, with the two-parameter form still accepted; the document's `Failure` schema read from the shape as before; and ADR 024 edited to say which shapes receive the list.
-
-**Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
 
 **Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.** `Path(T)`, typed middleware, the one log sink, `Bearer(T)`, the deadline that reaches the toolkit, `nilo.app` and the startup warnings each have tests, and each test was written by the people who built it. The direction's own closing condition is a reader who did not: every mistake they make is either a compile error or a refusal at `listen()` naming the fix, or it is the next entry here.
 

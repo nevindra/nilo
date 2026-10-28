@@ -119,7 +119,7 @@ Content-Type: application/json
 
 `message` is the sentence the field gets in `error`, and `expected` is what it would have taken ("text", "a whole number", "one of free, pro"); a rule has none. **The value the client sent is not a field of its own**, so a password never reaches a log through the list. Every field that failed is there, in the order the type declares them, up to 64 (the `error` sentence says how many there were). The same list comes from a plain `Form(T)`, a JSON body and a `Query(T)`, which stop at the first field they cannot read and then read the request again to find the rest, and from `b.fail()` on a [`Bound`](./forms.md#collecting-every-field-error-bound), as a 422.
 
-Only these arguments carry `fields`. A 404, a 500, a 401 challenge, a `fail` function's sentence and a body that is not JSON at all are the `error` and `status` they have always been. An app that named its own shape with `app.failures` is handed the status and the sentence as before, and does not see the list yet. The OpenAPI document's `Failure` schema lists `fields` as optional, with `code` as the enum above ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
+Only these arguments carry `fields`. A 404, a 500, a 401 challenge, a `fail` function's sentence and a body that is not JSON at all are the `error` and `status` they have always been. An app that named its own shape with `app.failures` is handed the list too if its `nilo_failure` asks for it ([below](#using-your-own-error-shape)). The OpenAPI document's `Failure` schema lists `fields` as optional, with `code` as the enum above ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
 
 A failure with no message of its own gets the status phrase. Nothing about nilo's internals is sent: no stack trace, no file name, and no Zig error name unless a `fail` function put it in the message on purpose. A 500 logs the error name and sends `internal server error`.
 
@@ -155,6 +155,32 @@ Content-Type: application/json
 The struct's fields become the JSON, and `nilo_failure` fills them from the status and the message. A nested struct for `{"error":{"code":…}}` works the same way. Every failure nilo builds uses the shape, with the headers the request collected: a 405 still carries its `Allow`, a 401 its `WWW-Authenticate`, and the CORS headers, cookies and your own headers still go out. What described the answer the failure replaced does not: `Content-Encoding`, `Content-Language`, `Content-Location`, `ETag`, `Last-Modified`, `Content-Range`, `Accept-Ranges`, `Content-Disposition`, the digests, `Location`, `Expires`, `Age`, and a `Cache-Control` that does not say `no-store` are dropped, so a failure is never labelled gzip or kept by a cache for a year ([ADR 024](../adr/024-every-failure-answers-as-json.md)). The OpenAPI document's `Failure` schema is read from the same fields, so it matches what is sent.
 
 A few answers keep nilo's own shape: the ones written before there is a request to route (a malformed head, a head that is too long, a 503 when the server sheds load), because those are constants written in one call. The body is written into a fixed buffer with 256 bytes of room for the fields around the message. A shape that needs more gets nilo's own shape instead, with the message intact, and the first failure in development shows it ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
+
+**To give your clients the list under your own keys, take a third parameter:**
+
+<!-- compiles -->
+```zig
+const FieldedError = struct {
+    code: u16,
+    detail: []const u8,
+    errors: []const Err,
+
+    const Err = struct {
+        path: []const u8,
+        msg: []const u8,
+
+        pub fn nilo_field(f: nilo.FieldFailure) Err {
+            return .{ .path = f.field, .msg = f.message };
+        }
+    };
+
+    pub fn nilo_failure(status: u16, message: []const u8, errors: []const Err) FieldedError {
+        return .{ .code = status, .detail = message, .errors = errors };
+    }
+};
+```
+
+`nilo_field` maps one entry, and nilo calls it once for each field that failed before the body is written. Take `fields: []const nilo.FieldFailure` instead and the entries arrive as nilo holds them (`field`, `code`, `message`, `expected`), with no `nilo_field` to write. A failure that names no field, such as a 404, hands the function an empty slice, so `errors` is `[]`. Neither function can fail: a `nilo_failure` or `nilo_field` that returns an error union is a compile error, because the failure path has no failure path of its own. The document's `Failure` schema lists `errors` as an array of your entry type.
 
 In tests, read the field instead of matching the raw response:
 

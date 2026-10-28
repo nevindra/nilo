@@ -71,6 +71,23 @@ The fields are the JSON, the way a handler's return type is.
 nilo writes the value with the same JSON writer a handler's answer goes through, into the same fixed stack buffer the default shape uses, and sends it through the same path, so a 405 keeps its `Allow`, a 401 its challenge, and every failure the headers the request collected.
 The API description derives `components.schemas.Failure` from the struct's fields, written inline under that name, so the document and the wire cannot disagree.
 
+**A third parameter hands it the fields.** `nilo_failure(status, message, fields)` is accepted beside the two-parameter form, and which one a type wrote is the whole switch: arity decides, so a shape of two parameters is handed nothing and pays for nothing. `fields` is a `[]const E`, where `E` is either `nilo.FieldFailure` itself (the list as nilo holds it) or a type of the application's with `pub fn nilo_field(f: nilo.FieldFailure) E` that maps one entry, so a team whose clients read `{"path":…,"msg":…}` renames the keys and drops what it does not send without a copy loop in every handler.
+
+```zig
+const ApiError = struct {
+    code: u16, detail: []const u8, errors: []const Err,
+    const Err = struct {
+        path: []const u8, msg: []const u8,
+        pub fn nilo_field(f: nilo.FieldFailure) Err { return .{ .path = f.field, .msg = f.message }; }
+    };
+    pub fn nilo_failure(status: u16, message: []const u8, errors: []const Err) ApiError {
+        return .{ .code = status, .detail = message, .errors = errors };
+    }
+};
+```
+
+nilo maps the list once, into the request arena, before the body is measured and written, so the counting pass and the writing pass see the same entries. A failure that names no field (a 404, a 500, a 401) hands the hook an empty slice, and so does a mapping the arena had no room for: the hook cannot fail, and so it is never told a failure happened. The API description reads the shape as before, and a `[]const E` field is an array of `E`'s schema. Connect's body has no place for the list and a Connect call is handed none. Refusals: a `nilo_failure` of any other parameter count, a third parameter that is not a slice, an `E` that is neither `nilo.FieldFailure` nor a type with a `nilo_field`, and a `nilo_field` that returns anything but `E` (an error union included).
+
 **Not a writer.** A shape a type could carry instead, `nilo_write(status, message, w) !void`, was built first and taken out: a writer has to be trusted about what it wrote, so the document would need a second declaration saying what the bytes look like, and the two would drift.
 A struct needs no second declaration, and `nilo_failure` cannot fail by signature, because the failure path must not have a failure path of its own and a writer's `!void` would have had one.
 
@@ -88,6 +105,10 @@ A 405 still carries its `Allow` header, and an unset `WWW-Authenticate` challeng
 **A Connect call is answered in Connect's shape, over the application's.** A request carrying `Connect-Protocol-Version: 1`, to a program with a route that reads or answers a message, fails as `{"code":"not_found","message":"…"}` with the same sentence, because its client reads nothing else; every other request keeps the shape above ([ADR 257](./257-a-connect-client-is-told-its-failure-in-connect-words.md)).
 
 ## What was rejected
+
+**A second hook, `nilo_failure_fields(status, message, fields)`, beside `nilo_failure`.** A type that declared both would have two answers to one failure and nothing to say which wins, and a type that declared only the second would have no body for a failure with no fields. One function, whose arity says what it wants, has no such state.
+
+**Handing the hook a `nilo.FieldFailure` list only.** It would have been simplest, and every application with its own keys would then rename them inside `nilo_failure`, which cannot allocate, so it would have had to write a fixed array or give up. `nilo_field` puts the allocation where the arena is and the rename where the application can read it.
 
 **Negotiating on `Accept`.** `fetch()` sends `Accept: */*` and so does `curl`, so the header cannot tell the browser from the terminal, the two cases this would exist to separate; choosing JSON for `*/*` is the same as choosing JSON always, with a rule on top that never fires.
 
@@ -116,7 +137,7 @@ nilo flushes on `send`, so the body would be rewritten after the head had alread
 
 | Axis | Cost |
 |---|---|
-| Allocations per request | 0 on a request that succeeds, and on a failure that is not about fields. A failure that is, makes three allocations in the request arena for the list and the sentence, and one for each entry's message (`bound`'s sentences are formatted once into a scratch and copied; the JSON walk formats into the arena): the failure path only, for a request that was refused anyway |
+| Allocations per request | 0 on a request that succeeds, and on a failure that is not about fields. A failure that is, makes three allocations in the request arena for the list and the sentence, and one for each entry's message (`bound`'s sentences are formatted once into a scratch and copied; the JSON walk formats into the arena), and one more for a shape whose `nilo_field` makes its own entries: the failure path only, for a request that was refused anyway |
 | Memory per idle connection | 0: the buffer lives on `sendFailure`'s frame, `noinline` and entered only on a failure |
 | Throughput and p99 | 0: one null check, on the failure path |
 | Binary size, an App that never calls `failures` | +400 bytes on `hello`, +448 on `rest`, stripped `ReleaseFast`. The fields add the comptime sentence table of `bound.zig` to every `Form(T)` and `Query(T)` in a program (it was only `Bound`'s), and a walk that collects where it returned: **not measured** by `bench/release.py` yet |
@@ -124,4 +145,4 @@ nilo flushes on `send`, so the body would be rewritten after the head had alread
 The stack buffer is sized `fail.max_message * 6 + 256`: `fail.max_message` is the 240 bytes of the Failure's slot, escaping can turn each byte into six, and 256 is the envelope's own room. A message past the slot is kept whole in the request arena (up to 16 KiB, ADR 006), and its body is built in the arena as well, `len * 6 + 256` bytes, so the frame does not grow; if the arena has no room the message is cut to the slot's, as it was before ([ADR 286](./286-a-handler-may-answer-in-several-typed-statuses.md)). A gRPC call is told the first KiB of it, since `grpc-message` is a header.
 A shape that outgrows the buffer gets nilo's own shape instead, sentence intact, which the first failure in development shows; there is no `std.log.warn` for it, because a log call site costs a kilobyte or two of formatting in the binary of every App, fired or not, whether or not that App ever calls `failures`.
 An application that does call `failures` additionally pays its own `json.write` instantiation and `schemaOf`, the same as a handler returning that struct would.
-`Refusals`: not a struct; no `nilo_failure`; a `nilo_failure` with the wrong signature.
+`Refusals`: not a struct; no `nilo_failure`; a `nilo_failure` with the wrong signature or parameter count; a third parameter that is not a slice; an entry type with no `nilo_field`; a `nilo_field` that is not `fn (nilo.FieldFailure) E`.

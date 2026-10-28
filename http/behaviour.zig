@@ -14836,7 +14836,38 @@ test "an answer that is not about fields has no fields, byte for byte" {
     try testing.expect(std.mem.endsWith(u8, garbage.response, "{\"error\":\"malformed request\",\"status\":400}"));
 }
 
-test "an App that named its own failure shape is not handed the list yet" {
+/// A shape that lists nilo's own entries, and one that renames them: the two
+/// ways a third parameter is written (ADR 024).
+const ListedError = struct {
+    code: u16,
+    detail: []const u8,
+    fields: []const nilo.FieldFailure,
+
+    pub fn nilo_failure(status: u16, message: []const u8, fields: []const nilo.FieldFailure) ListedError {
+        return .{ .code = status, .detail = message, .fields = fields };
+    }
+};
+
+const MappedError = struct {
+    code: u16,
+    detail: []const u8,
+    errors: []const Err,
+
+    const Err = struct {
+        path: []const u8,
+        msg: []const u8,
+
+        pub fn nilo_field(f: nilo.FieldFailure) Err {
+            return .{ .path = f.field, .msg = f.message };
+        }
+    };
+
+    pub fn nilo_failure(status: u16, message: []const u8, errors: []const Err) MappedError {
+        return .{ .code = status, .detail = message, .errors = errors };
+    }
+};
+
+test "a shape of two parameters answers a form that did not fit as it always did" {
     var app = App.init(testing.allocator);
     defer app.deinit();
     try app.failures(ApiError);
@@ -14849,6 +14880,80 @@ test "an App that named its own failure shape is not handed the list yet" {
         "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\n\r\nage=soon&plan=gold");
     try testing.expect(std.mem.indexOf(u8, answer.response, "\"fields\"") == null);
     try testing.expect(std.mem.indexOf(u8, answer.response, "3 fields did not fit") != null);
+}
+
+test "a shape of three parameters is handed the fields nilo lists" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.failures(ListedError);
+    try app.post("/sign-up", fbBoundSignUp);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "POST /sign-up HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\n\r\nage=soon&plan=gold");
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 422), parsed.value.object.get("code").?.integer);
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 3), fields.len);
+    try expectField(fields[0], "email", "missing", "text");
+    try expectField(fields[1], "age", "not_that_type", "a whole number");
+    try expectField(fields[2], "plan", "not_one_of", "one of free, pro");
+}
+
+test "a shape with an entry type of its own is handed the entries nilo_field made" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.failures(MappedError);
+    try app.post("/sign-up", fbBoundSignUp);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "POST /sign-up HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\n\r\nage=soon&plan=gold");
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    const errors = parsed.value.object.get("errors").?.array.items;
+    try testing.expectEqual(@as(usize, 3), errors.len);
+    try testing.expectEqualStrings("email", errors[0].object.get("path").?.string);
+    try testing.expectEqualStrings("plan", errors[2].object.get("path").?.string);
+    try testing.expect(errors[1].object.get("msg") != null);
+    try testing.expect(errors[1].object.get("code") == null);
+}
+
+test "a shape of three parameters is handed an empty list on a failure that names no field" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.failures(MappedError);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 404"));
+    try testing.expect(std.mem.endsWith(u8, answer.response, "{\"code\":404,\"detail\":\"there is no /nowhere\",\"errors\":[]}"));
+}
+
+test "the document shows the entries of a shape with a third parameter as an array of its type" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.failures(MappedError);
+    try app.post("/orders", fbPlaceOrder);
+    const json = try docsFor(&app);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"errors\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/components/schemas/Err\"}}",
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        json,
+        "\"Err\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"msg\":{\"type\":\"string\"}}",
+    ) != null);
 }
 
 test "the document's failure schema has the optional fields array, with FieldCode's tags" {

@@ -2407,7 +2407,27 @@ const refusals = [_]Refusal{
     },
     .{
         .name = "failures_from_wrong_signature",
-        .says = "failures_from_wrong_signature.ApiError's `nilo_failure` is not `fn (status: u16, message: []const u8) failures_from_wrong_signature.ApiError`.",
+        .says = "failures_from_wrong_signature.ApiError's `nilo_failure` is not `fn (status: u16, message: []const u8) failures_from_wrong_signature.ApiError` or `fn (status: u16, message: []const u8, fields: []const E) failures_from_wrong_signature.ApiError`.",
+    },
+    .{
+        .name = "failures_from_four_parameters",
+        .says = "failures_from_four_parameters.ApiError's `nilo_failure` is not `fn (status: u16, message: []const u8) failures_from_four_parameters.ApiError` or `fn (status: u16, message: []const u8, fields: []const E) failures_from_four_parameters.ApiError`.",
+    },
+    .{
+        .name = "failures_fields_not_a_slice",
+        .says = "failures_fields_not_a_slice.ApiError's `nilo_failure` takes usize as its third parameter, and the fields that did not fit arrive as a `[]const E`.",
+    },
+    .{
+        .name = "failures_field_without_nilo_field",
+        .says = "failures_field_without_nilo_field.ApiError.Err is neither `nilo.FieldFailure` nor a type with a `nilo_field`, so nilo cannot fill the fields of failures_field_without_nilo_field.ApiError's failure body.",
+    },
+    .{
+        .name = "failures_field_that_can_fail",
+        .says = "failures_field_that_can_fail.ApiError.Err's `nilo_field` is not `fn (f: nilo.FieldFailure) failures_field_that_can_fail.ApiError.Err`.",
+    },
+    .{
+        .name = "failures_field_returning_another_type",
+        .says = "failures_field_returning_another_type.ApiError.Err's `nilo_field` is not `fn (f: nilo.FieldFailure) failures_field_returning_another_type.ApiError.Err`.",
     },
     .{
         .name = "errors_status_not_an_error",

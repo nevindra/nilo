@@ -168,6 +168,12 @@ pub const App = struct {
     /// beside it is what the document says under `Failure`; set together.
     failure_write: ?failurebody.Write = null,
     failure_schema: ?*const openapi.Schema = null,
+    /// Whether that shape's `nilo_failure` takes the fields that did not fit,
+    /// and the step that turns them into the shape's own entry type when it
+    /// has one (ADR 024). Set with `failure_write`; a shape of two parameters
+    /// leaves both at their defaults and is handed nothing.
+    failure_fields: bool = false,
+    failure_map: ?failurebody.Map = null,
     /// The status (and sentence) `errors()` gave to errors from code that
     /// knows nothing of HTTP, or null for the built-in table alone. Read on
     /// the failure path and by the document (ADR 004).
@@ -1175,7 +1181,11 @@ pub const App = struct {
     ///
     /// The struct's fields are the JSON; `nilo_failure` fills it from the
     /// status and the fail function's sentence; the API description's
-    /// `Failure` schema is derived from the same fields. Every failure nilo
+    /// `Failure` schema is derived from the same fields. A third parameter,
+    /// `fields: []const nilo.FieldFailure`, hands it the fields of a body, form
+    /// or query that did not fit (an empty list on any other failure), and a
+    /// slice of a type of yours whose `pub fn nilo_field(f: nilo.FieldFailure) E`
+    /// maps one entry gets the keys it wants. Every failure nilo
     /// assembles takes the shape — a fail function, a 404, a 405 with its
     /// `Allow`, a 401 with its challenge, a 500 — and the headers the request
     /// collected still go out with it. The five answers written before there
@@ -1188,6 +1198,8 @@ pub const App = struct {
         if (self.failure_write != null) return error.FailureShapeAlreadySet;
         self.failure_write = write;
         self.failure_schema = schema;
+        self.failure_fields = comptime failurebody.takesFields(T);
+        self.failure_map = comptime failurebody.mapperOf(T);
     }
 
     /// Give errors from code that does not know about HTTP a status once, for

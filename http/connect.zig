@@ -24,6 +24,7 @@ const json = @import("json.zig");
 const codes = @import("code.zig");
 const message = @import("message.zig");
 const failurebody = @import("failurebody.zig");
+const fail = @import("fail.zig");
 
 /// Whether the request is a Connect call: it carries the protocol's version
 /// header, at the one version there is.
@@ -46,7 +47,16 @@ pub fn pick(head: []const u8, err: anyerror) ?failurebody.Write {
 /// and its status's otherwise: three of these, each a call into `write`.
 fn writerFor(comptime said: ?u8) type {
     return struct {
-        fn write(status: u16, text: []const u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        fn write(
+            status: u16,
+            text: []const u8,
+            fields: []const fail.FieldFailure,
+            mapped: ?*const anyopaque,
+            w: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            // Connect's body has no place for the fields (ADR 257).
+            _ = fields;
+            _ = mapped;
             return writeBody(said orelse codes.forStatus(status), text, w);
         }
     };
@@ -78,21 +88,21 @@ test "a Connect failure names its code from the error before the status" {
     const write = pick(head, error.AlreadyExists).?;
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try write(409, "that name is taken", &w);
+    try write(409, "that name is taken", &.{}, null, &w);
     try testing.expectEqualStrings("{\"code\":\"already_exists\",\"message\":\"that name is taken\"}", w.buffered());
 
     w = .fixed(&buf);
-    try pick(head, error.Failed).?(404, "no user 7", &w);
+    try pick(head, error.Failed).?(404, "no user 7", &.{}, null, &w);
     try testing.expectEqualStrings("{\"code\":\"not_found\",\"message\":\"no user 7\"}", w.buffered());
 
     w = .fixed(&buf);
-    try pick(head, error.RolledBack).?(503, "try again", &w);
+    try pick(head, error.RolledBack).?(503, "try again", &.{}, null, &w);
     try testing.expectEqualStrings("{\"code\":\"aborted\",\"message\":\"try again\"}", w.buffered());
 
     // Every error that names a code is told it, whatever its status.
     inline for (codes.by_error) |named| {
         w = .fixed(&buf);
-        try pick(head, named.err).?(500, "m", &w);
+        try pick(head, named.err).?(500, "m", &.{}, null, &w);
         try testing.expect(std.mem.indexOf(u8, w.buffered(), codes.names[named.code]) != null);
     }
 

@@ -1070,13 +1070,20 @@ fn writeFields(w: *std.Io.Writer, fields: []const fail.FieldFailure) !void {
 /// own shape and the application's, each measured by writing it nowhere. The
 /// shape is written in this pass as well as in the real one, so it has to give
 /// the same bytes both times, as every `nilo_failure` writer does.
-fn failureBodyLen(c: *Ctx, shape: ?failurebody.Write, status: u16, message: []const u8, fields: []const fail.FieldFailure) usize {
+fn failureBodyLen(
+    c: *Ctx,
+    shape: ?failurebody.Write,
+    status: u16,
+    message: []const u8,
+    fields: []const fail.FieldFailure,
+    mapped: ?*const anyopaque,
+) usize {
     var own = std.Io.Writer.Discarding.init(&.{});
     writeFailureBody(&own.writer, status, message, fields) catch {};
     var most: usize = @intCast(own.fullCount());
     if (shape) |write| {
         var custom = std.Io.Writer.Discarding.init(&.{});
-        if (write(status, lossyMessage(c, message), &custom.writer)) |_| {
+        if (write(status, lossyMessage(c, message), fields, mapped, &custom.writer)) |_| {
             most = @max(most, @as(usize, @intCast(custom.fullCount())));
         } else |_| {}
     }
@@ -1640,19 +1647,28 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, ap
     // over both shapes it may be written in. If the arena has no room now, the
     // message is cut to the slot's, as it was when it was said.
     // The fields that did not fit, when a body, form or query argument named
-    // them (ADR 024). Only nilo's own shape lists them: a shape of the
-    // application's is handed the status and the sentence, and it is the
-    // fallback written below, sized with no list, that must not outgrow its
-    // buffer. A body with fields is built in the arena like a long message,
-    // so the stack buffer is the size it always was.
-    const fields: []const fail.FieldFailure = if (shape == null and fail.failed(failure, err)) failure.fields() else &.{};
-    var listed = fields;
+    // them (ADR 024). nilo's own shape lists them, and so does an application's
+    // whose `nilo_failure` takes a third parameter; Connect's body and a shape
+    // of two parameters are handed none. The fallback written below, sized with
+    // no list, is what must not outgrow the stack buffer. A body with fields
+    // is built in the arena like a long message, so the stack buffer is the
+    // size it always was.
+    const lists = shape == null or (app.failure_fields and shape == app.failure_write);
+    var listed: []const fail.FieldFailure = if (lists and fail.failed(failure, err)) failure.fields() else &.{};
+    // The application's own entry type is made once, in the arena, before the
+    // body is measured, so the two passes agree. If the arena refuses, the
+    // hook is handed an empty list: it cannot fail, so it cannot be told to.
+    var listed_map: ?*const anyopaque = null;
+    if (shape != null and listed.len != 0) if (app.failure_map) |map| {
+        listed_map = map(c._arena, listed);
+    };
     const buf: []u8 = if (message.len <= fail.max_message and listed.len == 0)
         &stack
     else
-        c._arena.alloc(u8, failureBodyLen(c, shape, status, message, listed)) catch blk: {
+        c._arena.alloc(u8, failureBodyLen(c, shape, status, message, listed, listed_map)) catch blk: {
             message = message[0..fail.wholeCharacters(message[0..@min(message.len, fail.max_message)])];
             listed = &.{};
+            listed_map = null;
             break :blk &stack;
         };
     var body: std.Io.Writer = .fixed(buf);
@@ -1663,7 +1679,7 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, ap
     // `std.log.warn` here on purpose — one measured 1,446 bytes of binary
     // (2,121 with two `{d}`s) for a line an App with no shape can never
     // reach, on every App.
-    if (shape) |write| write(status, lossyMessage(c, message), &body) catch {
+    if (shape) |write| write(status, lossyMessage(c, message), listed, listed_map, &body) catch {
         body = .fixed(buf);
         writeFailureBody(&body, status, message, &.{}) catch unreachable; // sized for it, below
     };

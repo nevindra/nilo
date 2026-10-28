@@ -98,15 +98,15 @@ Independent of the order: each touches files no stage of the direction above doe
 
 ### A failure is a type
 
-**A failure becomes something a handler states in its signature and a client can read field by field, the way a success already is.** A handler can already answer several typed statuses, a `union(enum)` of `Status(code, T)` arms each listed in the document with its body ([ADR 286](./adr/286-a-handler-may-answer-in-several-typed-statuses.md)). The failure side was held to one sentence by two decisions, and both have moved: nilo's own body now lists every field that failed with a code a client can switch on ([ADR 024](./adr/024-every-failure-answers-as-json.md), [ADR 034](./adr/034-a-binding-hands-its-failures-to-the-handler.md)), and `app.errors` gives a domain error its status once, for the whole App ([ADR 004](./adr/004-http-errors-via-fail-functions.md)). What is left is a failure shape of the application's own receiving that list. Echo, Fastify, Nest and Hono all give an application one place to map a domain error to a status and a per-field body a form can read, so this is the gap a migrant from either side meets first after the happy path works. It costs the failure path only, and its one number to state is the bytes it adds to the failure slot.
+**A failure becomes something a handler states in its signature and a client can read field by field, the way a success already is.** A handler can already answer several typed statuses, a `union(enum)` of `Status(code, T)` arms each listed in the document with its body ([ADR 286](./adr/286-a-handler-may-answer-in-several-typed-statuses.md)). The failure side was held to one sentence by two decisions, and both have moved: nilo's own body now lists every field that failed with a code a client can switch on ([ADR 024](./adr/024-every-failure-answers-as-json.md), [ADR 034](./adr/034-a-binding-hands-its-failures-to-the-handler.md)), and `app.errors` gives a domain error its status once, for the whole App ([ADR 004](./adr/004-http-errors-via-fail-functions.md)). A shape of the application's own named with `app.failures` receives the same list through a third parameter of `nilo_failure`. Echo, Fastify, Nest and Hono all give an application one place to map a domain error to a status and a per-field body a form can read, which was the gap a migrant from either side met first after the happy path worked. The failure slot stays 256 bytes, the list living in the request arena on the failure path only; what is left is the number that says the success path paid nothing.
 
 <!-- gathered: `zig build docs-index` writes this list from the Direction lines in docs/todo.md -->
 
-- [P2](./todo.md#p2-a-real-cost-or-a-use-case-many-services-have) · `nilo_http` · A failure shape of the application's own cannot read the fields yet.
+No entry in the todo list names this direction yet.
 
 <!-- /gathered -->
 
-**What would settle it:** a form that marks the field that failed from the body alone (a handler with two typed answers whose document lists both is built, and so is a service-layer `error.EmailTaken` answered as a 409 with no `fail` call and no `catch`), with the success path's allocations and instructions unchanged in `bench/release.py`.
+**What would settle it:** the success path's allocations and instructions unchanged in `bench/release.py` against the release before; the rest is built (a form marks the field that failed from the body alone, a service-layer `error.EmailTaken` is a 409 with no `fail` call, and a handler's two typed answers are both in the document).
 
 ### A stream is one shape
 
