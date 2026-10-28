@@ -178,7 +178,7 @@ Within the limit nothing is copied: a file's bytes are a slice of the body that 
 
 ## Collecting every field error (`Bound`)
 
-**`Bound(Form(T))` gives the handler every failed field, instead of stopping at the first one with a 400.** Plain `Form(T)` is all-or-nothing: the first field that will not convert is a 400 and the request is over. For an API that is usually what you want. For a page it is not, because somebody who mistypes their age loses everything else they typed.
+**`Bound(Form(T))` gives the handler every failed field, instead of stopping at the first one with a 400.** Plain `Form(T)` is all-or-nothing for the handler: a field that will not convert is a 400 and the request is over, and the 400 names every field that failed, with a `fields` list a client can mark boxes from ([Errors](./errors.md#which-field-failed)). For an API that is usually what you want. For a page it is not, because somebody who mistypes their age loses everything else they typed.
 
 [`Bound(Form(T))`](../reference/handlers.md#boundw) hands the failures to the handler instead:
 
@@ -195,6 +195,8 @@ fn signUp(b: nilo.Bound(nilo.Form(SignUp))) !nilo.Redirect(303) {
 2 fields did not fit: the form is missing "email" (text);
 "age" has to be a whole number, not "soon"
 ```
+
+Beside that sentence the body has `fields`, one entry for each: `{"field":"email","code":"missing","message":"the form is missing \"email\" (text)","expected":"text"}`. A script or a single-page app that posts the form marks `email` from `field` and `code`, and does not read the sentence ([Errors](./errors.md#which-field-failed) has the codes). A rule of your own from `must` or `nilo_check` has `code: "rule"`.
 
 `value()` returns an optional, and there is no way around it. A field that did not bind holds nothing worth reading, so the binding withholds the whole struct rather than letting you read a zero nobody sent.
 

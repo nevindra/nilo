@@ -343,6 +343,12 @@ pub const nowMillis = @import("nilo_core").nowMillis;
 /// callable from anywhere (ADR 004).
 pub const fail = @import("fail.zig");
 
+/// One field of a request that did not fit, and the name a client switches
+/// on for why: the entries of `fields` in a 400 or 422 from a body, a form
+/// or a query argument (ADR 024). The tag names of `FieldCode` are public API.
+pub const FieldFailure = fail.FieldFailure;
+pub const FieldCode = fail.FieldCode;
+
 /// A response whose status the handler picks while it runs, headers of its
 /// own, or both: `Response(User){ .status = 201, .headers = …, .value = user }`.
 ///

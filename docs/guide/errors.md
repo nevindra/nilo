@@ -86,6 +86,41 @@ Content-Type: application/json
 
 Every failure has this one shape, whatever caused it: a `fail` function, an error returned by a handler, a body nilo refused, or a request head that never finished arriving. There is nothing to configure or negotiate. A frontend can call `res.json()` in the same `catch` where it shows the user what went wrong ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
 
+### Which field failed
+
+**A body, a form or a query string that does not fit also lists the fields, one entry each, so a form can mark the box and not parse English:**
+
+```
+$ curl -i localhost:8787/orders -d '{"address":{"zip":"x"},"items":[{"sku":"a","qty":"two"}]}'
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{"error":"4 fields did not fit: the request body is missing \"customer\" (text); the request body is missing \"address.city\" (text); \"address.zip\" has to be a whole number, not text; \"items.0.qty\" has to be a whole number, not text",
+ "status":400,
+ "fields":[
+  {"field":"customer","code":"missing","message":"the request body is missing \"customer\" (text)","expected":"text"},
+  {"field":"address.city","code":"missing","message":"the request body is missing \"address.city\" (text)","expected":"text"},
+  {"field":"address.zip","code":"not_that_type","message":"\"address.zip\" has to be a whole number, not text","expected":"a whole number"},
+  {"field":"items.0.qty","code":"not_that_type","message":"\"items.0.qty\" has to be a whole number, not text","expected":"a whole number"}]}
+```
+
+`field` is the path as the client spelled it in the request: names joined by `.`, and the position of a list element as a number (`items.0.qty`). A field renamed with `nilo_json` is under the name it was sent as. That is the key `react-hook-form`'s `setError` and Zod's joined path take, so a form needs no mapping.
+
+`code` is one of **`nilo.FieldCode`**, and its tag names are part of the API, kept stable:
+
+| `code` | what happened |
+|---|---|
+| `missing` | nothing arrived, and the field has no default and is not optional |
+| `not_that_type` | something arrived that the field cannot take: text for a number, a list for an object, a value its own type refused; `expected` says what it takes |
+| `not_one_of` | the field takes one of a list of words, and this was not one of them |
+| `too_many` | several values, or several files, where the field takes one |
+| `unknown_field` | the body has a key the endpoint does not take |
+| `rule` | a rule of your own did not hold: `nilo_check`, or `must` on a `Bound` |
+
+`message` is the sentence the field gets in `error`, and `expected` is what it would have taken ("text", "a whole number", "one of free, pro"); a rule has none. **The value the client sent is not a field of its own**, so a password never reaches a log through the list. Every field that failed is there, in the order the type declares them, up to 64 (the `error` sentence says how many there were). The same list comes from a plain `Form(T)`, a JSON body and a `Query(T)`, which stop at the first field they cannot read and then read the request again to find the rest, and from `b.fail()` on a [`Bound`](./forms.md#collecting-every-field-error-bound), as a 422.
+
+Only these arguments carry `fields`. A 404, a 500, a 401 challenge, a `fail` function's sentence and a body that is not JSON at all are the `error` and `status` they have always been. An app that named its own shape with `app.failures` is handed the status and the sentence as before, and does not see the list yet. The OpenAPI document's `Failure` schema lists `fields` as optional, with `code` as the enum above ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
+
 A failure with no message of its own gets the status phrase. Nothing about nilo's internals is sent: no stack trace, no file name, and no Zig error name unless a `fail` function put it in the message on purpose. A 500 logs the error name and sends `internal server error`.
 
 ### Using your own error shape
@@ -207,7 +242,7 @@ Both options are off by default: the id costs a header on every response, and th
 
 | | |
 |---|---|
-| 400 | a path param that doesn't convert, a query param that doesn't fit, a body that isn't valid JSON, a form sent in the wrong encoding, a WebSocket upgrade that isn't one |
+| 400 | a path param that doesn't convert, a query param that doesn't fit, a body that isn't valid JSON or doesn't fit its type (with the [fields that failed](#which-field-failed)), a form sent in the wrong encoding, a WebSocket upgrade that isn't one |
 | 401 | an `Authorization(…)` argument with no header behind it, another scheme, an empty token, or Basic that will not decode, with `WWW-Authenticate` saying what would have worked ([Handlers](./handlers.md#arguments-a-handler-can-take)) |
 | 403 | a WebSocket handshake from an origin the route did not name ([WebSocket](./websocket.md#origin-check)); an `Idempotent(…)` whose `by` found nobody behind the request |
 | 404 | no route, and no static file |

@@ -39,10 +39,16 @@ A field that did not bind holds nothing worth reading, so the binding does not h
 The rule: **a per-field failure needs a field to fail.** Everything else is about the request rather than about one of this endpoint's fields.
 
 - **A body that is not a form at all**, or text that is not JSON. There is no binding to hand back.
-- **A field the endpoint has never heard of.** It is not one of `T`'s fields, so there is nowhere to record it.
-- **A mistake nested inside a field.** `describeField` names it down to eight levels (`address.street`), the same limit `openapi.schemaOf` and `str.stamp` use because a type holding one of its own has to stop somewhere.
+- **A field the endpoint has never heard of.** It is not one of `T`'s fields, so there is nowhere to record it. Every such key is named, together, in the list of fields the 400 carries (`unknown_field`, [ADR 024](./024-every-failure-answers-as-json.md)).
+- **A mistake nested inside a field.** `describeField` names it down to eight levels, the same limit `openapi.schemaOf` and `str.stamp` use because a type holding one of its own has to stop somewhere, and every one of them is in the list, under the path the client sent (`address.street`, `items.0.qty`).
 
 Hard means the handler never sees it, not that the status is fixed. A JSON body whose type says `.misfit = 422` answers the ones that are JSON of the wrong shape (a body that is not an object, an unknown key, a nested mistake) with that 422 instead, and text that is not JSON stays the 400 ([ADR 251](./251-json-that-does-not-fit-can-be-a-422.md)).
+
+### The answer carries the fields, not only a sentence about them
+
+`b.fail()` and `checked.fail()` stop the request with a 422 whose body is the sentence and, beside it, `fields`: one entry for each failure with `field`, `code`, `message` and `expected` (ADR 024). A form outlines `email` from `field` and does not parse English out of "and N more". The entries are the same `Failures` the handler iterates, in the same order, so the list and `b.failures()` cannot disagree; a rule of the application's own (`must`, `nilo_check`) is `code: "rule"` and has no `expected`. The sentence is still the 240 bytes it was, ending in "and N more"; **the list is not cut to fit it**, because each entry is kept whole in the request arena (at most 64 of them), so a form of thirty boxes names thirty. `Reason` is not what a client sees: `bound.codeOf` maps it onto `nilo.FieldCode` in one `switch`.
+
+A plain `Form(T)`, JSON body or `Query(T)` has the same answer as a `Bound` that failed, as a 400: when its read stops at a field, the request is read again with the collecting readers this section is about, and `bound.refuseAll` words what they found. One field wrong is the sentence it always was.
 
 ### The walk says when it hit its own ceiling
 
@@ -56,7 +62,7 @@ deeper than 8 levels, which is as far as nilo follows a body, so it cannot say
 which part is wrong. The mistake is somewhere below that.
 ```
 
-Mechanically it is an out-parameter: `describeField` and `describeObject` take a `deeper: *bool`, and the one place that returns early on the budget sets it, but only when the value it is looking at actually has something inside it (`hasInsides`). A `Str` sitting at level eight is the *bottom* of a body that fits, not evidence of one that does not, and an empty list has nothing below it either; without that check every deep-but-fine body that failed for some other reason would be told it was too deep. Both callers get it, the single-sentence 400 and the collected 422's fallback path, because a `Bound(T)` whose refusal is nested has the same dead end.
+Mechanically it is an out-parameter: `describeField` and `describeObject` take a `deeper: *bool`, and the one place that returns early on the budget sets it, but only when the value it is looking at actually has something inside it (`hasInsides`). A `Str` sitting at level eight is the *bottom* of a body that fits, not evidence of one that does not, and an empty list has nothing below it either; without that check every deep-but-fine body that failed for some other reason would be told it was too deep. Both callers get it, the 400 that lists fields and the collected 422's fallback path, because a `Bound(T)` whose refusal is nested has the same dead end.
 
 ### An application's own rule joins the answer, not a second answer
 
@@ -126,7 +132,7 @@ Alongside it, `Bound(W).ok(value)` is the binding where everything bound, for a 
 | Throughput and p99 | Unchanged for a body that parses: one parse, no second pass, every outcome left clear. The second parse on the failure path is the one `describeBadBody` was already paying for, on a request that was going to be refused anyway. `must` runs only after a handler has already decided to refuse. |
 | Binary size | One `say_rule` function pointer per field in the comptime table, and one more sayer instantiation per bound struct in the program; under the noise floor of the size step. |
 
-`b.fail()` and `checked.fail()` write into the 240-byte failure buffer every connection already carries (`@sizeOf(Failure)` is 256, [ADR 024](./024-every-failure-answers-as-json.md)), so the 422 allocates nothing either; this only fills in the sentence. The ceiling message adds one string in `.rodata` the failure path already pays for, and `deeper` is one stack `bool` in a function that runs only on a request already refused.
+`b.fail()` and `checked.fail()` write the sentence into the 240-byte failure buffer every connection already carries (`@sizeOf(Failure)` is 256, [ADR 024](./024-every-failure-answers-as-json.md)), and the list into the request arena: three allocations and one for each failed field, on the failure path of a request that was refused anyway, where this used to allocate nothing. The binding's own `Outcomes` are still on the fiber's stack and still cost the success path nothing. The ceiling message adds one string in `.rodata` the failure path already pays for, and `deeper` is one stack `bool` in a function that runs only on a request already refused.
 
 ## Consequences
 

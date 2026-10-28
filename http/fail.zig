@@ -45,6 +45,80 @@ pub const max_long_message = 16 * 1024;
 /// pinned its size at 256 bytes). A short message never has `n` this big.
 const long_marker: u8 = 255;
 
+/// What `Failure.n` says when the slot's first bytes hold a pointer to a
+/// `Detail` in the request arena: the sentence and the fields that failed
+/// (ADR 024). Below `long_marker` and above any length a message in the slot
+/// can have, which is `max_message`.
+const detail_marker: u8 = 254;
+
+/// The most fields one failure carries. A form of sixty-four boxes is past what
+/// a page shows, and the body that lists them is built in the arena, so the
+/// bound is on what a request can ask the server to write (ADR 024). Past it
+/// the sentence still counts every one.
+pub const max_fields = 64;
+
+/// Why one field of a request did not fit, in words a client can switch on.
+///
+/// **The tag names are public API** (ADR 024): they are what a form library
+/// compares against in `fields[].code`, so one is never renamed or removed
+/// without a `CHANGELOG.md` entry that says what a client changes. It is a
+/// list of its own and not `Reason` shown through: `Reason` is what a
+/// conversion can fail at inside nilo and may grow a case that a client has no
+/// use for, while this is what a client is told (`bound.codeOf` maps one onto
+/// the other in one `switch`).
+pub const FieldCode = enum {
+    /// What a nilo compile error calls this type (ADR 074).
+    pub const nilo_type_name = "nilo.FieldCode";
+
+    /// Nothing arrived under this name, and the field has no default and is
+    /// not optional.
+    missing,
+    /// Something arrived and is not what the field takes: text where a
+    /// number was wanted, a list where an object was, a value its own type
+    /// refused. `expected` says what would have been taken.
+    not_that_type,
+    /// The field takes one of a list of words and this was not one of them.
+    not_one_of,
+    /// Several values arrived where the field takes one.
+    too_many,
+    /// The request names a field the endpoint does not take.
+    unknown_field,
+    /// A rule of the application's own did not hold (`nilo_check`, `must`).
+    rule,
+};
+
+/// One field of a request that did not fit.
+///
+/// **The value the client sent is not a part of this**: it would reach a log
+/// line or a frontend's error page, and a password is a field like any other.
+/// What `message` quotes is whatever the sentence for the field already
+/// quoted (`"age" has to be a whole number, not "soon"`), which is decided
+/// where that sentence is written and never widened here.
+pub const FieldFailure = struct {
+    /// What a nilo compile error calls this type (ADR 074).
+    pub const nilo_type_name = "nilo.FieldFailure";
+
+    /// Where the field is, as the client spelled it on the wire: `email`,
+    /// `address.city`, `items.0.qty`. The key a form library's `setError`
+    /// takes.
+    field: []const u8,
+    code: FieldCode,
+    /// nilo's own sentence for this field, the one the joined `error` is made
+    /// of.
+    message: []const u8,
+    /// What the field would have taken, in the words the sentences use
+    /// ("text", "a whole number", "one of newest, oldest"), when that is known.
+    expected: ?[]const u8 = null,
+};
+
+/// What a failure with fields keeps in the request arena (ADR 024): the
+/// sentence, which is also the whole of the message when nothing reads the
+/// fields, and the list.
+const Detail = struct {
+    message: []const u8,
+    fields: []const FieldFailure,
+};
+
 pub const Error = error{Failed};
 
 /// Where a fail function's message lives for one request. App keeps one
@@ -79,12 +153,61 @@ pub const Failure = struct {
     /// not fit and a request was there to hold it (ADR 024). Valid until the
     /// request ends, which is as long as a Failure is read.
     pub fn message(self: *const Failure) []const u8 {
+        if (self.n == detail_marker) return self.detail().message;
         if (self.n == long_marker) {
             var out: []const u8 = undefined;
             @memcpy(std.mem.asBytes(&out), self.buf[0..@sizeOf([]const u8)]);
             return out;
         }
         return self.buf[0..self.n];
+    }
+
+    /// The fields that failed, in the order the request's type declares them,
+    /// or none: for a failure that was not about fields, outside a request
+    /// (there is no arena to keep them in), and after `clear`. Valid until the
+    /// request ends. This is the one list a body shape reads, and the list a
+    /// failure shape of the application's own is handed (ADR 024).
+    pub fn fields(self: *const Failure) []const FieldFailure {
+        if (self.n != detail_marker) return &.{};
+        return self.detail().fields;
+    }
+
+    fn detail(self: *const Failure) *const Detail {
+        var out: *const Detail = undefined;
+        @memcpy(std.mem.asBytes(&out), self.buf[0..@sizeOf(*const Detail)]);
+        return out;
+    }
+
+    /// `setIn` for a failure that is about fields: the sentence stays what the
+    /// log line and a gRPC call are told, and the list rides beside it in the
+    /// request arena, behind a pointer in the slot's first bytes, so the
+    /// struct does not grow (ADR 153 pinned it at 256). **An allocation on the
+    /// failure path of a request that named fields, and no other**; if the
+    /// arena has no room, or there is no request, it is the sentence alone,
+    /// which is what every failure was before it carried a list.
+    ///
+    /// `listed` is copied, so a caller may build it on its stack; the strings
+    /// it points at must live as long as the request.
+    pub fn setFields(self: *Failure, request: *const InFlight, code: u16, sentence: []const u8, listed: []const FieldFailure) void {
+        const kept = listed[0..@min(listed.len, max_fields)];
+        if (kept.len != 0) if (keep(request, sentence, kept)) |stored| {
+            self.status = code;
+            @memcpy(self.buf[0..@sizeOf(*const Detail)], std.mem.asBytes(&stored));
+            self.n = detail_marker;
+            return;
+        };
+        self.setIn(request, code, "{s}", .{sentence});
+    }
+
+    fn keep(request: *const InFlight, sentence: []const u8, listed: []const FieldFailure) ?*const Detail {
+        const text = sentence[0..wholeCharacters(sentence[0..@min(sentence.len, max_long_message)])];
+        const detail_slot = allocAligned(request, Detail, 1) orelse return null;
+        const array = allocAligned(request, FieldFailure, listed.len) orelse return null;
+        const bytes = request.allocate(text.len) orelse return null;
+        @memcpy(bytes, text);
+        @memcpy(array, listed);
+        detail_slot[0] = .{ .message = bytes, .fields = array };
+        return &detail_slot[0];
     }
 
     /// Where the message goes when there is no request to hold a long one:
@@ -132,6 +255,123 @@ pub const Failure = struct {
         self.n = long_marker;
     }
 };
+
+/// `n` values of `T` from the request arena, which hands out bytes and so is
+/// asked for the room to align inside.
+pub fn allocAligned(request: *const InFlight, comptime T: type, n: usize) ?[]T {
+    const bytes = request.allocate(n * @sizeOf(T) + @alignOf(T) - 1) orelse return null;
+    const start = std.mem.alignPointer(bytes.ptr, @alignOf(T)) orelse return null;
+    return @as([*]T, @ptrCast(@alignCast(start)))[0..n];
+}
+
+/// Stop the request with `code`, naming the fields that did not fit. The
+/// sentence is made by whoever calls (a joined one for several, the field's
+/// own for one), and `listed` is what a body lists beside it (ADR 024). Called
+/// outside a request there is nowhere to keep either, and it is the bare
+/// error a fail function returns there too.
+pub fn fieldsFailed(code: u16, sentence: []const u8, listed: []const FieldFailure) Error {
+    if (inFlight()) |in_flight| in_flight.failure.setFields(in_flight, code, sentence, listed);
+    return error.Failed;
+}
+
+/// The sentence for `total` fields that did not fit, made of the `listed`
+/// ones' own: the field's sentence as it is for one, otherwise
+/// `N fields did not fit: …; …`, ending in `; and K more` when the sentence
+/// ran out of `buf` before the list did (ADR 034 gave `Bound` this shape).
+/// Whole sentences only: one that does not fit is left out, never cut.
+pub fn joinFields(buf: []u8, total: usize, listed: []const FieldFailure) []const u8 {
+    if (total <= 1 and listed.len == 1) return listed[0].message;
+    // Room kept back for the tail, so a sentence that runs out can still say
+    // how much of itself is missing. Ten places is more than a count of
+    // fields can need.
+    const tail_room = "; and  more".len + 10;
+    var w = std.Io.Writer.fixed(buf[0 .. buf.len - tail_room]);
+    w.print("{d} fields did not fit: ", .{total}) catch {};
+    var said: usize = 0;
+    for (listed) |f| {
+        const mark = w.end;
+        if (said > 0) w.writeAll("; ") catch break;
+        w.writeAll(f.message) catch {
+            w.end = mark;
+            break;
+        };
+        said += 1;
+    }
+    var out = std.Io.Writer.fixed(buf);
+    out.end = w.end;
+    if (said < total) out.print("{s}and {d} more", .{
+        @as([]const u8, if (said == 0) "" else "; "),
+        total - said,
+    }) catch {};
+    return buf[0..out.end];
+}
+
+/// Fields found one at a time while a body is read again to say what is wrong
+/// with it, kept in the request arena (ADR 024). A walker adds what it finds
+/// and goes on, so a client that sent three bad fields learns about three;
+/// `refuse` then ends the request with all of them.
+pub const FieldSink = struct {
+    arena: std.mem.Allocator,
+    items: std.ArrayList(FieldFailure) = .empty,
+    /// How many were found, which is more than `items` holds past
+    /// `max_fields` or when the arena ran out.
+    total: usize = 0,
+
+    pub fn init(arena: std.mem.Allocator) FieldSink {
+        return .{ .arena = arena };
+    }
+
+    /// One more field. `path` is spelled the way a message spells it, with
+    /// `lines[2].qty` for a list element; the field is kept the way a form
+    /// library spells it, `lines.2.qty`. An arena with no room costs the entry
+    /// its place in the list and not its place in the count.
+    pub fn add(
+        self: *FieldSink,
+        path: []const u8,
+        code: FieldCode,
+        expected: ?[]const u8,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) void {
+        self.total += 1;
+        if (self.items.items.len >= max_fields) return;
+        const message = std.fmt.allocPrint(self.arena, fmt, args) catch return;
+        self.push(path, code, expected, message);
+    }
+
+    fn push(self: *FieldSink, path: []const u8, code: FieldCode, expected: ?[]const u8, message: []const u8) void {
+        const field = wirePath(self.arena, path) catch return;
+        self.items.append(self.arena, .{ .field = field, .code = code, .message = message, .expected = expected }) catch return;
+    }
+
+    /// End the request with `code`, naming everything added; null when
+    /// nothing was kept, and then the error to answer with is the caller's.
+    pub fn refuse(self: *FieldSink, code: u16) ?Error {
+        if (self.items.items.len == 0) return null;
+        var buf: [max_message]u8 = undefined;
+        return fieldsFailed(code, joinFields(&buf, self.total, self.items.items), self.items.items);
+    }
+};
+
+/// `lines[2].qty` as `lines.2.qty`. A path with no index in it is returned as
+/// it is.
+fn wirePath(arena: std.mem.Allocator, path: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, path, '[') == null) return path;
+    const out = try arena.alloc(u8, path.len);
+    var n: usize = 0;
+    for (path) |ch| switch (ch) {
+        '[' => {
+            out[n] = '.';
+            n += 1;
+        },
+        ']' => {},
+        else => {
+            out[n] = ch;
+            n += 1;
+        },
+    };
+    return out[0..n];
+}
 
 /// The writer a fail function formats into: the Failure's slot first, then
 /// the request arena. One non-generic `drain` is the only copy of the
@@ -689,4 +929,105 @@ test "the challenge lives in the padding a Failure already had" {
     // message's slice is kept inside the buffer, so keeping one in the
     // request arena moved it by nothing either (ADR 024).
     try testing.expectEqual(@as(usize, 256), @sizeOf(Failure));
+}
+
+fn aField(name: []const u8, code: FieldCode) FieldFailure {
+    return .{ .field = name, .code = code, .message = "a sentence", .expected = "text" };
+}
+
+test "fields ride in the request arena behind a marker, and clear forgets them" {
+    var held: Held = .{ .arena = .init(testing.allocator) };
+    defer held.arena.deinit();
+    var in_flight = InFlight{};
+    in_flight.request = &held;
+    in_flight.request_ops = &Held.ops;
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+    const failure = &in_flight.failure;
+
+    // The list is copied, so the caller's own array may go out of scope.
+    {
+        const list = [_]FieldFailure{ aField("email", .missing), aField("address.city", .not_that_type) };
+        try testing.expectError(error.Failed, asUnion(fieldsFailed(422, "2 fields did not fit: a; b", &list)));
+    }
+    try testing.expectEqual(@as(u16, 422), failure.status);
+    try testing.expectEqualStrings("2 fields did not fit: a; b", failure.message());
+    try testing.expectEqual(@as(usize, 2), failure.fields().len);
+    try testing.expectEqualStrings("address.city", failure.fields()[1].field);
+    try testing.expectEqual(FieldCode.not_that_type, failure.fields()[1].code);
+
+    failure.clear();
+    try testing.expectEqual(@as(usize, 0), failure.fields().len);
+    try testing.expectEqualStrings("", failure.message());
+
+    // A fail function after it is a failure of no fields at all.
+    try testing.expectError(error.Failed, asUnion(notFound("no user {d}", .{7})));
+    try testing.expectEqual(@as(usize, 0), failure.fields().len);
+    try testing.expectEqualStrings("no user 7", failure.message());
+}
+
+test "fields with no arena to hold them are the sentence alone" {
+    var in_flight = InFlight{};
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    const list = [_]FieldFailure{aField("email", .missing)};
+    try testing.expectError(error.Failed, asUnion(fieldsFailed(422, "the form is missing email", &list)));
+    try testing.expectEqual(@as(u16, 422), in_flight.failure.status);
+    try testing.expectEqualStrings("the form is missing email", in_flight.failure.message());
+    try testing.expectEqual(@as(usize, 0), in_flight.failure.fields().len);
+
+    // And an arena with no room is the same.
+    var held: Held = .{ .arena = .init(testing.allocator), .full = true };
+    defer held.arena.deinit();
+    in_flight.request = &held;
+    in_flight.request_ops = &Held.ops;
+    try testing.expectError(error.Failed, asUnion(fieldsFailed(422, "once more", &list)));
+    try testing.expectEqualStrings("once more", in_flight.failure.message());
+    try testing.expectEqual(@as(usize, 0), in_flight.failure.fields().len);
+}
+
+test "a failure keeps at most max_fields fields, and the joined sentence counts them all" {
+    var sink_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer sink_arena.deinit();
+    var held: Held = .{ .arena = .init(testing.allocator) };
+    defer held.arena.deinit();
+    var in_flight = InFlight{};
+    in_flight.request = &held;
+    in_flight.request_ops = &Held.ops;
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    var sink = FieldSink.init(sink_arena.allocator());
+    for (0..max_fields + 6) |i| sink.add("items[2].qty", .missing, null, "field {d} is missing", .{i});
+    try testing.expectEqual(@as(usize, max_fields + 6), sink.total);
+    try testing.expectEqual(@as(usize, max_fields), sink.items.items.len);
+    try testing.expectEqualStrings("items.2.qty", sink.items.items[0].field);
+
+    try testing.expectError(error.Failed, asUnion(sink.refuse(400).?));
+    try testing.expectEqual(@as(usize, max_fields), in_flight.failure.fields().len);
+    try testing.expect(std.mem.startsWith(u8, in_flight.failure.message(), "70 fields did not fit: field 0 is missing; "));
+    try testing.expect(std.mem.endsWith(u8, in_flight.failure.message(), " more"));
+}
+
+test "one field is the sentence it would have been, and none is left to the caller" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var sink = FieldSink.init(arena.allocator());
+    try testing.expect(sink.refuse(400) == null);
+
+    var buf: [max_message]u8 = undefined;
+    sink.add("age", .not_that_type, "a whole number", "\"age\" has to be a whole number", .{});
+    try testing.expectEqualStrings("\"age\" has to be a whole number", joinFields(&buf, sink.total, sink.items.items));
+}
+
+test "a field code is spelled the way a client switches on it" {
+    try testing.expectEqualStrings("not_that_type", @tagName(FieldCode.not_that_type));
+    try testing.expectEqualStrings("unknown_field", @tagName(FieldCode.unknown_field));
+}
+
+test "the fields marker sits between the longest message and the long one" {
+    // A message in the slot is at most `max_message` bytes, so no length can be
+    // taken for either marker.
+    try testing.expect(max_message < detail_marker and detail_marker < long_marker);
 }

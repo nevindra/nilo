@@ -27,6 +27,28 @@ What they wrote instead was a middleware that caught the error and rewrote the r
 The sentence is unchanged; `curl` still shows it, one pair of braces further in, and `res.json()` now works.
 `status` is in the body as well as the status line because a client that has already given up on the response object still has it.
 
+**A body, a form or a query argument that did not fit adds `fields`**, one entry for each field that failed, in the order the type declares them:
+
+```json
+{"error": "2 fields did not fit: the request body is missing \"address.city\" (text); \"items.0.qty\" has to be a whole number, not text",
+ "status": 400,
+ "fields": [
+   {"field": "address.city", "code": "missing", "message": "the request body is missing \"address.city\" (text)", "expected": "text"},
+   {"field": "items.0.qty", "code": "not_that_type", "message": "\"items.0.qty\" has to be a whole number, not text", "expected": "a whole number"}
+ ]}
+```
+
+`fields` is left out when there is nothing to list, so a 404, a 500, a 401 challenge, a fail function's sentence and the five answers that go out before there is a Ctx are the bytes they always were.
+A client reads the sentence or the list, and the list is the one that does not need parsing English: `field` is the path as the client spelled it on the wire, with `.` between names and the index of a list element (`address.city`, `items.0.qty`; a renamed field is under the name it was sent as, [ADR 148](./148-a-field-name-is-a-spelling-too.md)), which is the key a form library's `setError` takes.
+`code` is one of **`nilo.FieldCode`**: `missing`, `not_that_type`, `not_one_of`, `too_many`, `unknown_field`, `rule`. **Those tag names are public API.** A client compares against them, so one is not renamed or removed without a `CHANGELOG.md` entry saying what a client changes. They are a list of their own and not `Reason` ([ADR 034](./034-a-binding-hands-its-failures-to-the-handler.md)) shown through, because `Reason` is what a conversion can fail at inside nilo and may change with it, while this is what a client is told; `bound.codeOf` is the one `switch` between the two. `expected` is what the field would have taken, in the words the sentences use, when it is known, and a rule of the application's own has none.
+**The value the client sent is not a field of its own**, so a password never reaches a log through the list; `message` carries the sentence the field already had, which quotes what arrived where that sentence always did (`not "soon"`) and nowhere else.
+
+Every field that failed is listed, not the first. A plain `Form(T)`, a JSON body struct and a `Query(T)` stop at the first field they cannot read, as they must, and only after that read has failed read the same request again with the collecting readers `Bound` is built on; a request that fits runs none of it. A key the endpoint does not take is a field of its own (`unknown_field`) and, when an object has one, "what is missing" is not asked of that object: a typo is both at once and the second would count one mistake twice.
+Past `fail.max_fields` (64) the list stops and the sentence still counts the rest.
+
+The list lives in the request arena, behind a second marker in the Failure's slot beside the one a long message uses: its first eight bytes point at a `Detail` (the sentence and the entries), so `@sizeOf(Failure)` stays 256 and a connection pays nothing for it ([ADR 153](./153-an-authorization-header-a-handler-can-ask-for.md)). `Failure.fields()` is empty for every other failure, outside a request, and when the arena has no room, and then the sentence is the whole answer, as it was.
+The body that carries it is built in the arena like a long message's, so `sendFailure`'s stack frame does not grow.
+
 ### A struct the application names
 
 **`app.failures(T)` names a struct, and the struct is the whole contract.**
@@ -73,9 +95,15 @@ A 405 still carries its `Allow` header, and an unset `WWW-Authenticate` challeng
 This was the first position, rejected as two behaviours to test, two to document, and a decision every user has to make on their first day with nothing to base it on: the whole point of one shape was that there was one shape.
 It was reversed, not for a switch between nilo's own shapes (that refusal stands), but for a shape the *application* already has: a team behind three other services with a frontend that already reads `{"code":…,"detail":…}` has no decision to make on day one, they have a shape, and the only alternative was a middleware that loses the sentence, the `Allow`, the `WWW-Authenticate` and the CORS headers, four things to get right to change two field names.
 
-**Copying RFC 7807 `application/problem+json`**, both as nilo's own default and as the alternative shape for the application that needed one.
-As a default: more fields (`type`, `title`, `detail`, `instance`), a content type most clients do not special-case, and nothing to put in the fields nilo actually knows; `error` and `status` is what there is.
+**A body of `error` and `status` and nothing else**, which was the default until a client could not mark the field that failed: an application that wanted its form to outline `email` parsed English, because nilo knew the field, what was wrong with it and what would have worked ([ADR 034](./034-a-binding-hands-its-failures-to-the-handler.md)) and joined them into one sentence in a 240-byte slot, ending in "and N more". The sentence stays, so nothing that read it breaks, and the list rides beside it.
+
+**Copying RFC 9457 (RFC 7807) `application/problem+json`**, both as nilo's own default and as the alternative shape for the application that needed one.
+It is still refused, now that nilo has per-field detail to put in it: the members it fixes (`type`, `title`, `detail`, `instance`) are ones nilo has nothing to say for, the list would be an extension member of the application's choosing anyway, and the content type is one most clients do not special-case, where `res.json()` on `application/json` is what every frontend already calls.
 As the alternative: the team that needs a named shape has one already, and the team that does not is served by the default, so a third shape nilo invented would be exactly the switch already refused.
+
+**Keeping the first field only for a plain argument**, `Bound` being the way to ask for the rest. It left the common endpoint, the one with no `Bound` in its signature, answering a form of five mistakes with one, and a client had to fix and resend five times.
+
+**`code` as `Reason`'s own names** (`not_a_number`, `not_true_or_false`, `not_a_choice`, `wrong_kind`). They are a list written for nilo's sentences, and a client switching on them would be broken by the next conversion nilo learns; three of them differ only in the type, which `expected` already says.
 
 **Every header the request collected going out on the failure**, which was the rule until the audit of `http/` at `39896d2` reproduced the gzip-labelled 409. A keep list was the other way to close it, and was rejected for dropping the headers nilo cannot know about: an application's request id or security header would vanish from exactly the responses somebody is debugging.
 
@@ -88,10 +116,10 @@ nilo flushes on `send`, so the body would be rewritten after the head had alread
 
 | Axis | Cost |
 |---|---|
-| Allocations per request | 0, on either path: a request that succeeds never reads the field |
+| Allocations per request | 0 on a request that succeeds, and on a failure that is not about fields. A failure that is, makes three allocations in the request arena for the list and the sentence, and one for each entry's message (`bound`'s sentences are formatted once into a scratch and copied; the JSON walk formats into the arena): the failure path only, for a request that was refused anyway |
 | Memory per idle connection | 0: the buffer lives on `sendFailure`'s frame, `noinline` and entered only on a failure |
 | Throughput and p99 | 0: one null check, on the failure path |
-| Binary size, an App that never calls `failures` | +400 bytes on `hello`, +448 on `rest`, stripped `ReleaseFast` |
+| Binary size, an App that never calls `failures` | +400 bytes on `hello`, +448 on `rest`, stripped `ReleaseFast`. The fields add the comptime sentence table of `bound.zig` to every `Form(T)` and `Query(T)` in a program (it was only `Bound`'s), and a walk that collects where it returned: **not measured** by `bench/release.py` yet |
 
 The stack buffer is sized `fail.max_message * 6 + 256`: `fail.max_message` is the 240 bytes of the Failure's slot, escaping can turn each byte into six, and 256 is the envelope's own room. A message past the slot is kept whole in the request arena (up to 16 KiB, ADR 006), and its body is built in the arena as well, `len * 6 + 256` bytes, so the frame does not grow; if the arena has no room the message is cut to the slot's, as it was before ([ADR 286](./286-a-handler-may-answer-in-several-typed-statuses.md)). A gRPC call is told the first KiB of it, since `grpc-message` is a header.
 A shape that outgrows the buffer gets nilo's own shape instead, sentence intact, which the first failure in development shows; there is no `std.log.warn` for it, because a log call site costs a kilobyte or two of formatting in the binary of every App, fired or not, whether or not that App ever calls `failures`.

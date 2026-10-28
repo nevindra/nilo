@@ -145,6 +145,7 @@ Every heading of every page, in page order. Find a name here, then read it on it
 - [`Bearer(T)`](./ctx.md#bearert)
 - [`Upload`](./ctx.md#upload)
 - [Failing](./ctx.md#failing)
+  - [`FieldFailure` and `FieldCode`](./ctx.md#fieldfailure-and-fieldcode)
 
 **[Core](./core.md)**: `nilo_core` holds what every other module shares: `Str`, `Run`, the Scope, percent coding, the clock, `Timestamp` and `Date`, `Backoff`, and the WebSocket frame.
 

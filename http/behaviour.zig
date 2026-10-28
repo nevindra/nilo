@@ -14561,3 +14561,304 @@ test "a fail message of a thousand bytes reaches the client whole in the shape a
     const result = h.send(&app, "GET /deploy HTTP/1.1\r\nHost: t\r\n\r\n");
     try testing.expect(std.mem.indexOf(u8, result.response, long_sentence ++ "\"") != null);
 }
+
+// ---- a failure body a client reads field by field (ADR 024) ----
+
+/// The JSON of a failure response, parsed; the caller releases it.
+fn failureJson(response: []const u8) !std.json.Parsed(std.json.Value) {
+    const blank = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.NoBody;
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, response[blank + 4 ..], .{});
+}
+
+/// The `fields` array of a failure response, or an empty one when it has none.
+fn fieldsIn(parsed: std.json.Parsed(std.json.Value)) []const std.json.Value {
+    const list = parsed.value.object.get("fields") orelse return &.{};
+    return list.array.items;
+}
+
+fn expectField(entry: std.json.Value, field: []const u8, code: []const u8, expected: ?[]const u8) !void {
+    try testing.expectEqualStrings(field, entry.object.get("field").?.string);
+    try testing.expectEqualStrings(code, entry.object.get("code").?.string);
+    try testing.expect(entry.object.get("message").?.string.len > 0);
+    if (expected) |wanted| {
+        try testing.expectEqualStrings(wanted, entry.object.get("expected").?.string);
+    } else {
+        try testing.expect(entry.object.get("expected") == null);
+    }
+}
+
+const FbPlan = enum { free, pro };
+
+const FbSignUp = struct {
+    email: Str,
+    age: u32,
+    plan: FbPlan,
+};
+
+fn fbBoundSignUp(b: bound_mod.Bound(form_mod.Form(FbSignUp))) ![]const u8 {
+    const form = b.value() orelse return b.fail();
+    return form.email.view();
+}
+
+fn fbPlainSignUp(f: form_mod.Form(FbSignUp)) ![]const u8 {
+    return f.value.email.view();
+}
+
+test "a Bound form names every field that failed, in the order the struct declares them" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-up", fbBoundSignUp);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const body = "age=soon&plan=gold";
+    const answer = h.send(&app, "POST /sign-up HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\n\r\n" ++ body);
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 422"));
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 422), parsed.value.object.get("status").?.integer);
+    try testing.expect(std.mem.startsWith(u8, parsed.value.object.get("error").?.string, "3 fields did not fit: "));
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 3), fields.len);
+    try expectField(fields[0], "email", "missing", "text");
+    try expectField(fields[1], "age", "not_that_type", "a whole number");
+    try expectField(fields[2], "plan", "not_one_of", "one of free, pro");
+}
+
+test "a plain form reports every failed field, not the first" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/sign-up", fbPlainSignUp);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "POST /sign-up HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\n\r\nage=soon&plan=gold");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 400"));
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 400), parsed.value.object.get("status").?.integer);
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 3), fields.len);
+    try expectField(fields[0], "email", "missing", "text");
+    try expectField(fields[1], "age", "not_that_type", "a whole number");
+    try expectField(fields[2], "plan", "not_one_of", "one of free, pro");
+
+    // One field wrong is the sentence it always was, with its one entry.
+    const one = h.send(&app, "POST /sign-up HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 32\r\n\r\nemail=a%40b.c&age=soon&plan=pro&x");
+    const single = try failureJson(one.response);
+    defer single.deinit();
+    try testing.expectEqualStrings(
+        "\"age\" has to be a whole number, not \"soon\"",
+        single.value.object.get("error").?.string,
+    );
+    try testing.expectEqual(@as(usize, 1), fieldsIn(single).len);
+}
+
+const FbLine = struct { sku: Str, qty: u32 };
+
+const FbOrder = struct {
+    customer: Str,
+    address: struct { city: Str, zip: u32 },
+    items: []const FbLine,
+};
+
+fn fbPlaceOrder(order: FbOrder) u32 {
+    return @intCast(order.items.len);
+}
+
+test "a JSON body reports every failed field, with the path as the client spelled it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/orders", fbPlaceOrder);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const body =
+        \\{"address":{"zip":"x"},"items":[{"sku":"a","qty":"two"},{"sku":"b","qty":3},{"qty":1}]}
+    ;
+    const answer = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n\r\n" ++ body);
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 400"));
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    try testing.expect(std.mem.startsWith(u8, parsed.value.object.get("error").?.string, "5 fields did not fit: "));
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 5), fields.len);
+    try expectField(fields[0], "customer", "missing", "text");
+    try expectField(fields[1], "address.city", "missing", "text");
+    try expectField(fields[2], "address.zip", "not_that_type", "a whole number");
+    try expectField(fields[3], "items.0.qty", "not_that_type", "a whole number");
+    try expectField(fields[4], "items.2.sku", "missing", "text");
+}
+
+test "a key the endpoint does not know is a field of its own in the list" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/orders", fbPlaceOrder);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const body =
+        \\{"custmer":"a","extra":1,"address":{"city":"x","zip":1},"items":[]}
+    ;
+    const answer = h.send(&app, "POST /orders HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n\r\n" ++ body);
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 2), fields.len);
+    try expectField(fields[0], "custmer", "unknown_field", null);
+    try expectField(fields[1], "extra", "unknown_field", null);
+}
+
+const FbTown = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+    post_code: u32,
+};
+
+const FbRenamed = struct {
+    pub const nilo_json = .{ .rename_all = .camelCase };
+    first_name: Str,
+    home_town: FbTown,
+};
+
+fn fbRenamed(body: FbRenamed) u32 {
+    return body.home_town.post_code;
+}
+
+test "a renamed field is reported under the name the client sent" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/people", fbRenamed);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const body =
+        \\{"homeTown":{"postCode":"x"}}
+    ;
+    const answer = h.send(&app, "POST /people HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n" ++
+        "Content-Length: " ++ std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n\r\n" ++ body);
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 2), fields.len);
+    try expectField(fields[0], "firstName", "missing", "text");
+    try expectField(fields[1], "homeTown.postCode", "not_that_type", "a whole number");
+}
+
+const FbPage = struct { page: u32, sort: FbPlan };
+
+fn fbSearch(q: typed.Query(FbPage)) u32 {
+    return q.value.page;
+}
+
+test "a plain query reports every failed parameter" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/search", fbSearch);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "GET /search?page=soon&sort=zzz HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 400"));
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 2), fields.len);
+    try expectField(fields[0], "page", "not_that_type", "a whole number");
+    try expectField(fields[1], "sort", "not_one_of", "one of free, pro");
+}
+
+const FbPassword = struct {
+    email: Str,
+    password: Str,
+    confirm: Str,
+
+    pub fn nilo_check(self: FbPassword, r: *bound_mod.Rules(FbPassword)) void {
+        r.must("confirm", self.password.eql(self.confirm.view()), "has to match the password");
+    }
+};
+
+fn fbRegister(f: form_mod.Form(FbPassword)) ![]const u8 {
+    return f.value.email.view();
+}
+
+test "a rule that did not hold is a field with the code rule, and the value is never echoed" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.post("/register", fbRegister);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const body = "email=a%40b.c&password=hunter2-secret&confirm=hunter3-secret";
+    const answer = h.send(&app, "POST /register HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " ++
+        std.fmt.comptimePrint("{d}", .{body.len}) ++ "\r\n\r\n" ++ body);
+    try testing.expect(std.mem.startsWith(u8, answer.response, "HTTP/1.1 422"));
+    const parsed = try failureJson(answer.response);
+    defer parsed.deinit();
+    const fields = fieldsIn(parsed);
+    try testing.expectEqual(@as(usize, 1), fields.len);
+    try expectField(fields[0], "confirm", "rule", null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "hunter") == null);
+}
+
+fn fbDenied() !void {
+    return fail.status(401, "no token", .{});
+}
+
+test "an answer that is not about fields has no fields, byte for byte" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.get("/deploy", refusesAtLength);
+    try app.get("/who", fbDenied);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const missing = h.send(&app, "GET /nowhere HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, missing.response, "{\"error\":\"there is no /nowhere\",\"status\":404}"));
+    const denied = h.send(&app, "GET /who HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, denied.response, "{\"error\":\"no token\",\"status\":401}"));
+    const long = h.send(&app, "GET /deploy HTTP/1.1\r\nHost: t\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, long.response, "{\"error\":\"" ++ long_sentence ++ "\",\"status\":400}"));
+    const garbage = h.send(&app, "NOT A REQUEST\r\n\r\n");
+    try testing.expect(std.mem.endsWith(u8, garbage.response, "{\"error\":\"malformed request\",\"status\":400}"));
+}
+
+test "an App that named its own failure shape is not handed the list yet" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.failures(ApiError);
+    try app.post("/sign-up", fbBoundSignUp);
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const answer = h.send(&app, "POST /sign-up HTTP/1.1\r\nHost: t\r\n" ++
+        "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 18\r\n\r\nage=soon&plan=gold");
+    try testing.expect(std.mem.indexOf(u8, answer.response, "\"fields\"") == null);
+    try testing.expect(std.mem.indexOf(u8, answer.response, "3 fields did not fit") != null);
+}
+
+test "the document's failure schema has the optional fields array, with FieldCode's tags" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    app.docs(.{});
+    try app.post("/orders", fbPlaceOrder);
+    const json = try docsFor(&app);
+    try testing.expect(std.mem.indexOf(u8, json, "\"fields\":{\"type\":\"array\",\"description\":\"present on a 400 or 422 from a body, form or query argument") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"code\":{\"type\":\"string\",\"enum\":[\"missing\",\"not_that_type\",\"not_one_of\",\"too_many\",\"unknown_field\",\"rule\"]}") != null);
+    // Optional: only `error` and `status` are required of every failure.
+    try testing.expect(std.mem.indexOf(u8, json, "\"required\":[\"error\",\"status\"]") != null);
+}

@@ -3280,12 +3280,15 @@ fn describeBadBody(
         ));
     }
 
+    // Every field that is wrong, not the first: the walk goes on past what it
+    // finds and the answer lists them all (ADR 024).
     var deeper = false;
-    const found = if (comptime tagged)
-        describeTagged(T, arena, dynamic.object, "", max_body_depth, &deeper)
+    var sink = fail.FieldSink.init(arena);
+    if (comptime tagged)
+        describeTagged(T, arena, dynamic.object, "", max_body_depth, &deeper, &sink)
     else
-        describeObject(T, arena, dynamic.object, "", .{}, max_body_depth, &deeper);
-    if (found) |explained| return misfit(T, explained);
+        describeObject(T, arena, dynamic.object, "", .{}, max_body_depth, &deeper, &sink);
+    if (sink.refuse(400)) |explained| return misfit(T, explained);
     return misfit(T, if (deeper) tooDeep() else err);
 }
 
@@ -3372,17 +3375,23 @@ fn collectBadBody(
 
     const object = dynamic.object;
 
+    // Every key the endpoint does not know, named together (ADR 024).
+    var unknown = fail.FieldSink.init(arena);
     var it = object.iterator();
     while (it.next()) |entry| {
         // The type's own word on keys it does not know, as `describeObject`
         // reads it; skipped, they are left for the fields below to ignore.
         if (comptime jsonmark.ignoresUnknown(T)) break;
         const name = entry.key_ptr.*;
-        if (!hasField(T, name)) return misfit(T, fail.badRequest(
+        if (!hasField(T, name)) unknown.add(
+            name,
+            .unknown_field,
+            null,
             "the request body has a field \"{s}\" this endpoint does not know. It takes: {s}",
             .{ name, comptime fieldList(T) },
-        ));
+        );
     }
+    if (unknown.refuse(400)) |refused| return misfit(T, refused);
 
     var out: T = undefined;
     var any = false;
@@ -3469,8 +3478,13 @@ fn collectBadBody(
                     any = true;
                     if (f_attrs.defaultValue(f_type)) |default| @field(out, f_name) = default;
                 } else {
+                    // Nested, so there is no binding to hand back: the whole
+                    // list of what is wrong down there is the answer, under
+                    // the names the client sent.
                     var deeper = false;
-                    if (describeField(f_type, arena, given, f_name, max_body_depth, &deeper)) |found| return misfit(T, found);
+                    var sink = fail.FieldSink.init(arena);
+                    describeField(f_type, arena, given, comptime jsonmark.fieldWire(T, f_name), max_body_depth, &deeper, &sink);
+                    if (sink.refuse(400)) |found| return misfit(T, found);
                     return misfit(T, if (deeper) tooDeep() else err);
                 }
             }
@@ -3508,14 +3522,17 @@ fn describeObject(
     comptime within: Within,
     comptime depth: u8,
     deeper: *bool,
-) ?anyerror {
+    sink: *fail.FieldSink,
+) void {
     // Something the body carries that the endpoint has no room for. Almost
     // always a typo, which is why the known names go out with it.
     //
-    // Asked before "what is missing", because a typo is both at once —
-    // `{"nme":"wati"}` has an unknown `nme` and is missing `name` — and of
-    // those two true sentences, the one quoting what was actually typed is
-    // the one that ends the search.
+    // Every such key is named. And when there is one, "what is missing" is
+    // not asked — a typo is both at once, `{"nme":"wati"}` has an unknown
+    // `nme` and is missing `name`, and of those two true sentences the one
+    // quoting what was actually typed is the one that ends the search; the
+    // second would only be the same mistake counted twice.
+    var any_unknown = false;
     var it = object.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
@@ -3524,39 +3541,37 @@ fn describeObject(
         if (within.tag.len > 0 and std.mem.eql(u8, name, within.tag)) continue;
         // A type that skips what it does not know has nothing to say about it.
         if (comptime jsonmark.ignoresUnknown(T)) continue;
-        if (!hasField(T, name)) return fail.badRequest(
-            "the request body has a field \"{s}\" {s} does not know. It takes: {s}",
-            .{ nameWithin(arena, where, name), comptime thatWhat(within), comptime takes(T, within) },
-        );
-    }
-
-    // Something the endpoint needs that the body does not carry. A field
-    // that may be absent, because it has a default or is a `?T`, is exempt:
-    // the rule a query struct and a form follow (`field.zig`).
-    const info = @typeInfo(T).@"struct";
-    inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
-        const on_the_wire = comptime jsonmark.fieldWire(T, f_name);
-        if (comptime !jsonmark.fieldSkipped(T, f_name) and !field_mod.FieldRule(f_type, f_attrs).may_be_absent) {
-            if (!object.contains(on_the_wire)) return fail.badRequest(
-                "the request body is missing \"{s}\" ({s})",
-                .{ nameWithin(arena, where, on_the_wire), comptime expectedOfBody(f_type) },
-            );
+        if (!hasField(T, name)) {
+            any_unknown = true;
+            const at = nameWithin(arena, where, name);
+            sink.add(at, .unknown_field, null, "the request body has a field \"{s}\" {s} does not know. It takes: {s}", .{
+                at, comptime thatWhat(within), comptime takes(T, within),
+            });
         }
     }
 
-    // Everything is present and nothing is spare, so a value is the wrong
-    // shape for the field it landed in — here, or somewhere further down.
-    inline for (info.field_names, info.field_types) |f_name, f_type| {
-        if (comptime jsonmark.fieldSkipped(T, f_name)) continue;
-        const on_the_wire = comptime jsonmark.fieldWire(T, f_name);
-        if (object.get(on_the_wire)) |given| {
-            if (describeField(f_type, arena, given, nameWithin(arena, where, on_the_wire), depth, deeper)) |found| {
-                return found;
+    const info = @typeInfo(T).@"struct";
+
+    // In the order the struct declares its fields: what the endpoint needs
+    // that the body does not carry, or a value that is the wrong shape for
+    // the field it landed in — here, or somewhere further down. A field that
+    // may be absent, because it has a default or is a `?T`, is exempt from
+    // the first: the rule a query struct and a form follow (`field.zig`).
+    inline for (info.field_names, info.field_types, info.field_attrs) |f_name, f_type, f_attrs| {
+        if (comptime !jsonmark.fieldSkipped(T, f_name)) {
+            const on_the_wire = comptime jsonmark.fieldWire(T, f_name);
+            if (object.get(on_the_wire)) |given| {
+                describeField(f_type, arena, given, nameWithin(arena, where, on_the_wire), depth, deeper, sink);
+            } else if (comptime !field_mod.FieldRule(f_type, f_attrs).may_be_absent) {
+                if (!any_unknown) {
+                    const at = nameWithin(arena, where, on_the_wire);
+                    sink.add(at, .missing, comptime expectedOfBody(f_type), "the request body is missing \"{s}\" ({s})", .{
+                        at, comptime expectedOfBody(f_type),
+                    });
+                }
             }
         }
     }
-
-    return null;
 }
 
 /// Which variant of an internally tagged union an object is being read as, so
@@ -3615,15 +3630,23 @@ fn describeTagged(
     name: []const u8,
     comptime depth: u8,
     deeper: *bool,
-) ?anyerror {
+    sink: *fail.FieldSink,
+) void {
     const key = comptime tagOf(U).?;
     const at = nameWithin(arena, name, key);
+    const choose = comptime "one of " ++ variantList(U);
 
-    const given = object.get(key) orelse return fail.badRequest(
+    const given = object.get(key) orelse return sink.add(
+        at,
+        .missing,
+        choose,
         "the request body is missing \"{s}\", which names the variant: one of {s}",
         .{ at, comptime variantList(U) },
     );
-    if (given != .string) return fail.badRequest(
+    if (given != .string) return sink.add(
+        at,
+        .not_that_type,
+        choose,
         "\"{s}\" has to be text naming the variant, one of {s}, not {s}",
         .{ at, comptime variantList(U), kindOf(given) },
     );
@@ -3636,21 +3659,18 @@ fn describeTagged(
                 while (it.next()) |entry| {
                     const k = entry.key_ptr.*;
                     if (std.mem.eql(u8, k, key)) continue;
-                    return fail.badRequest(
-                        "the request body has a field \"{s}\" {s} does not know. It takes: {s}",
-                        .{ nameWithin(arena, name, k), comptime thatWhat(within), comptime takes(void, within) },
-                    );
+                    const where = nameWithin(arena, name, k);
+                    sink.add(where, .unknown_field, null, "the request body has a field \"{s}\" {s} does not know. It takes: {s}", .{
+                        where, comptime thatWhat(within), comptime takes(void, within),
+                    });
                 }
-                return null;
+                return;
             }
-            return describeObject(f_type, arena, object, name, within, depth, deeper);
+            return describeObject(f_type, arena, object, name, within, depth, deeper, sink);
         }
     }
 
-    return fail.badRequest(
-        "\"{s}\" is not one of the known variants ({s}): \"{s}\"",
-        .{ at, comptime variantList(U), given.string },
-    );
+    sink.add(at, .not_one_of, choose, "\"{s}\" is not one of the known variants ({s}): \"{s}\"", .{ at, comptime variantList(U), given.string });
 }
 
 /// What is wrong with one value, given the type it landed in. Answers about
@@ -3662,16 +3682,22 @@ fn describeField(
     name: []const u8,
     comptime depth: u8,
     deeper: *bool,
-) ?anyerror {
+    sink: *fail.FieldSink,
+) void {
     // Asked of `T` and not of what is inside it, so an optional still says
     // "text or null" rather than dropping the half that makes it optional.
     if (!fits(T, given)) {
+        // What the field would have taken, for the entry beside the sentence.
+        const takes_it = comptime expectedOfBody(T);
         // A word that is not one of the choices is the one wrong value that
         // is the right *kind*, so "has to be one of …, not text" is a
         // sentence arguing with itself. It gets the wording a bad `?stage=`
         // gets, which quotes back what was actually sent.
         if (given == .string) {
-            if (comptime choicesOfBody(T)) |choices| return fail.badRequest(
+            if (comptime choicesOfBody(T)) |choices| return sink.add(
+                name,
+                .not_one_of,
+                takes_it,
                 "\"{s}\" is not one of the known choices ({s}): \"{s}\"",
                 .{ name, choices, given.string },
             );
@@ -3680,14 +3706,20 @@ fn describeField(
         // the number, the way `?age=300` does, rather than calling a number
         // "a number" (ADR 084).
         if (comptime numberOf(T)) |N| {
-            if (numberFault(T, arena, given)) |said| return fail.badRequest(
+            if (numberFault(T, arena, given)) |said| return sink.add(
+                name,
+                .not_that_type,
+                takes_it,
                 "\"{s}\" has to be {s}, not {s}",
                 .{ name, comptime expectedOfBody(N), said },
             );
         }
         // A list with a length that is the right kind and the wrong count
         // says the bound and the count (ADR 266).
-        if (given == .array) if (comptime manyOf(T)) |M| return fail.badRequest(
+        if (given == .array) if (comptime manyOf(T)) |M| return sink.add(
+            name,
+            .not_that_type,
+            takes_it,
             "\"{s}\" has to be {s}, not a list of {d}",
             .{ name, comptime expectedOf(M), given.array.items.len },
         );
@@ -3705,22 +3737,28 @@ fn describeField(
                     var tail: [128]u8 = undefined;
                     var w = std.Io.Writer.fixed(&tail);
                     @field(P, convert.explain_marker)(text, &w) catch {};
-                    return fail.badRequest("\"{s}\" {s}", .{ name, w.buffered() });
+                    return sink.add(name, .not_that_type, takes_it, "\"{s}\" {s}", .{ name, w.buffered() });
                 }
-                return fail.badRequest(
+                return sink.add(
+                    name,
+                    .not_that_type,
+                    takes_it,
                     "\"{s}\" has to be {s}, not \"{s}\"",
                     .{ name, comptime expectedOfBody(T), text },
                 );
             }
         }
-        return fail.badRequest(
+        return sink.add(
+            name,
+            .not_that_type,
+            takes_it,
             "\"{s}\" has to be {s}, not {s}",
             .{ name, comptime expectedOfBody(T), kindOf(given) },
         );
     }
 
     // An optional sent as null fits and holds nothing to look inside.
-    if (given == .null) return null;
+    if (given == .null) return;
     // **The bottom of the budget, and it used to be silent.** A body nested
     // deeper than this answered a bare 400 with no field, no reason and no
     // hint that depth was what happened — the cliff is documented and how
@@ -3730,7 +3768,7 @@ fn describeField(
     // saying nothing.
     if (depth == 0) {
         if (hasInsides(T, given)) deeper.* = true;
-        return null;
+        return;
     }
 
     const Inner = if (comptime patch_mod.isPatch(T)) T.nilo_patch else switch (@typeInfo(T)) {
@@ -3740,31 +3778,31 @@ fn describeField(
 
     // A value that parsed itself is one value, whatever its kind of type:
     // a `Uuid` is a struct with nothing inside it to point at.
-    if (comptime convert.parsesItself(Inner)) return null;
+    if (comptime convert.parsesItself(Inner)) return;
 
+    // Every element is looked into, so a list of ten lines with three bad
+    // ones names three.
     if (comptime many_mod.itemOf(Inner)) |Item| {
         for (given.array.items, 0..) |item, i| {
             const at = std.fmt.allocPrint(arena, "{s}[{d}]", .{ name, i }) catch name;
-            if (describeField(Item, arena, item, at, depth - 1, deeper)) |found| return found;
+            describeField(Item, arena, item, at, depth - 1, deeper, sink);
         }
-        return null;
+        return;
     }
 
     if (Inner != Str) switch (@typeInfo(Inner)) {
-        .@"struct" => return describeObject(Inner, arena, given.object, name, .{}, depth - 1, deeper),
-        .@"union" => if (comptime tagOf(Inner) != null) return describeTagged(Inner, arena, given.object, name, depth - 1, deeper),
+        .@"struct" => return describeObject(Inner, arena, given.object, name, .{}, depth - 1, deeper, sink),
+        .@"union" => if (comptime tagOf(Inner) != null) return describeTagged(Inner, arena, given.object, name, depth - 1, deeper, sink),
         .pointer => |p| {
             // `[]const u8` is text, which has nothing inside it to describe.
-            if (p.size != .slice or p.child == u8) return null;
+            if (p.size != .slice or p.child == u8) return;
             for (given.array.items, 0..) |item, i| {
                 const at = std.fmt.allocPrint(arena, "{s}[{d}]", .{ name, i }) catch name;
-                if (describeField(p.child, arena, item, at, depth - 1, deeper)) |found| return found;
+                describeField(p.child, arena, item, at, depth - 1, deeper, sink);
             }
         },
         else => {},
     };
-
-    return null;
 }
 
 /// Whether there is anything below this value worth having walked into — a

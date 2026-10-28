@@ -297,7 +297,7 @@ A default is written `.of(…)` (`weight: nilo.Within(0.0, 1.0) = .of(0.5)`) and
 
 **A rule about the struct goes on the struct.** `nilo_check` runs once every field has bound and says what did not hold with `r.must`, whichever way the struct arrived. It is the place for "confirm matches password" and "end is after start". A rule that needs the database ("that address is taken") goes in the handler as [`b.must`](./forms.md#custom-validation-rules).
 
-**`Bound(T)` collects them all.** A plain body stops at the first bad field with a 400, the way `std.json` stops. `Bound` keeps going and answers a 422 naming each one, the way a form with three wrong boxes should:
+**`Bound(T)` collects them all.** A plain body is refused with a 400 when a field does not fit, and that 400 names each field that failed, in `fields` beside the sentence, with the path the client sent (`address.city`, `items.0.qty`; [Errors](./errors.md#which-field-failed)). The handler never runs. `Bound` hands the handler the failures instead, and answers a 422 naming each one, the way a form with three wrong boxes should:
 
 <!-- compiles -->
 ```zig

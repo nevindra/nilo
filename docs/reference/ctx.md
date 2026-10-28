@@ -236,3 +236,16 @@ The scheme word is matched without regard to case. A header with another scheme 
 | `fail.status(code, fmt, args)` | any status |
 
 **All of them return `error.Failed`.** The message goes into a 240-byte slot with no allocation, or, when it is longer and a request is in flight, whole into the request arena up to 16 KiB (outside a request it is cut at 240; a gRPC call is told the first KiB), and is sent as `{"error": "…", "status": 404}`, the same shape for every failure whatever the endpoint returns when it succeeds, or as the struct `app.failures(T)` named, filled from the same status and message ([ADR 024](../adr/024-every-failure-answers-as-json.md)). The guide page is [Errors](../guide/errors.md).
+
+### `FieldFailure` and `FieldCode`
+
+**A body, a form or a query argument that did not fit, and a `b.fail()`, put `fields` in the body beside `error` and `status`**: one `nilo.FieldFailure` for each field that failed, in the order the type declares them. `fail.current().?.fields()` reads the list of the request being answered (empty for every failure that is not about fields, outside a request, and after the arena ran out of room), valid until the request ends ([ADR 024](../adr/024-every-failure-answers-as-json.md)).
+
+| `nilo.FieldFailure` | |
+|---|---|
+| `field` | `[]const u8`: the path as the client spelled it on the wire, `address.city`, `items.0.qty`; a renamed field is under its wire name |
+| `code` | `nilo.FieldCode` |
+| `message` | `[]const u8`: nilo's sentence for this field, the one `error` is joined from |
+| `expected` | `?[]const u8`: what the field would have taken ("text", "a whole number", "one of free, pro"), null for a rule |
+
+`nilo.FieldCode` is `missing`, `not_that_type`, `not_one_of`, `too_many`, `unknown_field` and `rule`. **The tag names are public API**: they are what a client compares against, and one is renamed or removed only with a `CHANGELOG.md` entry that says what a client changes. The value the client sent is not a field of the entry. At most 64 entries are kept (`fail.max_fields`); the `error` sentence still counts every failure.

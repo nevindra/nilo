@@ -66,6 +66,22 @@ const Upload = form_mod.Upload;
 
 pub const Reason = convert.Reason;
 
+/// What a client is told a failure was, from what a conversion failed at
+/// (ADR 024). One `switch`, so a new `Reason` cannot reach a body without
+/// somebody choosing its public name, and the names in `FieldCode` are the
+/// only ones a client ever sees.
+pub fn codeOf(reason: Reason) fail_mod.FieldCode {
+    return switch (reason) {
+        .missing => .missing,
+        // The value is there and is not what the field takes; `expected` is
+        // what says which, and "a whole number" or "true or false" is more
+        // than three more tags would tell a form.
+        .not_a_number, .not_true_or_false, .not_that_type, .wrong_kind => .not_that_type,
+        .not_a_choice => .not_one_of,
+        .several_files => .too_many,
+    };
+}
+
 /// The declaration a `Bound(W)` carries, so the compile-time engine can tell
 /// it from the thing it wraps.
 pub const marker = "nilo_bound";
@@ -139,6 +155,29 @@ pub fn hasCheck(comptime T: type) bool {
         );
         return true;
     }
+}
+
+/// A plain slot's way to say every field that did not bind, after its first
+/// read stopped at one (ADR 024): `outcomes` are what the collecting reader
+/// found, and the answer is the sentence the first read would have given when
+/// one field failed, and the one `Bound.fail` gives when several did, with the
+/// list beside it. Null when no outcome failed, and then the first read's own
+/// error stands. Only ever called on a request that is already refused, so
+/// the success path does not know it exists.
+pub noinline fn refuseAll(
+    comptime slot: Slot,
+    comptime T: type,
+    outcomes: *const Wording(slot, T).Outcomes,
+    code: u16,
+) ?fail_mod.Error {
+    const words = Wording(slot, T);
+    var n: usize = 0;
+    for (outcomes) |o| {
+        if (o.reason != null) n += 1;
+    }
+    if (n == 0) return null;
+    var it: words.Failures = .{ ._outcomes = outcomes, ._rules = &words.no_sentences };
+    return words.sayAll(code, n, &it);
 }
 
 /// Run `T`'s `nilo_check` over a value every field of which bound, and
@@ -423,7 +462,7 @@ pub fn Bound(comptime W: type) type {
             /// Stop the request with a 422 naming every one of them.
             pub fn fail(self: Checked) fail_mod.Error {
                 var it = self.failures();
-                return words.sayAll(self.failedCount(), &it);
+                return words.sayAll(422, self.failedCount(), &it);
             }
         };
 
@@ -431,13 +470,15 @@ pub fn Bound(comptime W: type) type {
         ///
         /// The shortcut for the handler that has nothing more interesting to
         /// say than "these are wrong". The body is the one every failure
-        /// answers with (ADR 024) — this only fills in the sentence, into
-        /// the fixed buffer that already exists, so the failure path still
-        /// allocates nothing. A 422 rather than a 400 because the request
-        /// was understood and its contents were not.
+        /// answers with (ADR 024): the sentence, and beside it `fields`, one
+        /// entry for each of them with its name, what was wrong and what
+        /// would have worked, which is what a form marks a box with
+        /// (ADR 034). The list is kept in the request arena, on this
+        /// failure path and no other. A 422 rather than a 400 because the
+        /// request was understood and its contents were not.
         pub fn fail(self: Self) fail_mod.Error {
             var it = self.failures();
-            return words.sayAll(self.failedCount(), &it);
+            return words.sayAll(422, self.failedCount(), &it);
         }
     };
 }
@@ -535,14 +576,17 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
                 if (s.len > 0) n += 1;
             }
             var it: Failures = .{ ._outcomes = &no_outcomes, ._rules = rules };
-            return sayAll(n, &it);
+            return sayAll(422, n, &it);
         }
 
         /// One sentence per failure, in one 422. Shared by everything that
         /// answers one so that a rule of the application's own cannot come
         /// out worded differently from one of nilo's.
-        pub fn sayAll(n: usize, it: *Failures) fail_mod.Error {
+        pub fn sayAll(code: u16, n: usize, it: *Failures) fail_mod.Error {
             var buf: [fail_mod.max_message]u8 = undefined;
+            // The same failures once more for the list, after the sentence
+            // has used them up.
+            var second = it.*;
 
             // The tail is written out of room kept back for it, so a sentence
             // that runs out of buffer can still say how much of itself is
@@ -586,7 +630,44 @@ fn Wording(comptime slot: Slot, comptime T: type) type {
                 n - said,
             }) catch {};
 
-            return fail_mod.status(422, "{s}", .{buf[0..out.end]});
+            return withFields(code, buf[0..out.end], n, &second);
+        }
+
+        /// The sentence, and beside it the fields it was made from (ADR 024).
+        /// Each field's sentence is written whole into a scratch of its own
+        /// and copied to the request arena, because the joined one may have
+        /// left it out to fit 240 bytes. Without a request, or without room
+        /// in its arena, it is the sentence alone, which is what a 422 here
+        /// always was.
+        noinline fn withFields(code: u16, sentence: []const u8, n: usize, it: *Failures) fail_mod.Error {
+            const in_flight = fail_mod.inFlight() orelse return fail_mod.status(code, "{s}", .{sentence});
+            const room = @min(n, fail_mod.max_fields);
+            const list = fail_mod.allocAligned(in_flight, fail_mod.FieldFailure, room) orelse
+                return fail_mod.status(code, "{s}", .{sentence});
+            var kept: usize = 0;
+            var scratch: [fail_mod.max_message]u8 = undefined;
+            while (kept < room) {
+                const f = it.next() orelse break;
+                var w = std.Io.Writer.fixed(&scratch);
+                // A sentence longer than the scratch is cut between
+                // characters, as a message is at the slot's size.
+                f.say(&w) catch {};
+                const said = w.buffered();
+                const text = said[0..fail_mod.wholeCharacters(said)];
+                const copy = in_flight.allocate(text.len) orelse break;
+                @memcpy(copy, text);
+                list[kept] = .{
+                    .field = f.field,
+                    .code = if (f.reason) |reason| codeOf(reason) else .rule,
+                    .message = copy,
+                    // A rule is the application's own words and has no type
+                    // it was expecting.
+                    .expected = if (f.reason == null) null else f.expected,
+                };
+                kept += 1;
+            }
+            in_flight.failure.setFields(in_flight, code, sentence, list[0..kept]);
+            return error.Failed;
         }
     };
 }
@@ -1240,4 +1321,29 @@ test "a binding of a struct with no check is the size it was" {
     // No room for sentences on the one, and a slice per field on the other.
     try testing.expect(@sizeOf(Bare) < @sizeOf(SignUp) + @sizeOf(Bare.Outcomes) + @sizeOf(Bare.Sentences));
     try testing.expect(@sizeOf(Checks) >= @sizeOf(Registration) + @sizeOf(Checks.Outcomes) + @sizeOf(Checks.Sentences));
+}
+
+test "every Reason is told to a client under a name of FieldCode's" {
+    try testing.expectEqual(fail_mod.FieldCode.missing, codeOf(.missing));
+    try testing.expectEqual(fail_mod.FieldCode.not_that_type, codeOf(.not_a_number));
+    try testing.expectEqual(fail_mod.FieldCode.not_that_type, codeOf(.not_true_or_false));
+    try testing.expectEqual(fail_mod.FieldCode.not_that_type, codeOf(.not_that_type));
+    try testing.expectEqual(fail_mod.FieldCode.not_that_type, codeOf(.wrong_kind));
+    try testing.expectEqual(fail_mod.FieldCode.not_one_of, codeOf(.not_a_choice));
+    try testing.expectEqual(fail_mod.FieldCode.too_many, codeOf(.several_files));
+}
+
+test "refuseAll says nothing when no field failed, and the sentence of one when one did" {
+    var in_flight = fail_mod.InFlight{};
+    in_flight.startRequest();
+    const previous = bulkhead.setFallbackSlot(&in_flight);
+    defer _ = bulkhead.setFallbackSlot(previous);
+
+    const none: [3]Outcome = @splat(.{});
+    try testing.expect(refuseAll(.form, SignUp, &none, 400) == null);
+
+    const one: [3]Outcome = .{ .{}, .{ .reason = .not_a_number, .given = Str.static("soon") }, .{} };
+    try testing.expectError(error.Failed, asUnion(refuseAll(.form, SignUp, &one, 400).?));
+    try testing.expectEqual(@as(u16, 400), in_flight.failure.status);
+    try testing.expectEqualStrings("\"age\" has to be a whole number, not \"soon\"", in_flight.failure.message());
 }

@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const http1 = @import("http1.zig");
+const fail = @import("fail.zig");
 const str_mod = @import("nilo_core");
 const patch_mod = @import("patch.zig");
 const mark = @import("jsonmark.zig");
@@ -1391,11 +1392,33 @@ pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, ops: []const Operation, 
 /// The shape of every failure nilo assembles (ADR 024). Written out here
 /// rather than derived from a Zig type, because the type it would be derived
 /// from is a fixed buffer and a status code, not a struct anybody returns.
+///
+/// `fields` is there for a body, a form or a query argument that did not fit,
+/// one entry for each field, and for no other failure: it is optional, and a
+/// client that never reads it is unaffected. The codes are `FieldCode`'s tags,
+/// which are public API, so a generated client gets an enum it can switch on.
 const error_schema =
     "{\"type\":\"object\",\"properties\":{" ++
     "\"error\":{\"type\":\"string\",\"description\":\"what went wrong, in words\"}," ++
-    "\"status\":{\"type\":\"integer\"}}," ++
+    "\"status\":{\"type\":\"integer\"}," ++
+    "\"fields\":{\"type\":\"array\",\"description\":\"present on a 400 or 422 from a body, form or query argument that did not fit: one entry for each field that failed, in the order the type declares them\"," ++
+    "\"items\":{\"type\":\"object\",\"properties\":{" ++
+    "\"field\":{\"type\":\"string\",\"description\":\"where the field is, as it was spelled in the request: address.city, items.0.qty\"}," ++
+    "\"code\":{\"type\":\"string\",\"enum\":" ++ field_codes ++ "}," ++
+    "\"message\":{\"type\":\"string\",\"description\":\"what is wrong with this field, in words\"}," ++
+    "\"expected\":{\"type\":\"string\",\"description\":\"what the field would have taken, when that is known\"}}," ++
+    "\"required\":[\"field\",\"code\",\"message\"]}}}," ++
     "\"required\":[\"error\",\"status\"]}";
+
+/// `FieldCode`'s tags as a JSON array, so the document cannot name a code the
+/// wire never sends or miss one it does.
+const field_codes = blk: {
+    var out: []const u8 = "[";
+    for (@typeInfo(fail.FieldCode).@"enum".field_names, 0..) |name, i| {
+        out = out ++ (if (i == 0) "" else ",") ++ "\"" ++ name ++ "\"";
+    }
+    break :blk out ++ "]";
+};
 
 fn alreadyWritten(earlier: []const Operation, pattern: []const u8) bool {
     for (earlier) |op| {

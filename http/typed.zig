@@ -2462,6 +2462,25 @@ fn collectListCollecting(
 /// default, or to null if it is optional; one with neither is required, and
 /// saying so is a 400 rather than a surprise zero (`field.zig`).
 fn queryValue(comptime T: type, c: *const Ctx) !T {
+    const out = queryFill(T, c) catch |err| return everyQueryField(T, c, err);
+    // A struct that checks itself is checked once it is whole (ADR 193).
+    try bound_mod.enforce(.query, T, out);
+    return out;
+}
+
+/// A query string that did not fit, read again to name every field that did
+/// not rather than the first (ADR 024): the collecting reader finds them and
+/// `bound.refuseAll` words them as a `Bound` would, in a 400 with the list
+/// beside the sentence. Only a request already refused gets here, and the
+/// query that fits runs neither this nor an allocation more than it did.
+noinline fn everyQueryField(comptime T: type, c: *const Ctx, err: anyerror) anyerror {
+    if (err != error.Failed) return err;
+    var outcomes: [@typeInfo(T).@"struct".field_names.len]convert_mod.Outcome = undefined;
+    _ = queryValueCollecting(T, c, &outcomes);
+    return bound_mod.refuseAll(.query, T, &outcomes, 400) orelse err;
+}
+
+fn queryFill(comptime T: type, c: *const Ctx) !T {
     const info = @typeInfo(T).@"struct";
     comptime @setEvalBranchQuota(convert_mod.budget(info.field_names));
     var out: T = undefined;
@@ -2491,8 +2510,6 @@ fn queryValue(comptime T: type, c: *const Ctx) !T {
             return fail.badRequest("{s} is required", .{label});
         }
     }
-    // A struct that checks itself is checked once it is whole (ADR 193).
-    try bound_mod.enforce(.query, T, out);
     return out;
 }
 

@@ -36,6 +36,7 @@ const std = @import("std");
 const convert = @import("convert.zig");
 const field_mod = @import("field.zig");
 const ctx_mod = @import("ctx.zig");
+const bound_mod = @import("bound.zig");
 const bulkhead = @import("bulkhead.zig");
 const fail = @import("fail.zig");
 const filebody = @import("filebody.zig");
@@ -253,7 +254,28 @@ pub fn readInto(
     body: []const u8,
 ) !T {
     const fields = try parsedFor(T, arena, content_type, body);
-    return fill(T, arena, fields, lifetime);
+    return fill(T, arena, fields, lifetime) catch |err| return everyField(T, arena, fields, lifetime, err);
+}
+
+/// A form that did not fit, read again to name every field that did not,
+/// rather than the first (ADR 024). `fill` stops at the first field it cannot
+/// convert and that is its job; the answer to a client is the whole list, so
+/// the failure path reads the same fields once more with the collecting
+/// reader and hands what it found to `bound.refuseAll`, which words it as a
+/// `Bound` would. **The form that fits never gets here**: no new local, no
+/// allocation and no branch on its path. A failure that is not a field's (the
+/// arena is full) stands as it was.
+noinline fn everyField(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    fields: Fields,
+    lifetime: *const str_mod.Lifetime,
+    err: anyerror,
+) anyerror {
+    if (err != error.Failed) return err;
+    var outcomes: [@typeInfo(T).@"struct".field_names.len]convert.Outcome = undefined;
+    _ = fillCollecting(T, arena, fields, lifetime, &outcomes);
+    return bound_mod.refuseAll(.form, T, &outcomes, 400) orelse err;
 }
 
 /// Read a form body into `T`, recording why each field that would not bind

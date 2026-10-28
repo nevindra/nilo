@@ -1032,22 +1032,47 @@ fn staticFailure(comptime status: u16, comptime message: []const u8) []const u8 
 /// worst moment to lose the message that says what went wrong. The message
 /// itself is unchanged, so `curl` still shows the sentence — one pair of
 /// braces further in.
-fn writeFailureBody(w: *std.Io.Writer, status: u16, message: []const u8) !void {
+///
+/// **`fields` follows `status` when a body, a form or a query argument named
+/// the fields that did not fit**, and is left out otherwise, so every other
+/// failure is the bytes it always was (ADR 024). Every string in it is
+/// escaped the same lossy way: the field is a path the client typed and the
+/// sentences quote what it sent.
+fn writeFailureBody(w: *std.Io.Writer, status: u16, message: []const u8, fields: []const fail.FieldFailure) !void {
     try w.writeAll("{\"error\":");
     // The message can hold a stranger's bytes (`%ff` in a path is decoded
     // without a check), and a body `res.json()` cannot parse is the failure
     // ADR 024 exists to prevent: so a byte that is not text becomes U+FFFD.
     try json.writeLossyString(w, message);
-    try w.print(",\"status\":{d}}}", .{status});
+    try w.print(",\"status\":{d}", .{status});
+    if (fields.len != 0) try writeFields(w, fields);
+    try w.writeByte('}');
+}
+
+fn writeFields(w: *std.Io.Writer, fields: []const fail.FieldFailure) !void {
+    try w.writeAll(",\"fields\":[");
+    for (fields, 0..) |f, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.writeAll("{\"field\":");
+        try json.writeLossyString(w, f.field);
+        try w.print(",\"code\":\"{s}\",\"message\":", .{@tagName(f.code)});
+        try json.writeLossyString(w, f.message);
+        if (f.expected) |expected| {
+            try w.writeAll(",\"expected\":");
+            try json.writeLossyString(w, expected);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeByte(']');
 }
 
 /// The bytes a long failure's body needs in the arena: the larger of nilo's
 /// own shape and the application's, each measured by writing it nowhere. The
 /// shape is written in this pass as well as in the real one, so it has to give
 /// the same bytes both times, as every `nilo_failure` writer does.
-fn failureBodyLen(c: *Ctx, shape: ?failurebody.Write, status: u16, message: []const u8) usize {
+fn failureBodyLen(c: *Ctx, shape: ?failurebody.Write, status: u16, message: []const u8, fields: []const fail.FieldFailure) usize {
     var own = std.Io.Writer.Discarding.init(&.{});
-    writeFailureBody(&own.writer, status, message) catch {};
+    writeFailureBody(&own.writer, status, message, fields) catch {};
     var most: usize = @intCast(own.fullCount());
     if (shape) |write| {
         var custom = std.Io.Writer.Discarding.init(&.{});
@@ -1614,10 +1639,22 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, ap
     // and its body is built there as well, sized exactly by a counting pass
     // over both shapes it may be written in. If the arena has no room now, the
     // message is cut to the slot's, as it was when it was said.
-    const buf: []u8 = if (message.len <= fail.max_message) &stack else c._arena.alloc(u8, failureBodyLen(c, shape, status, message)) catch blk: {
-        message = message[0..fail.wholeCharacters(message[0..fail.max_message])];
-        break :blk &stack;
-    };
+    // The fields that did not fit, when a body, form or query argument named
+    // them (ADR 024). Only nilo's own shape lists them: a shape of the
+    // application's is handed the status and the sentence, and it is the
+    // fallback written below, sized with no list, that must not outgrow its
+    // buffer. A body with fields is built in the arena like a long message,
+    // so the stack buffer is the size it always was.
+    const fields: []const fail.FieldFailure = if (shape == null and fail.failed(failure, err)) failure.fields() else &.{};
+    var listed = fields;
+    const buf: []u8 = if (message.len <= fail.max_message and listed.len == 0)
+        &stack
+    else
+        c._arena.alloc(u8, failureBodyLen(c, shape, status, message, listed)) catch blk: {
+            message = message[0..fail.wholeCharacters(message[0..@min(message.len, fail.max_message)])];
+            listed = &.{};
+            break :blk &stack;
+        };
     var body: std.Io.Writer = .fixed(buf);
     // A shape of the application's can outgrow the buffer — an envelope past
     // its 256 bytes — and then nilo's own shape goes out instead, with the
@@ -1628,7 +1665,7 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, ap
     // reach, on every App.
     if (shape) |write| write(status, lossyMessage(c, message), &body) catch {
         body = .fixed(buf);
-        writeFailureBody(&body, status, message) catch unreachable; // sized for it, below
+        writeFailureBody(&body, status, message, &.{}) catch unreachable; // sized for it, below
     };
     // The buffer is sized for the longest message a Failure can hold, so
     // this cannot run out of room; if it somehow did, what was written so
@@ -1639,7 +1676,7 @@ noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, ap
     // length, and a client's limit on a header list is commonly 8 KiB, so a
     // call is told the first KiB of a long message and an HTTP answer all of it.
     try c._framing.failed(err, message[0..fail.wholeCharacters(message[0..@min(message.len, grpc_message_max)])]);
-    if (shape == null) writeFailureBody(&body, status, message) catch {
+    if (shape == null) writeFailureBody(&body, status, message, listed) catch {
         return sendDirect(c, status, "", "");
     };
     try sendDirect(c, status, failure_content_type, buf[0..body.end]);

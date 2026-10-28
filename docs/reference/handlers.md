@@ -300,7 +300,7 @@ Each element converts exactly like a single field would, so `[]const Kind` for a
 | | |
 |---|---|
 | `b.value()` | `?T`: the bound value, or null if **any** field failed |
-| `b.fail()` | a 422 naming every field that did not bind |
+| `b.fail()` | a 422 naming every field that did not bind, with a [`fields`](./ctx.md#fieldfailure-and-fieldcode) entry for each |
 | `b.failed()`, `b.failedCount()` | whether any failed, and how many |
 | `b.failures()` | an iterator of `Failure` |
 | `b.given("name")` | `Str`: the text that arrived, bound or not. The name is checked while compiling |
