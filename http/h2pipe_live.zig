@@ -14,6 +14,7 @@
 //! hand over std's own socket. Compiled only into a build with HTTP/2 in it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const nilo = @import("http.zig");
 const liveclient = @import("liveclient.zig");
 const h2 = @import("h2.zig");
@@ -1250,8 +1251,10 @@ fn goneSearch() u32 {
     var n: u32 = 0;
     while (n < 1_000) : (n += 1) {
         if (nilo.gone()) return n;
-        const ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
-        _ = std.os.linux.nanosleep(&ts, null);
+        // Blocks this worker's thread, as the work a function stands for
+        // would. Through std rather than the Linux syscall, which on macOS is
+        // a bad system call and ended the process (`signal SYS`).
+        std.Io.sleep(testing.io, .fromMilliseconds(5), .awake) catch {};
     }
     return n;
 }
@@ -1419,7 +1422,7 @@ test "a connection whose input ended with a call running is half-closed and is s
         try testing.expect(gWait(&g_entered, io, 3_000));
         // The server's SETTINGS are acknowledged while this side can still write.
         try wire.pump(&reader.interface, w, stream.socket.handle, 100);
-        _ = std.os.linux.shutdown(stream.socket.handle, std.os.linux.SHUT.WR);
+        stream.shutdown(io, .send) catch {};
         for (0..80) |_| {
             if (wire.finished) break;
             wire.pump(&reader.interface, w, stream.socket.handle, 100) catch break;
@@ -1430,7 +1433,10 @@ test "a connection whose input ended with a call running is half-closed and is s
         try testing.expectEqualStrings("answered", wire.body.items);
     }
 
-    // The connection reset under a sleeping call.
+    // The connection reset under a sleeping call. A unix socket closed with
+    // bytes unread is a reset to its peer on Linux only; on macOS the peer
+    // reads an end, which is the half-close above and rightly not gone.
+    if (builtin.os.tag != .linux) return;
     gReset();
     {
         var stream = try live.connect(io, server.where.path);

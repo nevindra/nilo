@@ -191,10 +191,6 @@ Nothing is open at this tier.
 
 **Needs:** the follower's reload counted in the test, so a failure says which of the two it was, then the cause found; until then CI's `test-all` can go red on any change.
 
-**A gRPC test fails now and then: "a server stop that lands in a burst of calls ends the connection promptly, however many are queued or sleeping" (`http/grpc_live.zig`) found 8 where it expects 0.** It failed twice on the 2-core Xeon on 28 October 2026, once in a subagent's `test-http` and once in `test-all` at `99c7a33` with the next change in the tree, each time with other builds loading the machine, and passed in the run after each on the same tree. The test prints no line saying what the 8 are, calls answered after the stop or calls left unanswered, and those are a different defect each.
-
-**Needs:** the assertion given a message naming what it counted, the test looped under load until it fails again, and the cause found from which count it was.
-
 **One rule, one function: the audit's largest source of defects is a decision written in several places that stopped agreeing.** Whether a field may be absent is now one comptime rule (`http/field.zig`), and a number described in a query and not in JSON is still open. Path prefixes are matched three ways (`middleware.underPrefix`, `static.underPrefix`, the router) and disagree on `//` and on a param, which is how `useOn` came to skip a `*` route until the chain was resolved per request for one. A JSON string is written by `json.zig` and again by `writeFailureBody`, and only one checks UTF-8. `If-None-Match`, `If-Range` and `Range` are answered in `serve.zig`, `sendfile.zig` and through `Versioned`. `fieldList` exists twice with different output. Each is a fix that closes its defects for good, where a patch to each copy closes them until the next copy.
 
 **Needs:** the shape of each shared piece decided — one prefix matcher the router's split defines, one JSON string writer, one conditional-request ladder — and the order, which the defects suggest: the prefix matcher next.

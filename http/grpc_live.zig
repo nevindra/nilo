@@ -49,6 +49,7 @@ pub const Serving = struct {
     body_timeout_ms: u32 = 30_000,
     body_grace_ms: u32 = 10_000,
     body_min_rate: u32 = 8 * 1024,
+    shutdown_grace_ms: u32 = 10_000,
     bound: std.atomic.Value(bool) = .init(true),
     /// Set once `tryListen` has returned, so a test can bound how long a stop
     /// takes rather than join a thread that may never come back.
@@ -65,6 +66,7 @@ pub const Serving = struct {
             .body_timeout_ms = self.body_timeout_ms,
             .body_grace_ms = self.body_grace_ms,
             .body_min_rate = self.body_min_rate,
+            .shutdown_grace_ms = self.shutdown_grace_ms,
             .also = &.{.{ .address = beside }},
         }) catch {
             self.bound.store(false, .release);
@@ -595,9 +597,10 @@ test "a route promised never to wait that does is named, and from then on gets a
     try testing.expect(calls[1].finished_at < calls[0].finished_at);
 }
 
-/// How many `hang` handlers slept their whole wait. A stop cancels the sleep,
-/// so a server that stopped as it should leaves this at zero; one that waited
-/// the handlers out does not.
+/// How many `hang` handlers slept their whole wait. A stop cancels the sleep
+/// of a call still queued at once and of one already running when the grace
+/// period ends, so a server that stopped as it should leaves this at zero; one
+/// that waited the handlers out does not.
 var hang_slept_through: std.atomic.Value(u32) = .init(0);
 
 /// A handler that waits far longer than a stop is allowed to take.
@@ -623,7 +626,15 @@ test "a server stop that lands in a burst of calls ends the connection promptly,
     try app.post("/test.Echo/Hang", hang);
     try app.post("/test.Echo/Say", echo);
 
-    var serving: Serving = .{ .app = &app, .path = where.path };
+    // A grace period far shorter than a `hang`. Which calls have started when
+    // the stop lands is the scheduler's choice: on a quiet machine the stop
+    // finds them queued behind the first and turns them away, on a loaded one
+    // the connection has already started all twelve, and those are requests
+    // in flight, which a stop waits for (`drain`). With the default grace of
+    // ten seconds that wait and the sleep end together, and the test was a
+    // coin toss on a busy runner; here the running ones are cut at the grace,
+    // so either order ends before one handler sleeps its ten seconds.
+    var serving: Serving = .{ .app = &app, .path = where.path, .shutdown_grace_ms = 500 };
     const thread = try std.Thread.spawn(.{}, Serving.run, .{&serving});
     var joined = false;
     defer if (!joined) {

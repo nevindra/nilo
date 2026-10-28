@@ -330,6 +330,13 @@ test "asking whether the client is there adds nothing to what a connection holds
     // Debug and ReleaseSafe carry the loop's own list-membership checks in
     // a completion, so the figure is for the modes the suite runs in.
     if (!std.debug.runtime_safety) return error.SkipZigTest;
-    try testing.expectEqual(@as(usize, 528), @sizeOf(@import("engine/zio.zig").Wake));
+    // `Wake` holds the loop's completion, whose size is the backend's:
+    // io_uring and epoll on Linux, kqueue on macOS.
+    const wake: usize = switch (builtin.os.tag) {
+        .linux => 528,
+        .macos => 472,
+        else => return error.SkipZigTest,
+    };
+    try testing.expectEqual(wake, @sizeOf(@import("engine/zio.zig").Wake));
     try testing.expectEqual(@as(usize, 328), @sizeOf(@import("fail.zig").InFlight));
 }

@@ -24,6 +24,7 @@
 //! later.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const nilo = @import("http.zig");
 
 const testing = std.testing;
@@ -731,6 +732,10 @@ fn tlsWait(flag: *const std.atomic.Value(bool), ms: u64) bool {
 
 /// One TLS request left unanswered, then the client goes the way `how` says.
 fn leavesTls(how: enum { abrupt, close_notify, reset }) !void {
+    // The hang-up of an HTTP/1.1 connection is `poll` with `POLLRDHUP`, which
+    // only Linux has (`Wake.hangup`), so elsewhere a handler waits its time
+    // out, as `gone_live.zig`'s plain-socket cases say by skipping too.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     hush();
     tls_entered.store(false, .release);
     tls_finished.store(false, .release);
