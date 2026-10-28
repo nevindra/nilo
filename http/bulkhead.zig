@@ -1177,8 +1177,33 @@ fn fallbackIo() std.Io {
         }
         std.Thread.yield() catch {};
     }
+    keepCancelSignal();
     return fallback_threaded.io();
 }
+
+/// `std.Io.Threaded` cancels a call blocked in the kernel by sending its
+/// thread `SIGIO`, and installs a handler that does nothing so the signal
+/// interrupts the call rather than the process. Each `Threaded` puts back on
+/// `deinit` the handler that was there when it began, and this one is never
+/// ended: one that a test or a caller began before it and ended after puts
+/// the default action back while this is still in use, and the next cancel of
+/// a call on it ended the whole test binary with "signal IO". So the handler
+/// is put back before this is handed out, whenever it is the default.
+fn keepCancelSignal() void {
+    const posix = std.posix;
+    if (comptime posix.Sigaction == void or posix.SIG == void or !@hasField(posix.SIG, "IO")) return;
+    var current: posix.Sigaction = undefined;
+    posix.sigaction(.IO, null, &current);
+    if (current.handler.handler != posix.SIG.DFL) return;
+    const act: posix.Sigaction = .{
+        .handler = .{ .handler = ignoreSignal },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(.IO, &act, null);
+}
+
+fn ignoreSignal(_: std.posix.SIG) callconv(.c) void {}
 
 /// Bytes from the operating system's entropy source, off the event loop.
 /// What a session nonce is made of.

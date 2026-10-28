@@ -2326,6 +2326,29 @@ test "a handler that asks for an std.Io waits on a writer fiber in a Wired test"
     }
 }
 
+test "a writer on a Wired test's Io is cancelled after another Threaded put SIGIO back to its default" {
+    const posix = std.posix;
+    if (comptime posix.Sigaction == void or posix.SIG == void or !@hasField(posix.SIG, "IO")) return error.SkipZigTest;
+    var wired = try Wired.init(testing.allocator, .{});
+    defer wired.deinit();
+    const io = wired.io();
+
+    // What a `std.Io.Threaded` that began before the process-wide one and
+    // ended after it does: puts back the default action, which ends the
+    // process at the next `SIGIO` a cancel sends.
+    const default: posix.Sigaction = .{ .handler = .{ .handler = posix.SIG.DFL }, .mask = posix.sigemptyset(), .flags = 0 };
+    posix.sigaction(.IO, &default, null);
+
+    var wal: GroupCommit = .{ .queue = undefined };
+    wal.queue = .init(&wal.slots);
+    var writing = try wired.io().concurrent(GroupCommit.writer, .{ &wal, wired.io() });
+    // Blocked in the kernel on an empty queue, which a cancel interrupts with
+    // the signal; ended by the cancel, not by the queue closing.
+    std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    _ = writing.cancel(wired.io());
+    wal.queue.close(io);
+}
+
 test "c.io() is the same Io a Wired test starts its writer on" {
     var wired = try Wired.init(testing.allocator, .{});
     defer wired.deinit();
