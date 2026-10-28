@@ -35,7 +35,6 @@ const patch_mod = @import("patch.zig");
 const mark = @import("jsonmark.zig");
 const convert = @import("convert.zig");
 const field_mod = @import("field.zig");
-const fail = @import("fail.zig");
 
 const Str = str_mod.Str;
 
