@@ -107,6 +107,10 @@ pub const Chains = []const []const Link;
 /// stops is read when the longest has passed and again when it does.
 const settle_ms = 60;
 const settle_longest_ms = 1000;
+/// How many times a load that a write overlapped is thrown away and made
+/// again in one look at the directory, before the thread looks again on its
+/// next turn.
+const max_rereads = 3;
 /// The slice the thread waits in, which is also how long `halt` can take.
 const slice_ms = 50;
 
@@ -347,6 +351,8 @@ pub const Follower = struct {
 
         const poll_ns = @as(u64, self.options.follow_poll_ms) * std.time.ns_per_ms;
         var next_sweep = bulkhead.monotonicNanos() + poll_ns;
+        // A look that read the directory while it moved and kept nothing.
+        var again = false;
         while (!self.stop.load(.acquire)) {
             var changed = false;
             if (notifier) |*n| {
@@ -361,8 +367,8 @@ pub const Follower = struct {
             } else pause(io, slice_ms);
             if (self.retired != null) self.reap();
             const now = bulkhead.monotonicNanos();
-            if (changed or now >= next_sweep) {
-                self.reconcile(io);
+            if (changed or again or now >= next_sweep) {
+                again = self.reconcile(io);
                 next_sweep = bulkhead.monotonicNanos() + poll_ns;
                 // After the walk and not before it, so a directory made while
                 // it ran is in what it found. A directory that is gone has
@@ -378,8 +384,9 @@ pub const Follower = struct {
     }
 
     /// Look at the directory and, if it is not what the live generation was
-    /// read from, read it again.
-    fn reconcile(self: *Follower, io: std.Io) void {
+    /// read from, read it again. True when it moved under every read and
+    /// nothing was kept, so the caller looks again.
+    fn reconcile(self: *Follower, io: std.Io) bool {
         const live_print = self.live.load(.monotonic).?.set.fingerprint;
         var print = static_mod.scan(io, self.gpa, self.dir_path, self.options) catch |err| {
             if (!self.unreadable) std.log.warn(
@@ -387,30 +394,54 @@ pub const Follower = struct {
                 .{ self.dir_path, @errorName(err) },
             );
             self.unreadable = true;
-            return;
+            return false;
         };
         self.unreadable = false;
-        if (print == live_print) return;
+        if (print == live_print) return false;
 
-        // Changing: wait until it holds still, so a file being written is read
-        // once it is written and not at every size on the way.
-        var waited: u32 = 0;
-        while (waited < settle_longest_ms and !self.stop.load(.acquire)) {
-            pause(io, settle_ms);
-            waited += settle_ms;
-            const again = static_mod.scan(io, self.gpa, self.dir_path, self.options) catch return;
-            if (again == print) break;
-            print = again;
-        }
-        if (print == live_print or print == self.failed) return;
+        var reads: u32 = 0;
+        const set = while (true) {
+            // Changing: wait until it holds still, so a file being written is
+            // read once it is written and not at every size on the way.
+            var waited: u32 = 0;
+            var still = false;
+            while (waited < settle_longest_ms and !self.stop.load(.acquire)) {
+                pause(io, settle_ms);
+                waited += settle_ms;
+                const again = static_mod.scan(io, self.gpa, self.dir_path, self.options) catch return false;
+                if (again == print) {
+                    still = true;
+                    break;
+                }
+                print = again;
+            }
+            if (print == live_print or print == self.failed) return false;
 
-        const set = static_mod.loadOn(io, self.gpa, self.prefix, self.dir_path, self.options, .reported) catch |err| {
-            self.failed = print;
-            std.log.warn(
-                "nilo: static directory \"{s}\" changed and could not be loaded ({s}), so the files already held go on being served",
-                .{ self.dir_path, @errorName(err) },
-            );
-            return;
+            var set = static_mod.loadOn(io, self.gpa, self.prefix, self.dir_path, self.options, .reported) catch |err| {
+                self.failed = print;
+                std.log.warn(
+                    "nilo: static directory \"{s}\" changed and could not be loaded ({s}), so the files already held go on being served",
+                    .{ self.dir_path, @errorName(err) },
+                );
+                return false;
+            };
+            // Holding still is not the same as staying still. The set's
+            // fingerprint is the walk `load` made before it read a byte, so a
+            // file written in place while it was being read (truncated, then
+            // filled) is in the set half written under the stamp of before,
+            // and only asking again now finds it. A directory that never held
+            // still is read as it is (ADR 277); one that held still and then
+            // moved under the read is never published. It is waited on and
+            // read again, and after `max_rereads` the caller is told to look
+            // again on its next turn, because the events of the writes that
+            // moved it may already be spent.
+            if (!still) break set;
+            const after = static_mod.scan(io, self.gpa, self.dir_path, self.options) catch break set;
+            if (after == set.fingerprint) break set;
+            set.deinit();
+            reads += 1;
+            if (reads == max_rereads or self.stop.load(.acquire)) return true;
+            print = after;
         };
         self.publish(set) catch |err| {
             var gone = set;
@@ -420,9 +451,10 @@ pub const Follower = struct {
                 "nilo: static directory \"{s}\" changed and could not be swapped in ({s}), so the files already held go on being served",
                 .{ self.dir_path, @errorName(err) },
             );
-            return;
+            return false;
         };
         self.failed = 0;
+        return false;
     }
 };
 
@@ -790,6 +822,12 @@ const Torn = struct {
                 _ = self.torn.fetchAdd(1, .monotonic);
             _ = self.reads.fetchAdd(1, .monotonic);
             found.gen.lease.release();
+            // Four readers spinning without a pause hold every core of a
+            // four-core runner, and a writer stopped between its truncate and
+            // its write for longer than `settle_ms` leaves an empty file that
+            // holds still, which the follower rightly reads as it is: the
+            // guarantee is for a write that finishes, not one that is starved.
+            std.Thread.yield() catch {};
         }
     }
 };
@@ -819,8 +857,17 @@ test "a reader never sees a file half replaced, however often it is replaced" {
     const last = filled(6000, letter);
     try waitForBytes(fx.follower, gpa, "/page.txt", &last);
 
-    try testing.expectEqual(@as(u64, 0), torn.torn.load(.acquire));
-    try testing.expectEqual(@as(u64, 0), torn.missing.load(.acquire));
+    // Each counter named, so a failure says which guarantee broke: a torn
+    // read is a generation made from a file half written, a missing one a
+    // generation without the file at all.
+    const torn_reads = torn.torn.load(.acquire);
+    const missing = torn.missing.load(.acquire);
+    if (torn_reads != 0 or missing != 0) std.debug.print(
+        "torn reads {d}, missing {d}, of {d} reads over {d} swaps\n",
+        .{ torn_reads, missing, torn.reads.load(.acquire), fx.follower.swaps.load(.acquire) },
+    );
+    try testing.expectEqual(@as(u64, 0), torn_reads);
+    try testing.expectEqual(@as(u64, 0), missing);
     try testing.expect(torn.reads.load(.acquire) > 0);
     try testing.expect(fx.follower.swaps.load(.acquire) >= 1);
 }

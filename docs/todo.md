@@ -191,10 +191,6 @@ Nothing is open at this tier.
 
 **Needs:** the follower's reload counted in the test, so a failure says which of the two it was, then the cause found; until then CI's `test-all` can go red on any change.
 
-**A second follower test fails now and then: "a reader never sees a file half replaced, however often it is replaced" (`http/follow.zig`) counted 5,833,116 where it expects 0.** It failed once in `test-all` on the 9700X on 16 October 2026, with other builds loading the machine and nothing under `http/follow.zig` or `http/static.zig` changed, and passed in the runs before and after it. The count is the readers' spin, either reads that met a torn file or looks that found no `/page.txt`, and the failure prints no line to tell which: a torn read would be the guarantee ADR 277 makes broken, a missing one a generation built while the file was half written and dropped.
-
-**Needs:** the two counters asserted with messages that name them, the test run in a loop under load in both modes until it fails again, and the cause found from which one it was.
-
 **A gRPC test fails now and then: "a server stop that lands in a burst of calls ends the connection promptly, however many are queued or sleeping" (`http/grpc_live.zig`) found 8 where it expects 0.** It failed twice on the 2-core Xeon on 28 October 2026, once in a subagent's `test-http` and once in `test-all` at `99c7a33` with the next change in the tree, each time with other builds loading the machine, and passed in the run after each on the same tree. The test prints no line saying what the 8 are, calls answered after the stop or calls left unanswered, and those are a different defect each.
 
 **Needs:** the assertion given a message naming what it counted, the test looped under load until it fails again, and the cause found from which count it was.
