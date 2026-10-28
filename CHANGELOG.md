@@ -58,6 +58,8 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ### Changed
 
+- **`nilo_fetch` sets `TCP_NODELAY` on every TCP connection it dials** (plain, TLS and through a proxy; not a unix socket), so a POST whose body is larger than the write buffer no longer waits 41 ms for the peer's delayed ACK on a pooled connection. Nothing for a user to change.
+
 - **`cors.Origins.set` and `setSplit` refuse an origin with a space or a control byte in it** (`error.OriginNotAnOrigin`), which matched no browser's `Origin` and, echoed back, could not be written as a header. `setSplit` still trims the spaces around each entry ([ADR 088](docs/adr/088-an-origin-is-a-fact-about-the-deployment.md)).
 
 - **A `nilo_s3` request waiting on a credential refresh stops at its route's deadline**, with `error.TimedOut`, or signs with the key it already holds if that is still good, while the refresh runs on to its own `fetch_timeout_ms` and is kept for the requests after it. Before, it waited out the whole fetch. Nothing to change ([ADR 105](docs/adr/105-a-route-can-say-how-long-it-has.md)).

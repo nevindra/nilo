@@ -339,10 +339,6 @@ Nothing is open at this tier.
 
 **Needs:** a write that a cancel ends, on both `Threaded` and the Engine (a send with a deadline, or a cancel the io_uring backend delivers to an in-flight `sendmsg`), and a live test of a peer that stops reading mid-upload which fails within `stall_ms` plus a bound.
 
-**`nilo_fetch` does not set `TCP_NODELAY`, so a POST whose body is larger than the write buffer took 41 ms a call on a pooled connection.** Nagle's algorithm holds the body's last segment until the peer's delayed ACK. It was found while measuring zstd uploads, with or without a coding, against a plain `std.Io.net` upstream (`bench/release/fetch_zstd_send.zig`), so what it costs against a nilo server, which sets `setNoDelay(true)` on its own sockets in `http/engine/zio.zig`, is not measured. Every service that posts a body of more than a few kilobytes to another pays it on every call ([`fetch.md`](../bench/result/fetch.md)).
-
-**Needs:** the same program run against `bench/fetch_server.zig`, then the option set where `nilo_fetch` dials (std's connect has no hook, so in its own dial or on the pooled connection after it), held by a test that times a large POST on a reused connection.
-
 **`nilo_fetch` speaks HTTP/1.1 only, so a nilo service can answer gRPC and cannot call it.** The server half of HTTP/2 is built ([ADR 259](./adr/259-http2-is-a-framing-of-every-request.md)), and a service between other gRPC services, which is where most gRPC servers sit, needs both halves; a client connection carrying many calls is on the record nowhere. grpc-go and connect-go do both.
 
 **Needs:** a design for an outbound connection carrying many calls, and where its framing comes from: `nilo_fetch` may not import `nilo_http` ([ADR 038](./adr/038-a-module-sits-where-the-loop-puts-it.md)), so `h2.zig` and `hpack.zig` move down a layer or are written again; then the idle bytes of an outbound HTTP/2 connection measured before it ships.

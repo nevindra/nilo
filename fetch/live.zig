@@ -3131,3 +3131,68 @@ test "a socket call whose body is a reader gets a connection of its own and the 
         }
     }.run);
 }
+
+/// `count` requests on one connection, each body read to its end before the
+/// answer. **Its own socket sets no `TCP_NODELAY` and acknowledges nothing
+/// early**, which is what a peer that delays its ACKs looks like and what
+/// `Exchange.setNoDelay` is held against.
+fn serveBodies(canned: *Canned, count: usize) !void {
+    var stream = try canned.server.accept(canned.io);
+    defer stream.close(canned.io);
+    var in_buf: [4 << 10]u8 = undefined;
+    var out_buf: [256]u8 = undefined;
+    var reader = stream.reader(canned.io, &in_buf);
+    var writer = stream.writer(canned.io, &out_buf);
+    for (0..count) |_| {
+        var body_len: usize = 0;
+        while (true) {
+            const line = try reader.interface.takeDelimiterInclusive('\n');
+            const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+            if (trimmed.len == 0) break;
+            if (std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+                body_len = try std.fmt.parseInt(usize, std.mem.trim(u8, trimmed["content-length:".len..], " \t"), 10);
+            }
+        }
+        try reader.interface.discardAll(body_len);
+        try writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        try writer.interface.flush();
+    }
+}
+
+test "a body larger than the write buffer, posted again on a pooled connection, is not held for the peer's delayed ACK" {
+    // Without `TCP_NODELAY` the last segment of the body waits for the ACK
+    // of the one before it, which the kernel holds for 40 ms once the
+    // connection is out of its quick-ACK start: about 41 ms a call. The
+    // bound is half of that, and the calls are enough for the connection
+    // to leave the quick start.
+    try withIo(struct {
+        fn run(io: std.Io) !void {
+            const calls = 8;
+            var canned = try Canned.open(io);
+            defer canned.close();
+            var served = try io.concurrent(serveBodies, .{ &canned, @as(usize, calls) });
+            defer served.cancel(io) catch {};
+
+            var client = try started(io, .{ .timeout_ms = 5_000 });
+            defer client.deinit();
+            var scope: core.Run = .init(testing.allocator);
+            defer scope.deinit();
+
+            const body = try testing.allocator.alloc(u8, 40 << 10);
+            defer testing.allocator.free(body);
+            @memset(body, 'a');
+
+            var buf: [64]u8 = undefined;
+            const url = try canned.url(&buf);
+            _ = try client.post(&scope, url, body, .{});
+            const start = std.Io.Clock.awake.now(io);
+            for (1..calls) |_| {
+                const res = try client.post(&scope, url, body, .{});
+                try testing.expectEqual(std.http.Status.ok, res.status);
+            }
+            const ms = start.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
+            try testing.expect(@divTrunc(ms, calls - 1) < 20);
+            served.await(io) catch {};
+        }
+    }.run);
+}

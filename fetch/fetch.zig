@@ -2141,6 +2141,11 @@ pub const Exchange = struct {
         };
         self.open = true;
         self.reused = picked.reused;
+        // Once per connection, on the one just dialled and never on a unix
+        // socket (the option is `EOPNOTSUPP` there).
+        if (!picked.reused and opts.unix_socket == null) {
+            if (self.req.connection) |conn| setNoDelay(conn);
+        }
 
         // Ask for the body uncompressed. **Not a default worth inheriting**:
         // `std.http.Client` advertises `gzip, deflate` and then hands back the
@@ -2206,6 +2211,37 @@ pub const Exchange = struct {
         // written the body (ADR 293).
         if (opts.body == .upload) return;
         self.res = try self.req.receiveHead(&.{});
+    }
+
+    /// Turn Nagle's algorithm off on a TCP connection that was just dialled.
+    ///
+    /// **Why**: a request whose head and body are larger than the write
+    /// buffer leaves in two writes, and Nagle holds the second until the
+    /// peer has acknowledged the first, which a peer that delays its ACKs
+    /// does after 40 ms. That was 41 ms a call on a pooled connection for a
+    /// POST of a few kilobytes (`bench/result/fetch.md`). The server turns
+    /// the option on for its own sockets for the same reason
+    /// (`http/engine/zio.zig`).
+    ///
+    /// **Where**: std's `connectTcp` and `Connection.Tls.create` take no
+    /// option and keep the stream private, so the socket is reached through
+    /// the finished connection's `stream_reader`, once, right after
+    /// `request` returns. That is after a TLS handshake std dialled itself,
+    /// whose few small flights Nagle does not hurt; every request byte goes
+    /// out after it. `std.Io` has no socket option call at 0.17, so this is
+    /// `setsockopt` on the handle. A failure is ignored: the call works
+    /// either way, only slower. Not on Windows, whose handle is not an fd.
+    fn setNoDelay(conn: *std.http.Client.Connection) void {
+        if (comptime builtin.os.tag == .windows) return;
+        const on: c_int = 1;
+        const bytes: []const u8 = std.mem.asBytes(&on);
+        _ = std.posix.system.setsockopt(
+            conn.stream_reader.stream.socket.handle,
+            std.posix.IPPROTO.TCP,
+            std.posix.TCP.NODELAY,
+            bytes.ptr,
+            @intCast(bytes.len),
+        );
     }
 
     /// The connection this attempt is to use when `pickConnection` has an
