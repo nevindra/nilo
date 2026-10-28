@@ -168,6 +168,10 @@ pub const App = struct {
     /// beside it is what the document says under `Failure`; set together.
     failure_write: ?failurebody.Write = null,
     failure_schema: ?*const openapi.Schema = null,
+    /// The status (and sentence) `errors()` gave to errors from code that
+    /// knows nothing of HTTP, or null for the built-in table alone. Read on
+    /// the failure path and by the document (ADR 004).
+    error_map: ?*const fail.ErrorMap = null,
     /// Connect's failure body, for a request that says it is a Connect call;
     /// set by the first route that reads or answers a message and null in a
     /// program with none, which then links none of it (ADR 257).
@@ -1184,6 +1188,35 @@ pub const App = struct {
         if (self.failure_write != null) return error.FailureShapeAlreadySet;
         self.failure_write = write;
         self.failure_schema = schema;
+    }
+
+    /// Give errors from code that does not know about HTTP a status once, for
+    /// the whole App ([ADR 004](../docs/adr/004-http-errors-via-fail-functions.md)).
+    ///
+    /// ```zig
+    /// try app.errors(.{
+    ///     .{ error.EmailTaken, 409 },
+    ///     .{ error.NoSuchOrder, 404, "no such order" },
+    /// });
+    /// ```
+    ///
+    /// A service layer returns `error.EmailTaken` and a handler that does
+    /// `try` it answers 409, with no import of `nilo_http`, no `fail` call
+    /// and no `catch`. The table is read before the built-in one, so it can
+    /// also move an error nilo already knows. A fail function's own status
+    /// still wins, because it was said at the place that knew the request.
+    ///
+    /// A row without a sentence answers the status's reason phrase, and a 5xx
+    /// never answers with the error's name whatever the row says. An error
+    /// that is not listed is what it was: its built-in status, and a 500
+    /// otherwise. The logger reads the same table, so the line and the
+    /// response carry one status. A status outside 400 to 599 and an error
+    /// listed twice are compile errors; called twice, the second call is
+    /// `error.ErrorMapAlreadySet`, as `failures` is.
+    pub fn errors(self: *App, comptime table: anytype) error{ErrorMapAlreadySet}!void {
+        const map = comptime fail.errorMapOf(table);
+        if (self.error_map != null) return error.ErrorMapAlreadySet;
+        self.error_map = map;
     }
 
     /// Serve a page that says whether this process can do its job, by asking

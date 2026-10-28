@@ -1380,6 +1380,7 @@ pub fn operation(comptime pattern: []const u8, comptime f: anytype) openapi.Oper
             .answer = answer,
             .can_reject = can_reject,
             .misfit = misfit,
+            .errors = errorNamesOf(Fn),
         };
     }
 }
@@ -1415,6 +1416,22 @@ fn returnsNothing(comptime Fn: type) bool {
             .error_union => |u| u.payload == void,
             else => Returned == void,
         };
+    }
+}
+
+/// The names in the handler's error set, for the statuses `app.errors`
+/// gives them (ADR 004). An inferred set (`!T`) is read after the handler's
+/// body has been analysed, which `wrap` forces anyway; `anyerror`, the set
+/// of a `*Ctx` handler, names nothing, so the document says nothing for it.
+fn errorNamesOf(comptime Fn: type) []const []const u8 {
+    comptime {
+        const Returned = @typeInfo(Fn).@"fn".return_type orelse return &.{};
+        if (@typeInfo(Returned) != .error_union) return &.{};
+        const set = @typeInfo(@typeInfo(Returned).error_union.error_set).error_set;
+        const names = set.error_names orelse return &.{};
+        var out: []const []const u8 = &.{};
+        for (names) |name| out = out ++ [_][]const u8{name};
+        return out;
     }
 }
 

@@ -309,12 +309,6 @@ Nothing is open at this tier.
 
 **Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
 
-**An error from code that does not know about HTTP cannot be given a status once, for the whole App.** `fail.statusFor` is a closed `switch` (`http/fail.zig:213`): `NotFound` is a 404, a dozen parse errors are 400s, and any other error is a 500. A service layer returning `error.EmailTaken` either imports `nilo_http` to call `fail.conflict`, or every handler that calls it repeats the same `catch`. echo's `HTTPErrorHandler`, Fastify's `setErrorHandler` and Nest's exception filters are where Go and Node put that mapping, once. A middleware that catches what `next.run(c)` returns can do it today, and no page says so.
-
-**Needs:** a table the App is given (`app.errors(.{ .{ error.EmailTaken, 409, "that email is taken" } })`, or the shape a design finds better), read before the built-in one, the document naming the statuses a handler's error set shares with it; and a probe of whether an inferred error set can be read at registration on Zig 0.17, which decides whether the document can name them.
-
-**Direction:** [A failure is a type](./roadmap.md#a-failure-is-a-type)
-
 **Nobody who writes Go or Node services has yet built a service with nilo from the getting-started page, so the traps this direction closed are closed on paper.** `Path(T)`, typed middleware, the one log sink, `Bearer(T)`, the deadline that reaches the toolkit, `nilo.app` and the startup warnings each have tests, and each test was written by the people who built it. The direction's own closing condition is a reader who did not: every mistake they make is either a compile error or a refusal at `listen()` naming the fix, or it is the next entry here.
 
 **What would settle it:** a person who has written Go or Node services and not nilo builds `examples/rest` again from `docs/guide/getting-started.md` with a database, a login middleware and a container, and their mistakes are written down, each either refused in a sentence or filed.

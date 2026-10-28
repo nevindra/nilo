@@ -246,6 +246,11 @@ pub const Ctx = struct {
     /// test driving a handler by hand. A pointer to the App's, eight bytes
     /// on the Ctx (ADR 211).
     _compressors: ?*const compress_mod.Pool = null,
+    /// The table `app.errors` gave the App, or null when it never did. Here
+    /// for the logger, which runs inside the chain and has no App to ask, so
+    /// that the line it writes and the response `sendFailure` writes agree
+    /// (ADR 004). Eight bytes on the Ctx.
+    _errors: ?*const fail.ErrorMap = null,
     /// The zstd decoders the App holds, one per executor thread, for a body
     /// under `Content-Encoding: zstd` (ADR 295). Absent from a build that
     /// does not read zstd, so its Ctx is the size it was; null on a test that

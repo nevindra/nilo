@@ -355,6 +355,94 @@ pub fn failed(failure: *const Failure, err: anyerror) bool {
     return err == error.Failed and failure.isSet();
 }
 
+/// What `app.errors` says about one error: its status, and the sentence the
+/// client reads when the table gave one.
+pub const Mapped = struct {
+    status: u16,
+    message: ?[]const u8 = null,
+};
+
+/// One row of the table as the API description reads it: the error's name
+/// and its status. Names, because an inferred error set is readable while
+/// compiling and a value of it is not (ADR 004).
+pub const Row = struct {
+    name: []const u8,
+    status: u16,
+};
+
+/// The table `app.errors` was given, built while compiling. `find` is an
+/// unrolled comparison against each listed error, not a scan of data, so an
+/// App that never calls `errors` links none of it, and `rows` is what the
+/// document reads at `listen()` (ADR 004).
+pub const ErrorMap = struct {
+    find: *const fn (anyerror) ?Mapped,
+    rows: []const Row,
+};
+
+/// Check `table` and build the `ErrorMap` for it. Each entry is a tuple of an
+/// error, a status from 400 to 599 and, if the client should read something
+/// better than the status's reason phrase, a sentence. A status outside that
+/// range, an error listed twice and an entry of any other shape are compile
+/// errors, because the table is read on the failure path only and a
+/// mistake in it would otherwise be found by the first client to hit it.
+pub fn errorMapOf(comptime table: anytype) *const ErrorMap {
+    comptime {
+        const T = @TypeOf(table);
+        if (@typeInfo(T) != .@"struct" or !@typeInfo(T).@"struct".is_tuple)
+            @compileError("nilo: `app.errors` takes a tuple of entries, `.{ .{ error.EmailTaken, 409 }, … }`, not " ++ @typeName(T) ++ ".");
+        if (table.len == 0)
+            @compileError("nilo: `app.errors` was given no entries, and there is nothing to map.");
+        var rows: []const Row = &.{};
+        for (table, 0..) |entry, i| {
+            const E = @TypeOf(entry);
+            const shape = "nilo: entry " ++ std.fmt.comptimePrint("{d}", .{i + 1}) ++
+                " of `app.errors` is not `.{ error.Name, status }` or `.{ error.Name, status, \"sentence\" }`.";
+            if (@typeInfo(E) != .@"struct" or !@typeInfo(E).@"struct".is_tuple or entry.len < 2 or entry.len > 3)
+                @compileError(shape);
+            if (@typeInfo(@TypeOf(entry[0])) != .error_set) @compileError(shape);
+            const name = @errorName(entry[0]);
+            const code: i64 = entry[1];
+            if (code < 400 or code > 599)
+                @compileError("nilo: `app.errors` maps error." ++ name ++ " to " ++ std.fmt.comptimePrint("{d}", .{code}) ++
+                    ", and a status for an error is 400 to 599.");
+            if (entry.len == 3) {
+                const sentence: []const u8 = entry[2];
+                if (sentence.len > max_message)
+                    @compileError("nilo: `app.errors` gives error." ++ name ++ " a sentence of " ++
+                        std.fmt.comptimePrint("{d}", .{sentence.len}) ++ " bytes, and the most a failure carries is " ++
+                        std.fmt.comptimePrint("{d}", .{max_message}) ++ ".");
+            }
+            for (rows) |seen| {
+                if (std.mem.eql(u8, seen.name, name))
+                    @compileError("nilo: `app.errors` lists error." ++ name ++ " twice, and an error has one status.");
+            }
+            rows = rows ++ [_]Row{.{ .name = name, .status = code }};
+        }
+        const Built = struct {
+            fn find(err: anyerror) ?Mapped {
+                inline for (table) |entry| {
+                    if (err == @as(anyerror, entry[0])) return .{
+                        .status = entry[1],
+                        .message = if (entry.len == 3) @as([]const u8, entry[2]) else null,
+                    };
+                }
+                return null;
+            }
+            const map: ErrorMap = .{ .find = &find, .rows = rows };
+        };
+        return &Built.map;
+    }
+}
+
+/// The status a failed request answers with, given the App's table: the
+/// fail function's first, then `app.errors`, then the built-in one. The
+/// logger and `App` both come here so the line and the response agree.
+pub fn statusWith(map: ?*const ErrorMap, failure: ?*const Failure, err: anyerror) u16 {
+    if (failure) |f| if (failed(f, err)) return f.status;
+    if (map) |m| if (m.find(err)) |mapped| return mapped.status;
+    return statusFor(err);
+}
+
 /// Ordinary Zig errors coming from anywhere — a database, a parser, an
 /// allocator — are mapped through this table. Anything unrecognised
 /// becomes a 500 and is logged with its error name (ADR 004).

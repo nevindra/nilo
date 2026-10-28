@@ -2554,6 +2554,147 @@ test "app.failures is said once" {
     try testing.expectError(error.FailureShapeAlreadySet, app.failures(ApiError));
 }
 
+/// Code that has never heard of HTTP: it returns its own error names.
+const accounts = struct {
+    fn register(id: u32) !u32 {
+        if (id == 0) return error.EmailTaken;
+        if (id == 1) return error.NoSuchOrder;
+        if (id == 2) return error.UpstreamDown;
+        if (id == 3) return error.Unlisted;
+        return id;
+    }
+};
+
+fn registersAnAccount(id: u32) !u32 {
+    return try accounts.register(id);
+}
+
+fn mapAccountErrors(app: *App) !void {
+    try app.errors(.{
+        .{ error.EmailTaken, 409 },
+        .{ error.NoSuchOrder, 404, "no such order" },
+        .{ error.UpstreamDown, 503 },
+    });
+    try app.get("/accounts/:id", registersAnAccount);
+}
+
+test "an error from code that knows no HTTP answers the status app.errors gave it" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try mapAccountErrors(&app);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /accounts/0 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 409 Conflict\r\n"));
+    // No sentence given: the reason phrase, never the error's name.
+    try testing.expect(std.mem.endsWith(u8, result.response, "{\"error\":\"Conflict\",\"status\":409}"));
+}
+
+test "a sentence in app.errors is what the client reads" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try mapAccountErrors(&app);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /accounts/1 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
+    try testing.expect(std.mem.endsWith(u8, result.response, "{\"error\":\"no such order\",\"status\":404}"));
+}
+
+test "a mapped 5xx never sends the error's name" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try mapAccountErrors(&app);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /accounts/2 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 503 Service Unavailable\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "UpstreamDown") == null);
+    try testing.expect(std.mem.endsWith(u8, result.response, "{\"error\":\"Service Unavailable\",\"status\":503}"));
+}
+
+test "an error app.errors does not list is still a 500" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try mapAccountErrors(&app);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /accounts/3 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 500 Internal Server Error\r\n"));
+    try testing.expect(std.mem.indexOf(u8, result.response, "Unlisted") == null);
+}
+
+test "the access line carries the status app.errors gave" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.use(logger_mod.standard);
+    try mapAccountErrors(&app);
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    var sink_buf: [1024]u8 = undefined;
+    var sink = std.Io.Writer.fixed(&sink_buf);
+    logger_mod.tap = &sink;
+    defer logger_mod.tap = null;
+
+    const result = h.send(&app, "GET /accounts/0 HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 409 "));
+    try testing.expect(std.mem.startsWith(u8, sink.buffered(), "GET /accounts/0 409 "));
+    try testing.expect(std.mem.indexOf(u8, sink.buffered(), "error=EmailTaken") != null);
+}
+
+test "a fail function's status wins over app.errors" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.errors(.{.{ error.EmailTaken, 409 }});
+    try app.get("/orders", failsWithASentence);
+
+    var h = Harness.init();
+    defer h.deinit();
+    const result = h.send(&app, "GET /orders HTTP/1.1\r\nHost: x\r\n\r\n");
+    try testing.expect(std.mem.startsWith(u8, result.response, "HTTP/1.1 404 Not Found\r\n"));
+}
+
+test "the document lists the statuses app.errors gave to errors a handler's set holds" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try mapAccountErrors(&app);
+    // A `*Ctx` handler's error set is `anyerror`, which names nothing, so
+    // the document says nothing for it.
+    try app.get("/quiet", testQuiet);
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    try app.writeOpenApi(&out.writer);
+    const doc = out.written();
+
+    const quiet_at = std.mem.indexOf(u8, doc, "\"/quiet\"").?;
+    const accounts_at = std.mem.indexOf(u8, doc, "\"/accounts/{id}\"").?;
+    // Paths are written in registration order: accounts, then quiet.
+    try testing.expect(accounts_at < quiet_at);
+    const accounts_doc = doc[accounts_at..quiet_at];
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, accounts_doc, "\"409\":"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, accounts_doc, "\"404\":"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, accounts_doc, "\"503\":"));
+    // The 400 is nilo's own, from the path parameter, and written once.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, accounts_doc, "\"400\":"));
+    try testing.expect(std.mem.indexOf(u8, doc[quiet_at..], "\"409\":") == null);
+    try testing.expect(std.mem.indexOf(u8, doc, "EmailTaken") == null);
+}
+
+test "app.errors is said once" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.errors(.{.{ error.EmailTaken, 409 }});
+    try testing.expectError(error.ErrorMapAlreadySet, app.errors(.{.{ error.NoSuchOrder, 404 }}));
+}
+
 const Oversized = struct {
     padding: []const u8,
     detail: []const u8,

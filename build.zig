@@ -2402,6 +2402,18 @@ const refusals = [_]Refusal{
         .says = "failures_from_wrong_signature.ApiError's `nilo_failure` is not `fn (status: u16, message: []const u8) failures_from_wrong_signature.ApiError`.",
     },
     .{
+        .name = "errors_status_not_an_error",
+        .says = "`app.errors` maps error.EmailTaken to 200, and a status for an error is 400 to 599.",
+    },
+    .{
+        .name = "errors_listed_twice",
+        .says = "`app.errors` lists error.EmailTaken twice, and an error has one status.",
+    },
+    .{
+        .name = "errors_entry_without_a_status",
+        .says = "entry 1 of `app.errors` is not `.{ error.Name, status }` or `.{ error.Name, status, \"sentence\" }`.",
+    },
+    .{
         .name = "bytes_as_an_argument",
         .says = "argument 1 of the handler for route \"/bundles\" is a `nilo.Bytes`, which is what a handler answers *with* rather than something it is given.",
     },

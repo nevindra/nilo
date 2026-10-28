@@ -96,7 +96,7 @@ pub fn with(comptime options: Options) mw.Middleware {
                 // would have mapped to. A WebSocket handler failing after
                 // its 101, or a stream failing mid-body, used to be logged
                 // as a 500 nobody sent.
-                const status = c.answered() orelse statusOf(err);
+                const status = c.answered() orelse statusOf(c, err);
                 log(c, status, microsSince(started), nameOf(err));
                 return err;
             };
@@ -273,9 +273,8 @@ fn nameOf(err: anyerror) ?[]const u8 {
 /// What App is about to answer with. Asking `fail` rather than working it
 /// out again keeps the logged status and the sent status from drifting
 /// apart.
-fn statusOf(err: anyerror) u16 {
-    const failure = fail.current() orelse return fail.statusFor(err);
-    return fail.resolveStatus(failure, err);
+fn statusOf(c: *const Ctx, err: anyerror) u16 {
+    return fail.statusWith(c._errors, fail.current(), err);
 }
 
 fn microsSince(started: u64) u64 {

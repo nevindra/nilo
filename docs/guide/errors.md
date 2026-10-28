@@ -53,6 +53,25 @@ The exception is a handler that fails *after* it has already started answering. 
 warning: handler GET /report failed after answering: WriteFailed
 ```
 
+### Giving your own errors a status once
+
+**Code that does not know about HTTP returns its own errors, and the App says once what each of them means.** A service layer that returns `error.EmailTaken` should not have to import `nilo_http` to call `fail.conflict`, and no handler should repeat the same `catch`:
+
+<!-- compiles: body -->
+```zig
+try app.errors(.{
+    .{ error.EmailTaken, 409 },
+    .{ error.NoSuchOrder, 404, "no such order" },
+    .{ error.UpstreamDown, 503 },
+});
+```
+
+A handler that does `try` on a call returning `error.EmailTaken` now answers `409 {"error":"Conflict","status":409}`. A row with a sentence sends the sentence, as `NoSuchOrder` does. The table is read before the built-in one, so it can also move an error nilo already knows, and a `fail` function's own status still wins over it. An error that is not listed is what it was: the built-in status, and a 500 otherwise.
+
+A 5xx never sends the error's name, whatever the row says, because `UpstreamDown` is your business and not your caller's; without a sentence it answers the reason phrase and the log names the error. The access log reads the same table, so its line says 409 where the response did. A status outside 400 to 599 and an error listed twice are compile errors, and a second `app.errors` is `error.ErrorMapAlreadySet`.
+
+The API document lists the statuses too, on each route whose handler's error set holds the error. That works for an inferred set (`!User`), where the compiler knows every error the body can return. A handler that takes a `*Ctx` returns `anyerror`, which names nothing, so its routes get no status from the table ([ADR 004](../adr/004-http-errors-via-fail-functions.md)).
+
 ## The error response body
 
 **The client gets the status and the message as JSON, always**, whatever the endpoint returns when it succeeds:

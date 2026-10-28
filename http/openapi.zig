@@ -34,6 +34,7 @@ const patch_mod = @import("patch.zig");
 const mark = @import("jsonmark.zig");
 const convert = @import("convert.zig");
 const field_mod = @import("field.zig");
+const fail = @import("fail.zig");
 
 const Str = str_mod.Str;
 
@@ -335,6 +336,44 @@ pub const Operation = struct {
     /// Null is the derived name below
     /// ([ADR 119](../docs/adr/119-a-route-can-say-its-own-name.md)).
     name: ?[]const u8 = null,
+    /// The names in the handler's error set, read while compiling: an
+    /// inferred set (`!T`) is readable, `anyerror` (a `*Ctx` handler) names
+    /// nothing. What `app.errors` is matched against to list its statuses
+    /// ([ADR 004](../docs/adr/004-http-errors-via-fail-functions.md)).
+    errors: []const []const u8 = &.{},
+
+    /// Whether the document already writes a response for `code` on this
+    /// route, from the signature or from nilo's own refusals, so that one
+    /// from `app.errors` would be a key twice in an object.
+    fn writes(op: Operation, code: u16) bool {
+        if (op.declares(code)) return true;
+        return switch (code) {
+            400 => op.can_reject,
+            401 => op.security != .none or op.guarded,
+            404 => op.notFound(),
+            409 => op.idempotent,
+            422 => op.idempotent or op.misfit,
+            else => false,
+        };
+    }
+
+    fn canReturn(op: Operation, name: []const u8) bool {
+        for (op.errors) |e| if (std.mem.eql(u8, e, name)) return true;
+        return false;
+    }
+
+    /// The status row `nth` of the App's table adds to this route's
+    /// responses, or null: the route's error set does not hold the error, an
+    /// earlier row already gave the same status, or the document writes that
+    /// status already (ADR 004).
+    fn mappedStatus(op: Operation, rows: []const fail.Row, nth: usize) ?u16 {
+        const row = rows[nth];
+        if (!op.canReturn(row.name) or op.writes(row.status)) return null;
+        for (rows[0..nth]) |earlier| {
+            if (earlier.status == row.status and op.canReturn(earlier.name)) return null;
+        }
+        return row.status;
+    }
 
     /// Whether any response of this route is the 404 `?T` means (ADR 023),
     /// the first arm's or another's.
@@ -404,6 +443,9 @@ pub const Info = struct {
     /// own (ADR 024). Written under `components.schemas.Failure` in place
     /// of `error_schema`, so the document describes what the wire carries.
     failure: ?*const Schema = null,
+    /// The table `app.errors` gave the App: each row adds its status to a
+    /// route whose error set holds the error (ADR 004).
+    errors: []const fail.Row = &.{},
 };
 
 /// What `app.docs(…)` takes. Every field has a default, so `app.docs(.{})`
@@ -1204,8 +1246,9 @@ const Components = struct {
     /// here** (`sharedWith`'s, ADR 286, and the generic 401, 409 and 422): a
     /// reference to a component nobody wrote is a document no client
     /// generator opens.
-    fn anyFailure(ops: []const Operation) bool {
+    fn anyFailure(ops: []const Operation, rows: []const fail.Row) bool {
         for (ops) |op| {
+            for (rows, 0..) |_, n| if (op.mappedStatus(rows, n) != null) return true;
             if (op.can_reject or op.notFound() or op.security != .none) return true;
             if (op.guarded or op.idempotent or op.misfit) return true;
         }
@@ -1281,7 +1324,7 @@ pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, ops: []const Operation, 
             if (sibling.method == .other) continue;
             if (wrote_method) try w.writeByte(',');
             wrote_method = true;
-            try writeOperation(w, &components, sibling);
+            try writeOperation(w, &components, sibling, info.errors);
         }
 
         try w.writeByte('}');
@@ -1289,7 +1332,7 @@ pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, ops: []const Operation, 
 
     try w.writeAll("},\"components\":{\"schemas\":{");
     var wrote_schema = false;
-    if (Components.anyFailure(ops)) {
+    if (Components.anyFailure(ops, info.errors)) {
         try w.writeAll("\"" ++ error_schema_name ++ "\":");
         if (info.failure) |shape| {
             switch (shape.*) {
@@ -1361,7 +1404,7 @@ fn alreadyWritten(earlier: []const Operation, pattern: []const u8) bool {
     return false;
 }
 
-fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operation) !void {
+fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operation, rows: []const fail.Row) !void {
     try w.writeByte('"');
     for (@tagName(op.method)) |ch| try w.writeByte(std.ascii.toLower(ch));
     try w.writeAll("\":{\"operationId\":");
@@ -1475,6 +1518,14 @@ fn writeOperation(w: *std.Io.Writer, components: *const Components, op: Operatio
             try writeFailure(w, "422", both_422[both_422.len - misfit_len ..]);
         }
     }
+    // The statuses `app.errors` gave errors this handler's code can return.
+    // Only what the error set names: a `*Ctx` handler's `anyerror` says
+    // nothing, and the document does not guess (ADR 004).
+    for (rows, 0..) |_, n| if (op.mappedStatus(rows, n)) |code| {
+        var key: [3]u8 = undefined;
+        _ = std.fmt.bufPrint(&key, "{d}", .{code}) catch unreachable; // 400 to 599, checked by `errorMapOf`
+        try writeFailure(w, &key, "an error this endpoint's code can return, given this status by the App");
+    };
     try w.writeAll("}}");
 }
 

@@ -540,6 +540,7 @@ pub noinline fn serveRequest(
         ._session_fallbacks = &self.session_fallbacks,
         ._session_plain = self.session_plain_name,
         ._compressors = if (self.compressors) |*p| p else null,
+        ._errors = self.error_map,
         ._decoders = if (zstdbody.enabled) (if (self.decoders) |*p| p else null) else {},
         ._params = &.{},
         ._services = &self.services,
@@ -1573,15 +1574,22 @@ fn sendDirect(c: *Ctx, status: u16, content_type: []const u8, body: []const u8) 
 /// named with `app.failures` (ADR 024), or Connect's to a Connect call in a
 /// program that has a message route (ADR 257).
 noinline fn sendFailure(c: *Ctx, failure: *const fail.Failure, err: anyerror, app: *const App) !void {
-    const status = fail.resolveStatus(failure, err);
+    const status = fail.statusWith(app.error_map, failure, err);
+    const mapped: ?fail.Mapped = if (fail.failed(failure, err)) null else if (app.error_map) |m| m.find(err) else null;
     var message: []const u8 = if (fail.failed(failure, err)) failure.message() else blk: {
-        if (status == 500) {
+        // A sentence `app.errors` gave: written by the application, so it is
+        // the one thing about an error a 5xx may say (ADR 004).
+        if (mapped) |m| if (m.message) |sentence| break :blk sentence;
+        if (status == 500 or (mapped != null and status >= 500)) {
             std.log.warn(
                 "handler {s} {s} failed: {s}",
                 .{ @tagName(c.method), c._path, @errorName(err) },
             );
             // Internal error names are not leaked to the client; anyone who
-            // wants a readable message uses a fail function.
+            // wants a readable message uses a fail function, or gives the
+            // error a sentence in `app.errors`. A mapped error answers the
+            // reason phrase of the status it was given.
+            if (mapped != null) break :blk http1.statusPhrase(status);
             break :blk "internal server error";
         }
         break :blk http1.statusPhrase(status);
