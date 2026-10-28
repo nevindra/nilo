@@ -1149,6 +1149,7 @@ test {
     _ = @import("trace.zig");
     _ = @import("otlp.zig");
     _ = @import("metrics.zig");
+    _ = @import("process_stats.zig");
     _ = @import("compress.zig");
     _ = @import("allowance.zig");
     _ = @import("deadline.zig");

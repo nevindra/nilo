@@ -29,6 +29,8 @@ in [`docs/history.md`](./docs/history.md); what is coming is in
 
 ### Added
 
+- **`/metrics` publishes the watchdog's catches, the tracer's drops and the process series**: `nilo_watchdog_caught_total`, `nilo_trace_spans_dropped_total` (only with `app.trace`), and on Linux `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_start_time_seconds` and `process_cpu_seconds_total`, read from `/proc/self` when the page is scraped. Nothing on a request changes and nothing to change in a program ([ADR 079](docs/adr/079-the-route-table-is-the-registry.md)).
+
 - **`/metrics` publishes `nilo_session_rejected_total`**: session cookies and Bearer tokens that were sent and failed to open, so a wrong `session_secret` after a deploy shows as a climb rather than as a quiet hour. An expired one and a request that sent none are not counted, and the series appears once the first is seen. Nothing to change ([ADR 033](docs/adr/033-a-session-is-sealed-into-the-cookie.md)).
 
 - **A handler may return a `union(enum)` whose arms are each a `nilo.Status(code, T)`**: each arm answers with its own status and body type, and the API document lists one response per arm, so a 400 carrying `{"error":"…","offset":12}` beside a 200 list stays a typed return. Two arms with one status, an arm that is not a `Status`, and `?` around the union are compile errors ([ADR 286](docs/adr/286-a-handler-may-answer-in-several-typed-statuses.md)).

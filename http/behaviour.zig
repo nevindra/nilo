@@ -6016,6 +6016,46 @@ test "a number exposed after the routes were resolved is still on the page" {
     try testing.expect(std.mem.indexOf(u8, page, "second 2") != null);
 }
 
+test "the page carries the watchdog's catches, and the process series on Linux" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.metrics(.{});
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, page, "# TYPE nilo_watchdog_caught_total counter\n") != null);
+    // No tracer, so no line about one: a zero for a feature nobody turned on.
+    try testing.expect(std.mem.indexOf(u8, page, "nilo_trace_spans_dropped_total") == null);
+    // The process series are there where /proc is, and only then.
+    if (@import("process_stats.zig").read() != null) {
+        for ([_][]const u8{
+            "# TYPE process_resident_memory_bytes gauge\n",
+            "# TYPE process_virtual_memory_bytes gauge\n",
+            "# TYPE process_open_fds gauge\n",
+            "# TYPE process_start_time_seconds gauge\n",
+            "# TYPE process_cpu_seconds_total counter\n",
+        }) |line| try testing.expect(std.mem.indexOf(u8, page, line) != null);
+    }
+}
+
+test "a page for an App that traces says how many spans the tracer dropped" {
+    var app = App.init(testing.allocator);
+    defer app.deinit();
+    try app.metrics(.{});
+    try app.trace(.{ .service = "t" });
+
+    var h = Harness.init();
+    defer h.deinit();
+    try h.ready(&app);
+
+    _ = app.tracer.?.dropped.fetchAdd(7, .monotonic);
+    const page = h.send(&app, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").response;
+    try testing.expect(std.mem.indexOf(u8, page, "nilo_trace_spans_dropped_total 7\n") != null);
+}
+
 test "metrics cannot be switched on twice" {
     var app = App.init(testing.allocator);
     defer app.deinit();

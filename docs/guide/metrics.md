@@ -36,6 +36,23 @@ nilo_requests_in_flight 3
 
 **The status class is counted per route, and the exact code per service.** Whether *this* route is failing is a question about the route, and the class (4xx, 5xx) answers it. Which codes the server hands out overall (how many 401s, how many 429s) is a question about the service, and `nilo_responses_total` answers that. Exact codes per route as well would cost four kilobytes a route instead of the 160 bytes a route costs now, for a table that is nearly all zeroes.
 
+## What the process reports
+
+Beside the request series the page carries a few numbers nilo already keeps.
+
+```
+nilo_watchdog_caught_total 0
+nilo_trace_spans_dropped_total 0
+process_cpu_seconds_total 12.34
+process_open_fds 27
+process_max_fds 1048576
+process_virtual_memory_bytes 1262718976
+process_resident_memory_bytes 31457280
+process_start_time_seconds 1790000000
+```
+
+`nilo_watchdog_caught_total` counts requests that held their thread past the warning threshold. `nilo_trace_spans_dropped_total` is there only when you called `app.trace`. The `process_*` names are the ones every Prometheus client library uses, so an existing dashboard reads them as they are. They are read from `/proc/self` when the page is scraped and at no other time, so a request pays nothing; on a system that is not Linux they are left off rather than printed as zero. The cache's hit counts are not on the page yet ([`docs/todo.md`](../todo.md)).
+
 ## Requests that matched no route
 
 **A request that reached no route is still counted, under a label that says why.**

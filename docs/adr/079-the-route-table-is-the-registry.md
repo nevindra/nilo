@@ -103,6 +103,23 @@ metrics". It has to be a `std.atomic.Value(u64)`, and a plain `u64` is a compile
 error: handlers run on several threads and a non-atomic counter loses increments
 without saying so.
 
+### Numbers nilo already keeps are read at the scrape, never kept for it
+
+The page also carries what the process holds for its own reasons:
+`nilo_watchdog_caught_total` (the detector's global, ADR 032),
+`nilo_trace_spans_dropped_total` (the tracer's own atomic, present only when
+`app.trace` is on, wired in `sizeMetrics`) and the `process_*` series that
+Prometheus clients share, read from `/proc/self` in `http/process_stats.zig` on
+Linux and absent elsewhere. Each is read by a scrape and by nothing else, so a
+request pays nothing and a program that does not use the feature carries no
+line about it.
+
+**`nilo_http` does not name `nilo_cache` or `nilo_jwt`** (their build comments
+say why: a program with no cache links no ring), so the cache's hits and misses
+and the JWT memo's are not on the page. Reaching them takes a hook a service
+declares and the registry calls, the way `nilo_ready` is, and that is a design
+of its own on `docs/todo.md`.
+
 ### The status class is per route and the exact code is per process
 
 Per-route exact codes is what a Prometheus user asks for first. Sized for the

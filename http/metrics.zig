@@ -34,6 +34,8 @@ const Ctx = @import("ctx.zig").Ctx;
 const naming = @import("names.zig");
 const bulkhead = @import("bulkhead.zig");
 const session = @import("session.zig");
+const watchdog = @import("watchdog.zig");
+const process_stats = @import("process_stats.zig");
 
 /// The latency boundaries a server gets without asking, in microseconds.
 ///
@@ -148,6 +150,10 @@ pub const Table = struct {
     /// Requests being served right now. The App counts this already, to know
     /// what a stop has to wait for; reading it costs nothing new.
     in_flight: ?*const std.atomic.Value(u32) = null,
+    /// The tracer's count of spans it dropped, when `app.trace` is on. Null
+    /// for an App that does not trace, which is why the series is then absent
+    /// rather than a zero about a feature nobody asked for.
+    span_drops: ?*const Counter = null,
 
     /// Counters per slot: one per status class, one per bucket plus the
     /// overflow, and the sum of the durations.
@@ -317,6 +323,29 @@ pub const Table = struct {
                 \\
             , .{rejected});
         }
+
+        // Counted already by the detector that is on in every App (ADR 032),
+        // so printed always: a series that appears with its first catch
+        // loses that catch to `rate()`.
+        try w.print(
+            \\# HELP nilo_watchdog_caught_total Requests caught holding their thread (ADR 032).
+            \\# TYPE nilo_watchdog_caught_total counter
+            \\nilo_watchdog_caught_total {d}
+            \\
+        , .{watchdog.caught.load(.monotonic)});
+
+        if (self.span_drops) |dropped| {
+            try w.print(
+                \\# HELP nilo_trace_spans_dropped_total Spans dropped because a ring was full or an export failed.
+                \\# TYPE nilo_trace_spans_dropped_total counter
+                \\nilo_trace_spans_dropped_total {d}
+                \\
+            , .{dropped.load(.monotonic)});
+        }
+
+        // `process_*`: read from `/proc/self` now, on Linux, and absent
+        // elsewhere (ADR 079).
+        try process_stats.write(w);
 
         for (self.exposed) |e| {
             try w.print("# TYPE {s} {s}\n{s} {d}\n", .{

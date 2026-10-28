@@ -372,6 +372,7 @@ pub fn sizeMetrics(self: *App) !void {
     table.exposed = self.exposed.items;
     // The App counts this already, to know what a stop has to wait for.
     table.in_flight = &self.stop.in_flight;
+    table.span_drops = if (self.tracer) |t| &t.dropped else null;
 }
 
 fn followHooks(self: *App) follow_mod.Hooks {

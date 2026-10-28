@@ -147,7 +147,7 @@ Past `max_connections`, a connection is accepted and closed immediately, with no
 | `path` | `"/metrics"`: an ordinary route, so middleware in front of it applies |
 | `buckets` | `100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 1_000_000`: latency boundaries in microseconds, in increasing order. Reported in seconds |
 
-**What the page shows:** `nilo_requests_total{method,route,status}` by status class, `nilo_request_duration_seconds` as a histogram, `nilo_responses_total` by exact code for the whole process, `nilo_requests_in_flight`, `nilo_session_rejected_total` (session cookies and Bearer tokens that failed to open, expired ones excepted; printed once one has), and anything given to `app.expose`.
+**What the page shows:** `nilo_requests_total{method,route,status}` by status class, `nilo_request_duration_seconds` as a histogram, `nilo_responses_total` by exact code for the whole process, `nilo_requests_in_flight`, `nilo_session_rejected_total` (session cookies and Bearer tokens that failed to open, expired ones excepted; printed once one has), `nilo_watchdog_caught_total` (requests caught holding their thread), `nilo_trace_spans_dropped_total` (with `app.trace` only), on Linux the `process_*` series (`process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds`, `process_start_time_seconds`, `process_cpu_seconds_total`, read from `/proc/self` at the scrape), and anything given to `app.expose`.
 
 Requests are counted per **route**, not per path: `/users/1` and `/users/2` both count as `/users/:id`. Five slots are not routes: `<unmatched>`, `<method not allowed>`, `<shed>`, `<static file>` and `<unparsed>`. A route that has answered nothing has no series at all. See [Metrics](../guide/metrics.md).
 

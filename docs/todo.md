@@ -39,9 +39,9 @@ Nothing is open at this tier.
 
 ### `nilo_http`
 
-**The metrics page takes one number a name: no labels, no histogram of the application's own, no process series, and counters nilo keeps already go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig:1255`). "Orders by status" is three names, a business latency cannot be written at all, resident memory and open descriptors are missing, and the cache's hit counts, the watchdog's catches and the tracer's drops are numbers nobody scrapes. prom-client and the Go client give all of it.
+**The metrics page takes one number a name: no labels, no histogram of the application's own, and the cache's and the JWT memo's counters go unpublished.** `app.expose(name, .counter, &n)` or `.gauge` (`http/app.zig`, `App.expose`). "Orders by status" is three names, a business latency cannot be written at all, and the cache's hits and misses (`Store.stats()`) and the memo's are numbers nobody scrapes, because `nilo_http` does not name `nilo_cache` or `nilo_jwt` ([ADR 079](./adr/079-the-route-table-is-the-registry.md)). prom-client and the Go client give all of it.
 
-**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are ([ADR 079](./adr/079-the-route-table-is-the-registry.md)), and a histogram whose buckets are fixed at registration, each with its cost per increment.
+**What would settle it:** a design for a labelled family whose labels are an enum, so the series are closed while compiling the way routes are, a histogram whose buckets are fixed at registration, and a hook a service declares (as `nilo_ready` is) to print its own lines at the scrape without `nilo_http` naming its module, each with its cost per increment.
 
 ---
 
