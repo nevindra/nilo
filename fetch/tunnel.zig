@@ -43,6 +43,15 @@ fn hello() []const u8 {
     return "hello over tls\n";
 }
 
+/// A body read back. Taking it as a parameter is the point: the handler
+/// cannot run until every byte the head announced has arrived, so a body
+/// the client left in its TLS buffer is a call that never answers.
+const Note = struct { text: nilo.Str };
+
+fn echo(note: Note) Note {
+    return note;
+}
+
 /// A redirect that leaves the origin: `127.0.0.1` for the `localhost` the
 /// test called, on the same port. Written once the server is up, before
 /// any request, so the handler reads a settled value.
@@ -80,6 +89,7 @@ const Server = struct {
         try self.app.get("/loop-a", hopTo("/loop-b"));
         try self.app.get("/loop-b", hopTo("/loop-a"));
         try self.app.get("/away", away);
+        try self.app.post("/echo", echo);
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         for (0..500) |_| {
             if (self.app.boundPort()) |port| return port;
@@ -460,6 +470,59 @@ test "a body streamed over a tunnel uses the client that pools nothing and still
     try testing.expect(head.status != .ok);
     ex.end();
     try testing.expectEqual(@as(u32, 1), rig.proxy.connects.load(.acquire));
+}
+
+// ---- a body sent straight to an https origin ----
+
+/// A POST whose body is smaller than the TLS writer's buffer, and one that is
+/// not. `BodyWriter.end` flushes the TLS writer, which encrypts into the
+/// socket writer's buffer and stops there; until `send` flushed the
+/// connection after it, a body under about a kilobyte waited in that buffer
+/// while the server waited for it, and the call timed out. Every alert
+/// webhook a service posted was such a body. A big one filled the buffer and
+/// went out on its own, which is why nothing large ever showed it.
+fn postsEcho(rig: *Rig, comptime len: usize) !void {
+    const io = rig.loop();
+    var client: fetch.Client = .init(testing.allocator, .{ .roots = &rig.roots, .timeout_ms = 5_000 });
+    defer client.deinit();
+    try client.nilo_start(io, .none);
+    var scope: core.Run = .init(testing.allocator);
+    defer scope.deinit();
+    var buf: [64]u8 = undefined;
+    const target = try rigUrl(&buf, rig, "localhost", "/echo");
+
+    const text: [len]u8 = @splat('x');
+    const body = "{\"text\":\"" ++ text ++ "\"}";
+    const headers: []const std.http.Header = &.{.{ .name = "content-type", .value = "application/json" }};
+    const res = try client.post(&scope, target, body, .{ .headers = headers });
+    try testing.expectEqual(std.http.Status.ok, res.status);
+    try testing.expectEqualStrings(body, res.body.view());
+
+    // The same bytes from a reader, which ends its body the same way.
+    var source: std.Io.Reader = .fixed(body);
+    var ex: fetch.Exchange = .idle;
+    const head = try ex.begin(&client, .{
+        .method = .POST,
+        .url = target,
+        .headers = headers,
+        .body = .{ .stream = .{ .reader = &source, .len = body.len } },
+    });
+    defer ex.end();
+    try testing.expectEqual(std.http.Status.ok, head.status);
+}
+
+test "a small body posted to an https origin arrives without waiting for a full buffer" {
+    var rig: Rig = undefined;
+    try rig.up();
+    defer rig.down();
+    try postsEcho(&rig, 16);
+}
+
+test "a body larger than the TLS buffer posted to an https origin arrives too" {
+    var rig: Rig = undefined;
+    try rig.up();
+    defer rig.down();
+    try postsEcho(&rig, 20_000);
 }
 
 // ---- a call that does not verify the certificate (ADR 290) ----

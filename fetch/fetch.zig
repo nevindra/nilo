@@ -2688,12 +2688,19 @@ pub const Exchange = struct {
                 self.req.transfer_encoding = .{ .content_length = 0 };
                 var w = try self.req.sendBody(&.{});
                 try w.end();
+                try self.req.connection.?.flush();
             } else try self.req.sendBodiless(),
             .slice => |bytes| if (framed) {
                 self.req.transfer_encoding = .{ .content_length = bytes.len };
                 var w = try self.req.sendBody(&.{});
                 try w.writer.writeAll(bytes);
                 try w.end();
+                // `end` flushes the TLS writer, which encrypts into the
+                // socket writer's buffer and leaves it there: a body under
+                // that buffer's size never left, and the call waited out its
+                // deadline for an answer to a request the peer never got.
+                // The connection's own flush is both writers.
+                try self.req.connection.?.flush();
             } else {
                 const w = try self.sendHeadWithLength(bytes.len);
                 try w.writeAll(bytes);
@@ -2746,6 +2753,7 @@ pub const Exchange = struct {
                     // body that disagrees with the head describing it.
                     try source.streamExact64(&w.writer, src.len);
                     try w.end();
+                    try self.req.connection.?.flush();
                 } else {
                     const w = try self.sendHeadWithLength(src.len);
                     try source.streamExact64(w, src.len);
