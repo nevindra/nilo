@@ -1041,8 +1041,8 @@ fn renamedWithin(comptime T: type, comptime depth: usize, comptime writing: bool
     }
 }
 
-/// The first type at or inside `T` that parses itself and has not handed
-/// `std.json` a reader, or null ([ADR 166](../docs/adr/166-a-body-field-that-parses-itself.md)).
+/// The first type at or inside `T` that parses itself, or is a union with a
+/// `.tag`, and has not handed `std.json` a reader, or null ([ADR 166](../docs/adr/166-a-body-field-that-parses-itself.md)).
 ///
 /// A path param and a query value are read through `nilo_parse` by nilo; a
 /// body is read by `std.json`, which reads a struct into its fields unless
@@ -1070,6 +1070,13 @@ fn unreadable(comptime T: type, comptime depth: usize) ?type {
             },
             else => {},
         }
+        // A union that names its discriminator (`nilo_json = .{ .tag = … }`)
+        // is read by `std.json` as an object of one key unless it hands over
+        // `jsonParse`, so a client sending the tag beside the fields gets a
+        // 400 on the first request. Refused here, at the body argument and
+        // wherever the union sits inside one (ADR 016).
+        if (@typeInfo(T) == .@"union" and (of(T) orelse Mark{}).tag != null and
+            !std.meta.hasFn(T, "jsonParse")) return T;
         switch (@typeInfo(T)) {
             .@"struct" => |s| {
                 for (s.field_types) |f_type| {

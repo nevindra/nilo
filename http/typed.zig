@@ -1939,6 +1939,17 @@ fn checkNotRenamed(comptime pattern: []const u8, comptime T: type, comptime what
 fn checkReadable(comptime pattern: []const u8, comptime T: type) void {
     comptime {
         const Unread = mark.unreadableWithin(T) orelse return;
+        // A union with a `.tag` is not text that parses itself; what it lacks
+        // is the line that makes `std.json` look for the tag (ADR 016).
+        if (@typeInfo(Unread) == .@"union") @compileError(
+            "nilo: the request body on route \"" ++ pattern ++ "\" holds a `" ++ naming.of(Unread) ++
+                "`, a union with a discriminator and no `jsonParse`.\n" ++
+                "  A body is read by `std.json`, which reads a union as an object of one key " ++
+                "(`{\"variant\": {…}}`) unless the type carries `jsonParse` — so a client " ++
+                "sending the tag beside the fields would get a 400 on the first request.\n" ++
+                "  Hand the reader over, beside `nilo_json`:\n" ++
+                "    pub const jsonParse = nilo.jsonParseFor(@This());",
+        );
         @compileError(
             "nilo: the request body on route \"" ++ pattern ++ "\" holds a `" ++ naming.of(Unread) ++
                 "`, which parses itself from text (`nilo_parse`) and has not told `std.json` so.\n" ++

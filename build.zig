@@ -2196,6 +2196,14 @@ const refusals = [_]Refusal{
         .says = "argument 1 of the handler for route \"/area\" is a union_without_a_tag_as_an_argument.Shape, a union with no discriminator to read it by.",
     },
     .{
+        .name = "tagged_union_body_without_json_parse",
+        .says = "the request body on route \"/area\" holds a `tagged_union_body_without_json_parse.Shape`, a union with a discriminator and no `jsonParse`.",
+    },
+    .{
+        .name = "tagged_union_field_without_json_parse",
+        .says = "the request body on route \"/draw\" holds a `tagged_union_field_without_json_parse.Shape`, a union with a discriminator and no `jsonParse`.",
+    },
+    .{
         .name = "argument_not_recognised",
         .says = "argument 1 of the handler for route \"/users/:id\" is a [4]u8, which nilo does not recognise.",
     },
